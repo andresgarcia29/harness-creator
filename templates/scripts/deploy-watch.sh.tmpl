@@ -65,6 +65,16 @@ if command -v kargo >/dev/null; then
 fi
 
 # 3 · Health de ArgoCD con timeout
+# Auth: ARGOCD_AUTH_TOKEN (ideal) o fallback user/pass si el Vault del
+# proyecto guarda credenciales así — con login previo. Recomendado:
+# migrar a token de cuenta (`argocd account generate-token`).
+if command -v argocd >/dev/null && [ -z "${ARGOCD_AUTH_TOKEN:-}" ] \
+   && [ -n "${ARGOCD_USERNAME:-}" ] && [ -n "${ARGOCD_PASSWORD:-}" ]; then
+  srv="${ARGOCD_URL:-}"; srv="${srv#https://}"; srv="${srv#http://}"
+  argocd login "$srv" --username "$ARGOCD_USERNAME" --password "$ARGOCD_PASSWORD" --grpc-web >/dev/null 2>&1 \
+    && say "argocd: sesión iniciada con usuario (considera migrar a ARGOCD_AUTH_TOKEN)" \
+    || say "⚠️ argocd login falló — health check probablemente falle también"
+fi
 if command -v argocd >/dev/null; then
   say "── argocd: esperando $APP Healthy+Synced (timeout ${TIMEOUT}s) ──"
   argocd app wait "$APP" --health --sync --timeout "$TIMEOUT" >>"$LOG" 2>&1 \

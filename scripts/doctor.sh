@@ -25,6 +25,19 @@ for f in CLAUDE.md manifest.yaml harness-answers.yaml .harness-version inventory
   [ -f "$WS/$f" ] && ok "$f presente" || fail "$f faltante" "corre /harness-init de nuevo"
 done
 
+# 1b · Coherencia manifest ↔ repos/ (fantasmas y faltantes)
+if [ -f "$WS/manifest.yaml" ] && [ -d "$WS/repos" ]; then
+  for name in $(grep -E '^[[:space:]]+- name:' "$WS/manifest.yaml" | awk '{print $3}'); do
+    [ -d "$WS/repos/$name/.git" ] || warn "repo en manifest sin clon: $name — clónalo o quítalo del manifest/DAG"
+  done
+  for d in "$WS/repos"/*/; do
+    [ -d "$d/.git" ] || continue
+    name="$(basename "$d")"
+    grep -qE "^[[:space:]]+- name: $name\$" "$WS/manifest.yaml" \
+      || warn "clon sin registrar en manifest: repos/$name — regístralo o remuévelo (¿repo fantasma?)"
+  done
+fi
+
 # 2 · Scripts de instancia ejecutables
 for s in ship.sh worktree-task.sh; do
   if [ -f "$WS/scripts/$s" ]; then
@@ -82,7 +95,7 @@ if [ -f "$ANSWERS" ]; then
     elif [ "$scope" = "cronjob" ]; then
       warn "cli faltante: $bin (scope: cronjob — instálalo al activar su cronjob)"
     else
-      fail "cli faltante: $bin" "ver campo install de esa capacidad en catalog/capabilities.yaml"
+      fail "cli faltante: $bin" "corre scripts/bootstrap.sh (instala todo lo elegido) o ver install en catalog/capabilities.yaml"
     fi
   done < <(awk '
     /^  - name:/ { if (bin != "") print bin, scope; bin=""; scope="core" }

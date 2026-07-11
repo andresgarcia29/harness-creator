@@ -80,6 +80,19 @@ if [ "$SKIP_SECRETS" -eq 0 ] && [ "$CHECK" -eq 0 ]; then
     fi
   fi
   if [ "$NEED_TOKEN" -eq 1 ]; then
+    cat <<'TOKHELP'
+──────────────────────────────────────────────────────────────
+Necesitas un periodic token de Vault. ¿Cómo conseguirlo?
+ · Con acceso a Vault:
+     export VAULT_ADDR={{VAULT_ADDR}}
+     vault login -method=<tu método: oidc|userpass|github>
+     vault token create -period=768h -orphan \
+       -policy=<policies del harness> -field=token
+   (copia el token que imprime)
+ · Sin acceso: pídeselo a quien administre Vault.
+El token vive en ~/.config/harness/vault-token — nunca en el repo.
+──────────────────────────────────────────────────────────────
+TOKHELP
     if [ -t 0 ]; then
       # el valor NUNCA pasa por el agente: lo tecleas tú directo al archivo
       mkdir -p "$(dirname "$TOKFILE")"

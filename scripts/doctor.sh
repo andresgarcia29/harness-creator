@@ -126,7 +126,10 @@ if [ -f "$ANSWERS" ]; then
         if VAULT_ADDR="$vaddr" VAULT_TOKEN="$(cat "$tokfile")" vault token lookup >/dev/null 2>&1; then
           ok "token de Vault VÁLIDO"
         else
-          warn "token de Vault presente pero EXPIRADO/sin permisos (o Vault inaccesible) — renueva y re-corre scripts/bootstrap.sh"
+          warn "token de Vault presente pero EXPIRADO/sin permisos (o Vault inaccesible)"
+          echo "   ↳ renovación: export VAULT_ADDR=$vaddr && vault login -method=<tu método>"
+          echo "     luego: make init (te pide el token nuevo, lo valida y materializa .secrets)"
+          echo "     detalle completo: README.md § Secretos"
         fi
       else
         ok "token de Vault presente (sin validar: falta vault CLI o vault_addr en answers)"

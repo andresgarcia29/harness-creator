@@ -5,6 +5,9 @@
 help: ## esta ayuda
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
+init: ## onboarding de una pasada: deps + token + secretos + doctor
+	@bash scripts/bootstrap.sh
+
 doctor: ## salud del harness (CLIs, MCPs, hooks, links, secretos)
 	@bash scripts/doctor.sh .
 
@@ -26,4 +29,4 @@ watch: ## vigila el deploy: make watch TASK=<id> REPO=<repo>
 usage: ## costo por sesión/tarea (ccusage)
 	@ccusage
 
-.PHONY: help doctor secrets wt wt-rm ship watch usage
+.PHONY: help init doctor secrets wt wt-rm ship watch usage

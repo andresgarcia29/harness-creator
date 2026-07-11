@@ -23,7 +23,13 @@ pones juicio donde hace falta (topología, entrevista, generación).
   3. Re-instancia los templates con las respuestas registradas y
      presenta DIFF por archivo: upstream mejoró → proponlo; el humano
      personalizó → consérvalo; chocan → muestra ambos y que decida.
-  4. Nada se pisa sin confirmación. Al final actualiza `.harness-version`.
+  4. **Reconciliación**: toda respuesta nueva debe PROPAGARSE a los
+     artefactos existentes, no solo registrarse. Ej.: si `instance.repo`
+     revela que un repo clonado no es de producto, propón el diff que
+     lo quita de manifest.yaml, del DAG, de la tabla del CLAUDE.md y de
+     answers — y sugerir remover el clon. Una respuesta que contradice
+     un artefacto sin generar su diff es una migración incompleta.
+  5. Nada se pisa sin confirmación. Al final actualiza `.harness-version`.
 - **Idempotencia por archivo** (también en instalación fresca): si un
   archivo existe, diff y pregunta. Nunca destruyas personalización local.
 - **Tokens**: no explores los repos a mano; el inventario ya lo hizo.
@@ -157,6 +163,7 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `k8s/cronjobs/<job>.yaml` | cronjobs/k8s-cronjob.yaml.tmpl | si eligió GKE, uno por job |
 | `ratchets.json` | inline: `{}` | si eligió ratchet-keeper |
 | `scripts/doctor.sh` | COPIA de `${CLAUDE_PLUGIN_ROOT}/scripts/doctor.sh` | siempre (instancia autocontenida) |
+| `scripts/bootstrap.sh` | scripts/bootstrap.sh.tmpl | siempre — {{ENSURE_LINES}} se llena con UNA línea `ensure`/`require` por capacidad elegida, derivando el comando real del campo `install:` del catálogo (brew en macOS; `require` para SDKs pesados: flutter, gcloud, kubectl) |
 | `scripts/ship.sh` | scripts/ship.sh.tmpl | siempre |
 | `scripts/worktree-task.sh`, `scripts/quiet.sh`, `scripts/with-secrets.sh` | scripts/ | siempre |
 | `scripts/secrets.sh` | scripts/secrets.sh.tmpl | siempre (fuente según answers) |
@@ -214,7 +221,16 @@ la arqueología ligera:
 - Clusters infra/frontends: una pasada más superficial (qué módulos
   existen, qué consumen) basta.
 
-## Fase 4 — Verificación
+## Fase 4 — Bootstrap + Verificación
+
+Primero OFRECE correr el bootstrap (instala lo que falta, guía el
+token, materializa secretos y termina en doctor):
+
+```
+<workspace>/scripts/bootstrap.sh          # o --check para solo reportar
+```
+
+Si el humano prefiere no instalar nada aún, corre solo el doctor:
 
 ```
 ${CLAUDE_PLUGIN_ROOT}/scripts/doctor.sh <workspace>

@@ -149,6 +149,7 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 
 | Destino | Fuente | Condición |
 |---|---|---|
+| `README.md` | README.md.tmpl | siempre — onboarding para HUMANOS: {{SECRETS_ONBOARDING}} se instancia según la fuente elegida (de dónde sale el token/credencial, comandos exactos). Un usuario nuevo debe poder llegar a make init sin preguntarle a nadie |
 | `CLAUDE.md` | CLAUDE.md.tmpl | siempre (mapa ≤110 líneas; tabla de repos desde inventory) |
 | `manifest.yaml` | manifest.yaml.tmpl | siempre |
 | `harness-answers.yaml` | harness-answers.yaml.tmpl | siempre (esquema fijo) |

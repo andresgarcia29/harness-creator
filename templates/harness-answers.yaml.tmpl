@@ -14,6 +14,12 @@ project:
   name: "{{PROJECT_NAME}}"
   ticket_prefix: "{{TICKET_PREFIX}}"
 
+# Dónde se versiona ESTA instancia: "self" (git init en el workspace) o
+# la URL del repo destino. Si ese repo estaba clonado en repos/, queda
+# EXCLUIDO del clustering, del DAG y del manifest.
+instance:
+  repo: {{INSTANCE_REPO}}
+
 # trunk-direct-to-prod | trunk-staging | prs
 flow: {{FLOW}}
 
@@ -46,13 +52,22 @@ clusters:
 #    repos: [terraform-core, terraform-app-module, helm-library]
 
 # Capacidades palomeadas del catálogo. doctor.sh verifica:
-#   bin: <x>  → command -v <x>
-#   mcp: <x>  → clave <x> presente en .mcp.json
+#   bin: <x>   → command -v <x>
+#   mcp: <x>   → clave <x> presente en .mcp.json
+#   scope:     → core (falta = ❌ fallo) | cronjob (falta = ⚠️ warning,
+#                solo lo usa un detector de cronjob)
+# REGLA: con cronjobs deshabilitados NO se seleccionan capacidades
+# cronjob-only; quedan comentadas como pendientes.
 capabilities:
 {{CAPABILITIES_LIST}}
 #  - name: gh
 #    bin: gh
 #    tier: read-write
+#    scope: core
+#  - name: lychee
+#    bin: lychee
+#    tier: read-only
+#    scope: cronjob        # detector de doc-gardener
 #  - name: serena
 #    mcp: serena
 #    tier: read-write

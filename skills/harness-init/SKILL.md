@@ -13,8 +13,19 @@ pones juicio donde hace falta (topología, entrevista, generación).
 
 - **Secretos**: NUNCA leas, pidas ni escribas valores. Solo referencias
   (`vault://…`, `gcp-sm://…`, `env://VAR`).
-- **Idempotencia**: si un archivo generado ya existe, muestra el diff y
-  pregunta antes de sobreescribir. Nunca destruyas personalización local.
+- **Idempotencia total — /harness-init se puede correr SIEMPRE.** Si el
+  workspace ya tiene `.harness-version`, entras en **MODO UPDATE**:
+  1. Lee `harness-answers.yaml` — NO re-preguntes nada ya respondido;
+     pregunta SOLO lo nuevo de esta versión del plugin (compara la
+     versión de answers con la del plugin).
+  2. Migra el esquema del answers si esta versión agregó campos (ej.
+     `scope:` por capacidad, `instance:`) SIN tocar decisiones tomadas.
+  3. Re-instancia los templates con las respuestas registradas y
+     presenta DIFF por archivo: upstream mejoró → proponlo; el humano
+     personalizó → consérvalo; chocan → muestra ambos y que decida.
+  4. Nada se pisa sin confirmación. Al final actualiza `.harness-version`.
+- **Idempotencia por archivo** (también en instalación fresca): si un
+  archivo existe, diff y pregunta. Nunca destruyas personalización local.
 - **Tokens**: no explores los repos a mano; el inventario ya lo hizo.
   Lee archivos de repos SOLO para resolver una ambigüedad concreta de
   la entrevista.
@@ -76,8 +87,12 @@ harness; cada agente es contexto y mantenimiento.
    (`${CLAUDE_PLUGIN_ROOT}/catalog/capabilities.yaml`) FILTRADO por
    detect, agrupado por categoría, con tu recomendación marcada. Por
    cada una el humano puede DEGRADAR el tier (ej. github-mcp a
-   read-only). Registra nombre + bin/mcp + tier elegido. Las `phase: 2`
-   se mencionan como siguientes pasos, no se instalan.
+   read-only). Registra nombre + bin/mcp + tier + `scope:` (core |
+   cronjob, según el campo `cronjob:` del catálogo). REGLA: si los
+   cronjobs quedaron deshabilitados (#12), NO palomees capacidades
+   cuyo ÚNICO consumidor es un cronjob — regístralas comentadas como
+   "pendientes de activar cronjobs". Las `phase: 2` se mencionan como
+   siguientes pasos, no se instalan.
 6. **Tickets**: linear | github | none.
 7. **Memoria**: engram sí/no; perfiles (default: orquestador y
    arquitecto SOLAMENTE).
@@ -100,7 +115,19 @@ harness; cada agente es contexto y mantenimiento.
     (arranque mínimo: daily-digest, doc-gardener, harness-janitor,
     ci-doctor; el resto cuando sus detectores tengan herramienta
     instalada). Pregunta dónde corren: crontab local | GKE (genera
-    los manifiestos K8s) | GitHub Actions schedule.
+    los manifiestos K8s) | GitHub Actions schedule. Si el humano los
+    deshabilita, respeta la regla de #5 (sin capacidades cronjob-only).
+13. **Versionado de la instancia**: ¿el workspace se versiona en sí
+    mismo (git init aquí) o existe un repo destino (ej.
+    corvux-harness)? Registra `instance.repo` en answers. Si un repo
+    clonado en repos/ ES ese destino, EXCLÚYELO del clustering, del
+    DAG y del manifest — no es un repo de producto.
+14. **Bootstrap de secretos** (si source ≠ env): explica el flujo y
+    deja las instrucciones listas — el humano coloca su token FUERA
+    del chat (`~/.config/harness/vault-token`, chmod 600; tú NUNCA lo
+    ves), luego corre `scripts/secrets.sh pull` y verificas con
+    `scripts/secrets.sh check`. La instalación no está completa sin
+    `.secrets` materializado (doctor lo audita como warning).
 
 ## Fase 3 — Generación
 
@@ -164,6 +191,29 @@ Reglas de generación:
 - Ofrece `git init` + commit inicial del workspace (meta-repo) si no es
   repo — el harness se versiona a sí mismo.
 
+## Fase 3.5 — Arqueología ligera (default: SÍ; pide confirmación)
+
+Los abogados y las specs NO se entregan como esqueletos "TBD" — un
+abogado sin ownership real no puede litigar y una spec vacía no se
+puede citar. Salvo que el humano la rechace (por tiempo/costo), corre
+la arqueología ligera:
+
+- Por cada cluster `kind: service`, lanza UN subagente (modelo del rol
+  `mechanical` o `implementer`; en paralelo, máx 4 a la vez) que lee
+  SOLO lo barato y denso del repo: README, CLAUDE.md propio,
+  migraciones/esquema de datos, definiciones proto/rutas expuestas, y
+  nombres de directorios top-level. NO lee el código completo.
+- Cada subagente devuelve: **Posee / NO posee / Invariantes** reales
+  (2-4 líneas c/u, citando evidencia: archivo o tabla) + **3-5
+  requirements EARS** del comportamiento actual con un escenario
+  Given/When/Then cada uno.
+- Con eso rellenas la constitución del abogado y siembras
+  `specs/<svc>/spec.md`. TODO queda `status: DRAFT` igualmente: la
+  arqueología PROPONE con evidencia, el humano ratifica — pero ahora
+  ratifica contenido real, no llena huecos.
+- Clusters infra/frontends: una pasada más superficial (qué módulos
+  existen, qué consumen) basta.
+
 ## Fase 4 — Verificación
 
 ```
@@ -172,7 +222,9 @@ ${CLAUDE_PLUGIN_ROOT}/scripts/doctor.sh <workspace>
 
 Reporta cada resultado. Por cada ❌ da la remediación EXACTA y ofrece
 arreglarla ahí mismo. No declares éxito con fallos abiertos. Cierra con:
-qué se generó, qué quedó DRAFT (constituciones, map.md), y los tres
-primeros pasos: (1) ratificar constituciones, (2) correr UNA feature
-pequeña end-to-end, (3) agendar la arqueología de docs por servicio
-(dominios 🔴 de quality.md primero).
+qué se generó, qué quedó DRAFT pendiente de RATIFICAR (constituciones
+ya llenadas por la arqueología, constitution.md §6, map.md), el
+bootstrap de secretos si falta (token + `secrets.sh pull`), y los tres
+primeros pasos: (1) ratificar lo que la arqueología propuso, (2) correr
+UNA feature pequeña end-to-end, (3) profundizar la arqueología de los
+dominios 🔴 de quality.md.

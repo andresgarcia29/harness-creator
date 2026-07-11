@@ -6,6 +6,11 @@ argument-hint: [ruta-al-workspace]
 Vas a instalar un harness de ingeniería agéntica en el workspace de
 $ARGUMENTS (si no se indicó, pregunta la ruta).
 
+IDEMPOTENTE: si el workspace ya tiene `.harness-version`, entras en
+MODO UPDATE (regla global de la skill): no re-preguntas lo respondido,
+migras el esquema del answers, y todo cambio se presenta como diff.
+Correr este comando N veces es siempre seguro.
+
 Sigue ESTRICTAMENTE el flujo de la skill `harness-init` de este plugin.
 Resumen del contrato:
 

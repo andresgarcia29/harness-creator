@@ -72,20 +72,44 @@ if [ -f "$WS/CLAUDE.md" ]; then
   [ "$broken" -eq 0 ] && ok "links del CLAUDE.md resuelven"
 fi
 
-# 6 · CLIs seleccionadas (derivadas del campo bin: del answers)
+# 6 · CLIs seleccionadas (bin: del answers). scope: cronjob degrada a
+#     warning cuando falta — solo lo usa un detector de cronjob.
 if [ -f "$ANSWERS" ]; then
-  for bin in $(grep -E '^[[:space:]]+bin:' "$ANSWERS" | awk '{print $2}' | sort -u); do
-    command -v "$bin" >/dev/null && ok "cli: $bin" || fail "cli faltante: $bin" "ver campo install de esa capacidad en catalog/capabilities.yaml"
-  done
+  while read -r bin scope; do
+    [ -n "$bin" ] || continue
+    if command -v "$bin" >/dev/null; then
+      ok "cli: $bin"
+    elif [ "$scope" = "cronjob" ]; then
+      warn "cli faltante: $bin (scope: cronjob — instálalo al activar su cronjob)"
+    else
+      fail "cli faltante: $bin" "ver campo install de esa capacidad en catalog/capabilities.yaml"
+    fi
+  done < <(awk '
+    /^  - name:/ { if (bin != "") print bin, scope; bin=""; scope="core" }
+    /^    bin:/   { bin=$2 }
+    /^    scope:/ { scope=$2 }
+    END { if (bin != "") print bin, scope }
+  ' "$ANSWERS" | sort -u)
 else
   warn "sin harness-answers.yaml — no puedo verificar CLIs ni MCPs elegidos"
 fi
 
-# 7 · Secretos: presencia de referencias env:// (nunca valores)
+# 7 · Secretos: flujo completo, nunca valores
 if [ -f "$ANSWERS" ]; then
+  # referencias env://: presencia de la variable
   for var in $(grep -oE 'env://[A-Za-z_][A-Za-z0-9_]*' "$ANSWERS" | sed 's|env://||' | sort -u); do
     [ -n "${!var:-}" ] && ok "secreto presente: \$$var" || warn "secreto no presente en entorno: \$$var"
   done
+  # fuente vault/gcp-sm: bootstrap (token) y materialización (.secrets)
+  src="$(grep -E '^[[:space:]]+source:' "$ANSWERS" | head -1 | awk '{print $2}')"
+  if [ "$src" = "vault" ]; then
+    [ -f "$HOME/.config/harness/vault-token" ] && ok "token de Vault presente (~/.config/harness/vault-token)" \
+      || warn "sin token de Vault — colócalo TÚ (nunca por chat): guarda tu periodic token en ~/.config/harness/vault-token y chmod 600"
+  fi
+  if [ "$src" = "vault" ] || [ "$src" = "gcp-secret-manager" ]; then
+    [ -f "$WS/.secrets" ] && ok ".secrets materializado" \
+      || warn ".secrets no materializado — corre: scripts/secrets.sh pull (los MCPs autenticados y deploy-watch lo necesitan)"
+  fi
 fi
 
 # 8 · Agentes y comandos de pipeline

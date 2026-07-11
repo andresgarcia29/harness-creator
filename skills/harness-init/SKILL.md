@@ -141,6 +141,13 @@ harness; cada agente es contexto y mantenimiento.
     ves), luego corre `scripts/secrets.sh pull` y verificas con
     `scripts/secrets.sh check`. La instalación no está completa sin
     `.secrets` materializado (doctor lo audita como warning).
+    **VERIFICA EL LAYOUT, no lo asumas**: si hay token válido
+    disponible, lista los paths y los NOMBRES de campo reales
+    (`vault kv list …` y `vault kv get -format=json … | jq
+    '.data.data | keys'` — solo nombres, JAMÁS valores) y genera las
+    líneas dump_kv con esos campos. Cada Vault nombra distinto
+    (token vs password, api_key vs LINEAR_API_KEY); asumir el campo
+    rompe la materialización con el layout real.
 
 ## Fase 3 — Generación
 

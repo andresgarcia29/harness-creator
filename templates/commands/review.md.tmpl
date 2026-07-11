@@ -1,0 +1,24 @@
+---
+description: Review + QA local de un worktree — produce el veredicto que ship.sh exige
+argument-hint: <task-id> <repo>
+---
+
+Review de $ARGUMENTS. El artefacto de salida es
+`tasks/<task-id>/verdict-<repo>.json` — sin él, ship.sh no abre la
+puerta.
+
+1. **Lanza al agente `reviewer`** sobre el worktree
+   `worktrees/<task-id>/<repo>`. Escribe el veredicto con
+   `qa: "pending"`.
+2. **fail** → regresa los items `blocking` (con su remediación) al
+   implementer de la tarea. Loop máx {{LOOP_BUDGET}}: implementer
+   corrige SOLO blocking → reviewer re-evalúa. Presupuesto agotado →
+   humano, con el historial de veredictos.
+3. **pass** → **lanza al agente `qa`** (fase local): ejercita los
+   criterios de aceptación en el worktree; frontends con Playwright.
+   QA actualiza el campo `qa` del veredicto.
+4. `verdict: pass` + `qa: pass` → anuncia que la tarea está lista para
+   `/ship <task-id> <repo>`.
+
+Reglas: tú no editas código ni el veredicto — solo orquestas
+reviewer ↔ implementer ↔ qa y cuidas el presupuesto de loop.

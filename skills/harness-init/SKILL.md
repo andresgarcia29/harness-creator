@@ -102,8 +102,15 @@ harness; cada agente es contexto y mantenimiento.
 6. **Tickets**: linear | github | none.
 7. **Memoria**: engram sí/no; perfiles (default: orquestador y
    arquitecto SOLAMENTE).
-8. **Secretos**: vault | gcp-secret-manager | env. Si vault: VAULT_ADDR
-   y path base del KV (solo referencias).
+8. **Secretos**: vault | gcp-secret-manager | aws-secrets-manager |
+   doppler | sops | 1password | env. RECOMIENDA desde
+   `inventory.json → secret_hints` (el discovery detecta .sops.yaml,
+   doppler.yaml, op://, aws_secretsmanager/google_secret_manager en
+   terraform, VAULT_ADDR, .env.example) — evidencia, no adivinanza.
+   Si vault: VAULT_ADDR y path base del KV (solo referencias). El
+   TOKEN nunca se pide por chat: bootstrap.sh lo pide interactivo
+   (read -s directo al archivo) y VALIDA su vigencia — un token
+   muerto se detecta y se re-pide, no se reporta como presente.
 9. **Deploy** (si hay CD): org de GitHub, prefijo de apps ArgoCD,
    proyecto Kargo, tenant canary, y ROLLBACK_MODE auto|manual
    (recomienda auto: rollback primero, diagnóstico después).

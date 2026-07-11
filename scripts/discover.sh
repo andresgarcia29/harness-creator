@@ -136,11 +136,25 @@ if [ "$found" -eq 0 ]; then
   exit 2
 fi
 
+# ── Señales de fuente de secretos (workspace-level, para que la
+#    entrevista recomiende con evidencia, no adivine) ─────────────────
+secret_hints=()
+find "$REPOS_DIR" -maxdepth 3 -name ".sops.yaml" -print -quit 2>/dev/null | grep -q . && secret_hints+=("sops")
+find "$REPOS_DIR" -maxdepth 3 \( -name "doppler.yaml" -o -name "doppler.yml" \) -print -quit 2>/dev/null | grep -q . && secret_hints+=("doppler")
+find "$REPOS_DIR" -maxdepth 2 -name ".env.example" -print -quit 2>/dev/null | grep -q . && secret_hints+=("env")
+grep -rq "VAULT_ADDR\|vault_generic_secret\|hashicorp/vault" "$REPOS_DIR" --include="*.tf" --include="*.yaml" --include="*.md" 2>/dev/null && secret_hints+=("vault")
+grep -rq "google_secret_manager_secret" "$REPOS_DIR" --include="*.tf" 2>/dev/null && secret_hints+=("gcp-secret-manager")
+grep -rq "aws_secretsmanager" "$REPOS_DIR" --include="*.tf" 2>/dev/null && secret_hints+=("aws-secrets-manager")
+grep -rq "op://" "$REPOS_DIR" --include="*.yaml" --include="*.env*" --include="*.tpl" 2>/dev/null && secret_hints+=("1password")
+SECRET_HINTS_JSON="$(printf '%s\n' "${secret_hints[@]:-}" | jq -R . | jq -s 'map(select(length>0))')"
+
 jq -n \
   --arg workspace "$WS" \
   --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --argjson repos "$(cat "$tmp")" \
+  --argjson secret_hints "$SECRET_HINTS_JSON" \
   '{workspace:$workspace, scanned_at:$scanned_at, repo_count:($repos|length), repos:$repos,
+    secret_hints:$secret_hints,
     by_role: ($repos | group_by(.role_guess) | map({key: .[0].role_guess, value: map(.name)}) | from_entries),
     summary:{
       go:[$repos[]|select(.languages|index("go"))|.name],

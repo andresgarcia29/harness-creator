@@ -116,8 +116,22 @@ if [ -f "$ANSWERS" ]; then
   # fuente vault/gcp-sm: bootstrap (token) y materialización (.secrets)
   src="$(grep -E '^[[:space:]]+source:' "$ANSWERS" | head -1 | awk '{print $2}')"
   if [ "$src" = "vault" ]; then
-    [ -f "$HOME/.config/harness/vault-token" ] && ok "token de Vault presente (~/.config/harness/vault-token)" \
-      || warn "sin token de Vault — colócalo TÚ (nunca por chat): guarda tu periodic token en ~/.config/harness/vault-token y chmod 600"
+    tokfile="$HOME/.config/harness/vault-token"
+    if [ ! -f "$tokfile" ]; then
+      warn "sin token de Vault — corre scripts/bootstrap.sh (te lo pide interactivo, fuera del chat)"
+    else
+      # VIGENCIA, no solo presencia: un token muerto es peor que ninguno
+      vaddr="$(grep -E '^[[:space:]]+vault_addr:' "$ANSWERS" | head -1 | awk '{print $2}' | tr -d '"')"
+      if command -v vault >/dev/null && [ -n "$vaddr" ]; then
+        if VAULT_ADDR="$vaddr" VAULT_TOKEN="$(cat "$tokfile")" vault token lookup >/dev/null 2>&1; then
+          ok "token de Vault VÁLIDO"
+        else
+          warn "token de Vault presente pero EXPIRADO/sin permisos (o Vault inaccesible) — renueva y re-corre scripts/bootstrap.sh"
+        fi
+      else
+        ok "token de Vault presente (sin validar: falta vault CLI o vault_addr en answers)"
+      fi
+    fi
   fi
   if [ "$src" = "vault" ] || [ "$src" = "gcp-secret-manager" ]; then
     [ -f "$WS/.secrets" ] && ok ".secrets materializado" \

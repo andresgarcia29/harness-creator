@@ -19,6 +19,18 @@ ok()   { echo "✅ $1"; }
 inst() { echo "📦 instalando: $1"; }
 warn() { echo "⚠️  $1"; }
 
+# link_into_path <bin> — go install/uv tool instalan fuera del PATH típico;
+# busca el binario recién instalado y enlázalo al prefix de brew (ya en PATH)
+link_into_path() {
+  local bin="$1" cand dest
+  dest="$(brew --prefix 2>/dev/null)/bin"
+  [ -d "$dest" ] || return 1
+  for cand in "$(go env GOPATH 2>/dev/null)/bin/$bin" "$HOME/go/bin/$bin" "$HOME/.local/bin/$bin"; do
+    [ -x "$cand" ] && { ln -sf "$cand" "$dest/$bin"; ok "$bin enlazado a $dest (estaba fuera del PATH)"; return 0; }
+  done
+  return 1
+}
+
 # ensure <bin> <cmd de instalación...> — instala si falta (o reporta en --check)
 ensure() {
   local bin="$1"; shift
@@ -27,8 +39,11 @@ ensure() {
   if [ "$CHECK" -eq 1 ]; then warn "falta: $bin (instalaría: $*)"; return 0; fi
   inst "$bin ($*)"
   if "$@"; then
-    command -v "$bin" >/dev/null 2>&1 && { INSTALLED=$((INSTALLED+1)); ok "$bin instalado"; } \
-      || warn "$bin instalado pero no está en PATH — revisa (¿~/go/bin, ~/.local/bin en PATH?)"
+    if command -v "$bin" >/dev/null 2>&1 || link_into_path "$bin"; then
+      INSTALLED=$((INSTALLED+1)); ok "$bin instalado"
+    else
+      warn "$bin instalado pero no lo encuentro — agrega ~/go/bin y ~/.local/bin a tu PATH"
+    fi
   else
     warn "falló la instalación de $bin — instálalo a mano: $*"
   fi

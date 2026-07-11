@@ -271,11 +271,11 @@ capabilities:
     purpose: "Retrieval y edición SIMBÓLICA vía LSP — el ahorro de tokens más grande en implementación"
     provider: mcp
     mcp: serena
-    config: { command: "uvx", args: ["--from", "git+https://github.com/oraios/serena", "serena", "start-mcp-server", "--context", "ide-assistant"] }
+    config: { command: "uvx", args: ["--from", "git+https://github.com/oraios/serena", "serena", "start-mcp-server", "--context", "ide-assistant", "--enable-web-dashboard", "false"] }
     permission_tier: read-write
     profiles: [implementer]
     detect: always-recommend
-    note: "desactivar sus tools básicos de archivo (Claude Code ya los trae)"
+    note: "multi-repo: Serena es POR-PROYECTO — el implementer DEBE activate_project sobre su worktree al arrancar (el template ya lo instruye); sin eso las tools simbólicas no operan. Dashboard deshabilitado (se abría en cada sesión). Desactivar sus tools básicos de archivo (Claude Code ya los trae)"
 
   - name: context7
     category: mcp

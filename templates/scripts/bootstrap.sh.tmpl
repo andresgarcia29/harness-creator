@@ -69,14 +69,32 @@ case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) warn 'agrega $HOME/.local/bin a 
 if [ "$SKIP_SECRETS" -eq 0 ] && [ "$CHECK" -eq 0 ]; then
   echo "══ bootstrap: secretos ══"
   TOKFILE="$HOME/.config/harness/vault-token"
-  if [ "{{SECRETS_SOURCE}}" = "vault" ] && [ ! -f "$TOKFILE" ]; then
+  NEED_TOKEN=0
+  if [ "{{SECRETS_SOURCE}}" = "vault" ]; then
+    if [ ! -f "$TOKFILE" ]; then
+      NEED_TOKEN=1
+    elif command -v vault >/dev/null 2>&1; then
+      # vigencia: si el token murió, pedirlo de nuevo (fue el bug clásico)
+      VAULT_ADDR="{{VAULT_ADDR}}" VAULT_TOKEN="$(cat "$TOKFILE")" vault token lookup >/dev/null 2>&1 \
+        || { warn "el token de Vault existente está EXPIRADO o sin permisos — hay que renovarlo"; NEED_TOKEN=1; }
+    fi
+  fi
+  if [ "$NEED_TOKEN" -eq 1 ]; then
     if [ -t 0 ]; then
       # el valor NUNCA pasa por el agente: lo tecleas tú directo al archivo
       mkdir -p "$(dirname "$TOKFILE")"
       printf "pega tu periodic token de Vault (no se muestra): "
       IFS= read -rs VTOK; echo
-      [ -n "$VTOK" ] && { printf '%s' "$VTOK" > "$TOKFILE"; chmod 600 "$TOKFILE"; ok "token guardado en $TOKFILE"; } \
-        || warn "sin token — colócalo después en $TOKFILE (chmod 600)"
+      if [ -n "$VTOK" ]; then
+        printf '%s' "$VTOK" > "$TOKFILE"; chmod 600 "$TOKFILE"
+        if command -v vault >/dev/null 2>&1 && VAULT_ADDR="{{VAULT_ADDR}}" VAULT_TOKEN="$VTOK" vault token lookup >/dev/null 2>&1; then
+          ok "token guardado y VALIDADO"
+        else
+          warn "token guardado pero no pude validarlo (¿permisos/red?) — secrets.sh pull te dirá"
+        fi
+      else
+        warn "sin token — colócalo después en $TOKFILE (chmod 600)"
+      fi
       unset VTOK
     else
       warn "sin TTY: coloca tu token en $TOKFILE (chmod 600) y re-corre"

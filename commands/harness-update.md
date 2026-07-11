@@ -17,10 +17,16 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
    `${CLAUDE_PLUGIN_ROOT}/templates/` con las respuestas registradas en
    harness-answers.yaml (por eso el esquema es fijo) y compara contra
    el archivo real de la instancia.
-3. Clasifica cada diferencia:
-   - **upstream**: el template mejoró → proponla.
-   - **local**: personalización de la instancia → CONSÉRVALA (es ley
-     del proyecto); si choca con un cambio upstream, muestra ambos y
+3. Clasifica cada diferencia según la PROPIEDAD del archivo:
+   - **Propiedad del plugin** (scripts/{doctor,bootstrap,secrets,ship,
+     worktree-task,quiet,with-secrets}.sh, hooks): upstream gana por
+     default — re-instancia con las respuestas del answers y propón el
+     archivo completo. Un parche local aquí casi siempre fue un fix que
+     YA subió al plugin; verifica que la lógica local esté contenida en
+     la nueva versión antes de reemplazar.
+   - **Propiedad de la instancia** (harness-answers, models.yaml,
+     CLAUDE.md, constituciones, specs, docs): lo local gana — es ley
+     del proyecto; si choca con un cambio upstream, muestra ambos y
      que decida el humano.
 4. Presenta las actualizaciones como diffs individuales. NUNCA apliques
    sin confirmación explícita por archivo.

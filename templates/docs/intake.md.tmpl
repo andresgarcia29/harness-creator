@@ -1,0 +1,62 @@
+# Intake — Contrato de entrada del pipeline
+
+Un ticket que no cumple la plantilla NO entra al harness: se rebota con
+preguntas. Rebotar cuesta centavos; implementar un ticket ambiguo
+cuesta el pipeline completo más el retrabajo.
+
+## Plantilla obligatoria de ticket
+
+**Título** — verbo + resultado observable.
+  ✅ "Permitir reagendar bookings desde el widget"
+  ❌ "Mejoras al widget"
+
+**Contexto (por qué)** — 2 a 5 líneas: qué problema del usuario o del
+negocio resuelve. Sin contexto, el RFC no puede evaluar alternativas.
+
+**Criterios de aceptación** — lista verificable. Cada criterio debe
+poder comprobarse por QA local o por el smoke del canary:
+  - [ ] resultado observable y binario (pasa o no pasa)
+
+**Fuera de scope** — qué explícitamente NO incluye. Defensa #1 contra
+el scope creep de agentes.
+
+**Evidencia (solo bugs)** — pasos de repro, logs, tenant afectado,
+task-id de la feature que lo introdujo si se conoce.
+
+**Repos sospechados (opcional)** — el intake puede inferirlo; si lo
+sabes, ahorra una ronda.
+
+**Tipo y prioridad** — feature / bug / chore; P0–P3.
+
+## Labels de flujo
+
+`needs-spec` → rebotado, requiere completar plantilla
+`agent-ready` → válido, listo para el harness
+`in-harness` → un pipeline lo tomó (lo pone ticket-pull.sh)
+`shipped` → verde en canary (lo pone ticket-close.sh)
+
+## Criterios de rebote (el intake DEBE rebotar si se cumple cualquiera)
+
+1. Sin criterios de aceptación, o no verificables ("que funcione bien"
+   no es un criterio).
+2. Bug sin pasos de reproducción ni evidencia.
+3. El scope implica una decisión de arquitectura no tomada (nuevo
+   servicio, dependencia externa, cambio breaking) → primero ADR.
+4. Contradice un ADR vigente → el rebote cita el ADR.
+5. Mezcla más de una feature/bug independiente → pedir división.
+
+El rebote SIEMPRE propone la corrección: preguntas específicas o el
+borrador de criterios que el intake infiere, para que el humano solo
+confirme.
+
+## Puente con el tracker ({{TICKETS_PROVIDER}})
+
+- `scripts/ticket-pull.sh <ID>` — materializa tasks/<ID>/task.md, label
+  → in-harness, comenta el task-id. Exit: 0 ok · 2 no existe · 3 sin
+  agent-ready · 4 auth/red. Solo lectura + labels + comentarios.
+- `scripts/ticket-close.sh <ID> --status shipped|failed` — comenta
+  commits por repo + ship.log; label → shipped (o regresa a
+  agent-ready con el diagnóstico).
+
+Trazabilidad completa: ticket ↔ beads ↔ commits (`Task:`) ↔ deploy, en
+ambas direcciones, sin que ningún humano copie nada a mano.

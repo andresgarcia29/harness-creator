@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# ship.sh — ÚNICA puerta de salida a main. Los agentes piden shippear;
+# este script decide. Determinista, cero tokens en el camino verde.
+#
+# Uso: ship.sh <task-id> <repo>
+# Opera sobre el WORKTREE de la tarea (worktrees/<task>/<repo>), nunca
+# sobre el clon canónico. Gates en orden: rebase → trailer → lenguaje →
+# buf breaking → gitleaks → semgrep → veredicto de review → lock → push.
+#
+# Portabilidad: bash 3.2 (macOS), BSD grep. Sin flock (lock por mkdir).
+set -euo pipefail
+
+TASK="${1:?uso: ship.sh <task-id> <repo>}"
+REPO="${2:?uso: ship.sh <task-id> <repo>}"
+WS="$(cd "$(dirname "$0")/.." && pwd)"
+WT="$WS/worktrees/$TASK/$REPO"
+BASE="$WS/repos/$REPO"
+MAX_RETRY={{LOOP_BUDGET}}
+LOCKDIR="$WS/locks/$REPO.lock.d"
+mkdir -p "$WS/locks" "$WS/tasks/$TASK"
+
+[ -d "$WT" ] || { echo "❌ no existe el worktree $WT"; echo "   ↳ remediación: scripts/worktree-task.sh $TASK $REPO"; exit 2; }
+[ -d "$BASE/.git" ] || { echo "❌ no existe el clon base $BASE"; exit 2; }
+
+gate() { echo "── gate: $1 ──"; CURRENT_GATE="$1"; }
+
+# El error de un gate es un PROMPT: al fallar cualquier gate, el trap
+# imprime la instrucción de autocorrección (el agente que lee esto
+# arregla en una iteración, sin adivinar). También libera el lock.
+CURRENT_GATE="preflight"; LOCK_HELD=""
+on_exit() {
+  local rc=$?
+  [ -n "$LOCK_HELD" ] && rm -rf "$LOCKDIR"
+  [ "$rc" -eq 0 ] && return 0
+  echo ""
+  echo "⛔ gate '$CURRENT_GATE' falló (exit $rc)."
+  echo "   → Lee el error de arriba. Corrige SOLO eso en el worktree $WT,"
+  echo "     commitea con el trailer 'Task: $TASK' y re-corre ship.sh."
+  echo "   → Presupuesto de autofix: 2 rondas. Si esta es la tercera, PARA"
+  echo "     y escala a humano con el error completo (Ley 6)."
+}
+trap on_exit EXIT
+
+# ── Lock por repo: merge queue de pobre, portable (sin flock) ─────────
+acquire_lock() {
+  local waited=0
+  until mkdir "$LOCKDIR" 2>/dev/null; do
+    # lock huérfano: el proceso dueño ya no existe
+    if [ -f "$LOCKDIR/pid" ] && ! kill -0 "$(cat "$LOCKDIR/pid" 2>/dev/null)" 2>/dev/null; then
+      echo "⚠️  lock huérfano de pid $(cat "$LOCKDIR/pid" 2>/dev/null); lo reclamo"
+      rm -rf "$LOCKDIR"
+      continue
+    fi
+    waited=$((waited+3))
+    [ "$waited" -ge 600 ] && { echo "❌ lock de $REPO ocupado >10min ($LOCKDIR) — otro ship en curso"; exit 6; }
+    sleep 3
+  done
+  echo $$ > "$LOCKDIR/pid"
+  LOCK_HELD=1   # el trap on_exit lo libera
+}
+
+# ── Gates ─────────────────────────────────────────────────────────────
+gate_trailer() {
+  gate "trailer Task: $TASK"
+  local total with_trailer
+  total=$(git rev-list --count origin/main..HEAD)
+  [ "$total" -gt 0 ] || { echo "❌ no hay commits nuevos sobre origin/main"; exit 3; }
+  with_trailer=$(git log origin/main..HEAD --format=%B | grep -cE "^Task: $TASK\$" || true)
+  [ "$with_trailer" -ge "$total" ] || {
+    echo "❌ $((total-with_trailer)) de $total commits sin trailer 'Task: $TASK'"
+    echo "   ↳ remediación: git rebase origin/main --exec 'git commit --amend --no-edit --trailer \"Task: $TASK\"'"
+    exit 3
+  }
+}
+
+run_lang_gates() {
+  if [ -f go.mod ]; then
+    gate go; go vet ./... && go build ./... && go test ./...
+  fi
+  if [ -f package.json ]; then
+    gate ts
+    if [ -f tsconfig.json ]; then npx tsc --noEmit; fi   # gate DURO: sin || true
+    npm test --if-present
+  fi
+  if [ -f pyproject.toml ]; then
+    gate python
+    ruff check .
+    if command -v uv >/dev/null; then uv run pytest -q; else pytest -q; fi
+  fi
+  if [ -f pubspec.yaml ]; then
+    gate flutter; flutter analyze && flutter test
+  fi
+  if [ -f buf.yaml ]; then
+    # --against apunta al gitdir del clon base (compartido por el worktree)
+    gate buf; buf lint && buf breaking --against "$BASE/.git#branch=origin/main"
+  fi
+}
+
+run_security_gates() {
+  gate gitleaks
+  # detect sobre el rango real a pushear (protect --staged es no-op aquí)
+  gitleaks detect --no-banner --log-opts="origin/main..HEAD"
+  if [ -f "$WS/semgrep/rules.yaml" ]; then
+    gate semgrep
+    semgrep scan --config "$WS/semgrep/rules.yaml" --error --quiet .
+  fi
+}
+
+check_verdict() {
+  gate "veredicto de review"
+  local v="$WS/tasks/$TASK/verdict-$REPO.json"
+  [ -f "$v" ] || { echo "❌ sin veredicto en $v"; echo "   ↳ remediación: corre /review $TASK $REPO primero"; exit 3; }
+  jq -e '.verdict=="pass" and .qa=="pass"' "$v" >/dev/null \
+    || { echo "❌ veredicto no es pass — corrige los items blocking listados en $v (cada uno trae su remediación) y re-corre /review"; exit 3; }
+  # compliance: todo requirement del delta-spec cubierto por tests
+  jq -e '(.requirements_uncovered // 0) == 0' "$v" >/dev/null \
+    || { echo "❌ $(jq -r '.requirements_uncovered' "$v") requirements del delta-spec sin test que los proteja"
+         echo "   ↳ remediación: escribe el test faltante (ver .compliance[] con covered:false en $v) o pide al humano una excepción explícita"; exit 3; }
+}
+
+# ── Loop de ship ──────────────────────────────────────────────────────
+acquire_lock
+cd "$WT"
+attempt=0
+while [ "$attempt" -lt "$MAX_RETRY" ]; do
+  attempt=$((attempt+1))
+  echo "══ ship $REPO (task $TASK) intento $attempt/$MAX_RETRY ══"
+  git fetch origin
+  git rebase origin/main || { git rebase --abort; echo "❌ conflicto de rebase — resuélvelo en el worktree $WT"; exit 4; }
+  gate_trailer
+  run_lang_gates
+  run_security_gates
+  check_verdict
+  if git push origin HEAD:main; then
+    sha="$(git rev-parse --short HEAD)"
+    echo "{\"repo\":\"$REPO\",\"sha\":\"$sha\",\"shipped_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" >> "$WS/tasks/$TASK/ship.log"
+    echo "✅ shipped $REPO @ $sha"
+    echo "→ siguiente: scripts/deploy-watch.sh $TASK $REPO (o /ship se encarga)"
+    exit 0
+  fi
+  echo "⚠️ push rechazado (non-fast-forward), reintentando tras rebase…"
+done
+echo "❌ agotados $MAX_RETRY intentos — escala a humano"
+exit 5

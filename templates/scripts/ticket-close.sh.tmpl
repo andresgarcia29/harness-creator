@@ -20,7 +20,7 @@ API="https://api.linear.app/graphql"
 [ -n "${LINEAR_API_KEY:-}" ] || { echo "❌ LINEAR_API_KEY no está en el entorno — usa scripts/with-secrets.sh"; exit 4; }
 
 gql() {
-  curl -sf -X POST "$API" -H "Authorization: $LINEAR_API_KEY" -H "Content-Type: application/json" --data "$1" \
+  curl -sf --retry 3 --retry-delay 2 --retry-all-errors -X POST "$API" -H "Authorization: $LINEAR_API_KEY" -H "Content-Type: application/json" --data "$1" \
     || { echo "❌ error de red/auth contra Linear" >&2; exit 4; }
 }
 

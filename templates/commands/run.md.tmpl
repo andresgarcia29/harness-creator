@@ -1,0 +1,75 @@
+---
+description: Pipeline completo de ticket a producción SIN intervención por fase — solo se detiene donde el diseño exige juicio humano
+argument-hint: <TICKET-ID | url | task-id> [--hasta rfc|implement|review|ship|archive]
+---
+
+Corres el pipeline COMPLETO para $ARGUMENTS, encadenando las fases tú
+mismo (eres el orquestador): intake → RFC → implement → review → ship
+por DAG → deploy-watch → archive. El humano NO interviene entre fases —
+para eso existen los gates deterministas y los presupuestos.
+
+Nivel de autonomía: `autonomy` en harness-answers.yaml
+- **full**: no pausas nunca; los gates, el canary y el rollback son la
+  red (direct-to-prod ya está diseñado para esto).
+- **checkpoint** (default): UNA sola pausa — resumen ejecutivo antes
+  del PRIMER ship a main (plan + diffs + veredictos en 10 líneas). El
+  humano dice "go" una vez y el resto del DAG fluye solo.
+- **supervised**: equivale a correr los comandos sueltos; no uses /run.
+
+## Flujo
+
+1. **Intake** (/feature): pull del ticket + validación. Continúa solo.
+2. **RFC** (/rfc): abogados en PARALELO, síntesis, plan + delta-spec +
+   beads. Continúa solo.
+3. **Implement** (/implement): worktrees; implementers de tareas sin
+   dependencia mutua SIEMPRE en paralelo (consulta `bd ready` — no
+   serialices lo paralelizable). Cada tarea que termina encola su
+   review DE INMEDIATO (pipeline, no barrera: T1 puede estar en review
+   mientras T4 se implementa).
+4. **Review** (/review): loops internos fail→fix (máx {{LOOP_BUDGET}}).
+   Continúa solo si pass+pass.
+5. **Checkpoint** (si autonomy=checkpoint): resumen y espera el "go".
+6. **Ship** (/ship): por orden del DAG, repo por repo. Verde → sigue.
+   Entre repos NO pausas: los contratos expand/contract hacen seguro
+   el orden.
+7. **Archive** (/archive) + ticket-close. Reporte final: qué se shippeó,
+   costo (ccusage), aprendizajes (mem_save).
+
+## Dónde SÍ te detienes (única lista válida — todo lo demás fluye)
+
+- Intake REBOTA el ticket (criterios no verificables) → needs-spec y fin.
+- Un abogado sigue `status: DRAFT` → pedir ratificación.
+- RFC sin converger en 2 rondas → posiciones en limpio al humano.
+- Presupuesto de loop agotado en implement/review → diff + último error.
+- Gate rojo tras 2 rondas de autofix → error completo al humano.
+- Deploy 🔴 → rollback primero (deploy-watch), diagnóstico al humano.
+- `--hasta <fase>`: detente ahí (ej. --hasta review para inspección).
+
+## Decisiones PRE-APROBADAS (jamás preguntes por esto)
+
+- Publicar el comentario de rebote de intake y crear labels de flujo
+  faltantes en el tracker (needs-spec, agent-ready, in-harness, shipped).
+- Relanzar UNA vez a un subagente que murió SIN dejar cambios.
+- Crear go.work/config local al worktree cuando los `replace` relativos
+  lo exijan para compilar.
+- Reintentar comandos de red que fallaron por transitorios (curl 56).
+- Continuar al siguiente paso cuando el actual quedó verde.
+
+## Watchdog de subagentes (la crisis de API no se repite)
+
+Lanza implementers/reviewers como tareas en BACKGROUND y vigila su
+progreso. Un subagente sin avance en ~10 min: interrúmpelo y relánzalo
+— es seguro porque el estado vive en tasks/<id>/ y en los commits del
+worktree, no en su conversación. Dos muertes del mismo rol en la misma
+tarea → escala a humano con el último estado.
+
+## Reglas de orquestación
+
+- Estado SIEMPRE en tasks/<id>/ — si la sesión muere, /run <task-id>
+  RETOMA donde quedó (lee plan.md, beads y veredictos existentes; no
+  repitas fases con artefactos ya válidos).
+- Reporta progreso en UNA línea por evento ("T2 hermes: review pass,
+  encolando ship") — no narres, el humano lee el resumen final.
+- Escalación de modelos según models.yaml; escalar modelo nunca
+  sustituye escalar a humano.
+- Tú orquestas, JAMÁS implementas ni editas código tú mismo.

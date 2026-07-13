@@ -376,6 +376,17 @@ capabilities:
     profiles: [orquestador]
     detect: "tickets.provider: linear"
 
+  - name: linear-mcp
+    category: tracking
+    purpose: "MCP oficial de Linear — intake conversacional y menos fricción de red que curl. Los scripts siguen para el loop (cero tokens); este es para explorar/triage"
+    provider: mcp
+    mcp: linear
+    config: { command: "npx", args: ["-y", "mcp-remote", "https://mcp.linear.app/sse"] }
+    permission_tier: read-write
+    profiles: [orquestador]
+    detect: "tickets.provider: linear"
+    phase: 2
+
   - name: beads
     category: tracking
     purpose: "DAG de tareas git-backed para agentes (bd ready --json). Beads=estado del trabajo; Engram=conocimiento. v1.1+ trae bd linear sync nativo"

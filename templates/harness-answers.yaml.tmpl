@@ -32,6 +32,12 @@ models:
 
 loop_budget: {{LOOP_BUDGET}}
 
+# Autonomía de /run (pipeline completo sin intervención por fase):
+#   full       → nunca pausa; gates + canary + rollback son la red
+#   checkpoint → UNA pausa: resumen antes del primer ship a main
+#   supervised → comandos sueltos a mano (/feature, /rfc, …)
+autonomy: {{AUTONOMY}}
+
 # Orden de shipping: dependencias primero. Verificado por el arquitecto
 # en cada plan; ship.sh no lo impone (los contratos expand/contract lo
 # vuelven no-crítico), pero es la referencia.

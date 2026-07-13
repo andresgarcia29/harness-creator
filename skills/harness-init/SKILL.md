@@ -119,7 +119,12 @@ harness; cada agente es contexto y mantenimiento.
     mechanical el barato, y el modelo de ESCALACIÓN del implementer
     (regla: el gasto en razonamiento es proporcional al fan-out del
     artefacto). Va a `models.yaml` (política) y al frontmatter de los
-    agentes. `loop_budget` default 3.
+    agentes. `loop_budget` default 3. Si el humano elige el modelo
+    caro en TODO, advierte el costo en latencia+dinero de qa/mechanical
+    y registra la decisión.
+10b. **Autonomía de /run**: full | checkpoint (recomendado para
+    empezar) | supervised. checkpoint = una sola pausa antes del
+    primer ship; full = los gates y el canary son la red.
 11. **Principios del proyecto** para la constitución: 2-4 reglas
     innegociables propias del dominio (ej. multi-tenancy, localización)
     — van a `docs/constitution.md` §6, DRAFT hasta ratificar.
@@ -168,7 +173,7 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `.claude/agents/{architect,implementer,reviewer}.md` | agents/*.tmpl | siempre |
 | `.claude/agents/qa.md` | agents/qa.md.tmpl | si hay frontend/mobile o canary |
 | `.claude/agents/<abogado>.md` | agents/svc-agent.md.tmpl | UNO por cluster; `status: DRAFT` |
-| `.claude/commands/{feature,rfc,implement,review,ship,promote,archive}.md` | commands/*.tmpl | siempre |
+| `.claude/commands/{feature,rfc,implement,review,ship,promote,archive,run}.md` | commands/*.tmpl | siempre — /run es el pipeline completo sin intervención por fase (autonomy en answers: full \| checkpoint \| supervised) |
 | `models.yaml` | models.yaml.tmpl | siempre (política de ruteo de modelos) |
 | `docs/constitution.md` | docs/constitution.md.tmpl | siempre (DRAFT; §6 desde entrevista #11) |
 | `specs/<capability>/spec.md` | docs/spec.md.tmpl | UNO por dominio de ownership (esqueleto DRAFT; la arqueología los llena) |

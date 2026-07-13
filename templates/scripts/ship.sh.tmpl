@@ -91,8 +91,24 @@ run_lang_gates() {
     gate flutter; flutter analyze && flutter test
   fi
   if [ -f buf.yaml ]; then
-    # --against apunta al gitdir del clon base (compartido por el worktree)
-    gate buf; buf lint && buf breaking --against "$BASE/.git#branch=origin/main"
+    gate buf
+    # breaking: SIEMPRE duro (--against apunta al gitdir del clon base)
+    buf breaking --against "$BASE/.git#branch=origin/main"
+    # lint: RATCHET — solo violaciones NUEVAS respecto a main bloquean.
+    # La deuda preexistente no secuestra shipping ajeno (la baja el
+    # ratchet-keeper con su propio ciclo). Se ignoran números de línea
+    # para tolerar corrimientos.
+    norm() { jq -c 'del(.start_line,.end_line,.start_column,.end_column)' 2>/dev/null | sort; }
+    head_lint="$(buf lint --error-format=json 2>/dev/null | norm || true)"
+    main_lint="$(cd "$BASE" && buf lint --error-format=json 2>/dev/null | norm || true)"
+    new_lint="$(comm -13 <(printf '%s' "$main_lint") <(printf '%s' "$head_lint"))"
+    if [ -n "$new_lint" ]; then
+      echo "❌ buf lint: violaciones NUEVAS introducidas por este cambio:"
+      echo "$new_lint" | jq -r '"   \(.path): \(.message)"' 2>/dev/null || echo "$new_lint"
+      echo "   ↳ remediación: corrige SOLO estas (la deuda preexistente de main no bloquea)"
+      exit 3
+    fi
+    [ -n "$main_lint" ] && echo "⚠️  buf lint: $(printf '%s\n' "$main_lint" | grep -c .) violaciones PREEXISTENTES en main (no bloquean; candidatas al ratchet-keeper)"
   fi
 }
 

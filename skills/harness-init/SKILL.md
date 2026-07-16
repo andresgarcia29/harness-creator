@@ -122,9 +122,13 @@ harness; cada agente es contexto y mantenimiento.
     agentes. `loop_budget` default 3. Si el humano elige el modelo
     caro en TODO, advierte el costo en latencia+dinero de qa/mechanical
     y registra la decisión.
-10b. **Autonomía de /run**: full | checkpoint (recomendado para
-    empezar) | supervised. checkpoint = una sola pausa antes del
-    primer ship; full = los gates y el canary son la red.
+10b. **Autonomía de /auto**: full | checkpoint (recomendado para las
+    primeras semanas). checkpoint = UNA sola pausa, un resumen antes
+    del primer ship a main; full = ninguna pausa, los gates y el canary
+    son la red. En ambos casos /auto redacta criterios y resuelve
+    ambigüedad solo (ledger de supuestos): la autonomía gradúa cuándo
+    se toca main, NO cuánto piensa el humano. Si el humano quiere
+    conducir fase por fase, no usa /auto: usa los comandos sueltos.
 11. **Principios del proyecto** para la constitución: 2-4 reglas
     innegociables propias del dominio (ej. multi-tenancy, localización)
     — van a `docs/constitution.md` §6, DRAFT hasta ratificar.
@@ -173,7 +177,7 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `.claude/agents/{architect,implementer,reviewer}.md` | agents/*.tmpl | siempre |
 | `.claude/agents/qa.md` | agents/qa.md.tmpl | si hay frontend/mobile o canary |
 | `.claude/agents/<abogado>.md` | agents/svc-agent.md.tmpl | UNO por cluster; `status: DRAFT` |
-| `.claude/commands/{feature,rfc,implement,review,ship,promote,archive,run}.md` | commands/*.tmpl | siempre — /run es el pipeline completo sin intervención por fase (autonomy en answers: full \| checkpoint \| supervised) |
+| `.claude/commands/{feature,rfc,implement,review,ship,promote,archive,auto}.md` | commands/*.tmpl | siempre — /auto es el pipeline completo sin intervención humana y acepta ticket O prompt literal (autonomy en answers: full \| checkpoint) |
 | `models.yaml` | models.yaml.tmpl | siempre (política de ruteo de modelos) |
 | `docs/constitution.md` | docs/constitution.md.tmpl | siempre (DRAFT; §6 desde entrevista #11) |
 | `specs/<capability>/spec.md` | docs/spec.md.tmpl | UNO por dominio de ownership (esqueleto DRAFT; la arqueología los llena) |

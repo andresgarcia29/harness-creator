@@ -36,10 +36,22 @@ Los VALORES de secretos jamás van al repo, al chat ni a los logs. -->
 
 ## Cómo se trabaja aquí
 
-Pipeline (sesión de Claude Code en esta carpeta):
+Sesión de Claude Code en esta carpeta. El día a día es UNA línea:
+
+```
+/auto {{TICKET_PREFIX}}-123                      # un ticket del tracker
+/auto "agrega rate limiting por tenant, 100 req/min"   # o un prompt literal
+```
+
+`/auto` corre el pipeline entero sin preguntarte: intake → RFC →
+implement → review → ship → deploy → archive. Resuelve la ambigüedad con
+evidencia y te deja el rastro en `tasks/<id>/assumptions.md` — léelo:
+son las decisiones que se tomaron por ti. Solo para donde una ley del
+harness lo exige (ver `docs/harness/pipeline.md`).
+
+Si quieres conducir fase por fase, los comandos sueltos siguen ahí:
 `/feature <ticket>` → `/rfc` → `/implement` → `/review` → `/ship` →
-`/archive`. Detalle: `docs/harness/pipeline.md`. Reglas de entrada de
-tickets: `docs/harness/intake.md`.
+`/archive`. Reglas de entrada de tickets: `docs/harness/intake.md`.
 
 Leyes con enforcement (hook o gate — no son sugerencias):
 push a main solo vía `scripts/ship.sh` · trabajo solo en worktrees

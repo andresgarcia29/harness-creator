@@ -6,6 +6,14 @@ los agentes solo despiertan en rojo. Camino verde = cero tokens.
 
 ## El flujo
 
+Dos formas de recorrerlo. **A mano**, fase por fase (abajo), cuando
+quieres inspeccionar el trabajo entre pasos. O **`/auto <ticket |
+"prompt">`**, que encadena TODAS las fases sin intervención: mismo
+pipeline, mismos gates, mismas paradas — lo único que cambia es que no
+hay humano entre fase y fase. El intake de `/auto` no rebota (no hay a
+quién): redacta los criterios faltantes y declara cada ambigüedad
+resuelta en `tasks/<id>/assumptions.md`.
+
 ```
 /feature (intake)          valida el ticket o lo rebota (needs-spec)
    ↓ tasks/<id>/task.md
@@ -24,8 +32,8 @@ ticket-close.sh            comenta evidencia y cierra el ticket
 
 | Rol | Quién | Modelo | Regla dura |
 |---|---|---|---|
-| Orquestador | la sesión principal | — | orquesta, no implementa |
-| Intake | /feature | {{MODEL_MECHANICAL}} | rebota ambigüedad, no la implementa |
+| Orquestador | la sesión principal (o /auto) | — | orquesta, no implementa |
+| Intake | /feature (o el paso 0 de /auto) | {{MODEL_MECHANICAL}} | rebota ambigüedad; en /auto la resuelve con evidencia y la declara |
 | Abogados | agentes de cluster (svc-*, infra, frontends) | {{MODEL_ARCHITECT}} | responden UNA vez, JSON; no implementan |
 | Arquitecto | agente architect | {{MODEL_ARCHITECT}} | máx 2 rondas de RFC; produce plan+beads |
 | Implementer | agente implementer (por tarea) | {{MODEL_IMPLEMENTER}} | un worktree, un repo, un scope |
@@ -35,9 +43,21 @@ ticket-close.sh            comenta evidencia y cierra el ticket
 
 ## Artefactos por tarea (`tasks/<id>/`)
 
-`task.md` (ticket materializado) · `plan.md` (del arquitecto) ·
-`verdict-<repo>.json` (reviewer+qa) · `ship.log` · `deploy-<repo>.log`.
-Estado en ARCHIVOS, no en conversación: cualquier sesión puede retomar.
+`task.md` (ticket materializado, o redactado por /auto desde un prompt) ·
+`assumptions.md` (ledger de supuestos — solo /auto) · `plan.md` (del
+arquitecto) · `verdict-<repo>.json` (reviewer+qa) · `ship.log` ·
+`deploy-<repo>.log`. Estado en ARCHIVOS, no en conversación: cualquier
+sesión puede retomar (`/auto <task-id>`).
+
+### El ledger de supuestos (`assumptions.md`)
+
+Cuando no hay humano al que rebotarle, la ambigüedad no desaparece: se
+hace explícita y barata de revertir. Cada línea dice qué se asumió, con
+qué evidencia (spec > ADR > CLAUDE.md del repo > patrón del código) y
+qué cuesta deshacerlo si el supuesto era falso. Es lo primero que audita
+un humano en el reporte de /auto, y su material de `/promote`: un
+supuesto que resultó falso se vuelve una regla para que el siguiente
+/auto no lo repita.
 
 ## Presupuestos (Ley 6)
 

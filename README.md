@@ -13,13 +13,14 @@ Le apuntas a una carpeta con tus repositorios y genera un *harness* completo y a
 1. [Quickstart](#quickstart)
 2. [Cómo funciona el instalador](#cómo-funciona-el-instalador)
 3. [Qué genera: anatomía de una instancia](#qué-genera-anatomía-de-una-instancia)
-4. [El pipeline de trabajo](#el-pipeline-de-trabajo)
-5. [Componentes, explicados uno por uno](#componentes-explicados-uno-por-uno)
-6. [Self-healing: los cronjobs](#self-healing-los-cronjobs)
-7. [Secretos](#secretos)
-8. [Qué tan flexible es](#qué-tan-flexible-es)
-9. [Actualizaciones](#actualizaciones)
-10. [Estructura de este repo](#estructura-de-este-repo)
+4. [El diagrama maestro: qué pasa cuando corres `/auto`](#el-diagrama-maestro-qué-pasa-cuando-corres-auto)
+5. [Cómo leer el diagrama](#cómo-leer-el-diagrama)
+6. [Componentes, explicados uno por uno](#componentes-explicados-uno-por-uno)
+7. [Self-healing: los cronjobs](#self-healing-los-cronjobs)
+8. [Secretos](#secretos)
+9. [Qué tan flexible es](#qué-tan-flexible-es)
+10. [Actualizaciones](#actualizaciones)
+11. [Estructura de este repo](#estructura-de-este-repo)
 
 ---
 
@@ -41,7 +42,14 @@ mkdir repos && git clone <tus-repos> repos/
 make init
 ```
 
-Después de eso, el día a día es: `/feature <ticket>` → `/rfc` → `/implement` → `/review` → `/ship` → `/archive`. Nada más.
+Después de eso, el día a día es **una sola línea**:
+
+```
+/auto COR-123                                  # un ticket de Linear
+/auto "agrega rate limiting por tenant al gateway, 100 req/min"   # o un prompt literal
+```
+
+`/auto` corre el pipeline entero — intake, RFC, implementación, review, ship, deploy, archive — **sin preguntarte nada**. Si prefieres conducir fase por fase, los comandos sueltos siguen ahí: `/feature` → `/rfc` → `/implement` → `/review` → `/ship` → `/archive`.
 
 **Requisitos**: macOS o Linux, `git`, `jq` (`brew install jq`), Claude Code. Todo lo demás lo instala el bootstrap.
 
@@ -96,7 +104,8 @@ mi-workspace/
 ├── .mcp.json                 ← MCPs elegidos (los autenticados, envueltos en with-secrets)
 ├── .claude/
 │   ├── agents/               ← architect, reviewer, implementer, qa + abogados por cluster
-│   ├── commands/             ← /feature /rfc /implement /review /ship /promote /archive
+│   ├── commands/             ← /auto (todo el pipeline, sin intervención)
+│   │                           /feature /rfc /implement /review /ship /promote /archive
 │   ├── hooks/                ← block-direct-push, guard-canonical (las leyes con dientes)
 │   └── settings.json         ← hooks registrados + denials (kubectl apply, terraform apply…)
 ├── docs/
@@ -120,31 +129,246 @@ mi-workspace/
 ├── semgrep/rules.yaml        ← sensores custom CON remediación en el mensaje
 ├── repos/                    ← tus clones (regenerables, protegidos por hook)
 ├── worktrees/<task>/<repo>   ← donde se trabaja de verdad
-└── tasks/<id>/               ← estado por tarea: task.md, plan.md, veredictos, logs
+└── tasks/<id>/               ← estado por tarea: task.md, assumptions.md (ledger),
+                                 plan.md, veredictos, logs
 ```
 
 ---
 
-## El pipeline de trabajo
+## El diagrama maestro: qué pasa cuando corres `/auto`
+
+Primero la **espina dorsal**: las tres entradas, dónde despierta cada agente, qué lo bloquea, y el hecho central — **todas las salidas hacia un humano son diez, y están en un solo nodo rojo**. Cada bloque tiene su zoom en la sección siguiente. Los colores importan; la leyenda está debajo.
 
 ```mermaid
 flowchart TD
-    T["🎫 Ticket (Linear)"] -->|"ticket-pull.sh<br/>(script, 0 tokens)"| F["/feature — INTAKE<br/>valida criterios de aceptación<br/>o REBOTA con preguntas"]
-    F --> R["/rfc<br/>abogados afectados responden UNA vez (JSON)<br/>arquitecto sintetiza · árbitro: repo proto<br/>produce plan DAG + delta-spec EARS"]
-    R --> I["/implement<br/>worktree por repo · un implementer por tarea<br/>edición simbólica (Serena) · trailer Task:"]
-    I --> V["/review<br/>reviewer → verdict.json con compliance matrix<br/>qa ejercita los criterios como usuario<br/>loop máx 3 → humano"]
-    V --> S["/ship → ship.sh (GATES)<br/>rebase · trailers · build/test · buf breaking<br/>gitleaks · semgrep · veredicto · lock · push"]
-    S --> D["deploy-watch.sh (script)<br/>Actions → Kargo → ArgoCD health → smoke canary"]
-    D -->|"🟢 verde"| A["/archive<br/>fusiona delta-spec en specs maestras<br/>cierra ticket con evidencia"]
-    D -->|"🔴 rojo"| RB["ROLLBACK PRIMERO<br/>(Rollouts abort-to-stable / revert en git)<br/>diagnóstico después"]
+
+E1["🎫 <b>COR-123</b><br/>ticket de Linear"]:::human
+E2["💬 <b>'agrega rate limiting por<br/>tenant al gateway, 100 req/min'</b><br/>prompt literal"]:::human
+E3["♻️ <b>AUTO-20260716-rate-limit</b><br/>task-id de una corrida muerta"]:::human
+
+E1 --> P0
+E2 --> P0
+E3 --> P0
+
+P0{"<b>① /auto · paso 0</b><br/>¿ticket, prompt o retomar?"}:::dec
+
+P0 -->|"COR-N o URL"| TP(["<b>ticket-pull.sh</b> · GraphQL · $0<br/>materializa task.md · label → in-harness"]):::script
+P0 -->|"texto libre"| PR["<b>redacta el intake</b> · id AUTO-fecha-slug<br/>criterios binarios · scope mínimo · repos vía grafo"]:::agent
+P0 -->|"task-id ya existente"| RE(["<b>RETOMA</b> · entra por la 1ª fase<br/>sin artefacto válido · nada se re-genera"]):::script
+
+TP --> TASK
+PR --> TASK
+TASK["<b>tasks/&lt;id&gt;/task.md</b>"]:::art --> INT
+
+INT{"<b>② INTAKE</b> · ¿cumple el contrato?<br/>sin humano, la ambigüedad NO se rebota"}:::dec
+INT -->|"6 leyes rotas"| PARA(["<b>⛔ LAS 10 PARADAS</b><br/>ADR contradicho · decisión irreversible<br/>abogado DRAFT · bug irreproducible<br/>RFC sin converger · loop agotado<br/>gate rojo x2 · subagente muerto x2<br/>deploy 🔴 · ticket inexistente"]):::stop
+INT -->|"resuelto con evidencia"| LED["<b>assumptions.md</b> · el ledger<br/>SUPUESTO · PORQUE ⟨evidencia⟩ · SI ES FALSO ⟨costo⟩<br/>spec &gt; ADR &gt; CLAUDE.md &gt; código · empate → lo REVERSIBLE"]:::art
+
+LED --> RFC["<b>③ RFC</b> · abogados afectados en PARALELO<br/>una respuesta JSON c/u · no implementan nunca<br/><b>architect</b> sintetiza → plan.md · DAG · delta-spec · beads"]:::agent
+RFC -.-> PARA
+
+RFC --> IMP["<b>④ IMPLEMENT</b> · bd ready manda<br/>1 implementer = 1 tarea = 1 worktree = 1 repo<br/>lo paralelo NO se serializa · watchdog 10 min"]:::agent
+IMP -.-> PARA
+
+IMP --> REV["<b>⑤ REVIEW</b> · encola al terminar, no al final<br/><b>reviewer</b>: verdict.json + compliance matrix 100%<br/><b>qa</b>: ejercita los criterios como usuario"]:::agent
+REV -->|"🔴 fail · el error ES el prompt del fix"| IMP
+REV -.-> PARA
+
+REV --> CHK{"<b>autonomy</b> en harness-answers.yaml"}:::dec
+CHK -->|"checkpoint · UNA pausa en todo el pipeline"| GO(["resumen de 10 líneas → 'go'"]):::human
+CHK -->|"full · ninguna"| SHIP
+GO --> SHIP
+
+SHIP(["<b>⑥ ship.sh</b> · LA única puerta a main · $0<br/>8 gates: rebase → trailer → build/test → buf breaking<br/>→ gitleaks → semgrep → veredicto → lock → push"]):::script
+HOOK{{"<b>🚫 hooks + denials</b> · fail-closed<br/>block-direct-push · guard-canonical<br/>kubectl/terraform apply · push --force"}}:::hook
+HOOK -.->|"bloquean a TODO agente"| IMP
+HOOK -.->|"dejan pasar SOLO a"| SHIP
+SHIP -->|"🔴 gate · máx 2 autofixes"| IMP
+SHIP -.-> PARA
+
+SHIP --> DW(["<b>⑦ deploy-watch.sh</b> · $0, solo CPU<br/>Actions → Kargo → ArgoCD health → smoke canary"]):::script
+DW -->|"🔴"| RB(["<b>ROLLBACK PRIMERO</b> · abort-to-stable o revert<br/>diagnóstico DESPUÉS · nunca argocd app rollback"]):::script
+RB --> PARA
+DW -->|"🟢 · quedan tareas en el DAG"| SHIP
+
+DW -->|"🟢 · DAG completo"| ARCH["<b>⑧ /archive</b> · fusiona el delta-spec en la<br/>spec maestra ← por esto no hay spec-rot<br/>ticket-close.sh · mem_save"]:::agent
+
+ARCH --> REP(["<b>REPORTE FINAL</b> — lo único que lees<br/>qué se shippeó · <b>el ledger completo</b><br/>paradas · costo ccusage"]):::human
+REP -.->|"<b>/promote</b> semanal · el loop se cierra:<br/>supuesto falso → regla semgrep · decisión madura → ADR"| SHIP
+
+classDef script fill:#0b3d2e,stroke:#10b981,stroke-width:2px,color:#d1fae5
+classDef agent fill:#1e2a5a,stroke:#60a5fa,stroke-width:2px,color:#dbeafe
+classDef dec fill:#4a3410,stroke:#f59e0b,stroke-width:2px,color:#fef3c7
+classDef hook fill:#2d0f0f,stroke:#dc2626,stroke-width:3px,color:#fecaca
+classDef stop fill:#450a0a,stroke:#f87171,stroke-width:3px,color:#fee2e2
+classDef human fill:#3b1a4a,stroke:#c084fc,stroke-width:2px,color:#f3e8ff
+classDef art fill:#1f2937,stroke:#9ca3af,stroke-width:1px,color:#e5e7eb
 ```
 
-Reglas transversales, todas con enforcement:
-- **Push a main SOLO vía ship.sh** — un hook PreToolUse bloquea cualquier `git push` a main.
-- **Nunca se edita el clon canónico** — otro hook obliga a trabajar en worktrees.
-- **Todo commit lleva `Task: <id>`** — gate en ship.sh (trazabilidad ticket↔commit↔deploy).
-- **Presupuestos**: máx 3 iteraciones por loop, 2 rondas de RFC, 2 rondas de autofix → escala a humano.
-- **Camino verde = cero tokens**: de ship.sh a producción solo corre CPU.
+### Leyenda
+
+| Forma / color | Qué es | Cuesta |
+|---|---|---|
+| 🟩 **verde, redondeado** | script determinista | **$0** — cero tokens, solo CPU |
+| 🟦 **azul, rectángulo** | agente (LLM) | tokens, modelo según `models.yaml` |
+| 🟨 **ámbar, rombo** | decisión que el sistema toma **solo** | — |
+| 🟥 **rojo, doble borde** | **gate** de `ship.sh` — bloquea el push | $0 |
+| 🟥 **rojo oscuro, hexágono** | **hook / denial** — bloquea al agente antes de actuar | $0 |
+| 🔴 **⛔ PARA** | las **10 salidas** a un humano. La lista es cerrada | — |
+| 🟪 **morado** | los únicos puntos donde un humano toca el flujo | — |
+| ⬜ **gris** | artefacto en disco (el estado real) | — |
+
+---
+
+## Cómo leer el diagrama
+
+Ocho bloques. Lo que sigue explica **por qué** cada uno es como es — el diagrama dice qué pasa, esto dice por qué.
+
+### ① Entrada — tres formas de empezar, ninguna te hace trabajar
+
+Un ticket de Linear, un prompt literal entre comillas, o el `task-id` de una corrida que se murió. `/auto` decide cuál es sin preguntarte. El tercer caso es el que más vas a agradecer: como **todo el estado vive en `tasks/<id>/` y en los commits del worktree — nunca en la conversación de un agente** — una sesión muerta a mitad del pipeline se retoma con `/auto <task-id>`, y entra por la primera fase cuyo artefacto falte. Un artefacto válido jamás se re-genera.
+
+### ② Intake — la pieza nueva, y la que hace posible el resto
+
+Aquí está el cambio conceptual. Con un ticket, el intake clásico **rebota** lo ambiguo: cuesta centavos rebotar y cuesta el pipeline entero implementar una ambigüedad. Pero cuando la entrada es tu prompt y tú ya te fuiste, **no hay a quién rebotarle**. La ambigüedad no desaparece por eso — así que en vez de rebotarse, se **resuelve, se declara y se hace barata de revertir**:
+
+- **Se resuelve con evidencia, no con opinión.** Hay una precedencia estricta: *spec maestra > ADR vigente > el CLAUDE.md del repo > el patrón del código*. Un supuesto que no se apoya en ninguna de las cuatro no es un supuesto, es una invención — y las invenciones no se implementan.
+- **Ante empate, gana lo reversible.** Entre dos lecturas de tu prompt, la que sea más fácil de deshacer, aunque haga menos. Esto es lo que vuelve segura la autonomía: no que el agente acierte siempre, sino que equivocarse sea barato.
+- **Se declara en `tasks/<id>/assumptions.md`.** Cada línea dice qué asumió, con qué evidencia, y qué cuesta deshacerlo si era falso. El ledger es lo primero del reporte final: en 30 segundos ves todas las decisiones que se tomaron por ti.
+- **Alimenta al sistema.** Un supuesto que resultó falso es material de `/promote`: se convierte en regla semgrep o en ADR, y el siguiente `/auto` ya no lo repite. Por eso la flecha punteada del reporte vuelve al gate de semgrep — **el loop se cierra**.
+
+`/auto` también reescribe lo difuso en binario ("que ande rápido" → "p95 < 300ms en `/x`, medido por el smoke") y divide un prompt que mezcla dos features en dos tareas del DAG. Lo que **no** hace es fingir que un bug irreproducible es arreglable, ni tomar una decisión que la constitución reserva a humanos.
+
+**Zoom: los cinco criterios de rebote, y qué hace `/auto` con cada uno.** Con ticket, los cinco rebotan. Con prompt no se relajan: se transforman.
+
+```mermaid
+flowchart LR
+  V{"criterio de<br/>docs/harness/intake.md"}:::dec
+  V -->|"1 · criterio no verificable<br/>'que ande rápido'"| A1["lo reescribe binario<br/>+ el umbral elegido al ledger"]:::agent
+  V -->|"5 · mezcla 2 features"| A2["las divide en<br/>tareas del DAG"]:::agent
+  V -->|"2 · bug sin repro"| D2{"¿logro<br/>reproducirlo?"}:::dec
+  D2 -->|"sí"| A3["escribe el repro"]:::agent
+  D2 -->|"no"| S1(["⛔ PARA<br/>no hay bug demostrable<br/>que arreglar"]):::stop
+  V -->|"3 · decisión de arquitectura"| D3{"¿reversible <b>Y</b> dentro de<br/>un ownership existente?"}:::dec
+  D3 -->|"sí"| A4["decide lo mínimo<br/>y lo anota"]:::agent
+  D3 -->|"no: servicio nuevo · dep externa<br/>· breaking · mueve ownership"| A5["escribe ADR-N<br/>status: PROPOSED<br/>+ su recomendación"]:::agent
+  A5 --> S2(["⛔ PARA<br/>la ley la ratifican humanos"]):::stop
+  V -->|"4 · contradice un ADR vigente"| S3(["⛔ PARA · lo cita<br/>no lo re-litiga"]):::stop
+  A1 --> L
+  A2 --> L
+  A3 --> L
+  A4 --> L
+  L["<b>assumptions.md</b><br/>una línea por decisión tomada por ti"]:::art
+  L --> DR{"¿abogado afectado<br/>en status: DRAFT?"}:::dec
+  DR -->|"sí"| S4(["⛔ PARA · pide ratificación"]):::stop
+  DR -->|"no"| R(["→ ③ RFC"]):::script
+
+classDef agent fill:#1e2a5a,stroke:#60a5fa,stroke-width:2px,color:#dbeafe
+classDef dec fill:#4a3410,stroke:#f59e0b,stroke-width:2px,color:#fef3c7
+classDef stop fill:#450a0a,stroke:#f87171,stroke-width:2px,color:#fee2e2
+classDef art fill:#1f2937,stroke:#9ca3af,stroke-width:1px,color:#e5e7eb
+classDef script fill:#0b3d2e,stroke:#10b981,stroke-width:2px,color:#d1fae5
+```
+
+### ③ RFC — por qué existen los abogados
+
+Un solo agente implementando una feature cruza fronteras de datos sin que nadie objete: no tiene con quién discutir. Los **abogados** (`svc-*`, `infra`, `frontends`) son un tech lead por dominio de ownership que **defiende invariantes en el RFC y nunca implementa**. Responden **una vez, en paralelo, en JSON** — no es una conversación, es un alegato.
+
+Cuando chocan, el desempate **no es consenso ni la opinión del arquitecto**: es evidencia. Contratos → el repo proto es el árbitro. Datos → `docs/architecture/map.md`. Máximo 2 rondas; si no convergen, las posiciones van en limpio a un humano — porque un desacuerdo real entre dos dominios *es* una decisión de negocio, y esas no las toma un modelo.
+
+La parada por **abogado en `DRAFT`** parece burocracia y es lo contrario: la constitución de un abogado la propuso la arqueología leyendo tu código, pero hasta que un humano la ratifica **nadie la firmó**. Litigar citando una ley sin firmar es teatro. Por eso `/auto` para ahí — y es la primera cosa que vas a ratificar después de instalar.
+
+### ④ Implement — paralelo por defecto, contexto mínimo por diseño
+
+Un implementer = una tarea = un worktree = un repo. Sesiones cortas y desechables que **nunca llegan a compactación de contexto**, y aislamiento que hace imposible el scope creep. `bd ready --json` (beads) dice qué tareas no tienen dependencias entre sí, y **todas esas arrancan a la vez**: serializar lo paralelizable es la forma más cara de perder tiempo.
+
+El **watchdog** es la lección de una crisis real: un subagente que no avanza en ~10 min se interrumpe y se relanza. Es seguro *precisamente* porque su conversación no era el estado — el estado son los commits. Dos muertes del mismo rol en la misma tarea sí escalan a un humano.
+
+**Zoom: el fan-out real, y por qué el review no espera.**
+
+```mermaid
+flowchart LR
+  WT(["worktree-task.sh<br/>un worktree por repo · $0"]):::script --> BD(["<b>bd ready --json</b><br/>¿qué tareas no tienen deps?"]):::script
+  BD --> T1["implementer <b>T1</b> · proto<br/>Serena: edición por símbolo"]:::agent
+  BD --> T2["implementer <b>T2</b> · atlas"]:::agent
+  BD --> T3["implementer <b>T3</b> · hermes"]:::agent
+  T1 --> R1["reviewer + qa · T1"]:::agent
+  T2 --> R2["reviewer + qa · T2"]:::agent
+  T3 --> R3["reviewer + qa · T3"]:::agent
+  R1 --> S1(["ship T1"]):::script
+  R2 -->|"🔴 fail"| T2
+  R3 --> S3(["ship T3"]):::script
+  T1 -.-> W{"watchdog:<br/>¿avanzó en 10 min?"}:::dec
+  W -->|"no · 1ª vez"| RL["relanza — el estado vive en tasks/&lt;id&gt;/<br/>y en los commits, NO en su conversación"]:::agent
+  RL -.-> T1
+  W -->|"no · 2ª muerte del mismo rol"| ST(["⛔ PARA<br/>último estado al humano"]):::stop
+
+classDef agent fill:#1e2a5a,stroke:#60a5fa,stroke-width:2px,color:#dbeafe
+classDef dec fill:#4a3410,stroke:#f59e0b,stroke-width:2px,color:#fef3c7
+classDef stop fill:#450a0a,stroke:#f87171,stroke-width:2px,color:#fee2e2
+classDef script fill:#0b3d2e,stroke:#10b981,stroke-width:2px,color:#d1fae5
+```
+
+T1 ya se está shippeando mientras T2 vuelve a implementación por un review rojo. Nadie espera a nadie: **el DAG es la única autoridad sobre el orden**.
+
+### ⑤ Review — contra el "listo" autodeclarado
+
+El modo de fallo #1 de los agentes es declararse terminados. Contra eso, dos capas que no se pisan: el **reviewer** emite el JSON que `ship.sh` exige, con una **compliance matrix** — cada requirement del delta-spec apareado con el test que lo prueba. "El review aprobó" es difuso; "requirements cubiertos: 100%" lo verifica una máquina. Y **qa** no lee código: ejercita tus criterios de aceptación como un usuario, con Playwright si hay frontend, local y en el canary.
+
+Cada tarea encola su review **al terminar**, no al final de todas: T1 puede estar en review mientras T4 se implementa. Es un pipeline, no una barrera.
+
+### ⑥ Ship — las leyes con dientes
+
+`ship.sh` es la **única** puerta a main, y los ocho gates corren en orden de más barato a más caro. Lo importante no es la lista: es que **el mensaje de error de cada gate es el prompt del fix** — trae su remediación exacta, para que el agente corrija en una iteración. Presupuesto: 2 rondas de autofix; la tercera es tuya, con el error completo y sin resumir.
+
+```mermaid
+flowchart TD
+  A["cualquier agente<br/>implementer · reviewer · qa · /auto"]:::agent -->|"git push origin main"| H1{{"🚫 <b>block-direct-push</b><br/>hook PreToolUse · <b>fail-closed</b><br/>sin jq → bloquea por precaución"}}:::hook
+  A -->|"edita repos/atlas"| H2{{"🚫 <b>guard-canonical</b><br/>el clon base es intocable"}}:::hook
+  A -->|"kubectl apply · terraform apply<br/>argocd app rollback · push --force"| H3{{"🚫 <b>denials</b> de settings.json"}}:::hook
+  H1 --> X(["⛔ la llamada NUNCA ocurre"]):::stop
+  H2 --> X
+  H3 --> X
+
+  SH(["<b>ship.sh</b>"]):::script --> G1[["1 · rebase sobre origin/main"]]:::gate
+  G1 --> G2[["2 · trailer Task: &lt;id&gt; en TODO commit"]]:::gate
+  G2 --> G3[["3 · build + test · autodetectado por lenguaje"]]:::gate
+  G3 --> G4[["4 · buf breaking · contratos expand/contract"]]:::gate
+  G4 --> G5[["5 · gitleaks · ningún secreto sale"]]:::gate
+  G5 --> G6[["6 · semgrep · sensores custom con remediación"]]:::gate
+  G6 --> G7[["7 · veredicto + compliance = 100%"]]:::gate
+  G7 --> G8[["8 · lock por repo · un ship a la vez"]]:::gate
+  G8 --> P(["git push origin main"]):::script
+  H1 -.->|"<b>deja pasar SOLO a</b>"| P
+  G4 -.->|"🔴 el mensaje del gate ES el prompt del fix"| F{"¿3er intento?"}:::dec
+  F -->|"no · máx 2 autofixes"| A
+  F -->|"sí"| ST(["⛔ PARA · error completo, sin resumir"]):::stop
+
+classDef agent fill:#1e2a5a,stroke:#60a5fa,stroke-width:2px,color:#dbeafe
+classDef dec fill:#4a3410,stroke:#f59e0b,stroke-width:2px,color:#fef3c7
+classDef gate fill:#3f1d1d,stroke:#ef4444,stroke-width:3px,color:#fee2e2
+classDef hook fill:#2d0f0f,stroke:#dc2626,stroke-width:3px,color:#fecaca
+classDef stop fill:#450a0a,stroke:#f87171,stroke-width:2px,color:#fee2e2
+classDef script fill:#0b3d2e,stroke:#10b981,stroke-width:2px,color:#d1fae5
+```
+
+Los **hooks** son la diferencia entre una regla y una ley. "No pushees a main" en un CLAUDE.md es una sugerencia que un agente puede racionalizar a las 3am. `block-direct-push` es un hook PreToolUse que intercepta la llamada **antes de que ocurra**, y es *fail-closed*: si falta `jq`, bloquea por precaución. Mismo caso con `guard-canonical` (el clon de `repos/` es intocable; se trabaja en worktrees) y con los denials de `settings.json`.
+
+Fíjate en la asimetría del diagrama, porque es **todo** el diseño: el mismo hook que bloquea a *cualquier* agente es el que **deja pasar a `ship.sh`**. No hay dos caminos a main con distinta severidad — hay uno solo, y está pavimentado de gates.
+
+### ⑦ Deploy — rollback primero, diagnóstico después
+
+`deploy-watch.sh` sigue la cadena Actions → Kargo → ArgoCD health → smoke del canary, y es un script: **el camino verde no gasta un solo token**. En rojo, el orden no se negocia: **rollback primero** (Argo Rollouts abort-to-stable o revert en git — nunca `argocd app rollback`, que es un cañón), y el diagnóstico después, con producción ya sana. Un agente diagnosticando con el incendio encendido es el peor lugar posible para gastar 20 minutos.
+
+### ⑧ Archive — la pieza que evita el spec-rot
+
+Cuando el canary queda verde, `/archive` **fusiona el delta-spec en la spec maestra automáticamente**. Esta es la razón por la que el SDD de este harness no muere: si esa fusión dependiera de disciplina humana, en un trimestre las specs mentirían — y una spec podrida es peor que ninguna, porque los agentes la ejecutan con confianza.
+
+### Las 10 paradas — la lista es cerrada, y ese es el punto
+
+`/auto` para en exactamente diez lugares, y **cada uno es una ley del harness, no una preferencia**: ticket inexistente, bug irreproducible, contradice un ADR, decisión irreversible o que mueve ownership (→ ADR `PROPOSED` y para), abogado en DRAFT, RFC sin converger, subagente muerto dos veces, presupuesto de loop agotado, gate rojo tras 2 autofixes, deploy rojo. Nada más.
+
+La regla que lo hace funcionar es negativa: **si la razón para parar no está en esa lista, no es una razón — decide.** Preguntarte es un fallo de diseño, no prudencia. La red que sostiene esto no eres tú: son los gates deterministas, el canary y el rollback. Y `autonomy: checkpoint` en `harness-answers.yaml` te da **una** pausa —un resumen de 10 líneas antes del primer ship a main— para las primeras semanas, mientras le agarras confianza. Gradúa *cuándo se toca main*, no *cuánto piensa el agente*.
 
 ---
 
@@ -260,6 +484,7 @@ El flujo es fijo (discovery → entrevista → generación → verificación); *
 | Cambiar modelos (todo Opus, todo barato, mixto) | `models.yaml` + `/harness-init .` re-estampa los agentes |
 | Otro cronjob de self-healing | un archivo en `cronjobs/jobs/`: metadata + `detect()` + prompt. El runner hace el resto |
 | Más/menos agentes | el clustering se decide en la entrevista y se corrige en `harness-answers.yaml` |
+| Que `/auto` te pida un "go" antes de tocar main (o que no lo pida) | `autonomy: checkpoint \| full` en `harness-answers.yaml` |
 | Endurecer/relajar leyes | hooks y denials en `settings.json.tmpl`; gates en `ship.sh.tmpl` |
 
 Lo **no** negociable (a propósito): push a main solo por gates, worktrees, valores de secretos fuera del chat, rollback seguro (nunca `argocd app rollback` automático — Argo Rollouts abort-to-stable o revert en git), y que la ley la ratifiquen humanos.
@@ -286,7 +511,8 @@ scripts/           discover.sh · doctor.sh (deterministas, portables macOS/Linu
 templates/         todo lo que se genera:
   ├── CLAUDE.md, README, manifest, models, answers, settings, Makefile, semgrep
   ├── agents/      architect · implementer · reviewer · qa · svc-agent (abogado genérico)
-  ├── commands/    feature · rfc · implement · review · ship · promote · archive
+  ├── commands/    auto (pipeline autónomo: ticket o prompt → prod) · feature · rfc
+  │                implement · review · ship · promote · archive
   ├── docs/        constitution · spec (EARS) · pipeline · intake · testing-policy · quality · ADR · cronjobs
   ├── scripts/     bootstrap · ship · worktree · secrets · with-secrets · quiet · deploy-watch · tickets
   ├── hooks/       block-direct-push · guard-canonical

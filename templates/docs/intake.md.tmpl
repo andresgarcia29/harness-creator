@@ -49,6 +49,28 @@ El rebote SIEMPRE propone la corrección: preguntas específicas o el
 borrador de criterios que el intake infiere, para que el humano solo
 confirme.
 
+## Entrada por prompt (`/auto "…"`) — el mismo contrato, sin rebote
+
+`/auto` acepta un prompt literal en vez de un ticket. La plantilla de
+arriba sigue siendo obligatoria; lo que cambia es quién la llena: los
+campos que el prompt no trae los redacta el orquestador y los registra
+en `tasks/<id>/task.md` con `origin: prompt`.
+
+Los criterios de rebote no se relajan, se TRANSFORMAN — no hay a quién
+rebotarle, así que cada uno tiene su salida:
+
+| Criterio | Con ticket | Con prompt (`/auto`) |
+|---|---|---|
+| 1 · criterios no verificables | rebote | los reescribe verificables; el umbral elegido va al ledger |
+| 2 · bug sin repro | rebote | escribe el repro; si no logra reproducirlo, PARA (no hay bug demostrable que arreglar) |
+| 5 · mezcla features | rebote | las divide él mismo en tareas del DAG |
+| 3 · decisión de arquitectura no tomada | rebote → ADR | si es reversible y no cruza ownership: decide y lo anota. Si es irreversible o cruza ownership: ADR `PROPOSED` y PARA |
+| 4 · contradice un ADR vigente | rebote citando el ADR | PARA citando el ADR — no lo re-litiga |
+
+Las tareas `origin: prompt` no crean ticket: su trazabilidad es el
+trailer `Task: <id>` y `tasks/<id>/`. Si quieres el ticket en
+{{TICKETS_PROVIDER}}, la entrada correcta es el ticket.
+
 ## Puente con el tracker ({{TICKETS_PROVIDER}})
 
 - `scripts/ticket-pull.sh <ID>` — materializa tasks/<ID>/task.md, label

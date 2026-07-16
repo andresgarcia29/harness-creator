@@ -32,10 +32,12 @@ models:
 
 loop_budget: {{LOOP_BUDGET}}
 
-# Autonomía de /run (pipeline completo sin intervención por fase):
+# Autonomía de /auto (ticket o prompt → producción, sin intervención):
 #   full       → nunca pausa; gates + canary + rollback son la red
 #   checkpoint → UNA pausa: resumen antes del primer ship a main
-#   supervised → comandos sueltos a mano (/feature, /rfc, …)
+# Gradúa cuándo se toca main, NO cuánto piensa el humano: /auto redacta
+# criterios y resuelve ambigüedad solo en ambos modos (ledger de
+# supuestos). Para conducir fase por fase: comandos sueltos, no /auto.
 autonomy: {{AUTONOMY}}
 
 # Orden de shipping: dependencias primero. Verificado por el arquitecto

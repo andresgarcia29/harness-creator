@@ -148,6 +148,8 @@ agents=$(ls "$WS"/.claude/agents/*.md 2>/dev/null | wc -l | tr -d ' ')
 for c in feature rfc implement review ship; do
   [ -f "$WS/.claude/commands/$c.md" ] && ok "comando /$c presente" || warn "comando /$c faltante — el pipeline documentado en CLAUDE.md no está completo"
 done
+[ -f "$WS/.claude/commands/auto.md" ] && ok "comando /auto presente (pipeline autónomo: ticket o prompt → prod)" \
+  || warn "comando /auto faltante — sin él no hay pipeline sin intervención; corre /harness-init . (modo update)"
 
 # 9 · Constituciones DRAFT pendientes de ratificar
 drafts=$(grep -l "status: DRAFT" "$WS"/.claude/agents/*.md "$WS"/docs/constitution.md "$WS"/specs/*/spec.md 2>/dev/null | wc -l | tr -d ' ')

@@ -40,6 +40,9 @@ Dirección de dependencias (ley, referencia del DAG de shipping):
 
 `/feature` → `/rfc` → `/implement` → `/review` → `/ship` → verificación
 canary. Rojo en deploy: ROLLBACK PRIMERO, diagnóstico después.
+`/auto <ticket | "prompt">` corre TODO eso sin intervención humana: la
+ambigüedad se resuelve con evidencia y se declara en
+`tasks/<id>/assumptions.md`; solo para donde una ley lo exige.
 Semanal: `/promote` (memoria → ley). Roles: `.claude/agents/`.
 
 ## Secretos (jamás valores en repo ni en chat)

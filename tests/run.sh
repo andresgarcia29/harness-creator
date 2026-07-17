@@ -14,13 +14,13 @@ command -v python3 >/dev/null || { echo "falta python3 (el panel lo usa)"; exit 
 # el frontend: la fuente React (web/src) tiene las 8 vistas y el build
 # vendoreado (dist/) existe y trae el placeholder del token — sin dist, el
 # panel instalado sirve 404 y nadie compila Node en la máquina del usuario
-for v in dash tasks task-detail sessions session-detail costs new-task connections; do
+for v in dash tasks task-detail sessions session-detail costs new-task connections docs tools; do
   [ -f "../templates/ui/web/src/views/$v.tsx" ] || { echo "vista perdida: $v"; exit 1; }
 done
 [ -f ../templates/ui/dist/index.html ] || { echo "falta dist/ (corre npm run build en templates/ui/web)"; exit 1; }
 grep -q "__OP_TOKEN__" ../templates/ui/dist/index.html || { echo "dist/index.html sin el placeholder del token anti-CSRF"; exit 1; }
 /bin/ls ../templates/ui/dist/assets/*.js >/dev/null 2>&1 || { echo "dist sin assets"; exit 1; }
-echo "── frontend: 8 vistas en web/src + dist vendoreado con token ✓"
+echo "── frontend: 10 vistas en web/src + dist vendoreado con token ✓"
 
 failed=0
 for t in test_emit.sh test_track_read.sh; do

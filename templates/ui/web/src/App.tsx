@@ -15,11 +15,14 @@ import { SessionDetail } from "@/views/session-detail"
 import { Costs } from "@/views/costs"
 import { NewTask } from "@/views/new-task"
 import { Connections } from "@/views/connections"
+import { Docs } from "@/views/docs"
+import { Tools } from "@/views/tools"
 
 export type View =
   | { name: "dash" } | { name: "tasks" } | { name: "task"; id: string }
   | { name: "sessions" } | { name: "session"; id: string }
   | { name: "costs" } | { name: "new" } | { name: "connections" }
+  | { name: "docs" } | { name: "tools" }
 export type Go = (v: View) => void
 
 export default function App() {
@@ -56,6 +59,8 @@ export default function App() {
               : view.name === "costs" ? <Costs s={snap} go={setView} />
               : view.name === "new" ? <NewTask s={snap} go={setView} />
               : view.name === "connections" ? <Connections s={snap} />
+              : view.name === "docs" ? <Docs s={snap} />
+              : view.name === "tools" ? <Tools s={snap} />
               : <Dash s={snap} go={setView} />}
           </div>
         </div>

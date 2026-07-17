@@ -19,7 +19,7 @@ export function Sessions({ s, go }: { s: Snapshot; go: Go }) {
           const [g, est, on] = estado(x)
           return (
             <button key={x.id} onClick={() => go({ name: "session", id: x.id })}
-              className="flex w-full min-w-0 items-center gap-3.5 overflow-hidden rounded-xl border border-white/8 bg-card p-3.5 px-4 text-left transition-all hover:border-primary/45 hover:shadow-[0_0_10px_rgba(99,102,241,.2)]">
+              className="flex w-full min-w-0 items-center gap-3.5 overflow-hidden rounded-xl border border-border bg-card p-3.5 px-4 text-left transition-all hover:border-primary/45 hover:shadow-[0_0_10px_rgba(99,102,241,.2)]">
               <span className={cn("w-3.5 shrink-0 text-center font-mono text-[13px] font-semibold", on && "animate-pulse text-(--ok)")}>{g}</span>
               <span className="shrink-0 font-mono text-[12.5px] font-semibold text-(--brand)">{x.short}</span>
               <span className="w-24 shrink-0 text-[13px] font-semibold">{est}</span>

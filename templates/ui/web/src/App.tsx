@@ -38,7 +38,7 @@ export default function App() {
         <div className="px-5 py-7 sm:px-8 md:px-11 md:py-9">
           <div className={cn("mx-auto", narrow ? "max-w-[680px]" : "max-w-[1160px]")}>
             {snap?.warning && (
-              <Alert className="mb-4 border-(--wait)/45 bg-amber-950/20">
+              <Alert className="mb-4 border-(--wait)/45 bg-(--wait)/8">
                 <TriangleAlert className="text-(--wait)" />
                 <AlertDescription className="text-[12.5px] text-muted-foreground">{snap.warning}</AlertDescription>
               </Alert>

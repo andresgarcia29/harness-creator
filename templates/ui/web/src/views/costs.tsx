@@ -3,6 +3,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { VHead, H2, Code, Stats, Empty, NumCell } from "@/components/bits"
 import { n, usd, type Snapshot } from "@/lib/harness"
+import { DayCostChart, ModelShareChart } from "@/components/charts-recharts"
 import { TriangleAlert } from "lucide-react"
 import type { Go } from "@/App"
 
@@ -12,7 +13,6 @@ const HBar = ({ pct }: { pct: number }) => (
 
 export function Costs({ s, go }: { s: Snapshot; go: Go }) {
   const days = (s.days || []).slice(-7)
-  const maxD = Math.max(0.01, ...days.map((d) => d.cost || 0))
   const models = s.models || []
   const maxM = Math.max(0.01, ...models.map((m) => m.cost || 0))
   const sess = [...s.sessions].sort((a, b) => (b.cost || 0) - (a.cost || 0)).slice(0, 8)
@@ -22,7 +22,7 @@ export function Costs({ s, go }: { s: Snapshot; go: Go }) {
     <>
       <VHead title="Gastos" sub={<>todo el espacio de trabajo · el costo es un <b>estimado</b>; la báscula oficial es <Code>ccusage</Code></>} />
       {s.unpriced && s.unpriced.length > 0 && (
-        <Alert className="mb-3.5 border-(--wait)/45 bg-amber-950/20 text-muted-foreground">
+        <Alert className="mb-3.5 border-(--wait)/45 bg-(--wait)/8 text-muted-foreground">
           <TriangleAlert className="text-(--wait)" />
           <AlertDescription className="text-[12.5px] text-muted-foreground">
             Sin precio en <Code>pricing.json</Code>: <b className="text-foreground">{s.unpriced.join(", ")}</b> — sus
@@ -34,26 +34,10 @@ export function Costs({ s, go }: { s: Snapshot; go: Go }) {
         [usd(s.cost), "total observado"], [n(s.tokens.out), "tokens out"],
         [n(s.tokens.cache_read), "leídos de caché (~10× más baratos)"],
       ]} />
-      <H2 sub="días con actividad observada">Gasto estimado por día</H2>
-      <Card className="py-0"><CardContent className="p-4">
-        {days.length ? (
-          <>
-            <div className="flex h-[120px] items-end gap-2.5">
-              {days.map((d) => (
-                <div key={d.day} className="flex flex-1 flex-col justify-end gap-1.5 text-center">
-                  <span className="font-mono text-[10.5px] text-muted-foreground">{usd(d.cost)}{d.unpriced ? "*" : ""}</span>
-                  <div className="rounded-t bg-gradient-to-b from-(--brand) to-primary" style={{ height: Math.max(3, ((d.cost || 0) / maxD) * 84) }} />
-                  <span className="font-mono text-[9.5px] text-muted-foreground/60">{d.day.slice(5)}</span>
-                </div>
-              ))}
-            </div>
-            {days.some((d) => d.unpriced) && <p className="mt-2.5 text-[11.5px] text-muted-foreground/70">* ese día incluye modelos sin precio.</p>}
-          </>
-        ) : (
-          <p className="text-xs text-muted-foreground/60">Sin días con actividad todavía.</p>
-        )}
-      </CardContent></Card>
+      <H2 sub="días con actividad observada · apilado por modelo">Gasto estimado por día</H2>
+      <Card className="py-0"><CardContent className="p-4"><DayCostChart s={s} /></CardContent></Card>
       <H2>Por modelo</H2>
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_240px]">
       <div className="overflow-x-auto">
         <Table>
           <TableHeader><TableRow>
@@ -79,11 +63,13 @@ export function Costs({ s, go }: { s: Snapshot; go: Go }) {
           </TableBody>
         </Table>
       </div>
+      <div className="hidden lg:block"><ModelShareChart s={s} /></div>
+      </div>
       <H2 sub="cada una por separado">Sesiones que más han gastado</H2>
       <div className="grid gap-2.5">
         {sess.map((x) => (
           <button key={x.id} onClick={() => go({ name: "session", id: x.id })}
-            className="flex w-full min-w-0 items-center gap-3.5 overflow-hidden rounded-xl border border-white/8 bg-card p-3.5 px-4 text-left transition-all hover:border-primary/45 hover:shadow-[0_0_10px_rgba(99,102,241,.2)]">
+            className="flex w-full min-w-0 items-center gap-3.5 overflow-hidden rounded-xl border border-border bg-card p-3.5 px-4 text-left transition-all hover:border-primary/45 hover:shadow-[0_0_10px_rgba(99,102,241,.2)]">
             <span className="shrink-0 font-mono text-[12.5px] font-semibold text-(--brand)">{x.short}</span>
             <span className="hidden min-w-0 flex-1 truncate text-xs text-muted-foreground/80 sm:block">{(x.last_text || "").slice(0, 110)}</span>
             <NumCell v={n(x.tokens.out)} l="tokens" />

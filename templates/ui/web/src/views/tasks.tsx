@@ -35,7 +35,7 @@ export function Tasks({ s, go }: { s: Snapshot; go: Go }) {
           const lastTs = tevs.length ? tevs[tevs.length - 1].ts : ""
           return (
             <button key={id} onClick={() => go({ name: "task", id })}
-              className="flex w-full min-w-0 items-center gap-3.5 overflow-hidden rounded-xl border border-white/8 bg-card p-3.5 px-4 text-left transition-all hover:border-primary/45 hover:shadow-[0_0_10px_rgba(99,102,241,.2)]">
+              className="flex w-full min-w-0 items-center gap-3.5 overflow-hidden rounded-xl border border-border bg-card p-3.5 px-4 text-left transition-all hover:border-primary/45 hover:shadow-[0_0_10px_rgba(99,102,241,.2)]">
               <span className="shrink-0 font-mono text-[12.5px] font-semibold text-(--brand)">{id}</span>
               <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground/80">{t.title || ""}</span>
               {p && <StatusBadge on={false}>{p._k === "block" ? "✕ bloqueada" : "⏸ te espera"}</StatusBadge>}

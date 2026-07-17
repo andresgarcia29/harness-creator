@@ -3,370 +3,470 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>harness · panel</title>
+<title>corvux · panel</title>
 <!--
-  ARQUITECTURA DE ESTA PÁGINA (leerla explica el diseño):
+  IMPLEMENTA la guía "Corvux Manager" (diseño del usuario, 2026-07-17) con dos
+  cambios deliberados:
 
-  Tres pestañas = tres niveles de confianza de los datos, el mismo modelo que
-  el resto del sistema:
-    · Sesiones — la capa PRESTADA (transcripts de Claude Code: agentes, tokens,
-      texto). Puede romperse con cualquier versión nueva del CLI.
-    · Trabajo — la capa NUESTRA (el bus: gates, fases, supuestos, paradas, más
-      tasks/). Funciona con cualquier agente. Es la que importa.
-    · Costos — interpretación. Tokens reales × precios de pricing.json. Un
-      modelo sin precio muestra "—": el dinero no se inventa.
+  1. PALETA MONOCROMA — pedido explícito: "tema negro y blanco". Cero matiz de
+     color en toda la página. La jerarquía es tipográfica (peso, tamaño,
+     opacidad) y estructural. La alerta "te está esperando" es un BLOQUE
+     INVERTIDO (blanco sobre negro): en una página monocroma la inversión grita
+     más que cualquier color. Estados con glifos: ● vivo · ○ quieto · ✓ pasó ·
+     ✕ bloqueó.
 
-  Reglas de honestidad, no negociables:
-    · Cada sección declara su ALCANCE (esta sesión / todo el workspace).
-    · Ningún dato de ejemplo, nunca. Un vacío explica cómo se llena, no finge.
-    · Las negativas (gates que bloquean, paradas) se enseñan igual de grandes
-      que los éxitos: son la única línea que no se puede fingir.
+  2. SOLO LA SUPERFICIE DE OBSERVACIÓN. La guía traía plano de control (crear
+     tareas, responder al agente, conectar proveedores, modo nube). Eso
+     revierte el ADR-0009 ("el panel observa, no ejecuta") y aquí serían
+     botones muertos sin backend: NO se implementan hasta que esa decisión se
+     tome en serio (vive en el roadmap del daemon).
 
-  La versión anterior de este archivo eran 676 líneas de parches acumulados con
-  cuatro alcances mezclados en una pantalla. Se reescribió entero; si vas a
-  cambiar la estructura, cambia también este comentario.
+  Arquitectura: sidebar + vistas (dash | tasks | task | sessions | session |
+  costs). Estado en JS (VIEW), datos de /api/state + SSE /api/stream.
+  Leyes de honestidad: alcance declarado, vacíos que enseñan (jamás datos de
+  ejemplo), dinero nunca inventado ("—" sin precio), negativas tan grandes
+  como los éxitos, texto por turno (no hay letra-a-letra y se dice).
 -->
 <style>
   :root{
-    --bg:#0a0c10; --surface:#12151d; --surface2:#171c26; --line:#232a38; --line2:#1a202b;
-    --fg:#e8edf5; --dim:#98a2b3; --faint:#667085;
-    --live:#34d399; --wait:#a78bfa; --block:#f87171; --dec:#fbbf24; --agent:#60a5fa;
+    --bg:#0a0a0b; --panel:#111112; --panel2:#161617; --line:#242427; --line2:#1a1a1d;
+    --fg:#f5f5f6; --dim:#9c9ca3; --faint:#5d5d64;
     --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
     --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
     --r:10px;
   }
   *{box-sizing:border-box;margin:0;padding:0}
-  body{background:var(--bg);color:var(--fg);font:14px/1.6 var(--sans);-webkit-font-smoothing:antialiased}
+  html,body{height:100%}
+  body{background:var(--bg);color:var(--fg);font:14px/1.6 var(--sans);
+    -webkit-font-smoothing:antialiased;display:grid;grid-template-columns:216px minmax(0,1fr)}
   .mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
-  .muted{color:var(--faint)}
-  .sp{flex:1}
+  .muted{color:var(--faint)} .dim{color:var(--dim)} .sp{flex:1}
+  button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;text-align:left}
 
-  /* ── header: SIEMPRE el total del workspace, y lo dice ── */
-  header{display:flex;align-items:center;gap:14px;padding:11px 22px;border-bottom:1px solid var(--line);
-    background:rgba(18,21,29,.85);backdrop-filter:blur(12px);position:sticky;top:0;z-index:30}
-  .brand{font-weight:700;font-size:15px;letter-spacing:-.3px}
-  .brand span{color:var(--faint);font-weight:400;font-size:12px;margin-left:8px}
-  .conn{display:flex;align-items:center;gap:6px;color:var(--faint);font-size:11px}
-  .d{width:6px;height:6px;border-radius:50%;background:var(--faint);flex:none}
-  .d.on{background:var(--live);box-shadow:0 0 0 3px rgba(52,211,153,.15);animation:p 2.4s infinite}
-  @keyframes p{50%{opacity:.35}}
-  .kpi{text-align:right;padding-left:20px}
-  .kpi b{display:block;font:600 15px/1.2 var(--mono);font-variant-numeric:tabular-nums}
-  .kpi i{font-style:normal;font-size:9.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.7px}
-
-  nav{display:flex;gap:2px;padding:0 22px;border-bottom:1px solid var(--line);background:var(--surface);
-    position:sticky;top:51px;z-index:29}
-  nav button{background:none;border:none;border-bottom:2px solid transparent;color:var(--dim);
-    font:13px var(--sans);padding:10px 14px;cursor:pointer}
-  nav button:hover{color:var(--fg)}
-  nav button[aria-selected=true]{color:var(--fg);border-bottom-color:var(--agent)}
-  nav button b{font:10px var(--mono);color:var(--faint);margin-left:6px;font-weight:400}
-
-  main{padding:20px 22px 60px;max-width:1440px;margin:0 auto}
-  .tab{display:none}.tab.on{display:block;animation:fade .22s ease}
-  @keyframes fade{from{opacity:0;transform:translateY(4px)}}
-  section{margin-bottom:28px}
-  h2{font-size:12px;text-transform:uppercase;letter-spacing:1.1px;color:var(--dim);font-weight:600;margin-bottom:3px;
-    display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
-  .scope{font:600 8.5px var(--sans);letter-spacing:.6px;text-transform:uppercase;color:var(--faint);
+  /* ═══ SIDEBAR ═══ */
+  aside{position:sticky;top:0;height:100vh;display:flex;flex-direction:column;
+    border-right:1px solid var(--line);background:var(--panel);padding:18px 12px 14px}
+  .brand{display:flex;align-items:center;gap:9px;padding:0 8px 18px}
+  .brand .logo{width:24px;height:24px;border-radius:7px;background:var(--fg);color:var(--bg);
+    display:grid;place-items:center;font:700 13px var(--mono)}
+  .brand b{font-size:14px;letter-spacing:-.2px}
+  .chip{font:600 8.5px var(--sans);letter-spacing:.7px;text-transform:uppercase;color:var(--dim);
     border:1px solid var(--line);border-radius:99px;padding:2px 8px}
-  .lede{color:var(--faint);font-size:12.5px;margin-bottom:12px;max-width:82ch}
-  code{font:11.5px var(--mono);background:var(--surface2);padding:2px 5px;border-radius:4px;color:var(--dim)}
-  .warn{background:#3b1d1d;border:1px solid #7f3333;color:#fca5a5;padding:10px 13px;border-radius:8px;
-    margin-bottom:16px;font-size:12.5px}
-  .empty{border:1px dashed var(--line);border-radius:var(--r);padding:16px 18px;background:var(--surface)}
-  .empty h4{font-size:13px;font-weight:600;margin-bottom:5px}
-  .empty p{color:var(--faint);font-size:12.5px;max-width:78ch;margin-bottom:4px}
+  .navsec{font:600 9px var(--sans);letter-spacing:1.2px;text-transform:uppercase;color:var(--faint);
+    padding:14px 10px 6px}
+  .nav{display:flex;align-items:center;gap:9px;width:100%;padding:8px 10px;border-radius:8px;
+    color:var(--dim);font-size:13px;transition:.12s}
+  .nav:hover{background:var(--panel2);color:var(--fg)}
+  .nav[aria-current=true]{background:var(--panel2);color:var(--fg);font-weight:600}
+  .nav svg{flex:none;opacity:.85}
+  .nav .bdg{margin-left:auto;font:600 10px var(--mono);color:var(--faint)}
+  .nav[aria-current=true] .bdg{color:var(--dim)}
+  .sfoot{margin-top:auto;padding:12px 10px 0;border-top:1px solid var(--line2)}
+  .conn{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--faint);padding-bottom:8px}
+  .d{width:6px;height:6px;border-radius:50%;background:var(--faint);flex:none}
+  .d.on{background:var(--fg);animation:p 2.4s infinite}
+  @keyframes p{50%{opacity:.3}}
+  .sfoot p{font-size:10px;color:var(--faint);line-height:1.6}
 
-  /* ── LA ALERTA: la pregunta que manda es "¿me está esperando algo?" ── */
-  .alert{border-radius:12px;padding:15px 18px;margin-bottom:18px;display:flex;gap:14px;align-items:flex-start;
-    border:1px solid}
-  .alert.wait{border-color:rgba(167,139,250,.55);background:linear-gradient(90deg,rgba(167,139,250,.12),transparent 65%)}
-  .alert.block{border-color:rgba(248,113,113,.5);background:linear-gradient(90deg,rgba(248,113,113,.10),transparent 65%)}
-  .alert .ic{font-size:19px;line-height:1.3}
+  /* ═══ CONTENIDO ═══ */
+  main{padding:30px 40px 64px;max-width:1240px;animation:in .3s ease}
+  @keyframes in{from{opacity:0;transform:translateY(5px)}}
+  .vhead{display:flex;align-items:baseline;gap:12px;margin-bottom:20px;flex-wrap:wrap}
+  .vhead h1{font-size:21px;font-weight:700;letter-spacing:-.4px}
+  .vhead .sub{color:var(--faint);font-size:12.5px}
+  .back{color:var(--dim);font-size:12.5px;margin-bottom:14px;display:inline-block;border-radius:6px;padding:3px 8px 3px 0}
+  .back:hover{color:var(--fg)}
+  h2{font-size:11.5px;text-transform:uppercase;letter-spacing:1.1px;color:var(--dim);font-weight:600;
+    margin:26px 0 4px;display:flex;align-items:baseline;gap:9px}
+  h2:first-of-type{margin-top:0}
+  .lede{color:var(--faint);font-size:12px;margin-bottom:12px;max-width:82ch}
+  code{font:11.5px var(--mono);background:var(--panel2);padding:2px 5px;border-radius:4px;color:var(--dim)}
+
+  /* ═══ ALERTA INVERTIDA: en monocromo, la inversión es el grito ═══ */
+  .alert{border-radius:12px;padding:16px 20px;margin-bottom:14px;display:flex;gap:15px;
+    align-items:flex-start;background:var(--fg);color:var(--bg);cursor:pointer;
+    transition:.13s;border:1px solid var(--fg)}
+  .alert:hover{transform:translateY(-1px)}
+  .alert .glyph{font:700 17px var(--mono);line-height:1.4}
   .alert b{display:block;font-size:15px;letter-spacing:-.2px}
-  .alert.wait b{color:var(--wait)} .alert.block b{color:var(--block)}
-  .alert p{color:var(--dim);font-size:13px;margin-top:1px}
-  .alert i{font-style:normal;color:var(--faint);font-size:11px;display:block;margin-top:4px}
+  .alert p{font-size:13px;opacity:.75;margin-top:1px}
+  .alert i{font-style:normal;font-size:11px;opacity:.55;display:block;margin-top:4px}
+  .alert.block{background:var(--bg);color:var(--fg);border:2px solid var(--fg)}
 
-  /* ── sesiones ── */
-  .ses{display:grid;grid-template-columns:minmax(0,1fr);gap:8px}
-  .sesr{position:relative;display:flex;align-items:center;gap:13px;padding:12px 15px;border:1px solid var(--line);
-    border-radius:var(--r);background:var(--surface);cursor:pointer;font:inherit;color:inherit;width:100%;
-    min-width:0;overflow:hidden;text-align:left;transition:.13s}
-  .sesr:hover{border-color:var(--faint)}
-  .sesr[aria-selected=true]{border-color:var(--agent);background:linear-gradient(90deg,rgba(96,165,250,.08),transparent)}
-  .sesr[aria-selected=true]:before{content:"";position:absolute;left:0;top:10px;bottom:10px;width:3px;
-    background:var(--agent);border-radius:0 3px 3px 0}
-  .sesr .bea{width:9px;height:9px;border-radius:50%;background:var(--faint);flex:none}
-  .sesr.on .bea{background:var(--live);box-shadow:0 0 0 4px rgba(52,211,153,.15);animation:p 2.4s infinite}
-  .sesr .id{font:600 12.5px var(--mono);width:76px;flex:none}
-  .sesr .est{font-size:12.5px;font-weight:600;width:96px;flex:none}
-  .sesr.on .est{color:var(--live)}
-  .sesr .txt{flex:1;min-width:0;color:var(--faint);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .num{font:12px var(--mono);color:var(--dim);text-align:right;flex:none;width:84px;font-variant-numeric:tabular-nums}
-  .num s{text-decoration:none;color:var(--faint);font-size:10px;display:block}
+  /* stats */
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:1px;
+    background:var(--line);border:1px solid var(--line);border-radius:var(--r);overflow:hidden;margin-bottom:8px}
+  .stats>div{background:var(--panel);padding:13px 16px}
+  .stats b{display:block;font:600 20px/1.3 var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.5px}
+  .stats i{font-style:normal;font-size:9.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.7px}
 
-  /* ── detalle de la sesión elegida ── */
-  .detail{border:1px solid var(--line);border-radius:12px;background:var(--surface);margin-top:14px;overflow:hidden}
-  .dhead{display:flex;align-items:center;gap:12px;padding:13px 18px;background:rgba(96,165,250,.06);
-    border-bottom:1px solid var(--line)}
-  .dhead b{font-size:14px}
-  .dhead .mono{font-size:12px;color:var(--faint)}
-  .dbody{padding:16px 18px}
-  .strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));gap:1px;background:var(--line);
-    border:1px solid var(--line);border-radius:8px;overflow:hidden;margin-bottom:16px}
-  .strip div{background:var(--surface2);padding:10px 13px}
-  .strip b{display:block;font:600 17px/1.3 var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.4px}
-  .strip i{font-style:normal;font-size:9.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.6px}
-  .strip .hi b{color:var(--agent)} .strip .win b{color:var(--live)}
-  h3.sub{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--faint);font-weight:600;margin:16px 0 8px}
+  .card{border:1px solid var(--line);border-radius:var(--r);background:var(--panel);padding:16px 18px}
+  .rows{display:grid;grid-template-columns:minmax(0,1fr);gap:8px}
+  .row{position:relative;display:flex;align-items:center;gap:13px;padding:13px 16px;
+    border:1px solid var(--line);border-radius:var(--r);background:var(--panel);width:100%;
+    min-width:0;overflow:hidden;transition:.12s}
+  .row:hover{border-color:var(--faint)}
+  .row .st{font:600 13px var(--mono);width:14px;text-align:center;flex:none}
+  .row .st.on{animation:p 2.4s infinite}
+  .row .id{font:600 12.5px var(--mono);flex:none}
+  .row .lbl{font-size:13px;font-weight:600;flex:none}
+  .row .txt{flex:1;min-width:0;color:var(--faint);font-size:12px;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  .num{font:12px var(--mono);color:var(--dim);text-align:right;flex:none;font-variant-numeric:tabular-nums}
+  .num s{text-decoration:none;color:var(--faint);font-size:9.5px;display:block;text-transform:uppercase;letter-spacing:.4px}
+  .tag{font:600 9px var(--sans);letter-spacing:.6px;text-transform:uppercase;padding:3px 8px;
+    border:1px solid var(--line);border-radius:99px;color:var(--dim);flex:none}
+  .tag.hot{background:var(--fg);color:var(--bg);border-color:var(--fg)}
 
-  .tl{overflow:hidden}
-  .tl svg{display:block;width:100%}
-  .tl .axis{font:9.5px var(--mono);fill:var(--faint)}
-  .tl .grid-l{stroke:var(--line2)}
-  .tl .lbl{font:10px var(--sans);fill:var(--dim)}
-  .tl .conc{fill:var(--agent);opacity:.15}
-  .tl .conc-l{stroke:var(--agent);stroke-width:1.2;fill:none;opacity:.6}
-  .tl .peak{font:600 9.5px var(--mono);fill:var(--agent)}
-  .tl .bar{rx:2.5}
-  .tl .bar:hover{filter:brightness(1.35)}
+  /* pipeline */
+  .pipe{display:flex;margin:6px 0 4px}
+  .pstep{flex:1;text-align:center;position:relative;padding-top:19px}
+  .pstep:not(:last-child):after{content:"";position:absolute;top:5px;left:50%;right:-50%;height:1.5px;background:var(--line)}
+  .pstep.done:not(:last-child):after{background:var(--dim)}
+  .pdot{position:absolute;top:0;left:50%;transform:translateX(-50%);width:11px;height:11px;border-radius:50%;
+    background:var(--bg);border:2px solid var(--line);z-index:1}
+  .pstep.done .pdot{background:var(--fg);border-color:var(--fg)}
+  .pstep.now .pdot{background:var(--bg);border-color:var(--fg);box-shadow:0 0 0 4px rgba(245,245,246,.14);animation:p 2s infinite}
+  .pstep b{font-size:10.5px;font-weight:500;color:var(--faint)}
+  .pstep.done b{color:var(--dim)} .pstep.now b{color:var(--fg);font-weight:600}
+
+  /* historia */
+  .story{border-left:1.5px solid var(--line);margin-left:8px}
+  .beat{position:relative;padding:0 0 15px 24px}
+  .beat:last-child{padding-bottom:2px}
+  .beat:before{content:"";position:absolute;left:-5.5px;top:5px;width:10px;height:10px;border-radius:50%;
+    background:var(--bg);border:2px solid var(--faint)}
+  .beat[data-k=hard]:before{background:var(--fg);border-color:var(--fg)}
+  .beat[data-k=bad]:before{background:var(--bg);border-color:var(--fg);box-shadow:0 0 0 3px rgba(245,245,246,.18)}
+  .beat time{font:10.5px var(--mono);color:var(--faint);margin-right:8px}
+  .beat .lbl{font-weight:700;font-size:12.5px}
+  .beat[data-k=bad] .lbl{text-decoration:underline;text-underline-offset:3px}
+  .beat p{color:var(--dim);font-size:12px;margin-top:1px;max-width:96ch}
+
+  /* supuestos estructurados (Por qué / Si resulta falso) */
+  .sup{border:1px solid var(--line);border-radius:8px;padding:12px 15px;background:var(--panel2);margin-bottom:8px}
+  .sup b{font-size:12.5px;display:block}
+  .sup .why{font-size:11.5px;color:var(--dim);margin-top:3px}
+  .sup .why b{display:inline;font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--faint)}
+
+  /* gantt + charts (monocromo) */
+  .tl svg,.chart svg{display:block;width:100%}
+  .ax{font:9.5px var(--mono);fill:var(--faint)}
+  .gl{stroke:var(--line2)}
+  .lbl9{font:10px var(--sans);fill:var(--dim)}
+  .area{fill:var(--fg);opacity:.10}
+  .aline{stroke:var(--fg);stroke-width:1.2;fill:none;opacity:.55}
+  .peak{font:600 9.5px var(--mono);fill:var(--dim)}
+  .bar:hover{opacity:1 !important}
 
   .tree{border:1px solid var(--line2);border-radius:8px;overflow:hidden}
-  .kid{display:flex;align-items:center;gap:10px;padding:7px 13px;border-bottom:1px solid var(--line2);font-size:12.5px}
+  .kid{display:flex;align-items:center;gap:10px;padding:7px 14px;border-bottom:1px solid var(--line2);font-size:12.5px}
   .kid:last-child{border-bottom:none}
-  .kid.root{background:rgba(96,165,250,.05)}
-  .kid .st{width:7px;height:7px;border-radius:50%;background:var(--faint);flex:none}
-  .kid .st.on{background:var(--live);box-shadow:0 0 0 3px rgba(52,211,153,.15)}
+  .kid.root{background:var(--panel2)}
+  .kid .g{font:600 12px var(--mono);width:12px;text-align:center;flex:none}
+  .kid .g.on{animation:p 2.4s infinite}
   .kid .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .kid .nm i{font-style:normal;color:var(--faint);font:10.5px var(--mono);margin-left:8px}
-  .kid.child{padding-left:32px;position:relative}
-  .kid.child:before{content:"└";position:absolute;left:14px;color:var(--line);font-size:11px}
+  .kid.child{padding-left:34px;position:relative}
+  .kid.child:before{content:"└";position:absolute;left:15px;color:var(--line);font-size:11px}
 
-  #stream{border:1px solid var(--line2);border-radius:8px;max-height:240px;overflow:auto}
-  .msg{padding:9px 13px;border-bottom:1px solid var(--line2);font-size:12px;color:var(--dim);line-height:1.6}
+  #stream{border:1px solid var(--line2);border-radius:8px;max-height:250px;overflow:auto}
+  .msg{padding:9px 14px;border-bottom:1px solid var(--line2);font-size:12px;color:var(--dim);line-height:1.6}
   .msg:last-child{border-bottom:none}
   .msg .h{display:flex;gap:9px;align-items:baseline;margin-bottom:2px}
-  .msg .h b{color:var(--agent);font-size:10.5px;font-weight:600}
+  .msg .h b{font-size:10.5px;font-weight:700;color:var(--fg)}
   .msg .h time{color:var(--faint);font:10px var(--mono)}
   .msg p{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 
-  /* ── trabajo: tarjetas por tarea, con su pipeline y su historia ── */
-  .task{border:1px solid var(--line);border-radius:12px;background:var(--surface);margin-bottom:14px;overflow:hidden}
-  .thead{display:flex;align-items:center;gap:11px;padding:13px 18px;border-bottom:1px solid var(--line2)}
-  .thead b{font-size:14px}
-  .chip{font:600 9px var(--sans);padding:3px 8px;border-radius:99px;text-transform:uppercase;letter-spacing:.5px;
-    border:1px solid var(--line);color:var(--faint);flex:none}
-  .chip.prompt{border-color:rgba(167,139,250,.45);color:var(--wait)}
-  .tbody{padding:15px 18px}
-  .pipe{display:flex;margin:2px 0 16px}
-  .pstep{flex:1;text-align:center;position:relative;padding-top:20px}
-  .pstep:not(:last-child):after{content:"";position:absolute;top:5px;left:50%;right:-50%;height:2px;background:var(--line)}
-  .pstep.done:not(:last-child):after{background:var(--live);opacity:.45}
-  .pdot{position:absolute;top:0;left:50%;transform:translateX(-50%);width:11px;height:11px;border-radius:50%;
-    background:var(--surface2);border:2px solid var(--line);z-index:1}
-  .pstep.done .pdot{background:var(--live);border-color:var(--live)}
-  .pstep.now .pdot{background:var(--dec);border-color:var(--dec);box-shadow:0 0 0 4px rgba(251,191,36,.16);animation:p 2s infinite}
-  .pstep b{font-size:11px;font-weight:500;color:var(--faint)}
-  .pstep.done b{color:var(--dim)} .pstep.now b{color:var(--dec);font-weight:600}
-
-  .ledger{border:1px solid var(--line2);border-radius:8px;padding:10px 13px;background:var(--bg);margin-bottom:14px}
-  .ledger h4{font-size:10.5px;text-transform:uppercase;letter-spacing:.8px;color:var(--dec);margin-bottom:6px}
-  .ledger li{list-style:none;color:var(--dim);font-size:12px;padding:3px 0;line-height:1.55}
-  .ledger li:before{content:"· ";color:var(--dec)}
-
-  .story{border-left:2px solid var(--line);margin-left:8px}
-  .beat{position:relative;padding:0 0 15px 24px}
-  .beat:last-child{padding-bottom:2px}
-  .beat:before{content:"";position:absolute;left:-6px;top:5px;width:10px;height:10px;border-radius:50%;
-    background:var(--surface2);border:2px solid var(--line)}
-  .beat[data-k=amber]:before{background:var(--dec);border-color:var(--dec)}
-  .beat[data-k=red]:before{background:var(--block);border-color:var(--block);box-shadow:0 0 0 4px rgba(248,113,113,.14)}
-  .beat[data-k=green]:before{background:var(--live);border-color:var(--live)}
-  .beat[data-k=purple]:before{background:var(--wait);border-color:var(--wait);box-shadow:0 0 0 4px rgba(167,139,250,.14)}
-  .beat time{font:10.5px var(--mono);color:var(--faint);margin-right:8px}
-  .beat .lbl{font-weight:600;font-size:12.5px}
-  .beat[data-k=amber] .lbl{color:var(--dec)} .beat[data-k=red] .lbl{color:var(--block)}
-  .beat[data-k=green] .lbl{color:var(--live)} .beat[data-k=purple] .lbl{color:var(--wait)}
-  .beat p{color:var(--dim);font-size:12px;margin-top:1px;max-width:100ch}
-
-  /* ── costos ── */
   table{width:100%;border-collapse:collapse;font-size:12.5px}
-  th{text-align:left;color:var(--faint);font:600 10px var(--sans);text-transform:uppercase;letter-spacing:.7px;
-    padding:7px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
-  td{padding:6px 10px;border-bottom:1px solid var(--line2);white-space:nowrap}
-  tbody tr:hover td{background:var(--surface)}
-  tr.ghead td{background:var(--surface2);font-weight:600;border-top:1px solid var(--line)}
-  td.indent{padding-left:26px}
+  th{text-align:left;color:var(--faint);font:600 10px var(--sans);text-transform:uppercase;
+    letter-spacing:.7px;padding:7px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+  td{padding:6.5px 10px;border-bottom:1px solid var(--line2);white-space:nowrap}
+  tbody tr:hover td{background:var(--panel2)}
   .r{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
-  .who i{font-style:normal;color:var(--faint);font:10.5px var(--mono);margin-left:7px}
-  .bar{height:4px;border-radius:2px;background:var(--agent);opacity:.7;min-width:2px}
+  .hbar{height:4px;border-radius:2px;background:var(--fg);opacity:.55;min-width:2px}
   .note{color:var(--faint);font-size:11.5px;margin-top:10px;line-height:1.7;max-width:86ch}
   .note b{color:var(--dim);font-weight:600}
+  .warnbox{border:1.5px solid var(--fg);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12.5px;color:var(--dim)}
+
+  .empty{border:1px dashed var(--line);border-radius:var(--r);padding:22px 24px;background:var(--panel)}
+  .empty h4{font-size:14px;font-weight:700;margin-bottom:8px}
+  .empty p{color:var(--faint);font-size:12.5px;max-width:76ch;margin-bottom:5px}
+  .empty b{color:var(--dim)}
 </style>
 </head>
 <body>
-<header>
-  <div class="brand">🔭 harness<span id="ws"></span></div>
-  <div class="conn"><span class="d" id="dot"></span><span id="conn">conectando…</span></div>
-  <div class="sp"></div>
-  <div class="kpi"><b id="k-act">0</b><i>vivos · workspace</i></div>
-  <div class="kpi"><b id="k-out">0</b><i>tokens out · total</i></div>
-  <div class="kpi"><b id="k-cost">$0</b><i>costo est. · total</i></div>
-</header>
 
-<nav id="nav">
-  <button aria-selected="true" data-tab="sesiones">Sesiones<b id="n-ses"></b></button>
-  <button data-tab="trabajo">Trabajo<b id="n-tra"></b></button>
-  <button data-tab="costos">Costos</button>
-</nav>
-
-<main>
-  <div id="warnbox"></div>
-  <div id="alerts"></div>
-
-  <!-- ═══ SESIONES: la capa prestada (Claude Code) ═══ -->
-  <div class="tab on" id="t-sesiones">
-    <section>
-      <h2>Tus sesiones <span class="scope">todo el workspace</span></h2>
-      <p class="lede">Cada fila es una terminal con un agente corriendo. Haz clic para abrirla: verás cuándo corrió cada uno de sus agentes, qué dijeron y qué costó. Cada sesión lleva su propia cuenta — nunca se suman como si fueran una.</p>
-      <div class="ses" id="ses"></div>
-      <div id="detail"></div>
-    </section>
+<aside>
+  <div class="brand"><span class="logo">c</span><b>corvux</b><span class="chip">local</span></div>
+  <div class="navsec">Observar</div>
+  <button class="nav" data-v="dash"  aria-current="true">
+    <svg width="13" height="13" viewBox="0 0 14 14"><rect width="6" height="6" rx="1.5" fill="currentColor"/><rect x="8" width="6" height="6" rx="1.5" fill="currentColor" opacity=".4"/><rect y="8" width="6" height="6" rx="1.5" fill="currentColor" opacity=".4"/><rect x="8" y="8" width="6" height="6" rx="1.5" fill="currentColor"/></svg>
+    Resumen</button>
+  <button class="nav" data-v="tasks">
+    <svg width="13" height="13" viewBox="0 0 14 14"><rect y="1" width="14" height="2.2" rx="1.1" fill="currentColor"/><rect y="6" width="10" height="2.2" rx="1.1" fill="currentColor" opacity=".6"/><rect y="11" width="12" height="2.2" rx="1.1" fill="currentColor" opacity=".35"/></svg>
+    Tareas<span class="bdg" id="b-tasks"></span></button>
+  <button class="nav" data-v="sessions">
+    <svg width="13" height="13" viewBox="0 0 14 14"><circle cx="3" cy="7" r="2.4" fill="currentColor"/><circle cx="10.5" cy="3.2" r="2" fill="currentColor" opacity=".55"/><circle cx="10.5" cy="10.8" r="2" fill="currentColor" opacity=".55"/></svg>
+    Sesiones<span class="bdg" id="b-ses"></span></button>
+  <button class="nav" data-v="costs">
+    <svg width="13" height="13" viewBox="0 0 14 14"><rect y="8" width="3" height="6" rx="1" fill="currentColor" opacity=".45"/><rect x="5.5" y="4" width="3" height="10" rx="1" fill="currentColor" opacity=".7"/><rect x="11" width="3" height="14" rx="1" fill="currentColor"/></svg>
+    Gastos<span class="bdg mono" id="b-cost"></span></button>
+  <div class="sfoot">
+    <div class="conn"><span class="d" id="dot"></span><span id="conn">conectando…</span></div>
+    <p>Solo observa: no lanza, no aprueba, no edita. Crear tareas y conexiones vendrán con el daemon (revisar ADR-0009 primero).</p>
   </div>
+</aside>
 
-  <!-- ═══ TRABAJO: la capa nuestra (el bus + tasks/) ═══ -->
-  <div class="tab" id="t-trabajo">
-    <section>
-      <h2>Lo que el harness decidió — y lo que no dejó pasar <span class="scope">todo el workspace</span></h2>
-      <p class="lede">Esto no lo escribe Claude Code: lo escriben <code>ship.sh</code> y <code>/auto</code>, y funciona igual con cualquier agente. Cada gate (✅ pasó / 🔴 bloqueó), cada supuesto que se tomó por ti con su evidencia, y cada parada que te espera. Un gate que frena a su propio agente es la prueba de que el sistema es real — por eso se enseña igual de grande que un éxito.</p>
-      <div id="tasks"></div>
-    </section>
-  </div>
-
-  <!-- ═══ COSTOS: interpretación honesta ═══ -->
-  <div class="tab" id="t-costos">
-    <section>
-      <h2>En qué se va el dinero <span class="scope">todo el workspace</span></h2>
-      <p class="lede">Agrupado por sesión, ordenado por costo. Un número grande en <b>caché lee</b> es buena noticia: esos tokens costaron ~10× menos que mandarlos enteros.</p>
-      <div id="unpriced"></div>
-      <table><thead><tr>
-        <th>Quién</th><th>Modelo</th><th class="r">in</th><th class="r">out</th>
-        <th class="r">caché lee</th><th class="r">caché escribe</th><th class="r">$ est.</th><th style="width:76px"></th>
-      </tr></thead><tbody id="tok"></tbody><tfoot id="tokfoot"></tfoot></table>
-      <p class="note"><b>El costo es un estimado</b> con <code>scripts/ui/pricing.json</code> (editable; se relee sola). La báscula oficial es <code>ccusage</code>. Un modelo sin precio muestra <b>—</b>: los tokens son reales y el dinero no se inventa.</p>
-    </section>
-  </div>
-</main>
+<main id="view"></main>
 
 <script>
 const PHASES=[["intake","Intake"],["rfc","RFC"],["implement","Implement"],["review","Review"],
               ["ship","Ship"],["deploy","Deploy"],["archive","Archive"]];
-const $=id=>document.getElementById(id);
+const $=s=>document.querySelector(s);
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const nf=new Intl.NumberFormat("en",{notation:"compact",maximumFractionDigits:1});
 const n=x=>nf.format(x||0);
 const usd=x=>x==null?"—":"$"+x.toFixed(2);
 const hhmm=ts=>new Date(ts*1000).toLocaleTimeString("es",{hour12:false,hour:"2-digit",minute:"2-digit"});
-const dur=s=>s<60?Math.max(0,Math.round(s))+"s":s<3600?Math.round(s/60)+" min":(s/3600).toFixed(1)+" h";
+const dur=s=>s<60?Math.max(0,Math.round(s))+" s":s<3600?Math.round(s/60)+" min":(s/3600).toFixed(1)+" h";
 const who=a=>a.id==="main"?"orquestador":(a.desc||a.type||a.id.slice(0,10));
 
-let SEL=null, LAST=null;
-$("nav").onclick=e=>{const b=e.target.closest("button"); if(!b)return;
-  document.querySelectorAll("#nav button").forEach(x=>x.setAttribute("aria-selected",x===b));
-  document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("on",t.id==="t-"+b.dataset.tab));};
-$("ses").onclick=e=>{const b=e.target.closest("[data-ses]"); if(!b)return; SEL=b.dataset.ses; if(LAST) render(LAST);};
+let VIEW={name:"dash"}, LAST=null;
+function go(v){ VIEW=v; if(LAST) render(LAST); }
+document.querySelector("aside").addEventListener("click",e=>{
+  const b=e.target.closest("[data-v]"); if(b) go({name:b.dataset.v});
+});
 
-// ── Pendientes: el último evento registrado de cada tarea. Si es una parada o
-// un gate rojo, NADA ha pasado después en esa tarea → sigue esperándote. Es una
-// heurística, pero derivada de datos reales y explicada en pantalla.
+// ── derivaciones (reales, explicadas en pantalla) ──
 function pending(s){
   const last={};
   for(const e of s.events) if(e.task) last[e.task]=e;
-  const stops=[],blocks=[];
+  const out=[];
   for(const t in last){const e=last[t];
-    if(e.kind==="stop") stops.push(e);
-    else if(e.ok===false) blocks.push(e);}
-  return {stops,blocks};
+    if(e.kind==="stop") out.push({...e,_k:"wait"});
+    else if(e.ok===false) out.push({...e,_k:"block"});}
+  return out;
+}
+function estado(x){ return x.n_active?["●","Trabajando",true]:(x.idle<600?["◐","En pausa",false]:["○","En reposo",false]); }
+const BUSKINDS=["gate","stop","assumption","decision","phase","ship","deploy"];
+
+function beats(evs){
+  const out=[]; let run=[];
+  const flush=()=>{ if(!run.length)return;
+    out.push(run.length===1?{k:"hard",lbl:"Pasó el gate",p:run[0].summary,ts:run[0].ts}
+      :{k:"hard",lbl:`Pasaron ${run.length} gates`,p:run.map(e=>e.summary).join(" · "),ts:run[run.length-1].ts});
+    run=[];};
+  for(const e of evs){
+    if(e.kind==="gate"&&e.ok===true){run.push(e);continue;}
+    flush();
+    const M={gate:["bad","✕ Bloqueé"],stop:["bad","Te espero"],assumption:["soft","Asumí"],
+      decision:["soft","Decidí"],phase:["soft","Fase"],ship:["hard","Shippeé"],
+      deploy:e.ok===false?["bad","Deploy rojo"]:["hard","Canary verde"]};
+    const [k,lbl]=M[e.kind]||["soft",e.kind];
+    out.push({k,lbl,p:e.summary,ts:e.ts});
+  }
+  flush(); return out;
+}
+// "SUPUESTO: x · PORQUE: y · SI ES FALSO: z" → estructura legible (de la guía)
+function supuesto(a){
+  const m=a.match(/SUPUESTO:\s*(.*?)\s*·\s*PORQUE:\s*(.*?)\s*·\s*SI ES FALSO:\s*(.*)/i);
+  return m?{q:m[1],why:m[2],iff:m[3]}:{q:a,why:null,iff:null};
 }
 
+// ═══ VISTAS ═══
 function render(s){
   LAST=s;
-  $("ws").textContent=s.workspace.split("/").pop();
-  $("warnbox").innerHTML=s.warning?`<div class="warn">⚠️ ${esc(s.warning)}</div>`:"";
-  $("k-act").textContent=s.sessions.reduce((x,y)=>x+y.n_active,0);
-  $("k-out").textContent=n(s.tokens.out);
-  $("k-cost").textContent=usd(s.cost);
-  $("n-ses").textContent=s.sessions.length||"";
-  $("n-tra").textContent=s.tasks.length||"";
-
-  const {stops,blocks}=pending(s);
-  $("alerts").innerHTML=[
-    ...stops.slice(-2).map(e=>`<div class="alert wait"><span class="ic">🖐</span><div>
-      <b>Te está esperando — ${esc(e.task)}</b><p>${esc(e.summary)}</p>
-      <i>Es lo último que registró esa tarea: nada ha pasado después. El harness paró aquí porque su ley se lo exige.</i></div></div>`),
-    ...blocks.slice(-2).map(e=>`<div class="alert block"><span class="ic">⛔</span><div>
-      <b>Un gate bloqueó — ${esc(e.task)}</b><p>${esc(e.summary)}</p>
-      <i>El agente tiene 2 rondas de autofix; si esto sigue aquí, la tercera es tuya.</i></div></div>`),
-  ].join("");
-
-  renderSessions(s);
-  renderDetail(s);
-  renderTrabajo(s);
-  renderCostos(s);
+  document.querySelectorAll(".nav").forEach(b=>b.setAttribute("aria-current",
+    b.dataset.v===VIEW.name||(VIEW.name==="task"&&b.dataset.v==="tasks")||(VIEW.name==="session"&&b.dataset.v==="sessions")));
+  $("#b-tasks").textContent=s.tasks.length||"";
+  $("#b-ses").textContent=s.sessions.length||"";
+  $("#b-cost").textContent=s.cost?usd(s.cost):"";
+  const V={dash,tasks,task,sessions,session,costs}[VIEW.name]||dash;
+  $("#view").innerHTML=V(s);
 }
 
-// ═══ SESIONES ═══
-function estado(x){ return x.n_active?["on","Trabajando"]:(x.idle<600?["","En pausa"]:["","En reposo"]); }
-
-function renderSessions(s){
-  if(!SEL || !s.sessions.some(x=>x.id===SEL)) SEL=s.sessions.length?s.sessions[0].id:null;
-  $("ses").innerHTML=s.sessions.map(x=>{
-    const [on,est]=estado(x);
-    return `<button class="sesr ${on}" aria-selected="${x.id===SEL}" data-ses="${esc(x.id)}">
-      <span class="bea"></span><span class="id">${esc(x.short)}</span><span class="est">${est}</span>
-      <span class="txt">${esc((x.last_text||"").slice(0,140)||"(sin texto)")}</span>
-      <span class="num">${x.n_agents}<s>agentes · ${x.n_active} vivos</s></span>
-      <span class="num">${n(x.tokens.out)}<s>tokens out</s></span>
-      <span class="num">${usd(x.cost)}<s>est.</s></span>
-      <span class="num">${x.idle<60?"ahora":dur(x.idle)}<s>últ. actividad</s></span>
-    </button>`;}).join("")
-    ||`<div class="empty"><h4>Ninguna sesión todavía</h4><p>Abre Claude Code en este workspace y aparecerá aquí sola.</p></div>`;
+function alertCards(s,limit){
+  return pending(s).slice(-limit).map(e=>`
+    <div class="alert ${e._k==="block"?"block":""}" onclick='go({name:"task",id:${JSON.stringify(e.task)}})'>
+      <span class="glyph">${e._k==="block"?"✕":"⏸"}</span>
+      <div><b>${e._k==="block"?"Un gate bloqueó":"Te está esperando"} — ${esc(e.task)}</b>
+      <p>${esc(e.summary)}</p>
+      <i>Es lo último que registró esa tarea; nada ha pasado después. Clic para ver su historia.</i></div>
+    </div>`).join("");
 }
 
-function renderDetail(s){
-  const x=s.sessions.find(y=>y.id===SEL);
-  if(!x){ $("detail").innerHTML=""; return; }
+// ── Resumen ──
+function dash(s){
+  const acts=s.sessions.reduce((x,y)=>x+y.n_active,0);
+  const hasAny=s.sessions.length||s.tasks.length||s.events.length;
+  if(!hasAny) return `
+    <div class="vhead"><h1>Resumen</h1><span class="sub">todo el espacio de trabajo · en vivo</span></div>
+    <div class="empty"><h4>Todavía no hay nada que observar</h4>
+      <p><b>Tareas</b> — aparecen cuando llegue un ticket o cuando corras <code>/auto</code>.</p>
+      <p><b>Sesiones</b> — aparecen cuando un agente empiece a trabajar en el repositorio.</p>
+      <p><b>Alertas</b> — si algo necesita una decisión tuya, lo verás en grande.</p></div>`;
+
+  // decisiones recientes del bus (lo NUESTRO)
+  const evs=s.events.filter(e=>BUSKINDS.includes(e.kind)).slice(-8).reverse();
+  return `
+    <div class="vhead"><h1>Resumen</h1><span class="sub">todo el espacio de trabajo · en vivo</span></div>
+    ${alertCards(s,2) || `<div class="card" style="margin-bottom:14px"><b style="font-size:14px">Nada te espera ahora mismo.</b>
+      <p class="dim" style="font-size:12.5px;margin-top:2px">Si algo necesita tu decisión, aparecerá aquí en grande.</p></div>`}
+    <div class="stats">
+      <div><b>${acts}</b><i>agentes vivos</i></div>
+      <div><b>${s.sessions.length}</b><i>sesiones</i></div>
+      <div><b>${s.tasks.length}</b><i>tareas</i></div>
+      <div><b>${n(s.tokens.out)}</b><i>tokens out</i></div>
+      <div><b>${n(s.tokens.cache_read)}</b><i>leídos de caché</i></div>
+      <div><b>${usd(s.cost)}</b><i>costo est.</i></div>
+    </div>
+    <h2>Agentes trabajando a la vez <span class="sub" style="text-transform:none;letter-spacing:0">últimas 6 horas · todo el espacio</span></h2>
+    <div class="card chart">${concChart(s)}</div>
+    <h2>Últimas decisiones del harness</h2>
+    <p class="lede">Lo que el sistema decidió o no dejó pasar — el texto llega por turno. Clic en una para ver su tarea completa.</p>
+    ${evs.length?`<div class="card"><div class="story">${evs.map(e=>{const b=beats([e])[0];return `
+      <div class="beat" data-k="${b.k}" style="cursor:pointer" onclick='go({name:"task",id:${JSON.stringify(e.task||"")}})'>
+        <time>${esc((e.ts||"").slice(11,16))}</time><span class="lbl">${esc(b.lbl)}</span>
+        <span class="mono muted" style="font-size:10px"> ${esc(e.task||"")}</span>
+        <p>${esc(b.p)}</p></div>`;}).join("")}</div></div>`
+    :`<div class="empty"><p>El bus está vacío. Se llena solo cuando <code>ship.sh</code> o <code>/auto</code> trabajan en este workspace.</p></div>`}`;
+}
+
+function concChart(s){
+  const A=s.sessions.flatMap(x=>x.agents).filter(a=>a.first_ts&&a.last_ts);
+  if(!A.length) return `<p class="muted" style="font-size:12px">Sin actividad de agentes todavía.</p>`;
+  const now=s.ts, t0=now-6*3600, W=1000, H=88, PADB=18;
+  const x=t=>((t-t0)/(6*3600))*W;
+  const N=240, pts=[];
+  let peak=1;
+  for(let i=0;i<=N;i++){const t=t0+6*3600*(i/N);
+    const v=A.filter(a=>a.first_ts<=t&&a.last_ts>=t).length;
+    peak=Math.max(peak,v); pts.push([x(t),v]);}
+  const cy=v=>(H-PADB)-(v/peak)*(H-PADB-10);
+  const line=pts.map(([px,v],i)=>(i?"L":"M")+px.toFixed(1)+" "+cy(v).toFixed(1)).join(" ");
+  const area=`M0 ${H-PADB} `+pts.map(([px,v])=>`L${px.toFixed(1)} ${cy(v).toFixed(1)}`).join(" ")+` L${W} ${H-PADB} Z`;
+  const hrs=[];for(let t=Math.ceil(t0/3600)*3600;t<=now;t+=3600)hrs.push(t);
+  const cur=A.filter(a=>a.active).length;
+  return `<svg viewBox="0 0 ${W} ${H}" style="height:${H}px">
+    <path class="area" d="${area}"/><path class="aline" d="${line}"/>
+    <text class="peak" x="4" y="12">pico ${peak}</text>
+    <text class="peak" x="${W-4}" y="12" text-anchor="end">ahora ${cur}</text>
+    ${hrs.map(t=>`<line class="gl" x1="${x(t)}" y1="${H-PADB+2}" x2="${x(t)}" y2="${H-PADB+5}"/>
+      <text class="ax" x="${x(t)}" y="${H-4}" text-anchor="middle">${hhmm(t)}</text>`).join("")}
+  </svg>`;
+}
+
+// ── Tareas ──
+function taskPend(s,id){ return pending(s).find(e=>e.task===id); }
+function tasks(s){
+  const evs=s.events.filter(e=>BUSKINDS.includes(e.kind));
+  const ids=[...new Set([...s.tasks.map(t=>t.id),...evs.map(e=>e.task).filter(Boolean)])];
+  if(!ids.length) return `
+    <div class="vhead"><h1>Tareas</h1><span class="sub">todo el espacio de trabajo</span></div>
+    <div class="empty"><h4>Sin tareas todavía</h4>
+      <p>Aparecen cuando corras <code>/auto</code> con un ticket o un prompt, o cuando <code>ship.sh</code> registre trabajo. Todo con datos reales: aquí no hay ejemplos.</p></div>`;
+  return `
+    <div class="vhead"><h1>Tareas</h1><span class="sub">todo el espacio de trabajo</span></div>
+    ${alertCards(s,2)}
+    <div class="rows">${ids.map(id=>{
+      const t=s.tasks.find(x=>x.id===id)||{id,title:"",origin:"",phase:null,done:[],verdicts:{pass:0,total:0},assumptions:[]};
+      const p=taskPend(s,id);
+      const tevs=evs.filter(e=>e.task===id);
+      const lastTs=tevs.length?tevs[tevs.length-1].ts:"";
+      return `<button class="row" onclick='go({name:"task",id:${JSON.stringify(id)}})'>
+        <span class="lbl mono">${esc(id)}</span>
+        <span class="txt">${esc(t.title||"")}</span>
+        ${p?`<span class="tag hot">${p._k==="block"?"✕ bloqueada":"⏸ te espera"}</span>`:""}
+        ${t.origin?`<span class="tag">${esc(t.origin)}</span>`:""}
+        <span class="num">${t.phase?esc(t.phase):"—"}<s>fase</s></span>
+        <span class="num">${t.assumptions.length}<s>supuestos</s></span>
+        <span class="num">${lastTs?esc(lastTs.slice(11,16)):"—"}<s>últ. evento</s></span>
+      </button>`;}).join("")}</div>`;
+}
+
+// ── Tarea (detalle): "La historia, paso a paso" ──
+function task(s){
+  const id=VIEW.id;
+  const t=s.tasks.find(x=>x.id===id)||{id,title:"",origin:"",phase:null,done:[],verdicts:{pass:0,total:0},assumptions:[]};
+  const tevs=s.events.filter(e=>BUSKINDS.includes(e.kind)&&e.task===id);
+  const p=taskPend(s,id);
+  return `
+    <button class="back" onclick='go({name:"tasks"})'>← Tareas</button>
+    <div class="vhead"><h1 class="mono">${esc(id)}</h1><span class="sub">${esc(t.title||"")}</span>
+      ${t.origin?`<span class="tag">${esc(t.origin)}</span>`:""}
+      ${t.verdicts.total?`<span class="tag">veredictos ${t.verdicts.pass}/${t.verdicts.total}</span>`:""}</div>
+    ${p?`<div class="alert ${p._k==="block"?"block":""}" style="cursor:default">
+      <span class="glyph">${p._k==="block"?"✕":"⏸"}</span>
+      <div><b>${p._k==="block"?"Un gate bloqueó esta tarea":"Esta tarea te está esperando"}</b>
+      <p>${esc(p.summary)}</p></div></div>`:""}
+    ${t.phase?`<div class="card" style="margin-bottom:14px"><div class="pipe">${PHASES.map(([pid,lb])=>{
+      const d=t.done.includes(pid),now=t.phase===pid;
+      return `<div class="pstep ${d&&!now?"done":""} ${now?"now":""}"><span class="pdot"></span><b>${lb}</b></div>`;}).join("")}</div></div>`:""}
+    ${t.assumptions.length?`<h2>Supuestos que hizo el agente</h2>
+      <p class="lede">Cada uno con su evidencia y con lo que costaría deshacerlo si resultó falso.</p>
+      ${t.assumptions.map(a=>{const u=supuesto(a);return `<div class="sup"><b>${esc(u.q)}</b>
+        ${u.why?`<div class="why"><b>Por qué:</b> ${esc(u.why)}</div>`:""}
+        ${u.iff?`<div class="why"><b>Si resulta falso:</b> ${esc(u.iff)}</div>`:""}</div>`;}).join("")}`:""}
+    <h2>La historia, paso a paso</h2>
+    <p class="lede">Lo escriben <code>ship.sh</code> y <code>/auto</code> — funciona con cualquier agente. Un gate que bloquea se enseña igual de grande que un éxito: es la única línea que no se puede fingir.</p>
+    ${tevs.length?`<div class="card"><div class="story">${beats(tevs).map(b=>`
+      <div class="beat" data-k="${b.k}"><time>${esc((b.ts||"").slice(11,16))}</time>
+      <span class="lbl">${esc(b.lbl)}</span><p>${esc(b.p)}</p></div>`).join("")}</div></div>`
+    :`<div class="empty"><p>Sin eventos del bus para esta tarea todavía.</p></div>`}`;
+}
+
+// ── Sesiones ──
+function sessions(s){
+  if(!s.sessions.length) return `
+    <div class="vhead"><h1>Sesiones</h1><span class="sub">todo el espacio de trabajo</span></div>
+    <div class="empty"><h4>Ninguna sesión todavía</h4><p>Abre Claude Code en este workspace y aparecerá aquí sola.</p></div>`;
+  return `
+    <div class="vhead"><h1>Sesiones</h1><span class="sub">cada una lleva su propia cuenta — nunca se suman como si fueran una</span></div>
+    <div class="rows">${s.sessions.map(x=>{const [g,est,on]=estado(x);return `
+      <button class="row" onclick='go({name:"session",id:${JSON.stringify(x.id)}})'>
+        <span class="st ${on?"on":""}">${g}</span>
+        <span class="id">${esc(x.short)}</span>
+        <span class="lbl" style="width:96px">${est}</span>
+        <span class="txt">${esc((x.last_text||"").slice(0,140)||"(sin texto)")}</span>
+        <span class="num">${x.n_agents} · ${x.n_active}<s>agentes · vivos</s></span>
+        <span class="num">${n(x.tokens.out)}<s>tokens</s></span>
+        <span class="num">${usd(x.cost)}<s>est.</s></span>
+        <span class="num">${x.idle<60?"ahora":dur(x.idle)}<s>últ. act.</s></span>
+      </button>`;}).join("")}</div>`;
+}
+
+// ── Sesión (detalle) ──
+function session(s){
+  const x=s.sessions.find(y=>y.id===VIEW.id);
+  if(!x) return sessions(s);
   const A=x.agents.filter(a=>a.first_ts&&a.last_ts);
   const t0=A.length?Math.min(...A.map(a=>a.first_ts)):0, t1=A.length?Math.max(...A.map(a=>a.last_ts)):0;
-  const [,est]=estado(x);
-
-  $("detail").innerHTML=`<div class="detail">
-    <div class="dhead"><b>Sesión ${esc(x.short)}</b><span class="mono">${esc(x.model||"?")}</span>
-      <span class="sp"></span><span class="scope">solo esta sesión</span></div>
-    <div class="dbody">
-      <div class="strip">
-        <div><b>${est}</b><i>estado</i></div>
-        <div><b>${A.length?dur(t1-t0):"—"}</b><i>duración</i></div>
-        <div><b>${x.n_agents}</b><i>agentes</i></div>
-        <div class="hi"><b>${x.peak}</b><i>a la vez (pico)</i></div>
-        <div><b>${n(x.tokens.out)}</b><i>tokens out</i></div>
-        <div class="win"><b>${n(x.tokens.cache_read)}</b><i>leídos de caché (~10× más baratos)</i></div>
-        <div><b>${usd(x.cost)}</b><i>costo est.</i></div>
-      </div>
-      ${A.length>1?`<h3 class="sub">Cuándo corrió cada agente — las barras que se solapan corrieron a la vez</h3>
-        <div class="tl">${timeline(A,t0,t1,x.peak)}</div>`:""}
-      <h3 class="sub">Sus agentes</h3>
-      <div class="tree">${tree(x)}</div>
-      <h3 class="sub">Lo último que dijeron — llega por turno: Claude Code escribe cada mensaje al terminarlo</h3>
-      <div id="stream">${seedStream(x)}</div>
-    </div></div>`;
+  const [g,est,on]=estado(x);
+  return `
+    <button class="back" onclick='go({name:"sessions"})'>← Sesiones</button>
+    <div class="vhead"><h1>Sesión <span class="mono">${esc(x.short)}</span></h1>
+      <span class="sub mono">${esc(x.model||"?")}</span><span class="tag ${on?"hot":""}">${g} ${est}</span>
+      <span class="sp"></span><span class="tag">solo esta sesión</span></div>
+    <div class="stats">
+      <div><b>${A.length?dur(t1-t0):"—"}</b><i>duración</i></div>
+      <div><b>${x.n_agents}</b><i>agentes</i></div>
+      <div><b>${x.peak}</b><i>a la vez (pico)</i></div>
+      <div><b>${n(x.tokens.out)}</b><i>tokens out</i></div>
+      <div><b>${n(x.tokens.cache_read)}</b><i>de caché (~10× más baratos)</i></div>
+      <div><b>${usd(x.cost)}</b><i>costo est.</i></div>
+    </div>
+    ${A.length>1?`<h2>Cuándo corrió cada agente <span class="sub" style="text-transform:none;letter-spacing:0">las barras que se solapan corrieron a la vez</span></h2>
+      <div class="card tl">${gantt(A,t0,t1,x.peak)}</div>`:""}
+    <h2>Sus agentes</h2>
+    <div class="tree">${tree(x)}</div>
+    <h2>Lo último que dijeron <span class="sub" style="text-transform:none;letter-spacing:0">llega por turno — cada mensaje se escribe al terminarlo</span></h2>
+    <div id="stream">${seedStream(x)}</div>`;
 }
 
-function timeline(A,t0,t1,peak){
+function gantt(A,t0,t1,peak){
   const rows=[...A].sort((a,b)=>a.first_ts-b.first_ts);
-  const W=1000,LBL=228,RH=16,PAD=6,CH=50, span=Math.max(1,t1-t0);
+  const W=1000,LBL=228,RH=16,PAD=6,CH=48, span=Math.max(1,t1-t0);
   const H=CH+18+rows.length*RH+PAD;
   const x=t=>LBL+((t-t0)/span)*(W-LBL-8);
   const N=160,pts=[];
@@ -378,25 +478,25 @@ function timeline(A,t0,t1,peak){
   const step=span>4*3600?3600:span>3600?1800:600, hrs=[];
   for(let t=Math.ceil(t0/step)*step;t<=t1;t+=step)hrs.push(t);
   return `<svg viewBox="0 0 ${W} ${H}" style="height:${Math.min(760,H)}px">
-    <path class="conc" d="${area}"/><path class="conc-l" d="${line}"/>
+    <path class="area" d="${area}"/><path class="aline" d="${line}"/>
     <text class="peak" x="${LBL-6}" y="${cy(peak)+3}" text-anchor="end">${peak} a la vez</text>
-    ${hrs.map(t=>`<line class="grid-l" x1="${x(t)}" y1="${CH+4}" x2="${x(t)}" y2="${H-PAD}"/>
-      <text class="axis" x="${x(t)}" y="${CH+14}" text-anchor="middle">${hhmm(t)}</text>`).join("")}
+    ${hrs.map(t=>`<line class="gl" x1="${x(t)}" y1="${CH+4}" x2="${x(t)}" y2="${H-PAD}"/>
+      <text class="ax" x="${x(t)}" y="${CH+14}" text-anchor="middle">${hhmm(t)}</text>`).join("")}
     ${rows.map((a,i)=>{const y=CH+18+i*RH,w=Math.max(2.5,x(a.last_ts)-x(a.first_ts));
-      const c=a.active?"#34d399":(a.id==="main"?"#60a5fa":"#5b8def");
-      return `<text class="lbl" x="${LBL-8}" y="${y+RH-4}" text-anchor="end">${esc(who(a).slice(0,32))}</text>
-        <rect class="bar" x="${x(a.first_ts)}" y="${y+3}" width="${w}" height="${RH-6}" fill="${c}" opacity="${a.active?1:.82}">
+      return `<text class="lbl9" x="${LBL-8}" y="${y+RH-4}" text-anchor="end">${esc(who(a).slice(0,32))}</text>
+        <rect class="bar" x="${x(a.first_ts)}" y="${y+3}" width="${w}" height="${RH-6}" rx="2.5"
+          fill="${a.active?"#f5f5f6":(a.id==="main"?"#c9c9cf":"#6f6f78")}" opacity="${a.active?1:.85}">
         <title>${esc(who(a))} · ${dur(a.elapsed)} · ${n(a.usage.out)} tokens · ${usd(a.cost)}</title></rect>`;}).join("")}
   </svg>`;
 }
 
 function tree(x){
   const main=x.agents.find(a=>a.id==="main"), kids=x.agents.filter(a=>a.id!=="main");
-  const row=(a,cls)=>`<div class="kid ${cls}"><span class="st ${a.active?"on":""}"></span>
+  const row=(a,cls)=>`<div class="kid ${cls}"><span class="g ${a.active?"on":""}">${a.active?"●":"○"}</span>
     <span class="nm">${esc(who(a))}<i>${esc(a.id==="main"?(a.model||""):(a.type||""))}</i></span>
-    <span class="num" style="width:70px">${n(a.usage.out)}<s>tokens</s></span>
-    <span class="num" style="width:60px">${usd(a.cost)}<s>est.</s></span>
-    <span class="num" style="width:96px">${a.active?"● trabajando":dur(a.idle)}<s>${a.active?"":"desde hace"}</s></span></div>`;
+    <span class="num" style="width:72px">${n(a.usage.out)}<s>tokens</s></span>
+    <span class="num" style="width:58px">${usd(a.cost)}<s>est.</s></span>
+    <span class="num" style="width:98px">${a.active?"trabajando":dur(a.idle)}<s>${a.active?"ahora":"desde hace"}</s></span></div>`;
   return (main?row(main,"root"):"")+kids.map(a=>row(a,"child")).join("");
 }
 
@@ -407,99 +507,58 @@ function seedStream(x){
     <p>${esc(a.last_text)}</p></div>`).join("");
 }
 
-// ═══ TRABAJO ═══
-// Etiquetas humanas por tipo de evento. Los gates verdes consecutivos se
-// agrupan (ocho líneas de "pasó" ahogan la historia; un bloqueo jamás se
-// agrupa: es la línea más importante de la página).
-function beats(evs){
-  const out=[]; let run=[];
-  const flush=()=>{ if(!run.length)return;
-    out.push(run.length===1
-      ?{k:"green",lbl:"Pasó el gate",p:run[0].summary,ts:run[0].ts}
-      :{k:"green",lbl:`Pasaron ${run.length} gates`,p:run.map(e=>e.summary).join(" · "),ts:run[run.length-1].ts});
-    run=[];};
-  for(const e of evs){
-    if(e.kind==="gate"&&e.ok===true){run.push(e);continue;}
-    flush();
-    if(e.kind==="gate") out.push({k:"red",lbl:"Bloqueé",p:e.summary,ts:e.ts});
-    else if(e.kind==="stop") out.push({k:"purple",lbl:"Te espero",p:e.summary,ts:e.ts});
-    else if(e.kind==="assumption") out.push({k:"amber",lbl:"Asumí",p:e.summary,ts:e.ts});
-    else if(e.kind==="decision") out.push({k:"amber",lbl:"Decidí",p:e.summary,ts:e.ts});
-    else if(e.kind==="phase") out.push({k:"green",lbl:"Fase",p:e.summary,ts:e.ts});
-    else if(e.kind==="ship") out.push({k:"green",lbl:"Shippeé",p:e.summary,ts:e.ts});
-    else if(e.kind==="deploy") out.push({k:e.ok===false?"red":"green",lbl:e.ok===false?"Deploy rojo":"Canary verde",p:e.summary,ts:e.ts});
-    else out.push({k:"green",lbl:e.kind,p:e.summary,ts:e.ts});
-  }
-  flush(); return out;
+// ── Gastos ──
+function costs(s){
+  const days=(s.days||[]).slice(-7);
+  const maxD=Math.max(0.01,...days.map(d=>d.cost||0));
+  const models=s.models||[];
+  const maxM=Math.max(0.01,...models.map(m=>m.cost||0));
+  const sess=[...s.sessions].sort((a,b)=>(b.cost||0)-(a.cost||0)).slice(0,8);
+  const maxS=Math.max(0.01,...sess.map(x=>x.cost||0));
+  const prices=s.prices||{};
+  return `
+    <div class="vhead"><h1>Gastos</h1><span class="sub">todo el espacio de trabajo · el costo es un <b>estimado</b>; la báscula oficial es <code>ccusage</code></span></div>
+    ${s.unpriced&&s.unpriced.length?`<div class="warnbox">Sin precio en <code>pricing.json</code>: <b>${s.unpriced.map(esc).join(", ")}</b> — sus costos muestran «—». Los tokens son reales; el dinero no se inventa.</div>`:""}
+    <div class="stats">
+      <div><b>${usd(s.cost)}</b><i>total observado</i></div>
+      <div><b>${n(s.tokens.out)}</b><i>tokens out</i></div>
+      <div><b>${n(s.tokens.cache_read)}</b><i>leídos de caché (~10× más baratos)</i></div>
+    </div>
+    <h2>Gasto estimado por día <span class="sub" style="text-transform:none;letter-spacing:0">días con actividad observada</span></h2>
+    <div class="card">${days.length?`<div style="display:flex;gap:10px;align-items:flex-end;height:120px">
+      ${days.map(d=>`<div style="flex:1;display:flex;flex-direction:column;justify-content:flex-end;gap:6px;text-align:center">
+        <span class="mono" style="font-size:10.5px;color:var(--dim)">${usd(d.cost)}${d.unpriced?"*":""}</span>
+        <div style="height:${Math.max(3,(d.cost||0)/maxD*84)}px;background:var(--fg);opacity:.8;border-radius:4px 4px 0 0"></div>
+        <span class="ax" style="font:9.5px var(--mono);color:var(--faint)">${esc(d.day.slice(5))}</span>
+      </div>`).join("")}</div>${days.some(d=>d.unpriced)?`<p class="note">* ese día incluye modelos sin precio.</p>`:""}`
+      :`<p class="muted" style="font-size:12px">Sin días con actividad todavía.</p>`}</div>
+    <h2>Por modelo</h2>
+    <table><thead><tr><th>Modelo</th><th class="r">in</th><th class="r">out</th><th class="r">caché lee</th><th class="r">caché escribe</th><th class="r">$ est.</th><th style="width:90px"></th></tr></thead>
+    <tbody>${models.map(m=>`<tr><td class="mono" style="font-size:12px">${esc(m.model)}</td>
+      <td class="r">${n(m.in)}</td><td class="r">${n(m.out)}</td>
+      <td class="r muted">${n(m.cache_read)}</td><td class="r muted">${n(m.cache_creation)}</td>
+      <td class="r">${usd(m.cost)}</td>
+      <td><div class="hbar" style="width:${Math.max(2,(m.cost||0)/maxM*100)}%"></div></td></tr>`).join("")
+      ||`<tr><td colspan="7" class="muted">Sin datos.</td></tr>`}</tbody></table>
+    <h2>Sesiones que más han gastado <span class="sub" style="text-transform:none;letter-spacing:0">cada una por separado</span></h2>
+    <div class="rows">${sess.map(x=>`<button class="row" onclick='go({name:"session",id:${JSON.stringify(x.id)}})'>
+      <span class="id">${esc(x.short)}</span>
+      <span class="txt">${esc((x.last_text||"").slice(0,110))}</span>
+      <span class="num">${n(x.tokens.out)}<s>tokens</s></span>
+      <span class="num">${usd(x.cost)}<s>est.</s></span>
+      <span style="width:120px"><div class="hbar" style="width:${Math.max(2,(x.cost||0)/maxS*100)}%"></div></span>
+    </button>`).join("")}</div>
+    <h2>Tabla de precios <span class="sub" style="text-transform:none;letter-spacing:0">$ por millón de tokens · edítala en <code>scripts/ui/pricing.json</code> — el panel la relee sola</span></h2>
+    <table style="max-width:520px"><thead><tr><th>Modelo</th><th class="r">input</th><th class="r">output</th></tr></thead>
+    <tbody>${Object.entries(prices).map(([m,p])=>`<tr><td class="mono" style="font-size:12px">${esc(m)}</td>
+      <td class="r">$${p.input.toFixed(2)}</td><td class="r">$${p.output.toFixed(2)}</td></tr>`).join("")}</tbody></table>
+    <p class="note">Un modelo que no esté en la tabla (GLM, Kimi, el que uses) muestra «—» hasta que agregues su precio — y al agregarlo, el histórico se re-cotiza solo. Caché: lectura ~0.1×, escritura 1.25×.</p>`;
 }
 
-function renderTrabajo(s){
-  const evs=s.events.filter(e=>["gate","stop","assumption","decision","phase","ship","deploy"].includes(e.kind));
-  if(!s.tasks.length&&!evs.length){
-    $("tasks").innerHTML=`<div class="empty"><h4>Todavía no hay trabajo que contar</h4>
-      <p>Este espacio se llena solo, con datos reales, cuando el harness trabaja:</p>
-      <p>· <code>ship.sh</code> registra cada gate — los que pasan y, más importante, los que <b>bloquean</b>.</p>
-      <p>· <code>/auto</code> registra cada fase, cada supuesto que toma por ti (con su evidencia) y cada parada donde te espera.</p>
-      <p>· <code>deploy-watch.sh</code> registra el canary: verde o rollback.</p>
-      <p>Si este es el repo del instalador y no una instancia, esto está vacío <b>a propósito</b>: aquí no hay harness que observar.</p></div>`;
-    return;
-  }
-  const byTask={};
-  for(const e of evs)(byTask[e.task||"—"]=byTask[e.task||"—"]||[]).push(e);
-  const ids=[...new Set([...s.tasks.map(t=>t.id),...Object.keys(byTask).filter(k=>k!=="—")])];
-  $("tasks").innerHTML=ids.map(id=>{
-    const t=s.tasks.find(x=>x.id===id)||{id,title:"",origin:"",done:[],phase:null,verdicts:{pass:0,total:0},assumptions:[]};
-    const tevs=byTask[id]||[];
-    return `<div class="task">
-      <div class="thead"><b>${esc(t.id)}</b><span class="muted">${esc(t.title)}</span>
-        ${t.origin?`<span class="chip ${t.origin==="prompt"?"prompt":""}">${t.origin}</span>`:""}
-        <span class="sp"></span>
-        ${t.verdicts.total?`<span class="muted mono" style="font-size:11px">veredictos ${t.verdicts.pass}/${t.verdicts.total}</span>`:""}</div>
-      <div class="tbody">
-        ${t.phase?`<div class="pipe">${PHASES.map(([pid,lb])=>{
-          const d=t.done.includes(pid),now=t.phase===pid;
-          return `<div class="pstep ${d&&!now?"done":""} ${now?"now":""}"><span class="pdot"></span><b>${lb}</b></div>`;}).join("")}</div>`:""}
-        ${t.assumptions.length?`<div class="ledger"><h4>Supuestos que /auto tomó por ti — cada uno con su evidencia y lo que cuesta deshacerlo</h4>
-          ${t.assumptions.map(a=>`<li>${esc(a)}</li>`).join("")}</div>`:""}
-        ${tevs.length?`<div class="story">${beats(tevs).map(b=>`<div class="beat" data-k="${b.k}">
-            <time>${esc((b.ts||"").slice(11,16))}</time><span class="lbl">${esc(b.lbl)}</span>
-            <p>${esc(b.p)}</p></div>`).join("")}</div>`
-          :`<p class="muted" style="font-size:12px">Sin eventos del bus para esta tarea todavía.</p>`}
-      </div></div>`;}).join("");
-}
-
-// ═══ COSTOS ═══
-function renderCostos(s){
-  $("unpriced").innerHTML=s.unpriced&&s.unpriced.length
-    ?`<div class="warn">Sin precio en <code>pricing.json</code>: <b>${s.unpriced.map(esc).join(", ")}</b>. Sus filas muestran "—" — los tokens son reales, el dinero no se inventa. Agrega el precio y el histórico se re-cotiza solo.</div>`:"";
-  const rows=[];
-  const sess=[...s.sessions].sort((a,b)=>(b.cost||0)-(a.cost||0));
-  const maxC=Math.max(0.0001,...s.sessions.flatMap(x=>x.agents.map(a=>a.cost||0)));
-  for(const x of sess){
-    rows.push(`<tr class="ghead"><td colspan="2">sesión ${esc(x.short)} — ${x.n_agents} agentes</td>
-      <td class="r">${n(x.tokens.in)}</td><td class="r">${n(x.tokens.out)}</td>
-      <td class="r muted">${n(x.tokens.cache_read)}</td><td class="r muted">${n(x.tokens.cache_creation)}</td>
-      <td class="r">${usd(x.cost)}</td><td></td></tr>`);
-    for(const a of [...x.agents].sort((p,q)=>(q.cost||0)-(p.cost||0)))
-      rows.push(`<tr><td class="who indent">${esc(who(a))}</td>
-        <td class="muted mono" style="font-size:11px">${esc(a.model||"?")}</td>
-        <td class="r">${n(a.usage.in)}</td><td class="r">${n(a.usage.out)}</td>
-        <td class="r muted">${n(a.usage.cache_read)}</td><td class="r muted">${n(a.usage.cache_creation)}</td>
-        <td class="r">${usd(a.cost)}</td>
-        <td><div class="bar" style="width:${Math.max(2,(a.cost||0)/maxC*100)}%"></div></td></tr>`);
-  }
-  $("tok").innerHTML=rows.join("")||`<tr><td colspan="8" class="muted">Sin datos todavía.</td></tr>`;
-  $("tokfoot").innerHTML=s.sessions.length?`<tr style="border-top:2px solid var(--line)">
-    <td colspan="2" class="muted" style="font-size:11px">TOTAL · ${s.sessions.length} sesiones</td>
-    <td class="r">${n(s.tokens.in)}</td><td class="r">${n(s.tokens.out)}</td>
-    <td class="r muted">${n(s.tokens.cache_read)}</td><td class="r muted">${n(s.tokens.cache_creation)}</td>
-    <td class="r"><b>${usd(s.cost)}</b></td><td></td></tr>`:"";
-}
-
-// stream en vivo: solo de la sesión abierta
+// ── stream en vivo (solo la sesión abierta) ──
 function push(t){
-  if(SEL&&t.session!==SEL) return;
-  const box=$("stream"); if(!box) return;
+  if(VIEW.name!=="session"||t.session!==VIEW.id) return;
+  const box=$("#stream"); if(!box) return;
   const near=box.scrollTop+box.clientHeight>=box.scrollHeight-50;
   const d=document.createElement("div"); d.className="msg";
   d.innerHTML=`<div class="h"><b>${esc(t.who||t.agent.slice(0,12))}</b><time>${hhmm(t.ts)}</time></div><p>${esc(t.text)}</p>`;
@@ -508,12 +567,16 @@ function push(t){
   if(near) box.scrollTop=box.scrollHeight;
 }
 
+let lastData=0;
 (function connect(){
   const es=new EventSource("/api/stream");
-  es.addEventListener("snapshot",e=>{ $("dot").className="d on"; $("conn").textContent="en vivo";
+  es.addEventListener("snapshot",e=>{ lastData=Date.now();
+    $("#dot").className="d on"; $("#conn").textContent="en vivo";
     try{ render(JSON.parse(e.data)); }catch(err){ console.error(err); } });
   es.addEventListener("text",e=>push(JSON.parse(e.data)));
-  es.onerror=()=>{ $("dot").className="d"; $("conn").textContent="reconectando…"; };
+  es.onerror=()=>{ $("#dot").className="d";
+    const ago=lastData?Math.round((Date.now()-lastData)/1000):null;
+    $("#conn").textContent=ago?`reconectando… (último dato hace ${ago} s)`:"reconectando…"; };
 })();
 </script>
 </body>

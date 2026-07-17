@@ -90,12 +90,19 @@ class TestOpHTTP(unittest.TestCase):
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read() or b'{}')
 
-    def stub_lines(self):
-        time.sleep(0.4)   # Popen del server es asíncrono
-        try:
-            return open(self.stub_log).read().splitlines()
-        except OSError:
-            return []
+    def stub_lines(self, expect=1):
+        # El Popen del server es asíncrono: POLL hasta 5s en vez de dormir un
+        # tiempo fijo — con la máquina cargada, 0.4s no alcanzaban y el test
+        # era flaky (nos pasó: 3 errores en cascada por un IndexError aquí).
+        for _ in range(50):
+            try:
+                lines = open(self.stub_log).read().splitlines()
+                if len(lines) >= expect:
+                    return lines
+            except OSError:
+                pass
+            time.sleep(0.1)
+        return []
 
     def test_01_sin_token_403(self):
         code, body = self.post('/api/op/task', {'title': 'x'})
@@ -129,9 +136,10 @@ class TestOpHTTP(unittest.TestCase):
         bus = [json.loads(l) for l in
                open(os.path.join(self.ws, '.harness', 'events.jsonl'))]
         self.assertEqual(bus[-1]['task'], r['id'])
-        launched = self.stub_lines()[-1]
-        self.assertIn('/auto %s' % r['id'], launched)
-        self.assertIn('--session-id %s' % r['session'], launched)
+        lines = self.stub_lines(expect=1)
+        self.assertTrue(lines, 'el claude stub nunca corrió')
+        self.assertIn('/auto %s' % r['id'], lines[-1])
+        self.assertIn('--session-id %s' % r['session'], lines[-1])
         type(self)._sess = r['session']
 
     def test_06_responder_reanuda(self):
@@ -139,7 +147,9 @@ class TestOpHTTP(unittest.TestCase):
                             {'session': self._sess, 'text': 'sigue con Redis'},
                             token=self.token)
         self.assertEqual(code, 200)
-        self.assertIn('--resume %s' % self._sess, self.stub_lines()[-1])
+        lines = self.stub_lines(expect=2)
+        self.assertTrue(len(lines) >= 2, 'el resume nunca llegó al stub')
+        self.assertIn('--resume %s' % self._sess, lines[-1])
 
     def test_07_validacion_es_400_con_mensaje(self):
         code, body = self.post('/api/op/task', {'title': ''}, token=self.token)

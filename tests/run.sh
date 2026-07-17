@@ -33,10 +33,14 @@ if [ "${1:-}" != "fast" ]; then
 else
   echo; echo "── lock de ship.sh: saltado (modo fast)"
 fi
-echo; echo "── server.py (lógica)"; python3 test_server.py -v 2>&1 | tail -3 || failed=1
-[ "${PIPESTATUS[0]:-0}" = "0" ] || failed=1
-echo; echo "── server.py (HTTP end-to-end)"; python3 test_op_http.py -v 2>&1 | tail -3 || failed=1
-[ "${PIPESTATUS[0]:-0}" = "0" ] || failed=1
+# en verde: 3 líneas; en rojo: la salida COMPLETA (un tail que esconde el
+# traceback convierte cada falla en una sesión de adivinanza — nos pasó)
+pyrun() {
+  echo; echo "── $1"
+  out="$(python3 "$2" -v 2>&1)" && echo "$out" | tail -3 || { echo "$out"; failed=1; }
+}
+pyrun "server.py (lógica)" test_server.py
+pyrun "server.py (HTTP end-to-end)" test_op_http.py
 
 echo
 if [ "$failed" -eq 0 ]; then echo "════ SUITE COMPLETA EN VERDE ════"; else echo "════ HAY FALLAS ════"; exit 1; fi

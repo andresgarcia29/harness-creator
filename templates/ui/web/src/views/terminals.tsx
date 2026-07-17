@@ -10,11 +10,12 @@
 // terminales de la máquina, tengan harness o no.
 import { useEffect, useRef, useState } from "react"
 import { toast } from "sonner"
-import { VHead, H2, Lede, Code, Empty } from "@/components/bits"
+import { VHead, Lede, Code, Empty } from "@/components/bits"
 import { Ansi } from "@/lib/ansi"
 import { cn } from "@/lib/utils"
 import { op, type Snapshot, type HerdrState, type HerdrPane } from "@/lib/harness"
 import { FolderGit2, Radio, ChevronDown } from "lucide-react"
+import { PaneActions, WorkspaceActions } from "@/components/herdr-actions"
 
 const STATUS: Record<string, { label: string; chip: string; dot: string; pulse?: boolean }> = {
   working: { label: "trabajando", chip: "text-(--ok) border-(--ok)/40 bg-(--ok)/10", dot: "bg-(--ok)", pulse: true },
@@ -106,6 +107,7 @@ function TerminalWindow({ p, tabLabel, canOp }: { p: HerdrPane; tabLabel?: strin
         <span className={cn("flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider", s.chip)}>
           <i className={cn("size-1.5 rounded-full", s.dot, s.pulse && "animate-pulse")} />{s.label}
         </span>
+        {canOp && <span onClick={(e) => e.stopPropagation()}><PaneActions paneId={p.pane_id} label={tabLabel || p.pane_id} running={busy} /></span>}
         <ChevronDown className={cn("size-3.5 text-white/30 transition-transform duration-200", !open && "-rotate-90")} />
       </button>
       <Screen paneId={p.pane_id} open={open} />
@@ -159,11 +161,12 @@ export function Terminals({ s: snap }: { s: Snapshot }) {
       <div className="grid gap-6">
         {byWs.map(({ w, panes }) => (
           <section key={w.workspace_id}>
-            <H2 sub={`workspace de herdr · ${w.pane_count} pane${w.pane_count !== 1 ? "s" : ""} · ${w.tab_count} tab${w.tab_count !== 1 ? "s" : ""}`}>
-              <span className="flex items-center gap-2 normal-case tracking-normal">
-                <FolderGit2 className="size-3.5 text-muted-foreground/60" />{w.label}
-              </span>
-            </H2>
+            <div className="mb-1.5 mt-7 flex items-center gap-2 first:mt-0">
+              <FolderGit2 className="size-3.5 text-muted-foreground/60" />
+              <span className="font-heading text-[13px] font-semibold">{w.label}</span>
+              <span className="text-[11.5px] text-muted-foreground/60">workspace de herdr · {w.pane_count} pane{w.pane_count !== 1 ? "s" : ""} · {w.tab_count} tab{w.tab_count !== 1 ? "s" : ""}</span>
+              {canOp && <WorkspaceActions wsId={w.workspace_id} label={w.label} />}
+            </div>
             <div className="grid gap-3.5">
               {panes.length ? panes.map((p) => {
                 const tab = h.tabs.find((t) => t.tab_id === p.tab_id)

@@ -1,7 +1,7 @@
 // Acciones de ciclo de vida de herdr (interrumpir / cerrar). Son DESTRUCTIVAS,
 // así que todo pasa por un diálogo de confirmación — nada se cierra de un clic
 // accidental. El id se re-valida en el daemon contra el snapshot vivo.
-import { useState } from "react"
+import { useState, type ReactNode } from "react"
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils"
 import { op } from "@/lib/harness"
 import { toast } from "sonner"
 import { MoreHorizontal, OctagonX, SquareX, Trash2 } from "lucide-react"
+import { DropdownMenuSeparator } from "@/components/ui/dropdown-menu"
 
 type Action = { action: string; id: string; verb: string; danger?: boolean }
 
@@ -50,7 +51,7 @@ function useConfirm() {
 }
 
 // Menú de una VENTANA (pane): interrumpir o cerrar.
-export function PaneActions({ paneId, label, running }: { paneId: string; label: string; running: boolean }) {
+export function PaneActions({ paneId, label, running, extra }: { paneId: string; label: string; running: boolean; extra?: ReactNode }) {
   const { ask, dialog } = useConfirm()
   return (
     <>
@@ -76,6 +77,7 @@ export function PaneActions({ paneId, label, running }: { paneId: string; label:
             `Cierra «${label}» y mata su proceso. No se puede deshacer.`)}>
             <SquareX className="size-3.5" /> Cerrar terminal
           </DropdownMenuItem>
+          {extra && <><DropdownMenuSeparator />{extra}</>}
         </DropdownMenuContent>
       </DropdownMenu>
       {dialog}
@@ -84,7 +86,7 @@ export function PaneActions({ paneId, label, running }: { paneId: string; label:
 }
 
 // Menú de un WORKSPACE de herdr: cerrarlo entero.
-export function WorkspaceActions({ wsId, label }: { wsId: string; label: string }) {
+export function WorkspaceActions({ wsId, label, wsExtra }: { wsId: string; label: string; wsExtra?: ReactNode }) {
   const { ask, dialog } = useConfirm()
   return (
     <>
@@ -95,6 +97,8 @@ export function WorkspaceActions({ wsId, label }: { wsId: string; label: string 
           <MoreHorizontal className="size-4" />
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start">
+          {wsExtra}
+          {wsExtra && <DropdownMenuSeparator />}
           <DropdownMenuItem variant="destructive" onClick={() => ask(
             { action: "close-workspace", id: wsId, verb: "cerré el workspace", danger: true },
             "Cerrar workspace",

@@ -14,8 +14,10 @@ import { VHead, Lede, Code, Empty } from "@/components/bits"
 import { Ansi } from "@/lib/ansi"
 import { cn } from "@/lib/utils"
 import { op, type Snapshot, type HerdrState, type HerdrPane } from "@/lib/harness"
-import { FolderGit2, Radio, ChevronDown } from "lucide-react"
+import { FolderGit2, Radio, ChevronDown, Check, X } from "lucide-react"
 import { PaneActions, WorkspaceActions } from "@/components/herdr-actions"
+import { NewWorkspace, SplitItems, NewTerminalItem } from "@/components/herdr-open"
+import { parsePrompt, type Prompt } from "@/lib/prompt-parse"
 
 const STATUS: Record<string, { label: string; chip: string; dot: string; pulse?: boolean }> = {
   working: { label: "trabajando", chip: "text-(--ok) border-(--ok)/40 bg-(--ok)/10", dot: "bg-(--ok)", pulse: true },
@@ -26,14 +28,14 @@ const STATUS: Record<string, { label: string; chip: string; dot: string; pulse?:
 }
 const st = (s: string) => STATUS[s] || STATUS.unknown
 
-function Screen({ paneId, open }: { paneId: string; open: boolean }) {
+function Screen({ paneId, open, onText }: { paneId: string; open: boolean; onText?: (t: string) => void }) {
   const [text, setText] = useState<string | null>(null)
   const boxRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
     if (!open) return
     let live = true
     const load = () => fetch(`/api/herdr/pane?id=${encodeURIComponent(paneId)}&fmt=ansi`)
-      .then((r) => r.json()).then((d) => { if (live) setText(d.text ?? "") }).catch(() => {})
+      .then((r) => r.json()).then((d) => { if (live) { setText(d.text ?? ""); onText?.(d.text ?? "") } }).catch(() => {})
     load()
     const iv = setInterval(load, 1500)
     return () => { live = false; clearInterval(iv) }
@@ -53,6 +55,46 @@ function Screen({ paneId, open }: { paneId: string; open: boolean }) {
           <span className="term-cursor" />
         </pre>
       )}
+    </div>
+  )
+}
+
+async function sendKeys(paneId: string, keys: string[]) {
+  const r = await op("/api/op/herdr-key", { pane: paneId, keys })
+  if (!r.ok) toast.error(r.error || "no se pudo")
+}
+
+// Botones de respuesta cuando el agente muestra un menú o un y/n.
+function InteractiveAnswer({ paneId, prompt }: { paneId: string; prompt: Prompt }) {
+  if (!prompt) return null
+  return (
+    <div className="border-t border-(--wait)/25 bg-(--wait)/[0.06] px-3.5 py-2.5">
+      <div className="mb-1.5 flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-(--wait)">
+        te está preguntando
+      </div>
+      {prompt.question && <p className="mb-2 font-mono text-[11.5px] text-white/80">{prompt.question}</p>}
+      <div className="flex flex-wrap gap-2">
+        {prompt.kind === "yesno" ? (
+          <>
+            <button onClick={() => sendKeys(paneId, ["y", "Enter"])}
+              className="flex items-center gap-1.5 rounded-md border border-(--ok)/40 bg-(--ok)/10 px-3 py-1.5 text-[12px] font-semibold text-(--ok) transition-colors hover:bg-(--ok)/20">
+              <Check className="size-3.5" /> Sí
+            </button>
+            <button onClick={() => sendKeys(paneId, ["n", "Enter"])}
+              className="flex items-center gap-1.5 rounded-md border border-(--bad)/40 bg-(--bad)/10 px-3 py-1.5 text-[12px] font-semibold text-(--bad) transition-colors hover:bg-(--bad)/20">
+              <X className="size-3.5" /> No
+            </button>
+          </>
+        ) : (
+          prompt.options.map((o) => (
+            <button key={o.key} onClick={() => sendKeys(paneId, [o.key])}
+              className="flex items-center gap-2 rounded-md border border-white/12 bg-white/[0.04] px-3 py-1.5 text-[12px] text-white/85 transition-colors hover:border-(--brand)/50 hover:bg-(--brand)/10">
+              <span className="grid size-4 place-items-center rounded bg-white/10 font-mono text-[10px] text-(--brand)">{o.key}</span>
+              {o.label}
+            </button>
+          ))
+        )}
+      </div>
     </div>
   )
 }
@@ -85,6 +127,7 @@ function Prompt({ paneId }: { paneId: string }) {
 function TerminalWindow({ p, tabLabel, canOp }: { p: HerdrPane; tabLabel?: string; canOp: boolean }) {
   const busy = p.agent_status === "working" || p.agent_status === "blocked"
   const [open, setOpen] = useState(busy)
+  const [prompt, setPrompt] = useState<Prompt>(null)
   const s = st(p.agent_status)
   const cwd = (p.foreground_cwd || p.cwd || "").replace(/^\/Users\/[^/]+/, "~")
   return (
@@ -107,13 +150,19 @@ function TerminalWindow({ p, tabLabel, canOp }: { p: HerdrPane; tabLabel?: strin
         <span className={cn("flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider", s.chip)}>
           <i className={cn("size-1.5 rounded-full", s.dot, s.pulse && "animate-pulse")} />{s.label}
         </span>
-        {canOp && <span onClick={(e) => e.stopPropagation()}><PaneActions paneId={p.pane_id} label={tabLabel || p.pane_id} running={busy} /></span>}
+        {canOp && <span onClick={(e) => e.stopPropagation()}><PaneMenu paneId={p.pane_id} label={tabLabel || p.pane_id} running={busy} /></span>}
         <ChevronDown className={cn("size-3.5 text-white/30 transition-transform duration-200", !open && "-rotate-90")} />
       </button>
-      <Screen paneId={p.pane_id} open={open} />
+      <Screen paneId={p.pane_id} open={open} onText={(t) => setPrompt(parsePrompt(t))} />
+      {open && canOp && prompt && <InteractiveAnswer paneId={p.pane_id} prompt={prompt} />}
       {open && canOp && <Prompt paneId={p.pane_id} />}
     </div>
   )
+}
+
+// Menú de un pane: acciones (interrumpir/cerrar) + abrir (dividir).
+function PaneMenu({ paneId, label, running }: { paneId: string; label: string; running: boolean }) {
+  return <PaneActions paneId={paneId} label={label} running={running} extra={<SplitItems paneId={paneId} />} />
 }
 
 export function Terminals({ s: snap }: { s: Snapshot }) {
@@ -122,8 +171,11 @@ export function Terminals({ s: snap }: { s: Snapshot }) {
 
   const head = <VHead title="Terminales" sub="lo que corre en TU terminal, visto desde el panel"
     right={h?.available ? (
-      <span className="flex items-center gap-1.5 rounded-full border border-(--ok)/40 bg-(--ok)/8 px-2.5 py-1 text-[10px] font-semibold text-(--ok)">
-        <Radio className="size-3 animate-pulse" /> herdr {h.version} · en vivo
+      <span className="flex items-center gap-2">
+        {canOp && <NewWorkspace />}
+        <span className="flex items-center gap-1.5 rounded-full border border-(--ok)/40 bg-(--ok)/8 px-2.5 py-1 text-[10px] font-semibold text-(--ok)">
+          <Radio className="size-3 animate-pulse" /> herdr {h.version} · en vivo
+        </span>
       </span>
     ) : undefined} />
 
@@ -165,7 +217,7 @@ export function Terminals({ s: snap }: { s: Snapshot }) {
               <FolderGit2 className="size-3.5 text-muted-foreground/60" />
               <span className="font-heading text-[13px] font-semibold">{w.label}</span>
               <span className="text-[11.5px] text-muted-foreground/60">workspace de herdr · {w.pane_count} pane{w.pane_count !== 1 ? "s" : ""} · {w.tab_count} tab{w.tab_count !== 1 ? "s" : ""}</span>
-              {canOp && <WorkspaceActions wsId={w.workspace_id} label={w.label} />}
+              {canOp && <WorkspaceActions wsId={w.workspace_id} label={w.label} wsExtra={<NewTerminalItem wsId={w.workspace_id} />} />}
             </div>
             <div className="grid gap-3.5">
               {panes.length ? panes.map((p) => {

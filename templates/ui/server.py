@@ -1051,6 +1051,33 @@ class State:
         self._git_cache = cache
         return data
 
+    def task_events(self, task_id):
+        """TODOS los eventos del bus de una tarea (no solo la ventana reciente
+        del snapshot) — para que el grafo y la historia muestren el arco
+        completo: T1 → T2 → T3, con sus bloqueos y reaperturas."""
+        if any(c in task_id for c in '/\\'):
+            return []
+        out = []
+        try:
+            with open(os.path.join(self.ws, '.harness', 'events.jsonl'), errors='replace') as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        e = json.loads(line)
+                    except ValueError:
+                        continue
+                    if e.get('task') != task_id:
+                        continue
+                    e['summary'] = redact(e.get('summary', ''))[:400]
+                    if e.get('ok') in ('true', 'false'):
+                        e['ok'] = e['ok'] == 'true'
+                    out.append(e)
+        except OSError:
+            pass
+        return out[-500:]
+
     def tick(self):
         with self.lock:
             self.scan_events()
@@ -1112,6 +1139,11 @@ class Handler(BaseHTTPRequestHandler):
             from urllib.parse import parse_qs, urlparse
             tid = (parse_qs(urlparse(self.path).query).get('task') or [''])[0]
             body = json.dumps(self.state.task_git(tid)).encode()
+            return self._send(200, 'application/json', body)
+        if path == '/api/task-events':
+            from urllib.parse import parse_qs, urlparse
+            tid = (parse_qs(urlparse(self.path).query).get('task') or [''])[0]
+            body = json.dumps(self.state.task_events(tid)).encode()
             return self._send(200, 'application/json', body)
         if path == '/':
             return self._serve_dist('index.html')

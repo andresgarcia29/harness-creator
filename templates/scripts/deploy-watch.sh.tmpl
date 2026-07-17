@@ -38,7 +38,7 @@ say() { echo "$1" | tee -a "$LOG"; }
 #     git↔cluster y exige desactivar auto-sync. Nunca automático.
 red() { # red <motivo>
   say "🔴 $1"
-  emit deploy "$REPO 🔴 — $1" false
+  emit deploy "$REPO — $1" false
   emit stop "deploy rojo de $REPO: rollback primero; diagnóstico en tasks/$TASK/deploy-$REPO.log"
   if command -v kubectl >/dev/null && kubectl argo rollouts get rollout "$APP" >/dev/null 2>&1; then
     say "⏪ workload con Argo Rollouts: verifica el abort-to-stable automático:"

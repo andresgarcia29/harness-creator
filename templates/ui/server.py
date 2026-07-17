@@ -364,6 +364,8 @@ class State:
             return                       # records sintéticos: no son facturables
         cur = a['seen'].get(mid)
         new = {
+            'ts': ts or a['last_ts'] or 0,
+            'model': msg.get('model') or a['model'],
             'in': u.get('input_tokens', 0) or 0,
             'out': u.get('output_tokens', 0) or 0,
             'cache_read': u.get('cache_read_input_tokens', 0) or 0,
@@ -500,8 +502,37 @@ class State:
             })
         sessions.sort(key=lambda x: (not x['active'], -x['last_ts']))
 
+        # Cubos por día y por modelo, desde el ts REAL de cada mensaje.
+        KEYS = ('in', 'out', 'cache_read', 'cache_creation')
+        daybuck, modbuck = {}, {}
+        for a in self.agents.values():
+            for u in a['seen'].values():
+                m = u.get('model') or a['model'] or '?'
+                day = time.strftime('%Y-%m-%d', time.localtime(u.get('ts') or a['last_ts']))
+                for buck, key in ((daybuck, (day, m)), (modbuck, m)):
+                    e = buck.setdefault(key, {k: 0 for k in KEYS})
+                    for k in KEYS:
+                        e[k] += u[k]
+        days = {}
+        for (day, m), u in daybuck.items():
+            c = self.cost(m, u)
+            d = days.setdefault(day, {'day': day, 'cost': 0.0, 'out': 0, 'unpriced': False})
+            d['out'] += u['out']
+            if c is None:
+                d['unpriced'] = True
+            else:
+                d['cost'] += c
+        models = []
+        for m, u in modbuck.items():
+            c = self.cost(m, u)
+            models.append(dict(u, model=m, cost=(round(c, 4) if c is not None else None)))
+        models.sort(key=lambda x: -(x['cost'] or 0))
+
         return {
             'ts': now, 'workspace': self.ws, 'warning': self.warning,
+            'days': sorted(days.values(), key=lambda d: d['day']),
+            'models': models,
+            'prices': self.pricing.get('models', {}),
             'transcripts': bool(self.project_dir),
             'sessions': sessions,
             'tasks': self.tasks, 'events': self.events[-120:],

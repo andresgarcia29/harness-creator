@@ -53,7 +53,11 @@ export function AppSidebar({ view, go, snap, live }: {
         </div>
       </SidebarHeader>
       <SidebarContent>
-        {[["Observar", OBSERVE] as const, ["Operar", OPERATE] as const, ["Guía", GUIDE] as const].map(([label, items]) => (
+        {/* Operar se esconde cuando el backend es solo-lectura (op:false) —
+            p.ej. servido por el daemon, que aún no ejecuta (ADR-0010). */}
+        {([["Observar", OBSERVE] as const,
+           ...(snap?.op === false ? [] : [["Operar", OPERATE] as const]),
+           ["Guía", GUIDE] as const]).map(([label, items]) => (
           <SidebarGroup key={label}>
             <SidebarGroupLabel className="text-[10px] font-bold uppercase tracking-[0.16em] text-muted-foreground/60">{label}</SidebarGroupLabel>
             <SidebarGroupContent>

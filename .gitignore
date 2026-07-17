@@ -5,3 +5,4 @@ tasks/
 worktrees/
 inventory.json
 __pycache__/
+templates/ui/web/node_modules/

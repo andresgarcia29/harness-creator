@@ -1,6 +1,6 @@
 import { VHead, Empty, NumCell } from "@/components/bits"
 import { cn } from "@/lib/utils"
-import { estado, n, usd, dur, type Snapshot } from "@/lib/harness"
+import { estado, n, usd, fecha, type Snapshot } from "@/lib/harness"
 import type { Go } from "@/App"
 
 export function Sessions({ s, go }: { s: Snapshot; go: Go }) {
@@ -29,7 +29,7 @@ export function Sessions({ s, go }: { s: Snapshot; go: Go }) {
               <NumCell v={`${x.n_agents} · ${x.n_active}`} l="agentes · vivos" className="hidden md:block" />
               <NumCell v={n(x.tokens.out)} l="tokens" className="hidden sm:block" />
               <NumCell v={usd(x.cost)} l="est." />
-              <NumCell v={x.idle < 60 ? "ahora" : dur(x.idle)} l="últ. act." className="hidden md:block" />
+              <NumCell v={x.idle < 60 ? "ahora" : fecha(s.ts - x.idle)} l="últ. act." className="hidden md:block" />
             </button>
           )
         })}

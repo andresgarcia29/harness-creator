@@ -16,6 +16,45 @@ export const hhmm = (ts: number) =>
 export const dur = (s: number) =>
   s < 60 ? Math.max(0, Math.round(s)) + " s" : s < 3600 ? Math.round(s / 60) + " min" : (s / 3600).toFixed(1) + " h"
 
+// Toda hora del panel acepta epoch (sesiones/agentes) o ISO (bus) → epoch seg.
+export const toEpoch = (ts: number | string): number => {
+  if (typeof ts === "number") return ts
+  const t = Date.parse(ts)
+  return isNaN(t) ? 0 : t / 1000
+}
+const MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
+const dayKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
+// Fecha absoluta corta y humana: "hoy 14:02", "ayer 19:30", "17 jul 14:02".
+export function fecha(ts: number | string): string {
+  const e = toEpoch(ts); if (!e) return "—"
+  const d = new Date(e * 1000), now = new Date()
+  const hm = hhmm(e)
+  const yst = new Date(now); yst.setDate(now.getDate() - 1)
+  if (dayKey(d) === dayKey(now)) return `hoy ${hm}`
+  if (dayKey(d) === dayKey(yst)) return `ayer ${hm}`
+  const y = d.getFullYear() === now.getFullYear() ? "" : ` ${d.getFullYear()}`
+  return `${d.getDate()} ${MESES[d.getMonth()]}${y} ${hm}`
+}
+// Tiempo relativo: "ahora", "hace 20 min", "hace 3 h", "hace 2 días".
+export function rel(ts: number | string): string {
+  const e = toEpoch(ts); if (!e) return ""
+  const s = Date.now() / 1000 - e
+  if (s < 60) return "ahora"
+  if (s < 3600) return `hace ${Math.round(s / 60)} min`
+  if (s < 86400) return `hace ${Math.round(s / 3600)} h`
+  return `hace ${Math.round(s / 86400)} días`
+}
+// Etiqueta de día para agrupar la historia: "Hoy", "Ayer", "mié 17 jul".
+export function diaLabel(ts: number | string): string {
+  const e = toEpoch(ts); if (!e) return ""
+  const d = new Date(e * 1000), now = new Date()
+  const yst = new Date(now); yst.setDate(now.getDate() - 1)
+  if (dayKey(d) === dayKey(now)) return "Hoy"
+  if (dayKey(d) === dayKey(yst)) return "Ayer"
+  const dow = ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"][d.getDay()]
+  return `${dow} ${d.getDate()} ${MESES[d.getMonth()]}`
+}
+
 export type Agent = {
   id: string; type?: string; desc?: string; model?: string; active: boolean
   first_ts: number; last_ts: number; idle: number; elapsed: number
@@ -56,6 +95,22 @@ export type McpServer = {
   name: string; command: string; args: string[]; wrapped: boolean
   bin_ok: boolean; secrets_ok: boolean | null; env: string[]; probe?: McpProbe | null
 }
+// drill-down de razonamiento (on-demand, /api/session)
+export type ThreadItem = { k: "text" | "think" | "tool"; ts: number; t: string; inp?: string }
+export type AgentDetail = {
+  id: string; who: string; type: string; model: string; active: boolean; depth: number
+  first_ts: number; last_ts: number; elapsed: number
+  usage: { in: number; out: number; cache_read: number; cache_creation: number }
+  cost: number | null; thread: ThreadItem[]
+}
+export type SessionDetail = { id: string; short: string; agents: AgentDetail[] }
+// metadata de git por tarea (/api/task-git)
+export type RepoGit = {
+  repo: string; branch: string; ahead: number; dirty: boolean
+  last_subject: string; last_ts: number
+  pr: { number: number; state: string; url: string } | null; pushed_direct: boolean
+}
+export type TaskGit = { repos: RepoGit[]; read: string[] }
 
 export const who = (a: Agent) => (a.id === "main" ? "orquestador" : a.desc || a.type || a.id.slice(0, 10))
 
@@ -106,6 +161,49 @@ export function beats(evs: BusEvent[]): Beat[] {
   }
   flush()
   return out
+}
+
+// Estado de UNA tarea, derivado de sus eventos: dónde va, qué la detiene, qué
+// decidió por última vez. Es el corazón del mission-control del Resumen.
+export type TaskStatus = "wait" | "block" | "ship" | "work"
+export type TaskRollup = {
+  id: string; title: string; phase: string; status: TaskStatus
+  statusLabel: string; waitingOn: string; lastDecision: string
+  lastTs: string; nEvents: number
+}
+const PHASE_KEYS = PHASES.map(([k]) => k)
+export function taskRollup(s: Snapshot): TaskRollup[] {
+  const byTask: Record<string, BusEvent[]> = {}
+  for (const e of s.events) if (e.task && BUSKINDS.includes(e.kind)) (byTask[e.task] ||= []).push(e)
+  for (const t of s.tasks) byTask[t.id] ||= []
+  const out: TaskRollup[] = []
+  for (const id in byTask) {
+    const evs = byTask[id]
+    const last = evs[evs.length - 1]
+    const meta = s.tasks.find((t) => t.id === id)
+    let phase = meta?.phase || ""
+    for (let i = evs.length - 1; i >= 0; i--) {
+      if (evs[i].kind === "phase") {
+        const m = evs[i].summary.toLowerCase().match(new RegExp(`\\b(${PHASE_KEYS.join("|")})\\b`))
+        if (m) { phase = m[1]; break }
+      }
+    }
+    let status: TaskStatus = "work", label = "trabajando"
+    if (last) {
+      if (last.kind === "stop") { status = "wait"; label = "te espera" }
+      else if (last.ok === false) { status = "block"; label = "bloqueada" }
+      else if (last.kind === "ship" || (last.kind === "deploy" && last.ok)) { status = "ship"; label = "en main / deploy" }
+    }
+    // archive es el cierre del ciclo SDD: si llegó ahí y nada la frena, está lista
+    if (phase === "archive" && (status === "work" || status === "ship")) { status = "ship"; label = "listo" }
+    const dec = [...evs].reverse().find((e) => e.kind === "decision")
+    out.push({
+      id, title: meta?.title || "", phase, status, statusLabel: label,
+      waitingOn: last?.summary || "", lastDecision: dec?.summary || "",
+      lastTs: last?.ts || "", nEvents: evs.length,
+    })
+  }
+  return out.sort((a, b) => toEpoch(b.lastTs) - toEpoch(a.lastTs))
 }
 
 // "SUPUESTO: x · PORQUE: y · SI ES FALSO: z" → estructura legible

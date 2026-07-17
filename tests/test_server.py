@@ -303,5 +303,45 @@ print(json.dumps({"jsonrpc":"2.0","id":req["id"],"result":{
         self.assertTrue(r['auth_hint'])         # el error de auth SE DICE
 
 
+class TestPhase0(Base):
+    def test_tool_hint(self):
+        self.assertEqual(panel._tool_hint({'file_path': 'a/b.ts'}), 'a/b.ts')
+        self.assertEqual(panel._tool_hint({'command': 'ls -la'}), 'ls -la')
+        self.assertEqual(panel._tool_hint('no dict'), '')
+
+    def test_session_detail_incluye_hilo(self):
+        a = self.state._agent('sess-x', 'main')
+        a['model'] = 'claude-sonnet-5'
+        a['first_ts'] = 100; a['last_ts'] = 220
+        a['thread'] = [{'k': 'think', 'ts': 100, 't': 'pensando'},
+                       {'k': 'tool', 'ts': 110, 't': 'Read', 'inp': 'x.ts'},
+                       {'k': 'text', 'ts': 220, 't': 'listo'}]
+        d = self.state.session_detail('sess-x')
+        self.assertEqual(d['short'], 'sess-x'[:8])
+        ag = d['agents'][0]
+        self.assertEqual(ag['elapsed'], 120)
+        self.assertEqual(len(ag['thread']), 3)
+        self.assertEqual(ag['who'], 'orquestador')
+
+    def test_task_git_read_ignora_comandos(self):
+        # el evidence.log guarda el COMANDO entero en las filas 'ran' — mirarlo
+        # como ruta ensuciaba la lista. Solo read/scan/ran-file son rutas.
+        d = os.path.join(self.ws, 'tasks', 'COR-1')
+        os.makedirs(d)
+        with open(os.path.join(d, 'evidence.log'), 'w') as fh:
+            fh.write('2026-07-17\ts\tread\tworktrees/COR-1/atlas/auth.go\n')
+            fh.write('2026-07-17\ts\tscan\tworktrees/COR-1/hermes/pay.go\n')
+            fh.write('2026-07-17\ts\tran\tcd worktrees/COR-1/atlas && go test ./...\n')
+        g = self.state.task_git('COR-1')
+        # atlas y hermes son leídos (no hay worktrees reales → no 'touched')
+        self.assertEqual(g['read'], ['atlas', 'hermes'])
+        # el comando 'ran' no metió basura de shell
+        self.assertNotIn('cd ', g['read'])
+
+    def test_task_git_id_malicioso(self):
+        g = self.state.task_git('../../etc')
+        self.assertEqual(g, {'repos': [], 'read': []})
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=0)

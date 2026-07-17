@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { VHead, H2, Lede, Code, PendAlert, Story, Sup, Empty } from "@/components/bits"
 import { RespondBox } from "@/components/respond-box"
+import { TaskGitPanel } from "@/components/task-git"
 import { cn } from "@/lib/utils"
 import { BUSKINDS, PHASES, pending, type Snapshot, type Task } from "@/lib/harness"
 import { ArrowLeft } from "lucide-react"
@@ -61,10 +62,11 @@ export function TaskDetail({ s, id, go }: { s: Snapshot; id: string; go: Go }) {
           {t.assumptions.map((a, i) => <Sup key={i} text={a} />)}
         </>
       )}
+      <TaskGitPanel id={id} />
       <H2>La historia, paso a paso</H2>
       <Lede>Lo escriben <Code>ship.sh</Code> y <Code>/auto</Code> — funciona con cualquier agente. Un gate que bloquea se enseña igual de grande que un éxito: es la única línea que no se puede fingir.</Lede>
       {tevs.length ? (
-        <Card className="py-0"><CardContent className="p-5"><Story evs={tevs} /></CardContent></Card>
+        <Card className="py-0"><CardContent className="p-5"><Story evs={tevs} dated /></CardContent></Card>
       ) : (
         <Empty><p>Sin eventos del bus para esta tarea todavía.</p></Empty>
       )}

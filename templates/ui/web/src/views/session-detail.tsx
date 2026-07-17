@@ -5,6 +5,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { VHead, H2, Stats, NumCell, StatusBadge } from "@/components/bits"
 import { Gantt } from "@/components/charts"
 import { RespondBox } from "@/components/respond-box"
+import { AgentThreads } from "@/components/agent-thread"
 import type { StreamText } from "@/hooks/use-snapshot"
 import { cn } from "@/lib/utils"
 import { estado, hhmm, n, usd, dur, who, type Snapshot } from "@/lib/harness"
@@ -104,6 +105,7 @@ export function SessionDetail({ s, id, go, texts }: { s: Snapshot; id: string; g
           </>
         )}
       </ScrollArea>
+      <AgentThreads sessionId={x.id} />
       <div className="mt-6">
         <RespondBox session={x.id} label="Pasar contexto al agente" placeholder="Contexto nuevo, una corrección, una decisión…" />
       </div>

@@ -35,7 +35,7 @@ export type Task = {
 export type Snapshot = {
   ts: number; sessions: Session[]; events: BusEvent[]; tasks: Task[]
   tokens: { out: number; cache_read: number }; cost: number | null
-  days?: { day: string; cost: number | null; unpriced?: boolean }[]
+  days?: { day: string; cost: number | null; unpriced?: boolean; by_model?: Record<string, number> }[]
   models?: { model: string; in: number; out: number; cache_read: number; cache_creation: number; cost: number | null }[]
   prices?: Record<string, { input: number; output: number }>
   unpriced?: string[]; warning?: string | null

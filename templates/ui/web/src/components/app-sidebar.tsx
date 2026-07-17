@@ -6,7 +6,8 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 import { usd, type Snapshot } from "@/lib/harness"
-import { LayoutDashboard, ListTodo, Radio, ChartNoAxesColumn, Plus, Cable } from "lucide-react"
+import { LayoutDashboard, ListTodo, Radio, ChartNoAxesColumn, Plus, Cable, Sun, Moon, Monitor } from "lucide-react"
+import { useTheme, type Theme } from "@/hooks/use-theme"
 import type { View } from "@/App"
 
 const OBSERVE = [
@@ -24,6 +25,9 @@ export function AppSidebar({ view, go, snap, live }: {
   view: View; go: (v: View) => void; snap: Snapshot | null; live: boolean
 }) {
   const { isMobile, setOpenMobile } = useSidebar()
+  const { theme, setTheme } = useTheme()
+  const nextTheme: Record<Theme, Theme> = { dark: "light", light: "system", system: "dark" }
+  const ThemeIcon = theme === "dark" ? Moon : theme === "light" ? Sun : Monitor
   const nav = (v: View) => { go(v); if (isMobile) setOpenMobile(false) }
   const active = (v: string) =>
     view.name === v || (view.name === "task" && v === "tasks") || (view.name === "session" && v === "sessions")
@@ -73,6 +77,13 @@ export function AppSidebar({ view, go, snap, live }: {
           <span className={cn("size-[7px] shrink-0 rounded-full",
             live ? "bg-(--ok) shadow-[0_0_8px_rgba(16,185,129,.6)] animate-pulse" : "bg-muted-foreground/40")} />
           {live ? "en vivo" : "reconectando…"}
+          <button
+            onClick={() => setTheme(nextTheme[theme])}
+            title={`tema: ${theme} — clic para cambiar`}
+            className="ml-auto grid size-6 place-items-center rounded-md text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <ThemeIcon className="size-3.5" />
+          </button>
         </div>
         <p className="text-[10px] leading-relaxed text-muted-foreground/50">
           Operar crea trabajo, jamás merges: todo lo que lances desde aquí pasa por

@@ -533,12 +533,16 @@ class State:
         days = {}
         for (day, m), u in daybuck.items():
             c = self.cost(m, u)
-            d = days.setdefault(day, {'day': day, 'cost': 0.0, 'out': 0, 'unpriced': False})
+            d = days.setdefault(day, {'day': day, 'cost': 0.0, 'out': 0,
+                                      'unpriced': False, 'by_model': {}})
             d['out'] += u['out']
             if c is None:
                 d['unpriced'] = True
             else:
                 d['cost'] += c
+                # desglose por modelo del día: la gráfica apila BARRAS REALES,
+                # no proporciones inventadas
+                d['by_model'][m] = round(d['by_model'].get(m, 0.0) + c, 4)
         models = []
         for m, u in modbuck.items():
             c = self.cost(m, u)

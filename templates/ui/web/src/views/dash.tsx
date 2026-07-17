@@ -1,6 +1,6 @@
 import { Card, CardContent } from "@/components/ui/card"
 import { VHead, H2, Lede, Code, Stats, PendAlert, Story, Empty } from "@/components/bits"
-import { ConcChart } from "@/components/charts"
+import { ConcChart } from "@/components/charts-recharts"
 import { BUSKINDS, n, usd, pending, type Snapshot } from "@/lib/harness"
 import type { Go } from "@/App"
 

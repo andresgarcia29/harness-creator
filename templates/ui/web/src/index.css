@@ -131,6 +131,43 @@
     @apply font-sans;
     }
 }
+/* ═══ Corvux Agora — Light "Enterprise Clean" (style.md §2.2) ═══ */
+:root {
+  --background: oklch(0.984 0.003 247.86);       /* #f8fafc blue-gray suave */
+  --foreground: oklch(0.208 0.042 265.75);       /* #0f172a slate profundo */
+  --card: oklch(1 0 0);                          /* cards blanco puro */
+  --card-foreground: oklch(0.208 0.042 265.75);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.208 0.042 265.75);
+  --primary: oklch(0.585 0.233 277.12);          /* indigo #6366f1 constante */
+  --primary-foreground: oklch(0.984 0.003 247.86);
+  --secondary: oklch(0.929 0.013 255.51);        /* #e2e8f0 */
+  --secondary-foreground: oklch(0.208 0.042 265.75);
+  --muted: oklch(0.968 0.007 247.9);             /* #f1f5f9 */
+  --muted-foreground: oklch(0.554 0.046 257.42); /* #64748b */
+  --accent: oklch(0.968 0.007 247.9);
+  --accent-foreground: oklch(0.208 0.042 265.75);
+  --destructive: oklch(0.586 0.222 17.58);       /* rose #e11d48 */
+  --border: oklch(0.929 0.013 255.51);           /* #e2e8f0 bordes limpios */
+  --input: oklch(0.929 0.013 255.51);
+  --ring: oklch(0.585 0.233 277.12);
+  --chart-1: oklch(0.585 0.233 277.12);
+  --chart-2: oklch(0.609 0.126 221.72);
+  --chart-3: oklch(0.596 0.145 163.22);
+  --chart-4: oklch(0.666 0.157 58.32);
+  --chart-5: oklch(0.586 0.222 17.58);
+  --sidebar: oklch(0.984 0.003 247.86);
+  --sidebar-foreground: oklch(0.208 0.042 265.75);
+  --sidebar-primary: oklch(0.585 0.233 277.12);
+  --sidebar-primary-foreground: oklch(0.984 0.003 247.86);
+  --sidebar-accent: oklch(0.929 0.013 255.51);
+  --sidebar-accent-foreground: oklch(0.208 0.042 265.75);
+  --sidebar-border: oklch(0.929 0.013 255.51);
+  --sidebar-ring: oklch(0.585 0.233 277.12);
+  /* semánticos con contraste sobre blanco */
+  --ok: #059669; --wait: #d97706; --bad: #e11d48; --brand: #4f46e5;
+}
+
 /* ═══ Corvux Agora — dark True Black OLED + indigo #6366f1 (style.md) ═══
    Se anexa después del preset para ganar en la cascada sin editarlo. */
 .dark {
@@ -170,3 +207,4 @@
 .dark {
   --ok: #34d399; --wait: #fbbf24; --bad: #fb7185; --brand: #818cf8;
 }
+

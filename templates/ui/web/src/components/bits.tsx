@@ -59,8 +59,8 @@ export function PendAlert({ kind, title, summary, hint, onClick }: {
         "mb-3.5 border py-0 transition-all",
         onClick && "cursor-pointer hover:-translate-y-px",
         block
-          ? "border-(--bad)/40 bg-gradient-to-br from-rose-950/40 to-rose-950/10 hover:shadow-[0_4px_20px_rgba(225,29,72,.15)]"
-          : "border-(--wait)/40 bg-gradient-to-br from-amber-950/40 to-amber-950/10 hover:shadow-[0_4px_20px_rgba(245,158,11,.12)]",
+          ? "border-(--bad)/40 bg-gradient-to-br from-(--bad)/15 to-(--bad)/4 hover:shadow-[0_4px_20px_rgba(225,29,72,.15)]"
+          : "border-(--wait)/40 bg-gradient-to-br from-(--wait)/15 to-(--wait)/4 hover:shadow-[0_4px_20px_rgba(245,158,11,.12)]",
       )}
     >
       <CardContent className="flex items-start gap-4 p-4 sm:p-5">
@@ -152,7 +152,7 @@ export function StatusBadge({ on, children }: { on?: boolean; children: ReactNod
     <Badge
       variant="outline"
       className={cn("rounded-full text-[9px] font-semibold uppercase tracking-wider",
-        on && "border-(--ok)/40 bg-emerald-950/40 text-(--ok)")}
+        on && "border-(--ok)/40 bg-(--ok)/12 text-(--ok)")}
     >
       {children}
     </Badge>

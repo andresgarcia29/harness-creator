@@ -42,21 +42,40 @@ on_exit() {
 trap on_exit EXIT
 
 # ── Lock por repo: merge queue de pobre, portable (sin flock) ─────────
+# Dos ventanas de muerte que hay que cerrar (las dos costaron un lock inmortal):
+#   1. mkdir OK → SIGKILL → pid nunca escrito. El reclamo de huérfanos exigía
+#      [ -f pid ], así que un lock sin pid no era reclamable por NADIE: todo
+#      ship futuro de ese repo esperaba 10 min y moría, para siempre, hasta que
+#      un humano hiciera rm -rf. Reproducido antes de arreglarlo.
+#   2. mkdir OK → fallo → el trap corría con LOCK_HELD vacío y no limpiaba.
+#      LOCK_HELD se marca AHORA justo después del mkdir, no después del pid.
 acquire_lock() {
-  local waited=0
+  local waited=0 nopid=0
   until mkdir "$LOCKDIR" 2>/dev/null; do
-    # lock huérfano: el proceso dueño ya no existe
-    if [ -f "$LOCKDIR/pid" ] && ! kill -0 "$(cat "$LOCKDIR/pid" 2>/dev/null)" 2>/dev/null; then
-      echo "⚠️  lock huérfano de pid $(cat "$LOCKDIR/pid" 2>/dev/null); lo reclamo"
-      rm -rf "$LOCKDIR"
-      continue
+    if [ -f "$LOCKDIR/pid" ]; then
+      # lock huérfano: el proceso dueño ya no existe
+      if ! kill -0 "$(cat "$LOCKDIR/pid" 2>/dev/null)" 2>/dev/null; then
+        echo "⚠️  lock huérfano de pid $(cat "$LOCKDIR/pid" 2>/dev/null); lo reclamo"
+        rm -rf "$LOCKDIR"; nopid=0; continue
+      fi
+      nopid=0
+    else
+      # Sin pid: o el dueño está EN la ventana de adquisición (microsegundos),
+      # o murió dentro de ella y el lock quedó inmortal. Damos gracia; si a los
+      # 15s sigue sin pid, no hay dueño vivo que lo vaya a escribir.
+      nopid=$((nopid+1))
+      if [ "$nopid" -ge 15 ]; then
+        echo "⚠️  lock sin pid tras 15s — huérfano de una muerte en la ventana de adquisición; lo reclamo"
+        rm -rf "$LOCKDIR"; nopid=0; continue
+      fi
+      sleep 1; continue
     fi
     waited=$((waited+3))
     [ "$waited" -ge 600 ] && { echo "❌ lock de $REPO ocupado >10min ($LOCKDIR) — otro ship en curso"; exit 6; }
     sleep 3
   done
+  LOCK_HELD=1                 # ANTES del pid: si morimos ahora, el trap limpia
   echo $$ > "$LOCKDIR/pid"
-  LOCK_HELD=1   # el trap on_exit lo libera
 }
 
 # ── Gates ─────────────────────────────────────────────────────────────
@@ -128,6 +147,12 @@ run_security_gates() {
 # en SWE-bench+, el 31% de los parches "exitosos" pasaban por tests débiles, y
 # los harnesses que solo piden "no borres tests" en prosa lo piden porque no
 # tienen gate. Aquí los tests son el CONTRATO: cambiar uno exige delta-spec.
+#
+# La cuarentena de flake-warden NO es una puerta trasera de este gate: los
+# cronjobs jamás llaman a ship.sh — abren un PR que un humano revisa. Esa es la
+# excepción privilegiada, y es explícita. Si algún día alguien enruta un cronjob
+# por aquí, este gate lo bloqueará, y hará bien: un skip que nadie miró es
+# exactamente lo que este gate existe para impedir.
 gate_tests_untouched() {
   gate "tests no debilitados"
   local pat="${TEST_PATH_PATTERN:-(test|spec|Test|_test\.|\.test\.|\.spec\.|/tests?/|/spec/)}"

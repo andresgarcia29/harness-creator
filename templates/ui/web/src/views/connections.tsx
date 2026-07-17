@@ -1,10 +1,50 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { toast } from "sonner"
-import { VHead, H2, Code, StatusBadge } from "@/components/bits"
-import { op, type Snapshot } from "@/lib/harness"
+import { VHead, H2, Lede, Code, StatusBadge } from "@/components/bits"
+import { n as nfmt, op, type Snapshot } from "@/lib/harness"
+import { Database } from "lucide-react"
+
+// El almacén REAL del daemon (SQLite): motor, ruta, tamaño, filas. Nada de
+// botones muertos: Postgres llega con el modo nube y se dice tal cual.
+function DbCard() {
+  const [db, setDb] = useState<{ engine: string; path: string; size_bytes?: number; machines?: number; calls?: number; events?: number } | null>(null)
+  useEffect(() => {
+    fetch("/api/db").then((r) => r.json()).then(setDb).catch(() => {})
+  }, [])
+  if (!db) return null
+  const mb = db.size_bytes ? (db.size_bytes / 1024 / 1024).toFixed(1) + " MB" : "—"
+  return (
+    <>
+      <H2>Almacén — dónde viven los datos</H2>
+      <Lede>El histórico (llamadas, eventos, hilos, precios) persiste aquí y sobrevive reinicios. Cada máquina lleva su almacén y sincroniza precios desde OpenRouter por su cuenta — mismos precios en todas.</Lede>
+      <Card className="mb-3 py-0"><CardContent className="p-4 sm:p-5">
+        <h3 className="flex items-center gap-2.5 font-heading text-[14.5px] font-bold">
+          <Database className="size-4 text-(--brand)" /> SQLite <StatusBadge on>activo</StatusBadge>
+        </h3>
+        <div className="mt-2 grid gap-x-6 gap-y-1 text-[12px] text-muted-foreground sm:grid-cols-2">
+          <span className="truncate font-mono text-[11px]" title={db.path}>{db.path}</span>
+          <span>{mb} · {nfmt(db.calls)} llamadas · {nfmt(db.events)} eventos · {db.machines} máquina{(db.machines || 0) !== 1 ? "s" : ""}</span>
+        </div>
+        <p className="mt-2 text-[11.5px] text-muted-foreground/70">
+          WAL, migraciones forward-only con respaldo automático antes de cada una. Para compartir entre
+          máquinas hoy: cada daemon colecta lo suyo; la centralización llega con el modo nube.
+        </p>
+      </CardContent></Card>
+      <Card className="mb-3 border-dashed py-0"><CardContent className="p-4 sm:p-5">
+        <h3 className="flex items-center gap-2.5 font-heading text-[14.5px] font-bold">
+          <Database className="size-4 text-muted-foreground/50" /> Postgres <StatusBadge>con el modo nube</StatusBadge>
+        </h3>
+        <p className="mt-1 text-xs text-muted-foreground/80">
+          Cuando el daemon corra en modo <Code>serve</Code> (un deployment por cliente), el almacén central
+          será conectable aquí. Sin botón hasta que exista de verdad — este panel no muestra acciones muertas.
+        </p>
+      </CardContent></Card>
+    </>
+  )
+}
 
 function ProviderCard({ id, name, desc, ok, extra }: {
   id: string; name: string; desc: React.ReactNode; ok?: boolean; extra?: React.ReactNode
@@ -73,6 +113,7 @@ export function Connections({ s }: { s: Snapshot }) {
             {syncing ? "…" : "Sincronizar precios de modelos sin precio"}
           </Button>
         } />
+      <DbCard />
       <H2>Modo — desde dónde se sirve el panel</H2>
       <ModeCard name="Local" tag="activo" on>Tu máquina, 127.0.0.1. Un solo usuario, cero red. Es el modo de hoy.</ModeCard>
       <ModeCard name="VPS" tag="con el daemon">

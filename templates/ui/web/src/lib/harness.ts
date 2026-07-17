@@ -80,7 +80,7 @@ export type Snapshot = {
   unpriced?: string[]; warning?: string | null
   connections?: Record<string, boolean>; runs?: { task: string; session: string; kind: string }[]
   mode?: string; op?: boolean
-  toolbox?: Toolbox; mcp?: McpServer[]
+  toolbox?: Toolbox; mcp?: McpServer[]; herdr?: HerdrState | null
 }
 export type Toolbox = {
   version: string

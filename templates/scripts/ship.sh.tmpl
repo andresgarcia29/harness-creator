@@ -270,6 +270,10 @@ while [ "$attempt" -lt "$MAX_RETRY" ]; do
   if git push origin HEAD:main; then
     sha="$(git rev-parse --short HEAD)"
     echo "{\"repo\":\"$REPO\",\"sha\":\"$sha\",\"shipped_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" >> "$WS/tasks/$TASK/ship.log"
+    # Cierra el último gate ANTES de anunciar el ship: si lo dejara al trap,
+    # el "veredicto ✅" saldría en el bus DESPUÉS del "shippeé" y la historia
+    # tendría el penúltimo paso después del último.
+    [ -n "${CURRENT_GATE:-}" ] && emit gate "$CURRENT_GATE" true && CURRENT_GATE=""
     emit ship "$REPO @ $sha — pasó los gates y está en main" true
     echo "✅ shipped $REPO @ $sha"
     echo "→ siguiente: scripts/deploy-watch.sh $TASK $REPO (o /ship se encarga)"

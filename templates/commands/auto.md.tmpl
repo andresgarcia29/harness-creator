@@ -167,11 +167,14 @@ no emitas al bus, para él NO PASÓ. Emite con `scripts/emit.sh <kind> "<texto>"
 — es fail-open y cuesta milisegundos:
 
 ```bash
-scripts/emit.sh phase "implement — 3 tareas del DAG en paralelo"
-scripts/emit.sh assumption "límite 100 req/min · porque la spec GW-4 lo fija · si es falso: una constante"
-scripts/emit.sh decision "svc-atlas objetó; ganó la evidencia de architecture/map.md"
-scripts/emit.sh stop "abogado svc-hermes en DRAFT — necesito que lo ratifiques"
+scripts/emit.sh phase "implement — 3 tareas del DAG en paralelo" "" COR-42
+scripts/emit.sh assumption "límite 100 req/min · porque la spec GW-4 lo fija · si es falso: una constante" "" COR-42
+scripts/emit.sh decision "svc-atlas objetó; ganó la evidencia de architecture/map.md" "" COR-42
+scripts/emit.sh stop "abogado svc-hermes en DRAFT — necesito que lo ratifiques" "" COR-42
 ```
+
+(El 4º argumento es la tarea — sin él, el evento no aparece en la tarjeta de
+su tarea en el panel. El 3º es ok/true/false y casi siempre va vacío.)
 
 Reglas:
 - **Una línea por HECHO, no por paso.** No narres ("ahora voy a leer X"): cuenta

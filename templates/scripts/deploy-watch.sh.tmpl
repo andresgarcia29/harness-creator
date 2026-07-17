@@ -10,12 +10,16 @@
 # Córrelo autenticado: scripts/with-secrets.sh scripts/deploy-watch.sh ...
 set -uo pipefail
 
-# El bus: el humano mira el panel, no esta consola. Fail-open.
-# shellcheck source=/dev/null
-[ -f "$WS/scripts/emit.sh" ] && . "$WS/scripts/emit.sh" || emit() { :; }
 TASK="${1:?uso: deploy-watch.sh <task-id> <repo>}"
 REPO="${2:?uso: deploy-watch.sh <task-id> <repo>}"
 WS="$(cd "$(dirname "$0")/.." && pwd)"
+
+# El bus: el humano mira el panel, no esta consola. Fail-open.
+# (Va DESPUÉS de definir WS: con set -u, referenciar $WS antes de asignarlo
+# mata el script — y un bus que tumba el deploy-watch es lo contrario de
+# lo que promete. Nos pasó: la primera versión de esta línea iba arriba.)
+# shellcheck source=/dev/null
+[ -f "$WS/scripts/emit.sh" ] && . "$WS/scripts/emit.sh" || emit() { :; }
 LOG="$WS/tasks/$TASK/deploy-$REPO.log"; mkdir -p "$WS/tasks/$TASK"
 ORG="{{GITHUB_ORG}}"
 APP="{{ARGO_APP_PREFIX}}$REPO"
@@ -34,6 +38,8 @@ say() { echo "$1" | tee -a "$LOG"; }
 #     git↔cluster y exige desactivar auto-sync. Nunca automático.
 red() { # red <motivo>
   say "🔴 $1"
+  emit deploy "$REPO 🔴 — $1" false
+  emit stop "deploy rojo de $REPO: rollback primero; diagnóstico en tasks/$TASK/deploy-$REPO.log"
   if command -v kubectl >/dev/null && kubectl argo rollouts get rollout "$APP" >/dev/null 2>&1; then
     say "⏪ workload con Argo Rollouts: verifica el abort-to-stable automático:"
     say "   kubectl argo rollouts status $APP"
@@ -95,4 +101,5 @@ else
   say "⚠️ sin smoke para $REPO (scripts/smoke/$REPO.sh) — agrégalo; el canary es la última defensa"
 fi
 
+emit deploy "$REPO verificado: actions + argocd + smoke en verde" true
 say "🟢 deploy de $REPO verificado — siguiente tarea del DAG"

@@ -71,9 +71,14 @@ case "$tool" in
     cmd="$(printf '%s' "$payload" | jq -r '.tool_input.command // ""' 2>/dev/null)"
     [ -n "$cmd" ] || exit 0
     cwd="$(printf '%s' "$payload" | jq -r '.cwd // ""' 2>/dev/null)"
+    # El cwd del hook es el de la SESIÓN (la raíz del workspace), no el del
+    # comando: un "cd worktrees/COR-42/atlas && go test" corre en el worktree
+    # pero el cwd reportado es la raíz. La tarea viene del TEXTO del comando.
+    hint="$cwd"
+    case "$cmd" in *worktrees/*) hint="worktrees/${cmd#*worktrees/}" ;; esac
     case "$cmd" in
       *test*|*spec*|*pytest*|*jest*|*vitest*|*rspec*|*"go test"*|*gradle*|*mvn*|*cargo*)
-        emit ran "$(printf '%s' "$cmd" | cut -c1-160)" "$cwd"
+        emit ran "$(printf '%s' "$cmd" | cut -c1-160)" "$hint"
         for tok in $cmd; do
           case "$tok" in
             -*|*=*) continue ;;

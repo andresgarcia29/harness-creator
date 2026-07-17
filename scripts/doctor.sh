@@ -151,6 +151,36 @@ done
 [ -f "$WS/.claude/commands/auto.md" ] && ok "comando /auto presente (pipeline autónomo: ticket o prompt → prod)" \
   || warn "comando /auto faltante — sin él no hay pipeline sin intervención; corre /harness-init . (modo update)"
 
+# 8b · Presupuesto de contexto SIEMPRE inyectado.
+# CLAUDE.md + constitution.md entran en CADA agente, en CADA turno, para siempre.
+# Nadie los borra y cada versión les suma una lección. El límite no es el tamaño
+# de la ventana: es el "context rot" — la atención se degrada mucho antes de
+# llenarla, y un mapa de 3k líneas se ignora entero. Un techo medido es la
+# diferencia entre una ley que se lee y una que se saltan.
+ctx_words=0
+for f in "$WS/CLAUDE.md" "$WS/docs/constitution.md"; do
+  [ -f "$f" ] && ctx_words=$((ctx_words + $(wc -w < "$f" | tr -d ' ')))
+done
+# ~1.3 tokens por palabra (aprox. honesta; la cuenta exacta la da count_tokens)
+ctx_tokens=$((ctx_words * 13 / 10))
+if [ "$ctx_tokens" -gt 3000 ]; then
+  fail "contexto siempre-inyectado ≈ ${ctx_tokens} tokens (CLAUDE.md + constitution.md)" \
+       "PASA de 3000. Es un MAPA, no un manual: mueve el detalle a docs/ o a una skill y deja punteros. Un CLAUDE.md inflado hace que los agentes ignoren las instrucciones que sí importan."
+elif [ "$ctx_tokens" -gt 1500 ]; then
+  warn "contexto siempre-inyectado ≈ ${ctx_tokens} tokens — vigila el techo (falla a 3000). Prueba: ¿quitar esta línea haría que un agente se equivoque? Si no, fuera."
+else
+  ok "contexto siempre-inyectado ≈ ${ctx_tokens} tokens (bajo el techo de 1500)"
+fi
+
+# 8c · La UI (solo lectura, solo local)
+if [ -f "$WS/scripts/ui/server.py" ]; then
+  ok "panel local presente (make ui)"
+  grep -q "ui-emit.sh" "$WS/.claude/settings.json" 2>/dev/null \
+    || warn "ui-emit.sh no está registrado en .claude/settings.json — el panel vivirá de tasks/ y transcripts, sin el bus de eventos del harness"
+  grep -q "track-read.sh" "$WS/.claude/settings.json" 2>/dev/null \
+    || warn "track-read.sh no está registrado — sin él, ship.sh no puede verificar la evidencia de la compliance matrix (gate_evidence queda ciego)"
+fi
+
 # 9 · Constituciones DRAFT pendientes de ratificar
 drafts=$(grep -l "status: DRAFT" "$WS"/.claude/agents/*.md "$WS"/docs/constitution.md "$WS"/specs/*/spec.md 2>/dev/null | wc -l | tr -d ' ')
 [ "$drafts" -gt 0 ] && warn "$drafts documentos en DRAFT (constituciones/constitution/specs) — ratificar antes del primer RFC"

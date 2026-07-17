@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="es" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>corvux · panel</title>
+    <!-- server.py reemplaza __OP_TOKEN__ al servir: token anti-CSRF por
+         arranque (ADR-0010). Un build estático jamás trae el token real. -->
+    <script>window.__OP="__OP_TOKEN__";</script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

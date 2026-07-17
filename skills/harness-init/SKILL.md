@@ -175,7 +175,7 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `.claude/settings.json` | settings.json.tmpl | siempre (hooks + denials read-only) |
 | `.claude/hooks/{block-direct-push,guard-canonical}.sh` | hooks/ | siempre (fail-CLOSED: bloquean) |
 | `.claude/hooks/{track-read,ui-emit}.sh` | hooks/ | siempre (fail-OPEN: observan, `async: true`). track-read alimenta `gate_evidence` de ship.sh; ui-emit alimenta `make ui` |
-| `scripts/ui/{server.py,app.html,pricing.json}` | ui/ | siempre — panel local de solo lectura (`make ui`). Stdlib de Python 3, cero deps |
+| `scripts/ui/{server.py,pricing.json,dist/}` | ui/ | siempre — el panel (`make ui`): frontend React + shadcn/ui ya COMPILADO en dist/ (la fuente vive en el plugin, `templates/ui/web/`); el runtime sigue siendo stdlib de Python sirviendo estáticos — el usuario jamás necesita Node |
 | `.claude/agents/{architect,implementer,reviewer}.md` | agents/*.tmpl | siempre |
 | `.claude/agents/qa.md` | agents/qa.md.tmpl | si hay frontend/mobile o canary |
 | `.claude/agents/<abogado>.md` | agents/svc-agent.md.tmpl | UNO por cluster; `status: DRAFT` |

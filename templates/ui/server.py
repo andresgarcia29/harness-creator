@@ -768,20 +768,40 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # El frontend es React + shadcn/ui COMPILADO y vendoreado en dist/ (fuente
+    # en web/; `npm run build` solo al desarrollar el plugin). El runtime sigue
+    # siendo stdlib sirviendo estáticos: el usuario final jamás necesita Node.
+    MIME = {'.html': 'text/html; charset=utf-8', '.js': 'text/javascript',
+            '.css': 'text/css', '.svg': 'image/svg+xml', '.woff2': 'font/woff2',
+            '.png': 'image/png', '.ico': 'image/x-icon', '.map': 'application/json'}
+
+    def _serve_dist(self, rel):
+        base = os.path.realpath(os.path.join(HERE, 'dist'))
+        full = os.path.realpath(os.path.join(base, rel.lstrip('/')))
+        if not full.startswith(base + os.sep) and full != base:
+            return self._send(404, 'text/plain', b'not found')   # fuera de dist: jamás
+        try:
+            with open(full, 'rb') as fh:
+                body = fh.read()
+        except OSError:
+            return self._send(404, 'text/plain', b'not found')
+        ext = os.path.splitext(full)[1]
+        if ext == '.html':
+            # el token anti-CSRF del arranque viaja SOLO al servir (ADR-0010)
+            body = body.replace(b'__OP_TOKEN__', OP_TOKEN.encode())
+        return self._send(200, self.MIME.get(ext, 'application/octet-stream'), body)
+
     def do_GET(self):
         path = self.path.split('?')[0]
-        if path == '/':
-            try:
-                with open(os.path.join(HERE, 'app.html'), 'rb') as fh:
-                    html = fh.read().replace(b'__OP_TOKEN__', OP_TOKEN.encode())
-                    return self._send(200, 'text/html; charset=utf-8', html)
-            except OSError:
-                return self._send(500, 'text/plain', b'falta scripts/ui/app.html')
         if path == '/api/state':
             body = json.dumps(self.state.snapshot()).encode()
             return self._send(200, 'application/json', body)
         if path == '/api/stream':
             return self._stream()
+        if path == '/':
+            return self._serve_dist('index.html')
+        if path.startswith('/assets/') or path in ('/favicon.svg', '/favicon.ico'):
+            return self._serve_dist(path)
         self._send(404, 'text/plain', b'not found')
 
     def do_POST(self):

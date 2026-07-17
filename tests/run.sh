@@ -11,18 +11,16 @@ cd "$(dirname "$0")"
 command -v jq >/dev/null || { echo "falta jq (los hooks y el bus lo usan)"; exit 1; }
 command -v python3 >/dev/null || { echo "falta python3 (el panel lo usa)"; exit 1; }
 
-# el frontend al menos tiene que PARSEAR (los typos de CSS no los ve nadie más)
-if command -v node >/dev/null; then
-  node -e "
-    const s=require('fs').readFileSync('../templates/ui/app.html','utf8');
-    const m=s.match(/<script>\s*\n?const PHASES[\s\S]*<\/script>/);
-    new Function(m[0].replace(/<\/?script>/g,'').replace('const PHASES','var PHASES'));
-    for (const v of ['dash','tasks','task','sessions','session','costs','nuevaTarea','connections'])
-      if (!s.includes('function '+v+'(')) throw new Error('vista perdida: '+v);
-  " && echo "── app.html: parsea y las 8 vistas existen ✓" || exit 1
-else
-  echo "── app.html: sin node, no verificado (instálalo para cubrir el frontend)"
-fi
+# el frontend: la fuente React (web/src) tiene las 8 vistas y el build
+# vendoreado (dist/) existe y trae el placeholder del token — sin dist, el
+# panel instalado sirve 404 y nadie compila Node en la máquina del usuario
+for v in dash tasks task-detail sessions session-detail costs new-task connections; do
+  [ -f "../templates/ui/web/src/views/$v.tsx" ] || { echo "vista perdida: $v"; exit 1; }
+done
+[ -f ../templates/ui/dist/index.html ] || { echo "falta dist/ (corre npm run build en templates/ui/web)"; exit 1; }
+grep -q "__OP_TOKEN__" ../templates/ui/dist/index.html || { echo "dist/index.html sin el placeholder del token anti-CSRF"; exit 1; }
+/bin/ls ../templates/ui/dist/assets/*.js >/dev/null 2>&1 || { echo "dist sin assets"; exit 1; }
+echo "── frontend: 8 vistas en web/src + dist vendoreado con token ✓"
 
 failed=0
 for t in test_emit.sh test_track_read.sh; do

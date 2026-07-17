@@ -37,6 +37,7 @@ POLL_SECONDS = 0.7
 ACTIVE_WINDOW = 90        # sin records nuevos en 90s → ya no está "activo"
 MAX_EVENTS = 300
 MAX_TEXT = 1200
+MAX_SESSIONS = 12       # sesiones que el panel sigue a la vez
 
 # ── Redacción (defensa en profundidad: el hook ya redacta; aquí otra vez) ──
 _SECRET_PATTERNS = [
@@ -185,6 +186,7 @@ class State:
         self.ws = os.path.abspath(workspace)
         self.lock = threading.Lock()
         self.agents = {}
+        self.sessions = {}
         self.events = []
         self.tasks = []
         self.subs = []
@@ -283,28 +285,48 @@ class State:
         self.tasks = out[:20]
 
     # ── fuente 3: transcripts de Claude Code (PRESTADO, best-effort) ──
-    def _agent(self, aid):
-        if aid not in self.agents:
-            self.agents[aid] = {
-                'id': aid, 'type': 'main' if aid == 'main' else '?', 'desc': '',
+    def _session(self, sid):
+        if sid not in self.sessions:
+            self.sessions[sid] = {'id': sid, 'first_ts': 0, 'last_ts': 0, 'path': ''}
+        return self.sessions[sid]
+
+    def _agent(self, sid, aid):
+        key = (sid, aid)
+        if key not in self.agents:
+            self.agents[key] = {
+                'id': aid, 'session': sid,
+                'type': 'main' if aid == 'main' else '?', 'desc': '',
                 'model': '', 'depth': 0, 'parent': None if aid == 'main' else 'main',
                 'usage': {'in': 0, 'out': 0, 'cache_read': 0, 'cache_creation': 0},
                 'seen': {},   # message.id → usage final (dedupe, ver _ingest)
                 'msgs': 0, 'tools': [], 'last_text': '', 'first_ts': 0,
                 'last_ts': 0,
             }
-        return self.agents[aid]
+        return self.agents[key]
 
-    def _ingest(self, rec, aid, texts):
-        a = self._agent(aid)
-        # El reloj es el del RECORD, no el nuestro. Al arrancar releemos todo el
-        # historial de golpe: si estampáramos time.time(), cada agente muerto hace
-        # horas se vería "activo". Un panel que miente sobre quién está vivo es
-        # peor que no tener panel.
-        ts = parse_ts(rec.get('timestamp')) or a['last_ts'] or time.time()
-        a['last_ts'] = max(a['last_ts'], ts)
-        if not a['first_ts'] or ts < a['first_ts']:
-            a['first_ts'] = ts
+    def _ingest(self, rec, sid, aid, texts):
+        a = self._agent(sid, aid)
+        # El reloj es SIEMPRE el del record, JAMÁS el nuestro.
+        #
+        # Van tres veces que este mismo error se cuela por una puerta distinta.
+        # La versión anterior caía a `or time.time()` cuando un record no traía
+        # timestamp: el pasado se estampaba con la hora actual y una sesión de
+        # hace tres días aparecía "ACTIVA hace 5s". Un panel que miente sobre
+        # quién está vivo es peor que no tener panel.
+        #
+        # Regla: si no hay timestamp en el dato, NO INVENTAMOS UNO. El record se
+        # ingiere (tokens, texto) pero no toca los relojes. Un agente que nunca
+        # trae timestamps cae al mtime de su archivo, que sigue siendo un hecho
+        # medido y no una suposición.
+        ts = parse_ts(rec.get('timestamp'))
+        if ts:
+            a['last_ts'] = max(a['last_ts'], ts)
+            if not a['first_ts'] or ts < a['first_ts']:
+                a['first_ts'] = ts
+            se = self._session(sid)
+            se['last_ts'] = max(se['last_ts'], ts)
+            if not se['first_ts'] or ts < se['first_ts']:
+                se['first_ts'] = ts
         if rec.get('type') != 'assistant':
             return
         msg = rec.get('message') or {}
@@ -352,7 +374,7 @@ class State:
                 a['last_text'] = t
                 # 'who' = la descripción, no el id: "a754eafffe4b9f08" no le
                 # dice nada a nadie; "Research agent harnesses" sí.
-                texts.append({'agent': aid, 'text': t, 'ts': time.time(),
+                texts.append({'agent': aid, 'session': sid, 'text': t, 'ts': time.time(),
                               'who': ('orquestador' if aid == 'main'
                                       else (a['desc'] or a['type'] or aid[:10]))})
             elif block.get('type') == 'tool_use':
@@ -370,19 +392,22 @@ class State:
                                 'aquí? ¿CLAUDE_CONFIG_DIR apunta a otro sitio?')
                 return texts
         try:
-            # SOLO la sesión más reciente. Con 3, el panel sumaba tokens de
-            # sesiones de ayer y los presentaba como "ahora": un costo inflado
-            # que parece real. Mejor un número chico y cierto.
+            # TODAS las sesiones. Antes leíamos solo la última porque sumarlas
+            # inflaba el costo y lo presentaba como "ahora" — pero la respuesta
+            # no era esconderlas: es que cada sesión es una entidad con su
+            # propio estado, sus agentes y su cuenta. Tú tienes cinco abiertas y
+            # quieres ver las cinco.
             sessions = sorted(glob.glob(os.path.join(self.project_dir, '*.jsonl')),
-                              key=os.path.getmtime, reverse=True)[:1]
+                              key=os.path.getmtime, reverse=True)[:MAX_SESSIONS]
             for s in sessions:
-                for rec in self.tailer.read_new(s):
-                    self._ingest(rec, 'main', texts)
                 sid = os.path.basename(s)[:-6]
+                self._session(sid)['path'] = s
+                for rec in self.tailer.read_new(s):
+                    self._ingest(rec, sid, 'main', texts)
                 subs = os.path.join(self.project_dir, sid, 'subagents')
                 for f in glob.glob(os.path.join(subs, 'agent-*.jsonl')):
                     aid = os.path.basename(f)[len('agent-'):-len('.jsonl')]
-                    a = self._agent(aid)
+                    a = self._agent(sid, aid)
                     if a['type'] == '?':
                         try:
                             with open(f[:-6] + '.meta.json') as fh:
@@ -393,7 +418,12 @@ class State:
                         except Exception:
                             pass
                     for rec in self.tailer.read_new(f):
-                        self._ingest(rec, aid, texts)
+                        self._ingest(rec, sid, aid, texts)
+                    if a['msgs'] and not a['last_ts']:
+                        try:
+                            a['last_ts'] = a['first_ts'] = os.path.getmtime(f)
+                        except OSError:
+                            pass
             self.warning = None
         except Exception as e:
             self.warning = ('No pude leer los transcripts (%s). El formato es interno de '
@@ -403,9 +433,10 @@ class State:
 
     def snapshot(self):
         now = time.time()
-        agents, tot = [], {'in': 0, 'out': 0, 'cache_read': 0, 'cache_creation': 0}
+        tot = {'in': 0, 'out': 0, 'cache_read': 0, 'cache_creation': 0}
         cost = 0.0
-        for a in self.agents.values():
+        by_sess = {}
+        for (sid, aid), a in self.agents.items():
             if not a['msgs']:
                 continue
             for k in tot:
@@ -413,15 +444,50 @@ class State:
             c = self.cost(a['model'], a['usage'])
             cost += c
             idle = now - a['last_ts']
-            pub = {k: v for k, v in a.items() if k != 'seen'}  # 'seen' es interno
-            agents.append(dict(pub, cost=round(c, 4), idle=round(idle),
-                               active=idle < ACTIVE_WINDOW,
-                               elapsed=round(a['last_ts'] - a['first_ts'])))
-        agents.sort(key=lambda x: (not x['active'], x['id']))
+            pub = {k: v for k, v in a.items() if k != 'seen'}
+            by_sess.setdefault(sid, []).append(
+                dict(pub, cost=round(c, 4), idle=round(idle),
+                     active=idle < ACTIVE_WINDOW,
+                     elapsed=round(a['last_ts'] - a['first_ts'])))
+
+        # Una sesión = una terminal tuya. Es la unidad: tiene su propio estado,
+        # sus agentes, su cuenta. Sumarlas todas y llamarlo "ahora" fue el bug
+        # que escondí limitando el panel a una sola; la respuesta correcta es
+        # separarlas, no ocultarlas.
+        sessions = []
+        for sid, agents in by_sess.items():
+            agents.sort(key=lambda x: (not x['active'], x.get('first_ts') or 0))
+            se = self.sessions.get(sid, {})
+            act = [a for a in agents if a['active']]
+            ts = [(a['first_ts'], a['last_ts']) for a in agents if a.get('first_ts')]
+            peak = 0
+            if ts:
+                ev = sorted([(f, 1) for f, _ in ts] + [(l, -1) for _, l in ts])
+                cur = 0
+                for _, d in ev:
+                    cur += d
+                    peak = max(peak, cur)
+            last = max((a['last_ts'] for a in agents), default=0)
+            main = next((a for a in agents if a['id'] == 'main'), None)
+            sessions.append({
+                'id': sid, 'short': sid[:8],
+                'first_ts': min((a['first_ts'] for a in agents if a['first_ts']), default=0),
+                'last_ts': last, 'idle': round(now - last) if last else 0,
+                'active': bool(act), 'agents': agents,
+                'n_agents': len(agents), 'n_active': len(act), 'peak': peak,
+                'model': main['model'] if main else '',
+                'last_text': main['last_text'] if main else '',
+                'tokens': {k: sum(a['usage'][k] for a in agents) for k in tot},
+                'cost': round(sum(a['cost'] for a in agents), 4),
+                'msgs': sum(a['msgs'] for a in agents),
+            })
+        sessions.sort(key=lambda x: (not x['active'], -x['last_ts']))
+
         return {
             'ts': now, 'workspace': self.ws, 'warning': self.warning,
             'transcripts': bool(self.project_dir),
-            'agents': agents, 'tasks': self.tasks, 'events': self.events[-120:],
+            'sessions': sessions,
+            'tasks': self.tasks, 'events': self.events[-120:],
             'tokens': tot, 'cost': round(cost, 4),
             'uptime': round(now - self.started),
         }

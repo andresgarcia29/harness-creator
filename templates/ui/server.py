@@ -201,11 +201,20 @@ class State:
             with open(os.path.join(HERE, 'pricing.json')) as fh:
                 return json.load(fh)
         except Exception:
-            return {'models': {}, '_default': {'input': 5.0, 'output': 25.0},
+            return {'models': {},
                     '_cache_read_multiplier': 0.1, '_cache_write_multiplier': 1.25}
 
     def cost(self, model, u):
-        p = self.pricing.get('models', {}).get(model) or self.pricing.get('_default')
+        """USD estimado, o None si el modelo no tiene precio conocido.
+
+        ADR-0004 del daemon, que este panel violaba: un modelo sin precio
+        cuesta DESCONOCIDO, no "lo que Opus". Corriendo GLM, la versión
+        anterior te cobraba tarifa de Opus y lo enseñaba con dos decimales —
+        un número inventado con aspecto de dato es peor que un hueco honesto.
+        """
+        p = self.pricing.get('models', {}).get(model)
+        if not p:
+            return None
         cr = self.pricing.get('_cache_read_multiplier', 0.1)
         cw = self.pricing.get('_cache_write_multiplier', 1.25)
         return (u['in'] * p['input'] + u['cache_creation'] * p['input'] * cw
@@ -216,6 +225,11 @@ class State:
         path = os.path.join(self.ws, '.harness', 'events.jsonl')
         for rec in self.tailer.read_new(path):
             rec['summary'] = redact(rec.get('summary', ''))[:200]
+            # Un solo tipo para 'ok': los hooks lo escriben como string y el
+            # bus como booleano. Normalizar aquí evita que cada consumidor
+            # tenga que recordar la diferencia (ya se nos olvidó una vez).
+            if rec.get('ok') in ('true', 'false'):
+                rec['ok'] = rec['ok'] == 'true'
             self.events.append(rec)
         if len(self.events) > MAX_EVENTS:
             self.events = self.events[-MAX_EVENTS:]
@@ -442,11 +456,13 @@ class State:
             for k in tot:
                 tot[k] += a['usage'][k]
             c = self.cost(a['model'], a['usage'])
-            cost += c
+            if c is not None:
+                cost += c
             idle = now - a['last_ts']
             pub = {k: v for k, v in a.items() if k != 'seen'}
             by_sess.setdefault(sid, []).append(
-                dict(pub, cost=round(c, 4), idle=round(idle),
+                dict(pub, cost=(round(c, 4) if c is not None else None),
+                     priced=c is not None, idle=round(idle),
                      active=idle < ACTIVE_WINDOW,
                      elapsed=round(a['last_ts'] - a['first_ts'])))
 
@@ -478,7 +494,8 @@ class State:
                 'model': main['model'] if main else '',
                 'last_text': main['last_text'] if main else '',
                 'tokens': {k: sum(a['usage'][k] for a in agents) for k in tot},
-                'cost': round(sum(a['cost'] for a in agents), 4),
+                'cost': round(sum(a['cost'] or 0 for a in agents), 4),
+                'unpriced': sorted({a['model'] for a in agents if not a['priced'] and a['model']}),
                 'msgs': sum(a['msgs'] for a in agents),
             })
         sessions.sort(key=lambda x: (not x['active'], -x['last_ts']))
@@ -489,6 +506,8 @@ class State:
             'sessions': sessions,
             'tasks': self.tasks, 'events': self.events[-120:],
             'tokens': tot, 'cost': round(cost, 4),
+            'unpriced': sorted({a['model'] for aa in by_sess.values() for a in aa
+                                if not a['priced'] and a['model']}),
             'uptime': round(now - self.started),
         }
 

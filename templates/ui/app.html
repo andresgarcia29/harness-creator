@@ -42,7 +42,7 @@
   nav button[aria-selected=true]{color:var(--fg);border-bottom-color:var(--agent)}
   nav button b{font:10px var(--mono);color:var(--faint);margin-left:6px}
 
-  main{padding:24px 22px 60px;max-width:1180px;margin:0 auto}
+  main{padding:20px 24px 50px;max-width:1560px;margin:0 auto}
   .tab{display:none}.tab.on{display:block;animation:fade .25s ease}
   @keyframes fade{from{opacity:0;transform:translateY(4px)}}
   section{margin-bottom:30px}
@@ -77,6 +77,30 @@
   .hero-stats div{text-align:right}
   .hero-stats b{display:block;font:600 19px/1.2 var(--mono);font-variant-numeric:tabular-nums}
   .hero-stats i{font-style:normal;font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.7px}
+
+  /* ── resumen: cuando vuelves, ESTO es lo que quieres saber ── */
+  .sum{display:grid;grid-template-columns:repeat(auto-fit,minmax(126px,1fr));gap:1px;
+    background:var(--line);border:1px solid var(--line);border-radius:var(--r);overflow:hidden;margin-bottom:26px}
+  .sum div{background:var(--surface);padding:13px 15px}
+  .sum b{display:block;font:600 21px/1.25 var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.5px}
+  .sum i{font-style:normal;font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.7px}
+  .sum .hi b{color:var(--agent)}
+  .sum .win b{color:var(--live)}
+
+  /* ── línea de tiempo: el paralelismo se VE, no se cuenta ── */
+  .tl{border:1px solid var(--line);border-radius:var(--r);background:var(--surface);
+    padding:14px 16px 10px;overflow:hidden}
+  .tl svg{display:block;width:100%}
+  .tl .axis{font:9.5px var(--mono);fill:var(--faint)}
+  .tl .grid-l{stroke:var(--line2);stroke-width:1}
+  .tl .lane{fill:var(--surface2);opacity:0}
+  .tl .lane:nth-child(even){opacity:.5}
+  .tl .bar{rx:2.5}
+  .tl .bar:hover{opacity:1!important;filter:brightness(1.3)}
+  .tl .lbl{font:10px var(--sans);fill:var(--dim)}
+  .tl .conc{fill:var(--agent);opacity:.16}
+  .tl .conc-l{stroke:var(--agent);stroke-width:1.2;fill:none;opacity:.65}
+  .tl .peak{font:600 9.5px var(--mono);fill:var(--agent)}
 
   /* ── pipeline ── */
   .pipe{display:flex;align-items:center;gap:0}
@@ -220,6 +244,14 @@
       <div class="hero-stats" id="hero-stats"></div>
     </div>
 
+    <section id="s-sum"></section>
+
+    <section id="s-tl">
+      <h2>Cuándo corrió cada agente</h2>
+      <p class="lede">Cada barra es un agente; el ancho es lo que duró. Las barras que se solapan corrieron <b>a la vez</b> — eso es el harness paralelizando solo lo que el DAG le deja. La curva de arriba cuenta cuántos había vivos en cada momento.</p>
+      <div class="tl" id="tl"></div>
+    </section>
+
     <section id="s-pipe">
       <h2>En qué fase va</h2>
       <p class="lede">El trabajo cruza siete fases. Ninguna se salta: para llegar a producción hay que pasar por todos los gates, y son scripts, no opiniones.</p>
@@ -310,6 +342,75 @@ function heroState(s){
     why:"Cuando corras /auto con un ticket o un prompt, esto se enciende solo."};
 }
 
+
+// ── EL RESUMEN. Cuando vuelves de comer, el panel está "en reposo" — y es
+// justo cuando lo miras. Un estado en reposo que no cuenta nada es un panel
+// inútil: enseñar tres cajas vacías mientras escondes 32 agentes y $99 en una
+// línea gris colapsada es tener la arquitectura de información al revés.
+function renderSummary(s){
+  const A=s.agents.filter(a=>a.first_ts&&a.last_ts);
+  if(!A.length){ $("s-sum").innerHTML=""; $("s-tl").style.display="none"; return; }
+  const t0=Math.min(...A.map(a=>a.first_ts)), t1=Math.max(...A.map(a=>a.last_ts));
+  // Pico de paralelismo: barrido de eventos. Es LA cifra del harness — cuántos
+  // agentes trabajaron a la vez sin que nadie los coordinara a mano.
+  const ev=[]; A.forEach(a=>{ev.push([a.first_ts,1]);ev.push([a.last_ts,-1])});
+  ev.sort((x,y)=>x[0]-y[0]);
+  let cur=0,peak=0; ev.forEach(([,d])=>{cur+=d;peak=Math.max(peak,cur)});
+  // Lo que la caché te ahorró: se lee a 0.1x, así que 9/10 de esos tokens no los pagaste.
+  const saved=s.tokens.cache_read*0.9;
+  $("s-sum").innerHTML=`<div class="sum">
+    <div><b>${dur(Math.round(t1-t0))}</b><i>de sesión</i></div>
+    <div><b>${A.length}</b><i>agentes</i></div>
+    <div class="hi"><b>${peak}</b><i>a la vez (pico)</i></div>
+    <div><b>${n(s.tokens.out)}</b><i>tokens out</i></div>
+    <div class="win"><b>${n(saved)}</b><i>tokens que la caché te ahorró</i></div>
+    <div><b>${usd(s.cost)}</b><i>costo est.</i></div>
+  </div>`;
+  $("s-tl").style.display="";
+  drawTimeline(A,t0,t1,peak);
+}
+
+// ── LA LÍNEA DE TIEMPO. Pediste "ver los agentes en paralelo" el primer día y
+// te di tarjetas. El paralelismo es una propiedad del TIEMPO: se dibuja o no se
+// entiende. Cada barra es un agente; las que se solapan corrieron a la vez.
+function drawTimeline(A,t0,t1,peak){
+  const rows=[...A].sort((a,b)=>a.first_ts-b.first_ts);
+  const W=1000, LBL=232, RH=16, PAD=6, CH=52;           // CH = alto de la curva
+  const H=CH+18+rows.length*RH+PAD*2;
+  const span=Math.max(1,t1-t0);
+  const x=t=>LBL+((t-t0)/span)*(W-LBL-8);
+
+  // curva de concurrencia: cuántos vivos en cada instante
+  const N=180, pts=[];
+  for(let i=0;i<=N;i++){
+    const t=t0+span*(i/N);
+    pts.push([x(t), A.filter(a=>a.first_ts<=t&&a.last_ts>=t).length]);
+  }
+  const cy=v=>CH-(v/Math.max(1,peak))*(CH-8);
+  const line=pts.map(([px,v],i)=>(i?"L":"M")+px.toFixed(1)+" "+cy(v).toFixed(1)).join(" ");
+  const area=`M${pts[0][0]} ${CH} `+pts.map(([px,v])=>`L${px.toFixed(1)} ${cy(v).toFixed(1)}`).join(" ")+` L${pts[pts.length-1][0]} ${CH} Z`;
+
+  // eje: una marca por hora si cabe
+  const hrs=[], step=span>4*3600?3600:span>3600?1800:600;
+  for(let t=Math.ceil(t0/step)*step;t<=t1;t+=step) hrs.push(t);
+
+  $("tl").innerHTML=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMinYMin meet" style="height:${H}px;max-height:${H}px">
+    <path class="conc" d="${area}"/><path class="conc-l" d="${line}"/>
+    <text class="peak" x="${LBL-6}" y="${cy(peak)+3}" text-anchor="end">${peak} a la vez</text>
+    <text class="axis" x="${LBL-6}" y="${CH}" text-anchor="end">0</text>
+    ${hrs.map(t=>`<line class="grid-l" x1="${x(t)}" y1="${CH+4}" x2="${x(t)}" y2="${H-PAD}"/>
+      <text class="axis" x="${x(t)}" y="${CH+14}" text-anchor="middle">${new Date(t*1000).toLocaleTimeString("es",{hour:"2-digit",minute:"2-digit",hour12:false})}</text>`).join("")}
+    ${rows.map((a,i)=>{
+      const y=CH+18+i*RH, w=Math.max(2.5,x(a.last_ts)-x(a.first_ts));
+      const c=a.active?"#34d399":(a.id==="main"?"#60a5fa":"#5b8def");
+      return `<rect class="lane" x="${LBL}" y="${y}" width="${W-LBL-8}" height="${RH}"/>
+        <text class="lbl" x="${LBL-8}" y="${y+RH-4}" text-anchor="end">${esc(who(a).slice(0,34))}</text>
+        <rect class="bar" x="${x(a.first_ts)}" y="${y+3}" width="${w}" height="${RH-6}" fill="${c}"
+          opacity="${a.active?1:.82}"><title>${esc(who(a))} · ${dur(a.elapsed)} · ${n(a.usage.out)} tokens · ${usd(a.cost)}</title></rect>`;
+    }).join("")}
+  </svg>`;
+}
+
 function render(s){
   $("ws").textContent=s.workspace.split("/").pop();
   $("warn").innerHTML=s.warning?`<div class="warn">⚠️ ${esc(s.warning)}</div>`:"";
@@ -357,7 +458,7 @@ function render(s){
       <p>Cuando el harness lance un agente aparecerá aquí, con lo que está diciendo y lo que lleva gastado. Si son varios, verás uno por tarjeta: el harness los corre <b>en paralelo</b> siempre que el DAG lo permita.</p></div>`;
 
   // terminados
-  $("s-done").innerHTML=done.length?`
+  $("s-done").innerHTML=done.length&&!s.agents.some(a=>a.first_ts)?`
     <details ${done.length<=5?"open":""}>
       <summary>${done.length} agentes ya terminaron · ${n(done.reduce((x,a)=>x+a.usage.out,0))} tokens · ${usd(done.reduce((x,a)=>x+(a.cost||0),0))}</summary>
       <table><thead><tr><th>Agente</th><th class="r">tokens</th><th class="r">turnos</th>
@@ -394,6 +495,8 @@ function render(s){
         <p>Nadie ha dicho nada todavía. En cuanto un agente cierre un mensaje, aparece aquí.</p></div>`;
     }
   }
+
+  renderSummary(s);
 
   // historia
   renderStory(s);

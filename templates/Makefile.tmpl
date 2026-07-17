@@ -26,7 +26,10 @@ ship: ## gates + push: make ship TASK=<id> REPO=<repo>
 watch: ## vigila el deploy: make watch TASK=<id> REPO=<repo>
 	@bash scripts/with-secrets.sh bash scripts/deploy-watch.sh $(TASK) $(REPO)
 
-usage: ## costo por sesión/tarea (ccusage)
+usage: ## costo por sesión/tarea (ccusage — la báscula oficial)
 	@ccusage
 
-.PHONY: help init doctor secrets wt wt-rm ship watch usage
+ui: ## panel en vivo: agentes, fases, tokens (solo lectura, solo 127.0.0.1)
+	@python3 scripts/ui/server.py --port $(or $(PORT),7717) --workspace . --open
+
+.PHONY: help init doctor secrets wt wt-rm ship watch usage ui

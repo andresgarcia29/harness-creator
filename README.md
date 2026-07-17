@@ -15,12 +15,13 @@ Le apuntas a una carpeta con tus repositorios y genera un *harness* completo y a
 3. [Qué genera: anatomía de una instancia](#qué-genera-anatomía-de-una-instancia)
 4. [El diagrama maestro: qué pasa cuando corres `/auto`](#el-diagrama-maestro-qué-pasa-cuando-corres-auto)
 5. [Cómo leer el diagrama](#cómo-leer-el-diagrama)
-6. [Componentes, explicados uno por uno](#componentes-explicados-uno-por-uno)
-7. [Self-healing: los cronjobs](#self-healing-los-cronjobs)
-8. [Secretos](#secretos)
-9. [Qué tan flexible es](#qué-tan-flexible-es)
-10. [Actualizaciones](#actualizaciones)
-11. [Estructura de este repo](#estructura-de-este-repo)
+6. [El panel: `make ui`](#el-panel-make-ui)
+7. [Componentes, explicados uno por uno](#componentes-explicados-uno-por-uno)
+8. [Self-healing: los cronjobs](#self-healing-los-cronjobs)
+9. [Secretos](#secretos)
+10. [Qué tan flexible es](#qué-tan-flexible-es)
+11. [Actualizaciones](#actualizaciones)
+12. [Estructura de este repo](#estructura-de-este-repo)
 
 ---
 
@@ -106,7 +107,8 @@ mi-workspace/
 │   ├── agents/               ← architect, reviewer, implementer, qa + abogados por cluster
 │   ├── commands/             ← /auto (todo el pipeline, sin intervención)
 │   │                           /feature /rfc /implement /review /ship /promote /archive
-│   ├── hooks/                ← block-direct-push, guard-canonical (las leyes con dientes)
+│   ├── hooks/                ← block-direct-push, guard-canonical (leyes con dientes)
+│   │                           track-read, ui-emit (observadores, fail-open)
 │   └── settings.json         ← hooks registrados + denials (kubectl apply, terraform apply…)
 ├── docs/
 │   ├── constitution.md       ← principios innegociables, inyectados a TODOS los agentes
@@ -125,9 +127,11 @@ mi-workspace/
 │   ├── quiet.sh              ← trunca outputs ruidosos (economía de tokens)
 │   ├── deploy-watch.sh       ← vigila Actions→Kargo→ArgoCD→smoke; rollback seguro
 │   ├── ticket-pull/close.sh  ← puente Linear (GraphQL, cero tokens)
+│   ├── ui/                   ← panel local de solo lectura (make ui)
 │   └── cronjobs/             ← cron-runner + jobs de self-healing elegidos
 ├── semgrep/rules.yaml        ← sensores custom CON remediación en el mensaje
 ├── repos/                    ← tus clones (regenerables, protegidos por hook)
+├── .harness/events.jsonl     ← bus de eventos del harness (lo lee el panel)
 ├── worktrees/<task>/<repo>   ← donde se trabaja de verdad
 └── tasks/<id>/               ← estado por tarea: task.md, assumptions.md (ledger),
                                  plan.md, veredictos, logs
@@ -372,6 +376,39 @@ La regla que lo hace funcionar es negativa: **si la razón para parar no está e
 
 ---
 
+## El panel: `make ui`
+
+`/auto` corre solo — pero "solo" no debería significar "a ciegas". `make ui` abre un panel local en `127.0.0.1:7717` que te deja ver, mientras el harness trabaja: **qué agentes están vivos ahora mismo** y en paralelo, en qué fase va cada tarea, el texto que van produciendo, tokens y costo por agente, el grafo de quién lanzó a quién, y **el ledger de supuestos** de cada tarea.
+
+```
+make ui          # o: make ui PORT=8080
+```
+
+Cuatro pestañas: **Ahora** (fases + tarjetas de agentes + streaming), **Grafo** (árbol de spawns), **Tokens** (consumo y costo por agente), **Eventos** (el bus del harness).
+
+### Las cinco leyes del panel
+
+Un panel de observación en un sistema cuya filosofía es "los agentes proponen, los sistemas deterministas verifican" tiene que ganarse su lugar. Estas son sus reglas, y explican casi todo su diseño:
+
+1. **SOLO OBSERVA.** No lanza agentes, no aprueba, no cancela, no escribe en el workspace. El plano de control son los comandos y los gates. Una UI que además actúa es una segunda puerta a main, y solo hay una.
+2. **Solo `127.0.0.1`.** Nunca `0.0.0.0`. El panel muestra tu código y tus tareas.
+3. **Jamás muestra valores de secretos.** No lee `.secrets`, y todo texto pasa por redacción (patrones de GitHub, Vault, JWT, AWS, Slack, Linear…) antes de salir. La ley de secretos también aplica a los píxeles. *(Verificado: metimos un `ghp_…` real en los eventos de prueba y salió como `[REDACTADO]`.)*
+4. **Cero dependencias.** Stdlib de Python 3 y un HTML. Un panel que exige `npm install` se pudre en tres meses.
+5. **Degrada, no explota.** Lee dos fuentes con dos niveles de confianza: `.harness/events.jsonl` + `tasks/` son **nuestros** (estables); los transcripts de Claude Code son **prestados** (formato interno, cambia entre versiones). Si el parseo falla, el panel sigue vivo con lo que el harness sí controla y te lo dice arriba en rojo.
+
+### Lo que el panel NO hace, y por qué
+
+**No hay streaming token por token.** Lo medimos: el transcript de un agente vivo se quedó quieto 36 segundos y luego saltó 52 KB de golpe — Claude Code escribe los mensajes al **cerrarlos**. El panel muestra el texto por turno, que es lo más en vivo que existe sin mentir. Poner un typewriter falso encima sería teatro, en la única herramienta cuyo trabajo es observar con honestidad.
+
+**El costo es un estimado.** La báscula oficial sigue siendo `ccusage`; el panel calcula con `scripts/ui/pricing.json` (editable, se relee sola) para que veas la tendencia sin salir. Dos cosas que aprendimos construyéndolo, contra datos reales:
+
+- Una respuesta de la API se escribe en **varios records que repiten el mismo `usage`**. Sumarlos ingenuamente infla la cuenta. Se deduplica por `message.id`. *(Se cita por ahí un 4× de inflado; nosotros medimos 1.01× en transcripts reales — el error existe, la magnitud que circula no.)*
+- El desglose `ephemeral_5m` / `ephemeral_1h` gana sobre el campo plano: la caché de 5 min se escribe a 1.25× y la de 1 h a 2×, y el campo plano no los distingue.
+
+**Y un aviso honesto:** el panel lee un formato que Anthropic documenta como **interno y sujeto a cambio entre versiones** (verificado contra Claude Code 2.1.211). Por eso los transcripts son la capa de *enriquecimiento*, nunca la de verdad: si un día cambian, pierdes las tarjetas de agentes y los tokens — no las fases, ni los gates, ni las tareas.
+
+---
+
 ## Componentes, explicados uno por uno
 
 ### Los agentes (`.claude/agents/`)
@@ -414,8 +451,13 @@ El ritual **`/promote`** (semanal) cierra el loop: *la memoria propone, git disp
 
 ### Gates y hooks (las leyes con dientes)
 
-- **`ship.sh`** — la única puerta a main. Gates en orden: rebase → trailer `Task:` → build/test por lenguaje → `buf breaking` (contratos) → `gitleaks` (secretos) → `semgrep` (sensores custom) → veredicto+compliance → lock por repo → push. **El error de cada gate es un prompt**: incluye su remediación, para que el agente corrija en una iteración (máx 2 rondas de autofix).
-- **Hooks PreToolUse** — `block-direct-push` (ningún `git push` a main sobrevive) y `guard-canonical` (el clon base es intocable; trabaja en tu worktree). *Fail-closed*: sin `jq`, bloquean por precaución.
+- **`ship.sh`** — la única puerta a main. Gates en orden: rebase → trailer `Task:` → **tests-no-debilitados** → build/test por lenguaje → `buf breaking` (contratos) → `gitleaks` (secretos) → `semgrep` (sensores custom) → veredicto+compliance → **evidencia** → lock por repo → push. **El error de cada gate es un prompt**: incluye su remediación, para que el agente corrija en una iteración (máx 2 rondas de autofix).
+
+  Los dos gates nuevos existen porque nos hicieron una pregunta incómoda: *nuestros gates confían en cosas que el agente puede editar.*
+
+  - **`gate_tests_untouched`** — el gate de test confía en el test suite, y el test suite es un archivo. La forma más barata de pasar a verde no es arreglar el código: es borrar la aserción. Está medido en la literatura (en SWE-bench+, el 31% de los parches "exitosos" pasaban por tests débiles) y los harnesses que solo escriben *"no borres tests"* en prosa lo escriben porque no tienen gate. Este bloquea aserciones eliminadas, `skip`s añadidos y tests borrados — **salvo** que el delta-spec declare el cambio como `MODIFIED`/`REMOVED`, porque entonces no es trampa: es cumplir la spec. Los tests son el contrato; cambiar uno es un RFC.
+  - **`gate_evidence`** — la compliance matrix la escribe un agente. Nada comprobaba que hubiera *abierto* el test que cita. O sea: **el verificador estaba proponiendo**, justo lo que nuestra filosofía prohíbe. Ahora el hook `track-read.sh` registra qué artefactos se leyeron de verdad y el gate intersecta lo citado con lo leído: si un requirement dice `covered: true` citando un archivo que nadie abrió (o que no existe), no pasa. Cero LLM, cero opinión — es una intersección de conjuntos.
+- **Hooks, en dos familias con leyes opuestas.** Los que **bloquean** son *fail-closed*: `block-direct-push` (ningún `git push` a main sobrevive) y `guard-canonical` (el clon base es intocable **y ahora también `ship.sh`, los hooks y `settings.json`** — un agente atascado en un gate que "arregla" ship.sh no está pasando el gate: lo está borrando, y con él todos los demás para siempre). Sin `jq`, bloquean por precaución. Los que **observan** son *fail-open* y `async`: `track-read.sh` (el libro de a bordo de la evidencia) y `ui-emit.sh` (el bus del panel). Salen 0 siempre: un hook de telemetría que puede tumbar el pipeline es un bug, no una feature.
 - **Denials** — `kubectl apply`, `terraform apply`, `argocd app rollback`, `git push --force` y la regeneración ciega de snapshots están denegados a los agentes en `settings.json`. Writes de infra: solo por GitOps.
 - **semgrep/rules.yaml** — sensores custom donde **cada regla incluye su remediación en el mensaje**. Crece solo: el cronjob `rule-miner` mina reglas nuevas de los bugs de cada mes.
 
@@ -515,7 +557,9 @@ templates/         todo lo que se genera:
   │                implement · review · ship · promote · archive
   ├── docs/        constitution · spec (EARS) · pipeline · intake · testing-policy · quality · ADR · cronjobs
   ├── scripts/     bootstrap · ship · worktree · secrets · with-secrets · quiet · deploy-watch · tickets
-  ├── hooks/       block-direct-push · guard-canonical
+  ├── hooks/       block-direct-push · guard-canonical (fail-closed: bloquean)
+  │                track-read · ui-emit (fail-open: observan)
+  ├── ui/          server.py · app.html · pricing.json (el panel, `make ui`)
   └── cronjobs/    cron-runner + 12 jobs + manifiesto K8s
 ```
 

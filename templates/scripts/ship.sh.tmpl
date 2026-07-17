@@ -122,6 +122,82 @@ run_security_gates() {
   fi
 }
 
+# gate_tests_untouched — el gate confía en el test suite; el test suite es un
+# archivo que el agente puede editar. Sin este gate, la forma MÁS BARATA de
+# pasar a verde no es arreglar el código: es debilitar el test. Está medido —
+# en SWE-bench+, el 31% de los parches "exitosos" pasaban por tests débiles, y
+# los harnesses que solo piden "no borres tests" en prosa lo piden porque no
+# tienen gate. Aquí los tests son el CONTRATO: cambiar uno exige delta-spec.
+gate_tests_untouched() {
+  gate "tests no debilitados"
+  local pat="${TEST_PATH_PATTERN:-(test|spec|Test|_test\.|\.test\.|\.spec\.|/tests?/|/spec/)}"
+  local touched
+  touched="$(git diff origin/main..HEAD --name-only | grep -E "$pat" || true)"
+  [ -n "$touched" ] || return 0
+
+  # Señales de debilitamiento: borrar el archivo, o quitar/saltar aserciones.
+  local deleted weakened
+  deleted="$(git diff origin/main..HEAD --diff-filter=D --name-only | grep -E "$pat" || true)"
+  weakened="$(git diff origin/main..HEAD -- $(printf '%s ' $touched) 2>/dev/null \
+    | grep -E '^-' | grep -vE '^---' \
+    | grep -cE '(assert|expect|require\.|should|t\.Error|@Test|it\(|test\(|describe\()' || true)"
+  local skipped
+  skipped="$(git diff origin/main..HEAD -- $(printf '%s ' $touched) 2>/dev/null \
+    | grep -E '^\+' | grep -cE '(@skip|\.skip\(|xit\(|xdescribe\(|t\.Skip\(|pytest\.mark\.skip|#\[ignore\])' || true)"
+
+  if [ -n "$deleted" ] || [ "${weakened:-0}" -gt 0 ] || [ "${skipped:-0}" -gt 0 ]; then
+    # La excepción legítima existe: si el RFC declaró el cambio de comportamiento
+    # en el delta-spec, tocar el test NO es hacer trampa — es cumplir la spec.
+    local delta="$WS/tasks/$TASK/delta-spec.md"
+    if [ -f "$delta" ] && grep -qiE '(REMOVED|MODIFIED)' "$delta"; then
+      echo "⚠️  tests tocados, pero el delta-spec declara REMOVED/MODIFIED — permitido (queda en el registro)"
+      return 0
+    fi
+    echo "❌ este cambio DEBILITA tests y ningún delta-spec lo declara:"
+    [ -n "$deleted" ] && echo "   · borrados: $deleted"
+    [ "${weakened:-0}" -gt 0 ] && echo "   · $weakened aserciones eliminadas"
+    [ "${skipped:-0}" -gt 0 ] && echo "   · $skipped skips/ignores añadidos"
+    echo "   ↳ remediación: los tests son el CONTRATO, no el obstáculo. Si el"
+    echo "     comportamiento DEBE cambiar, eso es un RFC: declara el cambio en"
+    echo "     tasks/$TASK/delta-spec.md como MODIFIED/REMOVED y re-corre. Si no,"
+    echo "     arregla el CÓDIGO hasta que el test pase como está."
+    exit 3
+  fi
+}
+
+# gate_evidence — nuestra ley es "los agentes proponen, los sistemas
+# deterministas verifican". La compliance matrix la ESCRIBE un agente: hasta
+# ahora, el verificador proponía. Este gate no juzga el código; solo comprueba
+# mecánicamente que el artefacto citado por cada requirement (a) existe y (b)
+# fue REALMENTE leído (lo registra el hook track-read.sh). Es una intersección
+# de conjuntos: cero LLM, cero opinión.
+gate_evidence() {
+  local v="$WS/tasks/$TASK/verdict-$REPO.json"
+  jq -e 'has("compliance")' "$v" >/dev/null 2>&1 || return 0
+  gate "evidencia de compliance"
+  local log="$WS/tasks/$TASK/evidence.log"
+  local missing=0 unread=0 row art
+  while IFS= read -r art; do
+    [ -n "$art" ] || continue
+    if [ ! -e "$WS/$art" ] && [ ! -e "$WT/$art" ]; then
+      echo "   ✗ citado pero NO EXISTE: $art"; missing=$((missing+1)); continue
+    fi
+    if [ -f "$log" ] && grep -qF -- "$art" "$log"; then :; else
+      echo "   ✗ citado pero NADIE LO LEYÓ: $art"; unread=$((unread+1))
+    fi
+  done <<EOF
+$(jq -r '.compliance[]? | select(.covered==true) | .evidence // .test // empty' "$v" 2>/dev/null)
+EOF
+  if [ "$missing" -gt 0 ] || [ "$unread" -gt 0 ]; then
+    echo "❌ la compliance matrix cita evidencia que no existe ($missing) o que nunca se leyó ($unread)"
+    echo "   ↳ remediación: un requirement solo pasa a covered:true si el reviewer"
+    echo "     ABRIÓ el artefacto que lo prueba (test, log, screenshot). Corre el"
+    echo "     test, lee su salida, y cita la ruta real en .compliance[].evidence."
+    echo "     'Confía en mí' no es evidencia — por eso existe este gate."
+    exit 3
+  fi
+}
+
 check_verdict() {
   gate "veredicto de review"
   local v="$WS/tasks/$TASK/verdict-$REPO.json"
@@ -144,9 +220,11 @@ while [ "$attempt" -lt "$MAX_RETRY" ]; do
   git fetch origin
   git rebase origin/main || { git rebase --abort; echo "❌ conflicto de rebase — resuélvelo en el worktree $WT"; exit 4; }
   gate_trailer
+  gate_tests_untouched
   run_lang_gates
   run_security_gates
   check_verdict
+  gate_evidence
   if git push origin HEAD:main; then
     sha="$(git rev-parse --short HEAD)"
     echo "{\"repo\":\"$REPO\",\"sha\":\"$sha\",\"shipped_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" >> "$WS/tasks/$TASK/ship.log"

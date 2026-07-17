@@ -84,6 +84,17 @@ def clip(text, n=MAX_TEXT):
     return text if len(text) <= n else text[:n] + ' […]'
 
 
+def _tool_hint(inp):
+    """Una pista corta de qué hizo una herramienta, para el hilo. Redactada."""
+    if not isinstance(inp, dict):
+        return ''
+    for k in ('file_path', 'path', 'pattern', 'command', 'url', 'query', 'description'):
+        v = inp.get(k)
+        if isinstance(v, str) and v:
+            return redact(v)[:120]
+    return ''
+
+
 def parse_ts(iso):
     """ISO-8601 → epoch. Sin dateutil: stdlib y a prueba de formatos raros."""
     if not iso:
@@ -332,6 +343,10 @@ class State:
                 'seen': {},   # message.id → usage final (dedupe, ver _ingest)
                 'msgs': 0, 'tools': [], 'last_text': '', 'first_ts': 0,
                 'last_ts': 0,
+                # el hilo de razonamiento del agente: cada bloque de texto o
+                # pensamiento con SU reloj (el del record). Acotado — el
+                # drill-down se sirve on-demand, no viaja en cada snapshot.
+                'thread': [],
             }
         return self.agents[key]
 
@@ -399,20 +414,32 @@ class State:
             a['seen'][mid] = new
             a['usage'] = {k: sum(v[k] for v in a['seen'].values())
                           for k in ('in', 'out', 'cache_read', 'cache_creation')}
+        rec_ts = ts or a['last_ts'] or 0
         for block in (msg.get('content') or []):
             if not isinstance(block, dict):
                 continue
-            if block.get('type') == 'text' and block.get('text'):
+            bt = block.get('type')
+            if bt == 'text' and block.get('text'):
                 t = clip(redact(block['text']))
                 a['last_text'] = t
+                a['thread'].append({'k': 'text', 'ts': rec_ts, 't': t})
                 # 'who' = la descripción, no el id: "a754eafffe4b9f08" no le
                 # dice nada a nadie; "Research agent harnesses" sí.
                 texts.append({'agent': aid, 'session': sid, 'text': t, 'ts': time.time(),
                               'who': ('orquestador' if aid == 'main'
                                       else (a['desc'] or a['type'] or aid[:10]))})
-            elif block.get('type') == 'tool_use':
-                a['tools'].append(block.get('name', '?'))
+            elif bt == 'thinking' and block.get('thinking'):
+                # el razonamiento en crudo — por qué tardó, qué sopesó. Es lo
+                # que el humano pidió leer. Redactado como todo lo demás.
+                a['thread'].append({'k': 'think', 'ts': rec_ts,
+                                    't': clip(redact(block['thinking']))})
+            elif bt == 'tool_use':
+                name = block.get('name', '?')
+                a['tools'].append(name)
                 a['tools'] = a['tools'][-40:]
+                a['thread'].append({'k': 'tool', 'ts': rec_ts, 't': name,
+                                    'inp': _tool_hint(block.get('input'))})
+        a['thread'] = a['thread'][-80:]   # acotado por agente
 
     def scan_transcripts(self):
         texts = []
@@ -926,6 +953,104 @@ class State:
         self._mcp_probes = dict(getattr(self, '_mcp_probes', {}), **results)
         return {'probed': results}
 
+    # ── Drill-down de razonamiento (on-demand, no infla el SSE) ──────────
+    def session_detail(self, sid):
+        with self.lock:
+            agents = []
+            for (s, aid), a in self.agents.items():
+                if s != sid:
+                    continue
+                el = (a['last_ts'] - a['first_ts']) if a['first_ts'] and a['last_ts'] else 0
+                agents.append({
+                    'id': aid,
+                    'who': 'orquestador' if aid == 'main' else (a['desc'] or a['type'] or aid[:10]),
+                    'type': a['type'], 'model': a['model'],
+                    'active': self._is_active(a), 'depth': a['depth'],
+                    'first_ts': a['first_ts'], 'last_ts': a['last_ts'], 'elapsed': el,
+                    'usage': a['usage'], 'cost': self.cost(a['model'], a['usage']),
+                    'thread': a['thread'],
+                })
+            agents.sort(key=lambda x: (x['id'] != 'main', x['first_ts'] or 9e18))
+            return {'id': sid, 'short': sid[:8], 'agents': agents}
+
+    def _is_active(self, a):
+        return bool(a['last_ts']) and (time.time() - a['last_ts'] < ACTIVE_WINDOW)
+
+    # ── Metadata de git por tarea (repos tocados/leídos, PR, commits) ────
+    def _git(self, args, cwd, timeout=4):
+        try:
+            r = subprocess.run(['git'] + args, cwd=cwd, capture_output=True,
+                               text=True, timeout=timeout)
+            return r.stdout.strip() if r.returncode == 0 else ''
+        except (OSError, subprocess.SubprocessError):
+            return ''
+
+    def task_git(self, task_id):
+        """Qué repos toca (worktrees) vs lee (evidencia), branch, commits, PR.
+        Cache 15 s. Shell a git/gh: fail-open, con timeout, jamás bloquea."""
+        if any(c in task_id for c in '/\\'):
+            return {'repos': [], 'read': []}
+        cache = getattr(self, '_git_cache', {})
+        hit = cache.get(task_id)
+        now = time.time()
+        if hit and hit['at'] > now - 15:
+            return hit['data']
+        repos = []
+        wt = os.path.join(self.ws, 'worktrees', task_id)
+        gh = shutil.which('gh')
+        for d in sorted(glob.glob(os.path.join(wt, '*'))):
+            if not os.path.isdir(os.path.join(d, '.git')) and not os.path.exists(os.path.join(d, '.git')):
+                continue
+            name = os.path.basename(d)
+            branch = self._git(['rev-parse', '--abbrev-ref', 'HEAD'], d) or '?'
+            ahead = self._git(['rev-list', '--count', 'origin/main..HEAD'], d) or '0'
+            dirty = bool(self._git(['status', '--porcelain'], d))
+            last = self._git(['log', '-1', '--format=%s\t%ct'], d)
+            subj, cts = (last.split('\t', 1) + [''])[:2] if last else ('', '')
+            pr = None
+            if gh and branch not in ('?', 'main'):
+                try:
+                    out = subprocess.run(
+                        ['gh', 'pr', 'list', '--head', branch, '--state', 'all',
+                         '--json', 'number,state,url', '--limit', '1'],
+                        cwd=d, capture_output=True, text=True, timeout=6)
+                    arr = json.loads(out.stdout) if out.returncode == 0 and out.stdout.strip() else []
+                    if arr:
+                        pr = {'number': arr[0].get('number'), 'state': arr[0].get('state', '').lower(),
+                              'url': arr[0].get('url', '')}
+                except (OSError, subprocess.SubprocessError, ValueError):
+                    pr = None
+            repos.append({'repo': name, 'branch': branch, 'ahead': int(ahead or 0),
+                          'dirty': dirty, 'last_subject': redact(subj)[:120],
+                          'last_ts': int(cts) if cts.isdigit() else 0,
+                          'pr': pr, 'pushed_direct': (pr is None and int(ahead or 0) == 0 and bool(subj))})
+        # repos LEÍDOS: del evidence.log del track-read. SOLO las filas cuyo
+        # 4º campo es una RUTA (read/scan/ran-file); 'ran' guarda el comando
+        # entero — mirarlo como ruta ensuciaba la lista con fragmentos de shell.
+        read = set()
+        try:
+            with open(os.path.join(self.ws, 'tasks', task_id, 'evidence.log'), errors='replace') as fh:
+                for line in fh:
+                    parts = line.rstrip('\n').split('\t')
+                    if len(parts) < 4 or parts[2] not in ('read', 'scan', 'ran-file'):
+                        continue
+                    p = parts[3].strip()
+                    seg = p.split('worktrees/%s/' % task_id, 1)
+                    repo = None
+                    if len(seg) == 2:
+                        repo = seg[1].split('/', 1)[0]
+                    elif '/' in p and not p.startswith(('worktrees', '/', '.')):
+                        repo = p.split('/', 1)[0]
+                    if repo and re.match(r'^[A-Za-z0-9._-]+$', repo):
+                        read.add(repo)
+        except OSError:
+            pass
+        touched = {r['repo'] for r in repos}
+        data = {'repos': repos, 'read': sorted(read - touched)}
+        cache[task_id] = {'at': now, 'data': data}
+        self._git_cache = cache
+        return data
+
     def tick(self):
         with self.lock:
             self.scan_events()
@@ -978,6 +1103,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, 'application/json', body)
         if path == '/api/stream':
             return self._stream()
+        if path == '/api/session':
+            from urllib.parse import parse_qs, urlparse
+            sid = (parse_qs(urlparse(self.path).query).get('id') or [''])[0]
+            body = json.dumps(self.state.session_detail(sid)).encode()
+            return self._send(200, 'application/json', body)
+        if path == '/api/task-git':
+            from urllib.parse import parse_qs, urlparse
+            tid = (parse_qs(urlparse(self.path).query).get('task') or [''])[0]
+            body = json.dumps(self.state.task_git(tid)).encode()
+            return self._send(200, 'application/json', body)
         if path == '/':
             return self._serve_dist('index.html')
         if path.startswith('/assets/') or path in ('/favicon.svg', '/favicon.ico'):

@@ -2,7 +2,7 @@ import type { ReactNode } from "react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
-import { beats, supuesto, type Beat, type BusEvent } from "@/lib/harness"
+import { beats, supuesto, fecha, diaLabel, toEpoch, type Beat, type BusEvent } from "@/lib/harness"
 import { CirclePause, CircleX } from "lucide-react"
 
 // Cabecera de vista: título DM Sans + subtítulo — y en móvil deja aire al trigger
@@ -90,25 +90,41 @@ const beatLbl: Record<Beat["k"], string> = {
 // La historia paso a paso — la línea que no se puede fingir.
 // group=false: un beat por evento (el feed del dash mezcla tareas y ahí
 // agrupar gates consecutivos mentiría sobre a quién pertenecen).
-export function Story({ evs, taskOf, onTask, group = true }: {
-  evs: BusEvent[]; taskOf?: (b: number) => string; onTask?: (id: string) => void; group?: boolean
+// dated: agrupa por día ("Hoy", "Ayer", "mié 17 jul") y muestra la fecha —
+// sin esto, HH:MM solo es ambiguo cuando el trabajo cruza días.
+export function Story({ evs, taskOf, onTask, group = true, dated = false }: {
+  evs: BusEvent[]; taskOf?: (b: number) => string; onTask?: (id: string) => void; group?: boolean; dated?: boolean
 }) {
   const bs = group ? beats(evs) : evs.map((e) => beats([e])[0])
+  let lastDay = ""
   return (
     <div className="ml-2 border-l-[1.5px] border-border">
-      {bs.map((b, i) => (
-        <div
-          key={i}
-          className={cn("relative pb-4 pl-6 last:pb-0.5", onTask && "cursor-pointer")}
-          onClick={onTask && taskOf ? () => onTask(taskOf(i)) : undefined}
-        >
-          <span className={cn("absolute -left-[5.5px] top-1.5 size-2.5 rounded-full border-2", beatDot[b.k])} />
-          <time className="mr-2 font-mono text-[10.5px] text-muted-foreground/60">{(b.ts || "").slice(11, 16)}</time>
-          <span className={cn("text-[12.5px] font-bold", beatLbl[b.k])}>{b.lbl}</span>
-          {taskOf && <span className="ml-2 font-mono text-[10px] text-muted-foreground/50">{taskOf(i)}</span>}
-          <p className="mt-0.5 max-w-[96ch] text-xs text-muted-foreground">{b.p}</p>
-        </div>
-      ))}
+      {bs.map((b, i) => {
+        const day = dated ? diaLabel(b.ts) : ""
+        const showDay = dated && day !== lastDay
+        if (showDay) lastDay = day
+        return (
+          <div key={i}>
+            {showDay && (
+              <div className="relative -ml-[1.5px] mb-2 mt-1 border-l-[1.5px] border-transparent pl-6 first:mt-0">
+                <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-muted-foreground/50">{day}</span>
+              </div>
+            )}
+            <div
+              className={cn("relative pb-4 pl-6 last:pb-0.5", onTask && "cursor-pointer")}
+              onClick={onTask && taskOf ? () => onTask(taskOf(i)) : undefined}
+            >
+              <span className={cn("absolute -left-[5.5px] top-1.5 size-2.5 rounded-full border-2", beatDot[b.k])} />
+              <time className="mr-2 font-mono text-[10.5px] tabular-nums text-muted-foreground/60">
+                {dated && toEpoch(b.ts) ? fecha(b.ts) : (b.ts || "").slice(11, 16)}
+              </time>
+              <span className={cn("text-[12.5px] font-bold", beatLbl[b.k])}>{b.lbl}</span>
+              {taskOf && <span className="ml-2 font-mono text-[10px] text-muted-foreground/50">{taskOf(i)}</span>}
+              <p className="mt-0.5 max-w-[96ch] text-xs text-muted-foreground">{b.p}</p>
+            </div>
+          </div>
+        )
+      })}
     </div>
   )
 }

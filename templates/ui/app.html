@@ -78,6 +78,27 @@
   .hero-stats b{display:block;font:600 19px/1.2 var(--mono);font-variant-numeric:tabular-nums}
   .hero-stats i{font-style:normal;font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.7px}
 
+  /* ── SESIONES: la unidad principal. Cada una es una terminal tuya. ── */
+  .ses{display:grid;grid-template-columns:minmax(0,1fr);gap:8px;margin-bottom:24px}
+  .sesr{display:flex;align-items:center;gap:13px;padding:12px 15px;border:1px solid var(--line);
+    border-radius:var(--r);background:var(--surface);cursor:pointer;transition:.14s;text-align:left;
+    font:inherit;color:inherit;width:100%;min-width:0;overflow:hidden}
+  .sesr:hover{border-color:var(--faint);background:var(--surface2)}
+  .sesr[aria-selected=true]{border-color:var(--agent);background:linear-gradient(90deg,rgba(96,165,250,.09),transparent)}
+  .sesr[aria-selected=true]:before{content:"";position:absolute;left:0;top:12px;bottom:12px;width:3px;
+    background:var(--agent);border-radius:0 3px 3px 0}
+  .sesr{position:relative}
+  .sesr .bea{width:9px;height:9px;border-radius:50%;background:var(--faint);flex:none}
+  .sesr.on .bea{background:var(--live);box-shadow:0 0 0 4px rgba(52,211,153,.15);animation:p 2.4s infinite}
+  .sesr .id{font:600 12.5px var(--mono);width:78px;flex:none}
+  .sesr .est{font-size:12.5px;font-weight:600;width:104px;flex:none}
+  .sesr.on .est{color:var(--live)}
+  .sesr .txt{flex:1;min-width:0;color:var(--faint);font-size:12px;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  .sesr .num{font:12px var(--mono);color:var(--dim);text-align:right;flex:none;width:74px}
+  .sesr .num s{text-decoration:none;color:var(--faint);font-size:10.5px;display:block}
+  .drill{font-size:11px;color:var(--faint);margin:-14px 0 20px 3px}
+
   /* ── resumen: cuando vuelves, ESTO es lo que quieres saber ── */
   .sum{display:grid;grid-template-columns:repeat(auto-fit,minmax(126px,1fr));gap:1px;
     background:var(--line);border:1px solid var(--line);border-radius:var(--r);overflow:hidden;margin-bottom:26px}
@@ -244,6 +265,13 @@
       <div class="hero-stats" id="hero-stats"></div>
     </div>
 
+    <section>
+      <h2>Tus sesiones <em id="ses-n"></em></h2>
+      <p class="lede">Cada fila es una terminal con un agente. Haz clic para ver su flujo completo: dónde va, qué decidió y qué sigue. Cada una lleva su propia cuenta — nunca se suman como si fueran una.</p>
+      <div class="ses" id="ses"></div>
+    </section>
+
+    <p class="drill" id="drill"></p>
     <section id="s-sum"></section>
 
     <section id="s-tl">
@@ -411,12 +439,57 @@ function drawTimeline(A,t0,t1,peak){
   </svg>`;
 }
 
+let SEL=null, LAST=null;   // sesión seleccionada (persiste entre snapshots)
+
+function estado(x){
+  if(x.n_active) return ["on","Trabajando"];
+  if(x.idle<600) return ["","En pausa"];
+  return ["","En reposo"];
+}
+
+function renderSessions(s){
+  $("ses-n").textContent=`— ${s.sessions.length} abierta${s.sessions.length===1?"":"s"} en este workspace`;
+  // Si la seleccionada desapareció (o es el primer render), toma la más activa.
+  if(!SEL || !s.sessions.some(x=>x.id===SEL)) SEL=s.sessions.length?s.sessions[0].id:null;
+  $("ses").innerHTML=s.sessions.map(x=>{
+    const [on,est]=estado(x);
+    return `<button class="sesr ${on}" aria-selected="${x.id===SEL}" data-ses="${esc(x.id)}">
+      <span class="bea"></span>
+      <span class="id">${esc(x.short)}</span>
+      <span class="est">${est}</span>
+      <span class="txt">${esc((x.last_text||"(sin texto)").slice(0,150))}</span>
+      <span class="num">${x.n_agents} agentes<s>${x.n_active} vivos · pico ${x.peak}</s></span>
+      <span class="num">${n(x.tokens.out)}<s>tokens out</s></span>
+      <span class="num">${usd(x.cost)}<s>est.</s></span>
+      <span class="num">${x.idle<60?"ahora":"hace "+dur(x.idle)}<s>actividad</s></span>
+    </button>`;
+  }).join("")||`<div class="empty"><h4>Ninguna sesión todavía</h4><p>Abre Claude Code en este workspace y aparecerá aquí.</p></div>`;
+}
+
+$("ses").onclick=e=>{
+  const b=e.target.closest("[data-ses]"); if(!b) return;
+  SEL=b.dataset.ses;                       // clic = elijo sesión; el resto se reencuadra
+  if(LAST) render(LAST);
+};
+
 function render(s){
+  LAST=s;
   $("ws").textContent=s.workspace.split("/").pop();
   $("warn").innerHTML=s.warning?`<div class="warn">⚠️ ${esc(s.warning)}</div>`:"";
+  renderSessions(s);
+
+  // Todo lo de abajo se reencuadra a LA SESIÓN ELEGIDA. Mezclar sesiones y
+  // llamarlo "ahora" es la mentira que este panel existe para no contar.
+  const sess=s.sessions.find(x=>x.id===SEL)||{agents:[],tokens:{in:0,out:0,cache_read:0,cache_creation:0},cost:0,n_agents:0};
+  $("drill").innerHTML=s.sessions.length>1
+    ? `Viendo <b style="color:var(--agent)">${esc(sess.short||"—")}</b> · las cifras de abajo son SOLO de esta sesión. Arriba, el total del workspace.`
+    : "";
+  s={...s, agents:sess.agents, tokens:sess.tokens, cost:sess.cost};
   const act=s.agents.filter(a=>a.active), done=s.agents.filter(a=>!a.active);
-  $("k-act").textContent=act.length; $("k-out").textContent=n(s.tokens.out);
-  $("k-cost").textContent=usd(s.cost); $("n-graph").textContent=s.agents.length||"";
+  $("k-act").textContent=LAST.sessions.reduce((x,y)=>x+y.n_active,0);
+  $("k-out").textContent=n(LAST.tokens.out);
+  $("k-cost").textContent=usd(LAST.cost);
+  $("n-graph").textContent=s.agents.length||"";
 
   const h=heroState(s);
   $("hero").dataset.s=h.s; $("hero-state").textContent=h.t;
@@ -483,8 +556,8 @@ function render(s){
   // un panel vacío parece un panel roto. Lo llenamos con lo último que dijo cada
   // agente vivo (marcado como "antes de que abrieras el panel", no como si
   // acabara de llegar).
-  if(!$("stream").dataset.seeded){
-    $("stream").dataset.seeded="1";
+  if($("stream").dataset.seeded!==SEL){
+    $("stream").dataset.seeded=SEL;
     const withText=act.filter(a=>a.last_text);
     if(withText.length){
       $("stream").innerHTML=withText.map(a=>`<div class="msg">
@@ -595,7 +668,7 @@ function push(t){
   const es=new EventSource("/api/stream");
   es.addEventListener("snapshot",e=>{ $("dot").className="d on"; $("conn").textContent="en vivo";
     try{ render(JSON.parse(e.data)); }catch(err){ console.error(err); } });
-  es.addEventListener("text",e=>push(JSON.parse(e.data)));
+  es.addEventListener("text",e=>{const t=JSON.parse(e.data); if(!SEL||t.session===SEL) push(t);});
   es.onerror=()=>{ $("dot").className="d"; $("conn").textContent="reconectando…"; };
 })();
 </script>

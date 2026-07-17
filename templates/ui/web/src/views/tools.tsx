@@ -95,7 +95,7 @@ export function Tools({ s }: { s: Snapshot }) {
       </Lede>
       {mcp.length ? (
         <>
-          <Button onClick={probar} disabled={busy} className="mb-3">{busy ? "sondeando…" : "Probar todos ahora"}</Button>
+          {s.op !== false && <Button onClick={probar} disabled={busy} className="mb-3">{busy ? "sondeando…" : "Probar todos ahora"}</Button>}
           <div className="grid gap-2.5">{mcp.map((m) => <McpCard key={m.name} m={m} />)}</div>
         </>
       ) : (

@@ -6,165 +6,196 @@
 <title>harness · panel</title>
 <style>
   :root{
-    --bg:#0d1117; --panel:#161b22; --line:#30363d; --line2:#21262d;
-    --fg:#e6edf3; --dim:#8b949e; --faint:#6e7681;
-    --script:#10b981; --agent:#60a5fa; --dec:#f59e0b; --gate:#ef4444;
-    --human:#c084fc; --ok:#3fb950;
+    --bg:#0b0e14; --panel:#131720; --panel2:#171c26; --line:#242b38; --line2:#1c222d;
+    --fg:#e6edf3; --dim:#9aa4b2; --faint:#68717f;
+    --live:#3fb950; --agent:#58a6ff; --warn:#f59e0b; --gate:#ef4444; --human:#c084fc;
     --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
   }
   *{box-sizing:border-box;margin:0;padding:0}
-  body{background:var(--bg);color:var(--fg);font-family:var(--mono);font-size:13px;line-height:1.5}
-  a{color:var(--agent)}
-  header{display:flex;align-items:center;gap:16px;padding:10px 16px;border-bottom:1px solid var(--line);
-    background:var(--panel);position:sticky;top:0;z-index:10;flex-wrap:wrap}
-  .brand{font-weight:700;letter-spacing:.5px}
-  .brand small{color:var(--faint);font-weight:400;margin-left:6px}
+  body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:13px;line-height:1.5;
+    -webkit-font-smoothing:antialiased}
+  .num{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+  header{display:flex;align-items:center;gap:14px;padding:9px 18px;border-bottom:1px solid var(--line);
+    background:var(--panel);position:sticky;top:0;z-index:20}
+  .brand{font-weight:700;font-size:14px;letter-spacing:-.2px}
+  .brand span{color:var(--faint);font-weight:400;margin-left:7px;font-size:12px}
   .live{display:flex;align-items:center;gap:6px;color:var(--faint);font-size:11px}
-  .dot{width:7px;height:7px;border-radius:50%;background:var(--faint)}
-  .dot.on{background:var(--ok);box-shadow:0 0 0 3px rgba(63,185,80,.15);animation:pulse 2s infinite}
-  @keyframes pulse{50%{opacity:.45}}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--faint);flex:none}
+  .dot.on{background:var(--live);box-shadow:0 0 0 3px rgba(63,185,80,.16);animation:pulse 2.4s infinite}
+  @keyframes pulse{50%{opacity:.4}}
   .spacer{flex:1}
-  .stat{color:var(--dim);font-size:11px}
-  .stat b{color:var(--fg);font-weight:600;font-size:13px}
-  nav{display:flex;gap:2px;padding:0 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+  .kpi{text-align:right;padding-left:18px;border-left:1px solid var(--line2)}
+  .kpi b{display:block;font-size:15px;font-weight:600;font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .kpi i{font-style:normal;font-size:10px;color:var(--faint);text-transform:uppercase;letter-spacing:.6px}
+
+  nav{display:flex;gap:4px;padding:0 18px;border-bottom:1px solid var(--line);background:var(--panel);
+    position:sticky;top:43px;z-index:19}
   nav button{background:none;border:none;border-bottom:2px solid transparent;color:var(--dim);
-    font-family:inherit;font-size:12px;padding:9px 14px;cursor:pointer}
+    font:inherit;font-size:12.5px;padding:9px 12px;cursor:pointer}
   nav button:hover{color:var(--fg)}
   nav button[aria-selected="true"]{color:var(--fg);border-bottom-color:var(--agent)}
-  main{padding:16px;max-width:1500px;margin:0 auto}
+  nav button b{font-family:var(--mono);font-size:10px;color:var(--faint);margin-left:5px}
+
+  main{padding:18px;max-width:1280px;margin:0 auto}
   .tab{display:none}.tab.on{display:block}
-  .warn{background:#3f1d1d;border:1px solid var(--gate);color:#fecaca;padding:9px 12px;
-    border-radius:6px;margin-bottom:14px;font-size:12px}
-  h2{font-size:11px;text-transform:uppercase;letter-spacing:1.2px;color:var(--faint);
-    margin:0 0 10px;font-weight:600}
-  h2 span{text-transform:none;letter-spacing:0;color:var(--faint);font-weight:400}
-  section{margin-bottom:26px}
-  .empty{color:var(--faint);padding:16px;border:1px dashed var(--line);border-radius:6px;font-size:12px}
+  section{margin-bottom:22px}
+  h2{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--faint);font-weight:600;
+    margin-bottom:9px;display:flex;align-items:baseline;gap:8px}
+  h2 em{font-style:normal;text-transform:none;letter-spacing:0;color:var(--faint);font-weight:400;font-size:11.5px}
+  .warn{background:#3a1d1d;border:1px solid #7f2d2d;color:#fca5a5;padding:9px 12px;border-radius:7px;
+    margin-bottom:14px;font-size:12px}
+  .empty{color:var(--faint);padding:14px;border:1px dashed var(--line);border-radius:7px;font-size:12px}
+  code{font-family:var(--mono);font-size:11px;background:var(--panel2);padding:1px 4px;border-radius:3px;color:var(--dim)}
 
   /* pipeline */
-  .pipe{display:flex;gap:6px;flex-wrap:wrap}
-  .ph{flex:1;min-width:96px;border:1px solid var(--line);border-radius:6px;padding:8px 10px;background:var(--panel)}
-  .ph b{display:block;font-size:12px}
-  .ph i{font-style:normal;font-size:10px;color:var(--faint)}
-  .ph.done{border-color:var(--script);background:#0b3d2e}
-  .ph.done i{color:#6ee7b7}
-  .ph.now{border-color:var(--dec);background:#4a3410;box-shadow:0 0 0 1px var(--dec)}
-  .ph.now i{color:#fcd34d}
+  .pipe{display:flex;gap:4px}
+  .ph{flex:1;border:1px solid var(--line);border-radius:5px;padding:6px 9px;background:var(--panel);min-width:0}
+  .ph b{display:block;font-size:11.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ph i{font-style:normal;font-size:9.5px;color:var(--faint)}
+  .ph.done{border-color:#1a6e4b;background:#0d2a20}.ph.done i{color:#6ee7b7}
+  .ph.now{border-color:var(--warn);background:#3a2a0c}.ph.now i{color:#fcd34d}
 
-  /* cards */
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:10px}
-  .card{border:1px solid var(--line);border-radius:8px;background:var(--panel);padding:11px 12px}
-  .card.act{border-color:var(--agent);box-shadow:0 0 0 1px rgba(96,165,250,.25)}
-  .card h3{font-size:13px;display:flex;align-items:center;gap:7px;margin-bottom:3px}
-  .tag{font-size:9px;padding:1px 6px;border-radius:99px;border:1px solid var(--line);color:var(--dim);
-    text-transform:uppercase;letter-spacing:.5px}
-  .tag.act{border-color:var(--ok);color:var(--ok)}
-  .tag.prompt{border-color:var(--human);color:var(--human)}
-  .meta{color:var(--faint);font-size:11px;margin-bottom:7px}
-  .text{background:var(--bg);border:1px solid var(--line2);border-radius:5px;padding:7px 8px;
-    font-size:11px;color:var(--dim);max-height:96px;overflow:auto;white-space:pre-wrap;word-break:break-word}
-  .bar{height:3px;background:var(--line2);border-radius:2px;overflow:hidden;margin-top:8px}
-  .bar span{display:block;height:100%;background:var(--agent)}
+  /* hero cards (solo activos) */
+  .heroes{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:10px}
+  .hero{border:1px solid var(--agent);border-radius:8px;background:var(--panel);padding:12px 13px;
+    box-shadow:0 0 0 1px rgba(88,166,255,.14)}
+  .hero .top{display:flex;align-items:center;gap:8px;margin-bottom:2px}
+  .hero h3{font-size:13.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+  .pill{font-size:9px;padding:2px 7px;border-radius:99px;border:1px solid var(--live);color:var(--live);
+    text-transform:uppercase;letter-spacing:.5px;font-weight:600;flex:none;display:flex;align-items:center;gap:4px}
+  .pill .dot{width:5px;height:5px;box-shadow:none}
+  .sub{color:var(--faint);font-size:11px;margin-bottom:9px;font-family:var(--mono)}
+  .say{background:var(--bg);border:1px solid var(--line2);border-radius:5px;padding:8px 9px;font-size:11.5px;
+    color:var(--dim);line-height:1.55;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;
+    overflow:hidden}
+  .stats{display:flex;gap:14px;margin-top:9px}
+  .stats div{flex:1}
+  .stats b{display:block;font-size:13px;font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .stats i{font-style:normal;font-size:9.5px;color:var(--faint);text-transform:uppercase;letter-spacing:.5px}
+
+  /* tabla densa */
+  table{width:100%;border-collapse:collapse;font-size:12px}
+  th{text-align:left;color:var(--faint);font-weight:600;font-size:9.5px;text-transform:uppercase;
+    letter-spacing:.7px;padding:5px 9px;border-bottom:1px solid var(--line);white-space:nowrap}
+  td{padding:5px 9px;border-bottom:1px solid var(--line2);white-space:nowrap}
+  td.who{white-space:normal;max-width:340px}
+  tbody tr:hover td{background:var(--panel)}
+  .r{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .muted{color:var(--faint)}
+  .who b{font-weight:500}
+  .who i{font-style:normal;color:var(--faint);font-size:10.5px;font-family:var(--mono);margin-left:6px}
+  .mini{height:4px;border-radius:2px;background:var(--agent);min-width:2px;opacity:.75}
+  details summary{cursor:pointer;color:var(--dim);font-size:11.5px;padding:5px 0;list-style:none}
+  details summary::-webkit-details-marker{display:none}
+  details summary:before{content:"▸ ";color:var(--faint)}
+  details[open] summary:before{content:"▾ "}
 
   /* stream */
-  #stream{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px;
-    height:280px;overflow:auto}
-  .msg{border-left:2px solid var(--agent);padding:2px 0 2px 9px;margin-bottom:9px;
-    white-space:pre-wrap;word-break:break-word;font-size:11.5px;color:var(--dim);
-    animation:in .25s ease}
-  @keyframes in{from{opacity:0;transform:translateY(3px)}}
-  .msg b{color:var(--agent);font-weight:600;display:block;font-size:10px;margin-bottom:2px}
-  .msg time{color:var(--faint);font-weight:400}
+  #stream{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:4px 0;
+    max-height:250px;overflow:auto}
+  .msg{padding:7px 12px;border-bottom:1px solid var(--line2);font-size:11.5px;color:var(--dim);
+    line-height:1.55;animation:in .3s ease}
+  .msg:last-child{border-bottom:none}
+  @keyframes in{from{opacity:0;transform:translateY(4px)}}
+  .msg .h{display:flex;gap:8px;align-items:baseline;margin-bottom:2px}
+  .msg .h b{color:var(--agent);font-size:10.5px;font-weight:600}
+  .msg .h time{color:var(--faint);font-size:10px;font-family:var(--mono)}
+  .msg p{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 
-  /* table */
-  table{width:100%;border-collapse:collapse;font-size:12px}
-  th{text-align:left;color:var(--faint);font-weight:600;font-size:10px;text-transform:uppercase;
-    letter-spacing:.6px;padding:6px 8px;border-bottom:1px solid var(--line)}
-  td{padding:6px 8px;border-bottom:1px solid var(--line2)}
-  tr:hover td{background:var(--panel)}
-  .num{text-align:right;font-variant-numeric:tabular-nums}
-  .mini{height:5px;background:var(--line2);border-radius:2px;min-width:2px}
-
-  /* events */
-  .ev{display:flex;gap:9px;padding:3px 0;border-bottom:1px solid var(--line2);font-size:11px}
-  .ev time{color:var(--faint);white-space:nowrap}
-  .ev .k{color:var(--dec);min-width:76px}
-  .ev .s{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
-
-  .note{color:var(--faint);font-size:11px;margin-top:8px;line-height:1.6}
+  /* grafo */
+  .tree{border:1px solid var(--line);border-radius:8px;background:var(--panel);overflow:hidden}
+  .root{display:flex;align-items:center;gap:9px;padding:10px 13px;background:#16233d;
+    border-bottom:1px solid var(--line)}
+  .root b{font-size:13px}
+  .kid{display:flex;align-items:center;gap:9px;padding:6px 13px 6px 30px;border-bottom:1px solid var(--line2);
+    position:relative;font-size:12px}
+  .kid:last-child{border-bottom:none}
+  .kid:before{content:"";position:absolute;left:16px;top:0;bottom:0;border-left:1px solid var(--line)}
+  .kid:after{content:"";position:absolute;left:16px;top:50%;width:9px;border-top:1px solid var(--line)}
+  .kid:last-child:before{bottom:50%}
+  .kid .nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .kid .nm i{font-style:normal;color:var(--faint);font-size:10.5px;font-family:var(--mono);margin-left:7px}
+  .st{width:7px;height:7px;border-radius:50%;background:var(--faint);flex:none}
+  .st.on{background:var(--live);box-shadow:0 0 0 3px rgba(63,185,80,.16)}
+  .note{color:var(--faint);font-size:11px;margin-top:9px;line-height:1.65}
   .note b{color:var(--dim);font-weight:600}
-  svg text{font-family:var(--mono)}
+
+  /* eventos */
+  .ev{display:flex;gap:10px;padding:4px 9px;border-bottom:1px solid var(--line2);font-size:11.5px;
+    align-items:baseline}
+  .ev time{color:var(--faint);font-family:var(--mono);font-size:10.5px;flex:none}
+  .ev .k{color:var(--warn);font-family:var(--mono);font-size:10.5px;width:78px;flex:none}
+  .ev .s{color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;font-family:var(--mono)}
 </style>
 </head>
 <body>
 <header>
-  <div class="brand">🔭 harness <small id="ws"></small></div>
+  <div class="brand">🔭 harness<span id="ws"></span></div>
   <div class="live"><span class="dot" id="dot"></span><span id="conn">conectando…</span></div>
   <div class="spacer"></div>
-  <div class="stat">agentes activos <b id="s-act">0</b></div>
-  <div class="stat">tokens out <b id="s-out">0</b></div>
-  <div class="stat">costo est. <b id="s-cost">$0</b></div>
+  <div class="kpi"><b id="k-act">0</b><i>activos</i></div>
+  <div class="kpi"><b id="k-out">0</b><i>tokens out</i></div>
+  <div class="kpi"><b id="k-cost">$0</b><i>costo est.</i></div>
 </header>
 
 <nav id="nav">
   <button aria-selected="true" data-tab="now">Ahora</button>
-  <button data-tab="graph">Grafo</button>
-  <button data-tab="tokens">Tokens</button>
-  <button data-tab="events">Eventos</button>
+  <button data-tab="graph">Grafo<b id="n-graph"></b></button>
+  <button data-tab="tokens">Tokens<b id="n-tok"></b></button>
+  <button data-tab="events">Eventos<b id="n-ev"></b></button>
 </nav>
 
 <main>
   <div id="warn"></div>
 
   <div class="tab on" id="t-now">
-    <section>
-      <h2>Pipeline <span id="pipe-task"></span></h2>
+    <section id="s-pipe">
+      <h2>Pipeline <em id="pipe-task"></em></h2>
       <div class="pipe" id="pipe"></div>
     </section>
+
     <section>
-      <h2>Agentes en paralelo <span>— una tarjeta por agente vivo</span></h2>
-      <div class="grid" id="agents"></div>
+      <h2>Trabajando ahora <em id="act-sub"></em></h2>
+      <div class="heroes" id="heroes"></div>
     </section>
-    <section>
-      <h2>Streaming <span>— llega por TURNO, no token a token (ver nota)</span></h2>
+
+    <section id="s-stream">
+      <h2>Streaming <em>llega por turno — el transcript se escribe al cerrar cada mensaje</em></h2>
       <div id="stream"></div>
-      <p class="note"><b>Por qué por turno:</b> Claude Code escribe cada mensaje en su
-      transcript al CERRARLO, así que esto es lo más en vivo que existe sin mentir.
-      Un typewriter falso aquí sería teatro — y esta UI existe para observar, no para actuar.</p>
     </section>
-    <section>
-      <h2>Tareas <span>— y los supuestos que /auto tomó por ti</span></h2>
-      <div class="grid" id="tasks"></div>
-    </section>
+
+    <section id="s-done"></section>
+    <section id="s-tasks"></section>
   </div>
 
   <div class="tab" id="t-graph">
     <section>
-      <h2>Quién lanzó a quién <span>— del meta.json real de cada subagente</span></h2>
+      <h2>Quién lanzó a quién <em>del meta.json real de cada subagente</em></h2>
       <div id="graph"></div>
-      <p class="note">Verde = activo. El grafo sale de <b>spawnDepth</b> y <b>toolUseId</b>,
-      que Claude Code escribe en <b>subagents/agent-&lt;id&gt;.meta.json</b>. No se infiere nada.</p>
+      <p class="note">Sale de <b>spawnDepth</b> y <b>toolUseId</b>, que Claude Code escribe en
+        <b>subagents/agent-&lt;id&gt;.meta.json</b>. No se infiere nada.</p>
     </section>
   </div>
 
   <div class="tab" id="t-tokens">
     <section>
-      <h2>Consumo por agente</h2>
+      <h2>Consumo por agente <em>ordenado por costo</em></h2>
       <table><thead><tr>
-        <th>Agente</th><th>Modelo</th><th class="num">in</th><th class="num">out</th>
-        <th class="num">caché r/w</th><th class="num">$ est.</th><th style="width:120px"></th>
-      </tr></thead><tbody id="tok"></tbody></table>
-      <p class="note"><b>El costo es un ESTIMADO</b> con la tabla de
-      <b>scripts/ui/pricing.json</b> (edítala si cambian los precios; se relee sola).
-      La báscula oficial sigue siendo <b>ccusage</b> — esto es para ver la tendencia
-      sin salir del panel. La caché se lee a ~0.1× y se escribe a 1.25×: por eso un
-      número alto en <b>caché r</b> es una buena noticia, no una mala.</p>
+        <th>Agente</th><th>Modelo</th><th class="r">in</th><th class="r">out</th>
+        <th class="r">caché lee</th><th class="r">caché escribe</th><th class="r">$ est.</th><th style="width:90px"></th>
+      </tr></thead><tbody id="tok"></tbody>
+      <tfoot id="tokfoot"></tfoot></table>
+      <p class="note"><b>El costo es un ESTIMADO</b> de <b>scripts/ui/pricing.json</b> (editable, se relee sola).
+        La báscula oficial es <b>ccusage</b>. La caché se lee a ~0.1× y se escribe a 1.25×: un número
+        grande en <b>caché lee</b> es buena noticia — sin ella pagarías 10× por esos tokens.</p>
     </section>
   </div>
 
   <div class="tab" id="t-events">
     <section>
-      <h2>Bus del harness <span>— .harness/events.jsonl (esto es NUESTRO, no de Claude Code)</span></h2>
+      <h2>Bus del harness <em>.harness/events.jsonl — esto es NUESTRO, no de Claude Code</em></h2>
       <div id="events"></div>
     </section>
   </div>
@@ -175,9 +206,17 @@ const PHASES=[["intake","Intake"],["rfc","RFC"],["implement","Implement"],["revi
               ["ship","Ship"],["deploy","Deploy"],["archive","Archive"]];
 const $=id=>document.getElementById(id);
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-const n=x=>(x||0).toLocaleString("es");
+
+// Números COMPACTOS. En es-ES "146.122" es ambiguo junto a "$33.118": ¿miles o
+// decimales? 146K y $33.12 no se confunden nunca. La legibilidad gana.
+const nf=new Intl.NumberFormat("en",{notation:"compact",maximumFractionDigits:1});
+const n=x=>nf.format(x||0);
+const usd=x=>"$"+(x||0).toFixed(2);
 const hhmm=ts=>new Date(ts*1000).toLocaleTimeString("es",{hour12:false});
-const dur=s=>s<60?s+"s":s<3600?Math.floor(s/60)+"m "+(s%60)+"s":Math.floor(s/3600)+"h "+Math.floor(s%3600/60)+"m";
+const dur=s=>s<60?s+"s":s<3600?Math.round(s/60)+"m":(s/3600).toFixed(1)+"h";
+// La identidad de un agente es su DESCRIPCIÓN, no su tipo: 31 tarjetas que
+// dicen "general-purpose" no identifican nada.
+const who=a=>a.id==="main"?"orquestador":(a.desc||a.type||a.id.slice(0,10));
 
 $("nav").onclick=e=>{
   const b=e.target.closest("button"); if(!b) return;
@@ -188,110 +227,124 @@ $("nav").onclick=e=>{
 function render(s){
   $("ws").textContent=s.workspace.split("/").pop();
   $("warn").innerHTML=s.warning?`<div class="warn">⚠️ ${esc(s.warning)}</div>`:"";
-  const act=s.agents.filter(a=>a.active);
-  $("s-act").textContent=act.length;
-  $("s-out").textContent=n(s.tokens.out);
-  $("s-cost").textContent="$"+(s.cost||0).toFixed(2);
+  const act=s.agents.filter(a=>a.active), done=s.agents.filter(a=>!a.active);
+  $("k-act").textContent=act.length;
+  $("k-out").textContent=n(s.tokens.out);
+  $("k-cost").textContent=usd(s.cost);
+  $("n-graph").textContent=s.agents.length||"";
+  $("n-tok").textContent=s.agents.length||"";
+  $("n-ev").textContent=s.events.length||"";
 
-  // pipeline (tarea más reciente)
+  // ── pipeline: solo si hay tareas; si no, estorba
   const t=s.tasks[0];
-  $("pipe-task").textContent=t?`— ${t.id}: ${t.title}`:"— sin tareas todavía";
-  $("pipe").innerHTML=PHASES.map(([id,label])=>{
-    const done=t&&t.done.includes(id), now=t&&t.phase===id;
-    return `<div class="ph ${done&&!now?"done":""} ${now?"now":""}">
-      <b>${label}</b><i>${now?"aquí":done?"✓ hecho":"pendiente"}</i></div>`;
-  }).join("");
+  if(t){
+    $("s-pipe").style.display="";
+    $("pipe-task").textContent=`${t.id} · ${t.title}`;
+    $("pipe").innerHTML=PHASES.map(([id,label])=>{
+      const done=t.done.includes(id), now=t.phase===id;
+      return `<div class="ph ${done&&!now?"done":""} ${now?"now":""}">
+        <b>${label}</b><i>${now?"aquí":done?"✓":"—"}</i></div>`;
+    }).join("");
+  } else $("s-pipe").style.display="none";
 
-  // agentes
-  $("agents").innerHTML=s.agents.length?s.agents.map(a=>{
-    const pct=Math.min(100,(a.usage.out/2000)*100);
-    return `<div class="card ${a.active?"act":""}">
-      <h3>${esc(a.id==="main"?"orquestador":a.type)}
-        <span class="tag ${a.active?"act":""}">${a.active?"activo":"inactivo "+dur(a.idle)}</span></h3>
-      <div class="meta">${esc(a.desc||a.id)}<br>${esc(a.model||"?")} ·
-        ${n(a.usage.out)} out · ${a.msgs} turnos · ${dur(a.elapsed)} · $${a.cost.toFixed(3)}</div>
-      <div class="text">${esc(a.last_text||"(sin texto todavía)")}</div>
-      <div class="bar"><span style="width:${pct}%"></span></div></div>`;
-  }).join(""):`<div class="empty">Ningún agente ha escrito todavía. Corre <b>/auto</b> en una sesión de Claude Code en este workspace.</div>`;
+  // ── activos: tarjetas grandes. Es lo único que pasa AHORA.
+  $("act-sub").textContent=act.length?`${act.length} de ${s.agents.length} agentes`:"";
+  $("heroes").innerHTML=act.length?act.map(a=>`
+    <div class="hero">
+      <div class="top"><h3>${esc(who(a))}</h3>
+        <span class="pill"><span class="dot on"></span>activo</span></div>
+      <div class="sub">${esc(a.model||"?")}${a.id!=="main"?" · "+esc(a.type):""}</div>
+      <div class="say">${esc(a.last_text||"(sin texto todavía)")}</div>
+      <div class="stats">
+        <div><b>${n(a.usage.out)}</b><i>out</i></div>
+        <div><b>${a.msgs}</b><i>turnos</i></div>
+        <div><b>${dur(a.elapsed)}</b><i>activo</i></div>
+        <div><b>${usd(a.cost)}</b><i>est.</i></div>
+      </div>
+    </div>`).join(""):
+    `<div class="empty">Nadie trabajando ahora. Cuando corras <code>/auto</code> o un agente arranque, aparece aquí.</div>`;
 
-  // tareas
-  $("tasks").innerHTML=s.tasks.length?s.tasks.map(t=>`
-    <div class="card"><h3>${esc(t.id)}
-      <span class="tag ${t.origin==="prompt"?"prompt":""}">${t.origin}</span></h3>
-      <div class="meta">${esc(t.title)}<br>fase: <b>${t.phase}</b> ·
-        veredictos ${t.verdicts.pass}/${t.verdicts.total}</div>
-      ${t.assumptions.length?`<div class="text"><b style="color:var(--human)">ledger (${t.assumptions.length})</b>
-        ${t.assumptions.map(a=>"\n· "+esc(a)).join("")}</div>`:
-        `<div class="text" style="color:var(--faint)">sin assumptions.md — o es tarea de ticket, o /auto no tuvo que asumir nada</div>`}
-    </div>`).join(""):`<div class="empty">Sin tareas en <b>tasks/</b>.</div>`;
+  // ── terminados: tabla densa y plegada. 31 tarjetas muertas eran ruido.
+  $("s-done").innerHTML=done.length?`
+    <details ${done.length<=6?"open":""}>
+      <summary>${done.length} agentes terminados · ${n(done.reduce((x,a)=>x+a.usage.out,0))} tokens out · ${usd(done.reduce((x,a)=>x+a.cost,0))}</summary>
+      <table><thead><tr><th>Agente</th><th class="r">out</th><th class="r">turnos</th>
+        <th class="r">duró</th><th class="r">hace</th><th class="r">$ est.</th></tr></thead>
+      <tbody>${done.map(a=>`<tr>
+        <td class="who"><b>${esc(who(a))}</b><i>${esc(a.model||"?")}</i></td>
+        <td class="r">${n(a.usage.out)}</td><td class="r muted">${a.msgs}</td>
+        <td class="r muted">${dur(a.elapsed)}</td><td class="r muted">${dur(a.idle)}</td>
+        <td class="r">${usd(a.cost)}</td></tr>`).join("")}</tbody></table>
+    </details>`:"";
 
-  // grafo
-  $("graph").innerHTML=svgGraph(s.agents);
+  // ── tareas
+  $("s-tasks").innerHTML=s.tasks.length?`<h2>Tareas <em>y los supuestos que /auto tomó por ti</em></h2>
+    ${s.tasks.map(t=>`<div class="hero" style="border-color:var(--line);box-shadow:none;margin-bottom:8px">
+      <div class="top"><h3>${esc(t.id)} · ${esc(t.title)}</h3>
+        <span class="pill" style="border-color:${t.origin==="prompt"?"var(--human)":"var(--line)"};color:${t.origin==="prompt"?"var(--human)":"var(--faint)"}">${t.origin}</span></div>
+      <div class="sub">fase ${esc(t.phase)} · veredictos ${t.verdicts.pass}/${t.verdicts.total}</div>
+      ${t.assumptions.length?`<div class="say" style="-webkit-line-clamp:8">${t.assumptions.map(a=>"· "+esc(a)).join("<br>")}</div>`:
+        `<div class="say muted">sin assumptions.md — o vino de un ticket, o /auto no tuvo que asumir nada</div>`}
+    </div>`).join("")}`:"";
 
-  // tokens
-  const max=Math.max(1,...s.agents.map(a=>a.usage.out));
-  $("tok").innerHTML=s.agents.map(a=>`<tr>
-    <td>${esc(a.id==="main"?"orquestador":a.type)}</td>
-    <td style="color:var(--faint)">${esc(a.model||"?")}</td>
-    <td class="num">${n(a.usage.in)}</td><td class="num">${n(a.usage.out)}</td>
-    <td class="num" style="color:var(--faint)">${n(a.usage.cache_read)}/${n(a.usage.cache_creation)}</td>
-    <td class="num">$${a.cost.toFixed(3)}</td>
-    <td><div class="mini" style="width:${(a.usage.out/max*100)}%;background:var(--agent)"></div></td>
-  </tr>`).join("")||`<tr><td colspan="7" style="color:var(--faint)">sin datos</td></tr>`;
+  // ── grafo: VERTICAL. 31 cajitas en fila eran ilegibles.
+  const main=s.agents.find(a=>a.id==="main"), kids=s.agents.filter(a=>a.id!=="main");
+  $("graph").innerHTML=s.agents.length?`<div class="tree">
+    <div class="root"><span class="st ${main&&main.active?"on":""}"></span>
+      <b>orquestador</b><span class="muted" style="font-family:var(--mono);font-size:11px">${esc(main?main.model:"")}</span>
+      <span class="spacer"></span><span class="muted num" style="font-size:11px">${main?n(main.usage.out)+" out":""}</span></div>
+    ${kids.map(a=>`<div class="kid">
+      <span class="st ${a.active?"on":""}"></span>
+      <span class="nm">${esc(who(a))}<i>${esc(a.type)}${a.depth?" · profundidad "+a.depth:""}</i></span>
+      <span class="muted num" style="font-size:11px">${n(a.usage.out)} out</span>
+      <span class="muted num" style="font-size:11px;width:62px;text-align:right">${usd(a.cost)}</span>
+      <span class="muted" style="font-size:10.5px;width:74px;text-align:right">${a.active?"● activo":"hace "+dur(a.idle)}</span>
+    </div>`).join("")}</div>`:`<div class="empty">Sin agentes que graficar.</div>`;
 
-  // eventos
+  // ── tokens, por costo
+  const rows=[...s.agents].sort((x,y)=>y.cost-x.cost);
+  const max=Math.max(1,...rows.map(a=>a.cost));
+  $("tok").innerHTML=rows.map(a=>`<tr>
+    <td class="who"><b>${esc(who(a))}</b></td>
+    <td class="muted" style="font-family:var(--mono);font-size:11px">${esc(a.model||"?")}</td>
+    <td class="r">${n(a.usage.in)}</td><td class="r">${n(a.usage.out)}</td>
+    <td class="r muted">${n(a.usage.cache_read)}</td><td class="r muted">${n(a.usage.cache_creation)}</td>
+    <td class="r">${usd(a.cost)}</td>
+    <td><div class="mini" style="width:${Math.max(2,a.cost/max*100)}%"></div></td>
+  </tr>`).join("")||`<tr><td colspan="8" class="muted">sin datos</td></tr>`;
+  $("tokfoot").innerHTML=rows.length?`<tr style="border-top:2px solid var(--line)">
+    <td colspan="2" class="muted" style="font-size:11px">TOTAL · ${rows.length} agentes</td>
+    <td class="r">${n(s.tokens.in)}</td><td class="r">${n(s.tokens.out)}</td>
+    <td class="r muted">${n(s.tokens.cache_read)}</td><td class="r muted">${n(s.tokens.cache_creation)}</td>
+    <td class="r"><b>${usd(s.cost)}</b></td><td></td></tr>`:"";
+
+  // ── eventos
   $("events").innerHTML=s.events.length?s.events.slice().reverse().map(e=>`<div class="ev">
     <time>${esc((e.ts||"").slice(11,19))}</time><span class="k">${esc(e.kind||"")}</span>
-    <span class="s">${esc(e.tool?e.tool+": ":"")}${esc(e.summary||"")}</span></div>`).join(""):
-    `<div class="empty">El bus está vacío. Se llena cuando el hook <b>ui-emit.sh</b> está registrado
-     en <b>.claude/settings.json</b> y corre una sesión. Corre <b>make doctor</b> si dudas.</div>`;
-}
-
-function svgGraph(agents){
-  if(!agents.length) return `<div class="empty">Sin agentes que graficar.</div>`;
-  const main=agents.find(a=>a.id==="main"), subs=agents.filter(a=>a.id!=="main");
-  const W=Math.max(560,120+subs.length*160), rowY=170, cx=W/2;
-  let s=`<svg viewBox="0 0 ${W} ${subs.length?260:110}" style="width:100%;height:auto">`;
-  if(main){
-    s+=`<rect x="${cx-90}" y="20" width="180" height="46" rx="8" fill="#1e2a5a"
-      stroke="${main.active?"#3fb950":"#60a5fa"}" stroke-width="2"/>
-      <text x="${cx}" y="40" fill="#dbeafe" font-size="12" text-anchor="middle">orquestador</text>
-      <text x="${cx}" y="56" fill="#8b949e" font-size="10" text-anchor="middle">${esc(main.model||"")}</text>`;
-  }
-  subs.forEach((a,i)=>{
-    const x=80+i*160+ (subs.length===1?W/2-160:0);
-    s+=`<path d="M${cx} 66 C ${cx} 120, ${x+50} 110, ${x+50} ${rowY-24}" fill="none"
-        stroke="${a.active?"#3fb950":"#30363d"}" stroke-width="1.5"/>
-      <rect x="${x}" y="${rowY-24}" width="100" height="60" rx="8" fill="#161b22"
-        stroke="${a.active?"#3fb950":"#30363d"}" stroke-width="2"/>
-      <text x="${x+50}" y="${rowY-6}" fill="#e6edf3" font-size="10" text-anchor="middle">${esc((a.type||"?").slice(0,14))}</text>
-      <text x="${x+50}" y="${rowY+8}" fill="#8b949e" font-size="9" text-anchor="middle">${n(a.usage.out)} out</text>
-      <text x="${x+50}" y="${rowY+22}" fill="${a.active?"#3fb950":"#6e7681"}" font-size="9" text-anchor="middle">${a.active?"● activo":"○ "+dur(a.idle)}</text>`;
-  });
-  return s+"</svg>";
+    <span class="s">${esc(e.tool?e.tool+" — ":"")}${esc(e.summary||"")}</span></div>`).join(""):
+    `<div class="empty">El bus está vacío. Se llena cuando <code>ui-emit.sh</code> está registrado en
+      <code>.claude/settings.json</code> y corre una sesión. Si este es el repo del instalador y no
+      una instancia, está vacío <b>a propósito</b>: aquí no hay harness que observar.</div>`;
 }
 
 function push(t){
-  const box=$("stream"), near=box.scrollTop+box.clientHeight>=box.scrollHeight-40;
+  const box=$("stream"), near=box.scrollTop+box.clientHeight>=box.scrollHeight-50;
   const d=document.createElement("div");
   d.className="msg";
-  d.innerHTML=`<b>${esc(t.agent==="main"?"orquestador":t.agent.slice(0,12))} <time>${hhmm(t.ts)}</time></b>${esc(t.text)}`;
+  d.innerHTML=`<div class="h"><b>${esc(t.who||t.agent.slice(0,12))}</b><time>${hhmm(t.ts)}</time></div><p>${esc(t.text)}</p>`;
   box.appendChild(d);
-  while(box.children.length>60) box.removeChild(box.firstChild);
+  while(box.children.length>40) box.removeChild(box.firstChild);
   if(near) box.scrollTop=box.scrollHeight;
 }
 
-let es;
 function connect(){
-  es=new EventSource("/api/stream");
+  const es=new EventSource("/api/stream");
   es.addEventListener("snapshot",e=>{
     $("dot").className="dot on"; $("conn").textContent="en vivo";
-    render(JSON.parse(e.data));
+    try{ render(JSON.parse(e.data)); }catch(err){ console.error(err); }
   });
   es.addEventListener("text",e=>push(JSON.parse(e.data)));
-  es.onerror=()=>{
-    $("dot").className="dot"; $("conn").textContent="reconectando…";
-  };
+  es.onerror=()=>{ $("dot").className="dot"; $("conn").textContent="reconectando…"; };
 }
 connect();
 </script>

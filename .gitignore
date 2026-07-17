@@ -1,2 +1,6 @@
 .DS_Store
 *.log
+.harness/
+tasks/
+worktrees/
+inventory.json

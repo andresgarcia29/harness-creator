@@ -151,6 +151,15 @@ done
 [ -f "$WS/.claude/commands/auto.md" ] && ok "comando /auto presente (pipeline autónomo: ticket o prompt → prod)" \
   || warn "comando /auto faltante — sin él no hay pipeline sin intervención; corre /harness-init . (modo update)"
 
+# 8a-bis · El bus del harness
+if [ -f "$WS/scripts/emit.sh" ]; then
+  ok "scripts/emit.sh presente (el bus: gates, fases, supuestos, paradas)"
+  grep -q "emit.sh" "$WS/scripts/ship.sh" 2>/dev/null \
+    || warn "ship.sh no sourcea emit.sh — los gates no se cuentan y el panel no puede enseñar cuándo el harness frenó a su propio agente"
+else
+  warn "falta scripts/emit.sh — el panel solo verá agentes y tokens (lo que presta Claude Code), nunca tus decisiones ni tus gates; corre /harness-init . (modo update)"
+fi
+
 # 8b · Presupuesto de contexto SIEMPRE inyectado.
 # CLAUDE.md + constitution.md entran en CADA agente, en CADA turno, para siempre.
 # Nadie los borra y cada versión les suma una lección. El límite no es el tamaño

@@ -22,7 +22,18 @@ mkdir -p "$WS/locks" "$WS/tasks/$TASK"
 [ -d "$WT" ] || { echo "❌ no existe el worktree $WT"; echo "   ↳ remediación: scripts/worktree-task.sh $TASK $REPO"; exit 2; }
 [ -d "$BASE/.git" ] || { echo "❌ no existe el clon base $BASE"; exit 2; }
 
-gate() { echo "── gate: $1 ──"; CURRENT_GATE="$1"; }
+# El bus: lo que este gate decide se cuenta. Fail-open — si emit.sh no está,
+# ship.sh funciona igual (el bus es observación, no control).
+# shellcheck source=/dev/null
+[ -f "$WS/scripts/emit.sh" ] && . "$WS/scripts/emit.sh" || emit() { :; }
+
+# Instrumentación en UN solo punto: si estamos empezando un gate, el anterior
+# pasó. El trap sabe cuál falló. Cero riesgo de olvidarse de instrumentar uno.
+gate() {
+  [ -n "${CURRENT_GATE:-}" ] && [ "$CURRENT_GATE" != "preflight" ] \
+    && emit gate "$CURRENT_GATE" true
+  echo "── gate: $1 ──"; CURRENT_GATE="$1"
+}
 
 # El error de un gate es un PROMPT: al fallar cualquier gate, el trap
 # imprime la instrucción de autocorrección (el agente que lee esto
@@ -31,7 +42,13 @@ CURRENT_GATE="preflight"; LOCK_HELD=""
 on_exit() {
   local rc=$?
   [ -n "$LOCK_HELD" ] && rm -rf "$LOCKDIR"
-  [ "$rc" -eq 0 ] && return 0
+  if [ "$rc" -eq 0 ]; then
+    [ -n "${CURRENT_GATE:-}" ] && emit gate "$CURRENT_GATE" true
+    return 0
+  fi
+  # UN GATE QUE BLOQUEA ES LA MEJOR NOTICIA DEL SISTEMA: es la prueba de que el
+  # harness frena a su propio agente. Se cuenta igual de fuerte que un éxito.
+  emit gate "$CURRENT_GATE — BLOQUEÓ el ship de $REPO (exit $rc)" false
   echo ""
   echo "⛔ gate '$CURRENT_GATE' falló (exit $rc)."
   echo "   → Lee el error de arriba. Corrige SOLO eso en el worktree $WT,"
@@ -253,6 +270,7 @@ while [ "$attempt" -lt "$MAX_RETRY" ]; do
   if git push origin HEAD:main; then
     sha="$(git rev-parse --short HEAD)"
     echo "{\"repo\":\"$REPO\",\"sha\":\"$sha\",\"shipped_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" >> "$WS/tasks/$TASK/ship.log"
+    emit ship "$REPO @ $sha — pasó los gates y está en main" true
     echo "✅ shipped $REPO @ $sha"
     echo "→ siguiente: scripts/deploy-watch.sh $TASK $REPO (o /ship se encarga)"
     exit 0

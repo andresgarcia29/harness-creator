@@ -111,6 +111,21 @@ export type RepoGit = {
   pr: { number: number; state: string; url: string } | null; pushed_direct: boolean
 }
 export type TaskGit = { repos: RepoGit[]; read: string[] }
+// herdr (opcional): terminales de agentes en vivo, cross-workspace (/api/herdr)
+export type HerdrPane = {
+  pane_id: string; workspace_id: string; tab_id: string
+  cwd: string; foreground_cwd: string; agent_status: string; focused: boolean
+}
+export type HerdrWorkspace = {
+  workspace_id: string; label: string; number: number
+  agent_status: string; pane_count: number; tab_count: number; focused: boolean
+}
+export type HerdrTab = { tab_id: string; workspace_id: string; label: string; agent_status: string; pane_count: number }
+export type HerdrAgent = { name: string; pane_id: string; workspace_id: string; agent_status: string; cwd: string }
+export type HerdrState = {
+  available: boolean; version: string; reason?: string
+  workspaces: HerdrWorkspace[]; tabs: HerdrTab[]; panes: HerdrPane[]; agents: HerdrAgent[]
+}
 
 export const who = (a: Agent) => (a.id === "main" ? "orquestador" : a.desc || a.type || a.id.slice(0, 10))
 

@@ -6,7 +6,7 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 import { usd, type Snapshot } from "@/lib/harness"
-import { LayoutDashboard, ListTodo, Radio, ChartNoAxesColumn, Plus, Cable, Sun, Moon, Monitor, BookOpen, Blocks } from "lucide-react"
+import { LayoutDashboard, ListTodo, Radio, ChartNoAxesColumn, Plus, Cable, Sun, Moon, Monitor, BookOpen, Blocks, SquareTerminal } from "lucide-react"
 import { useTheme, type Theme } from "@/hooks/use-theme"
 import type { View } from "@/App"
 
@@ -14,6 +14,7 @@ const OBSERVE = [
   { v: "dash", label: "Resumen", icon: LayoutDashboard },
   { v: "tasks", label: "Tareas", icon: ListTodo },
   { v: "sessions", label: "Sesiones", icon: Radio },
+  { v: "terminals", label: "Terminales", icon: SquareTerminal },
   { v: "costs", label: "Gastos", icon: ChartNoAxesColumn },
 ] as const
 const OPERATE = [

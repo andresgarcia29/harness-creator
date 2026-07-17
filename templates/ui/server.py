@@ -308,7 +308,11 @@ class State:
         if rec.get('type') != 'assistant':
             return
         msg = rec.get('message') or {}
-        if msg.get('model'):
+        # OJO: el modelo se estampa SOLO si es real. Los records sintéticos
+        # traen model:"<synthetic>" y, si dejas que pisen el campo, el agente
+        # queda etiquetado <synthetic> y su costo se calcula con la tarifa por
+        # defecto: una etiqueta falsa con un número falso.
+        if msg.get('model') and msg['model'] != '<synthetic>':
             a['model'] = msg['model']
 
         # DEDUPE POR message.id. Una respuesta de la API se escribe en VARIOS
@@ -346,7 +350,11 @@ class State:
             if block.get('type') == 'text' and block.get('text'):
                 t = clip(redact(block['text']))
                 a['last_text'] = t
-                texts.append({'agent': aid, 'text': t, 'ts': time.time()})
+                # 'who' = la descripción, no el id: "a754eafffe4b9f08" no le
+                # dice nada a nadie; "Research agent harnesses" sí.
+                texts.append({'agent': aid, 'text': t, 'ts': time.time(),
+                              'who': ('orquestador' if aid == 'main'
+                                      else (a['desc'] or a['type'] or aid[:10]))})
             elif block.get('type') == 'tool_use':
                 a['tools'].append(block.get('name', '?'))
                 a['tools'] = a['tools'][-40:]

@@ -4,3 +4,4 @@
 tasks/
 worktrees/
 inventory.json
+__pycache__/

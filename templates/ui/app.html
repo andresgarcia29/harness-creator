@@ -189,6 +189,30 @@
   .note b{color:var(--dim);font-weight:600}
   .warnbox{border:1.5px solid var(--fg);border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:12.5px;color:var(--dim)}
 
+  /* formularios (plano de operar) */
+  .fld{margin-bottom:14px;max-width:640px}
+  .fld label{display:block;font:600 10.5px var(--sans);text-transform:uppercase;letter-spacing:.8px;color:var(--dim);margin-bottom:5px}
+  .fld label i{font-style:normal;font-weight:400;text-transform:none;letter-spacing:0;color:var(--faint)}
+  .fld input[type=text],.fld input[type=number],.fld textarea,.fld select{width:100%;background:var(--panel2);
+    border:1px solid var(--line);border-radius:8px;color:var(--fg);font:13px var(--sans);padding:9px 12px;outline:none}
+  .fld input:focus,.fld textarea:focus,.fld select:focus{border-color:var(--dim)}
+  .fld textarea{min-height:96px;resize:vertical;font-family:var(--sans)}
+  .fgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;max-width:640px}
+  .check{display:flex;gap:9px;align-items:flex-start;font-size:12.5px;color:var(--dim);margin-bottom:9px;cursor:pointer;max-width:640px}
+  .check input{margin-top:3px;accent-color:#f5f5f6}
+  .btn{background:var(--fg);color:var(--bg);border-radius:8px;padding:9px 18px;font:600 13px var(--sans);transition:.12s}
+  .btn:hover{transform:translateY(-1px)}
+  .btn[disabled]{opacity:.4;pointer-events:none}
+  .btn.ghost{background:none;color:var(--fg);border:1px solid var(--line)}
+  .btn.ghost:hover{border-color:var(--dim)}
+  .opmsg{font-size:12.5px;color:var(--dim);margin-top:10px;max-width:640px;line-height:1.6}
+  .opmsg.err{border:1.5px solid var(--fg);border-radius:8px;padding:9px 12px}
+  .conncard{border:1px solid var(--line);border-radius:var(--r);background:var(--panel);padding:16px 18px;margin-bottom:12px;max-width:640px}
+  .conncard h3{font-size:14px;font-weight:700;display:flex;align-items:center;gap:9px}
+  .conncard p{color:var(--faint);font-size:12px;margin:3px 0 10px}
+  .conncard .rowline{display:flex;gap:9px;align-items:center}
+  .conncard input{flex:1;background:var(--panel2);border:1px solid var(--line);border-radius:8px;
+    color:var(--fg);font:12.5px var(--mono);padding:8px 11px;outline:none}
   .empty{border:1px dashed var(--line);border-radius:var(--r);padding:22px 24px;background:var(--panel)}
   .empty h4{font-size:14px;font-weight:700;margin-bottom:8px}
   .empty p{color:var(--faint);font-size:12.5px;max-width:76ch;margin-bottom:5px}
@@ -212,14 +236,22 @@
   <button class="nav" data-v="costs">
     <svg width="13" height="13" viewBox="0 0 14 14"><rect y="8" width="3" height="6" rx="1" fill="currentColor" opacity=".45"/><rect x="5.5" y="4" width="3" height="10" rx="1" fill="currentColor" opacity=".7"/><rect x="11" width="3" height="14" rx="1" fill="currentColor"/></svg>
     Gastos<span class="bdg mono" id="b-cost"></span></button>
+  <div class="navsec">Operar</div>
+  <button class="nav" data-v="new">
+    <svg width="13" height="13" viewBox="0 0 14 14"><rect x="6" width="2.4" height="14" rx="1.2" fill="currentColor"/><rect y="5.8" width="14" height="2.4" rx="1.2" fill="currentColor"/></svg>
+    Nueva tarea</button>
+  <button class="nav" data-v="connections">
+    <svg width="13" height="13" viewBox="0 0 14 14"><circle cx="3" cy="3" r="2.2" fill="currentColor"/><circle cx="11" cy="11" r="2.2" fill="currentColor"/><path d="M4.5 4.5 L9.5 9.5" stroke="currentColor" stroke-width="1.6"/></svg>
+    Conexiones<span class="bdg" id="b-conn"></span></button>
   <div class="sfoot">
     <div class="conn"><span class="d" id="dot"></span><span id="conn">conectando…</span></div>
-    <p>Solo observa: no lanza, no aprueba, no edita. Crear tareas y conexiones vendrán con el daemon (revisar ADR-0009 primero).</p>
+    <p>Operar crea trabajo, jamás merges: todo lo que lances desde aquí pasa por los mismos gates. A main solo se llega por <span class="mono">ship.sh</span>.</p>
   </div>
 </aside>
 
 <main id="view"></main>
 
+<script>window.__OP="__OP_TOKEN__";</script>
 <script>
 const PHASES=[["intake","Intake"],["rfc","RFC"],["implement","Implement"],["review","Review"],
               ["ship","Ship"],["deploy","Deploy"],["archive","Archive"]];
@@ -282,7 +314,8 @@ function render(s){
   $("#b-tasks").textContent=s.tasks.length||"";
   $("#b-ses").textContent=s.sessions.length||"";
   $("#b-cost").textContent=s.cost?usd(s.cost):"";
-  const V={dash,tasks,task,sessions,session,costs}[VIEW.name]||dash;
+  $("#b-conn").textContent=Object.values(s.connections||{}).filter(Boolean).length||"";
+  const V={dash,tasks,task,sessions,session,costs,new:nuevaTarea,connections}[VIEW.name]||dash;
   $("#view").innerHTML=V(s);
 }
 
@@ -413,7 +446,11 @@ function task(s){
     ${tevs.length?`<div class="card"><div class="story">${beats(tevs).map(b=>`
       <div class="beat" data-k="${b.k}"><time>${esc((b.ts||"").slice(11,16))}</time>
       <span class="lbl">${esc(b.lbl)}</span><p>${esc(b.p)}</p></div>`).join("")}</div></div>`
-    :`<div class="empty"><p>Sin eventos del bus para esta tarea todavía.</p></div>`}`;
+    :`<div class="empty"><p>Sin eventos del bus para esta tarea todavía.</p></div>`}
+    ${(()=>{ const run=(s.runs||[]).slice().reverse().find(r=>r.task===id&&r.session);
+      if(p&&run) return respondBox(run.session,"El agente te espera — respóndele aquí","Tu decisión o el contexto que le falta…");
+      if(p) return `<p class="note">Esta tarea no se lanzó desde el panel, así que no hay sesión que reanudar desde aquí: responde en su terminal (o pásale contexto desde su sesión en Sesiones).</p>`;
+      return ""; })()}`;
 }
 
 // ── Sesiones ──
@@ -461,7 +498,8 @@ function session(s){
     <h2>Sus agentes</h2>
     <div class="tree">${tree(x)}</div>
     <h2>Lo último que dijeron <span class="sub" style="text-transform:none;letter-spacing:0">llega por turno — cada mensaje se escribe al terminarlo</span></h2>
-    <div id="stream">${seedStream(x)}</div>`;
+    <div id="stream">${seedStream(x)}</div>
+    ${respondBox(x.id,"Pasar contexto al agente","Contexto nuevo, una corrección, una decisión…")}`;
 }
 
 function gantt(A,t0,t1,peak){
@@ -553,6 +591,116 @@ function costs(s){
     <tbody>${Object.entries(prices).map(([m,p])=>`<tr><td class="mono" style="font-size:12px">${esc(m)}</td>
       <td class="r">$${p.input.toFixed(2)}</td><td class="r">$${p.output.toFixed(2)}</td></tr>`).join("")}</tbody></table>
     <p class="note">Un modelo que no esté en la tabla (GLM, Kimi, el que uses) muestra «—» hasta que agregues su precio — y al agregarlo, el histórico se re-cotiza solo. Caché: lectura ~0.1×, escritura 1.25×.</p>`;
+}
+
+// ── el plano de operar ──
+async function op(path, body, btn){
+  if(btn){btn.disabled=true;btn.dataset.t=btn.textContent;btn.textContent="…";}
+  try{
+    const r=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json",
+      "X-Corvux-Token":window.__OP},body:JSON.stringify(body)});
+    return await r.json();
+  }catch(e){ return {ok:false,error:String(e)};
+  }finally{ if(btn){btn.disabled=false;btn.textContent=btn.dataset.t;} }
+}
+
+// ── Nueva tarea (el formulario de la guía) ──
+function nuevaTarea(s){
+  const models=Object.keys(s.prices||{});
+  return `
+    <div class="vhead"><h1>Nueva tarea</h1><span class="sub">se lanza con <code>/auto</code> — pasa por los mismos gates que todo lo demás</span></div>
+    <h2>Qué hay que hacer</h2>
+    <div class="fld"><label>Título</label><input type="text" id="f-title" placeholder="Permitir reagendar bookings desde el widget"></div>
+    <div class="fld"><label>Contexto <i>(opcional, cuanto más mejor)</i></label>
+      <textarea id="f-ctx" placeholder="Qué problema resuelve, criterios de aceptación si los sabes, qué queda fuera de scope…"></textarea></div>
+    <div class="fld"><label>Origen</label>
+      <select id="f-origin" onchange="document.getElementById('f-ticket-w').style.display=this.value==='ticket'?'':'none'">
+        <option value="prompt">Prompt directo — lo escribes aquí y arranca ya</option>
+        <option value="ticket">Ticket — se enlaza a un ticket existente</option>
+      </select></div>
+    <div class="fld" id="f-ticket-w" style="display:none"><label>Ticket</label><input type="text" id="f-ticket" placeholder="COR-123"></div>
+    <h2>Cómo debe trabajar</h2>
+    <div class="fgrid">
+      <div class="fld"><label>Modelo preferido</label><select id="f-model"><option value="">según models.yaml (recomendado)</option>
+        ${models.map(m=>`<option>${esc(m)}</option>`).join("")}</select></div>
+      <div class="fld"><label>Prioridad</label><select id="f-prio"><option>P0</option><option>P1</option><option selected>P2</option><option>P3</option></select></div>
+      <div class="fld"><label>Agentes en paralelo (máx.)</label><input type="number" id="f-par" value="3" min="1" max="12"></div>
+      <div class="fld"><label>Presupuesto máximo <i>(USD, estimado)</i></label><input type="number" id="f-budget" placeholder="sin límite"></div>
+    </div>
+    <label class="check"><input type="checkbox" id="f-asum" checked>
+      <span>Puede hacer supuestos — cada uno queda en el ledger con su evidencia. Si lo apagas, cada ambigüedad será una parada que te espera.</span></label>
+    <label class="check"><input type="checkbox" id="f-review">
+      <span>Pídeme revisión antes de publicar — se detendrá antes del primer ship a main hasta que des el visto bueno.</span></label>
+    <div style="margin-top:16px"><button class="btn" onclick="crearTarea(this)">Crear tarea</button></div>
+    <div id="f-msg" class="opmsg"></div>`;
+}
+async function crearTarea(btn){
+  const v=id=>document.getElementById(id).value;
+  const c=id=>document.getElementById(id).checked;
+  const r=await op("/api/op/task",{title:v("f-title"),context:v("f-ctx"),origin:v("f-origin"),
+    ticket:v("f-ticket"),model:v("f-model"),priority:v("f-prio"),
+    max_parallel:+v("f-par")||3,budget:v("f-budget"),assumptions_ok:c("f-asum"),
+    review_before_ship:c("f-review")},btn);
+  const m=document.getElementById("f-msg");
+  if(r.ok){ m.className="opmsg";
+    m.innerHTML=`Lanzada como <b class="mono">${esc(r.id)}</b> · sesión <span class="mono">${esc(r.session.slice(0,8))}…</span> — aparecerá sola en Sesiones y su historia en Tareas.`;
+    setTimeout(()=>go({name:"task",id:r.id}),1400);
+  } else { m.className="opmsg err"; m.textContent="No se lanzó: "+r.error; }
+}
+
+// ── Conexiones + modo ──
+function connections(s){
+  const c=s.connections||{};
+  const card=(id,name,desc,ok,extra)=>`<div class="conncard">
+    <h3>${esc(name)} <span class="tag ${ok?"hot":""}">${ok?"conectado":"sin conectar"}</span></h3>
+    <p>${desc}</p>
+    <div class="rowline"><input type="password" id="tk-${id}" placeholder="${ok?"token guardado — pega uno nuevo para rotarlo":"pega tu token"}">
+    <button class="btn ghost" onclick="conectar('${id}',this)">Conectar</button></div>
+    ${extra||""}<div id="msg-${id}" class="opmsg"></div></div>`;
+  return `
+    <div class="vhead"><h1>Conexiones</h1><span class="sub">los tokens se validan contra el proveedor antes de guardarse — en <code>~/.config/harness/</code>, chmod 600; jamás se muestran ni pasan por un agente</span></div>
+    ${card("linear","Linear","Para que los tickets entren como tareas y /auto los tome solos.",c.linear)}
+    ${card("openrouter","OpenRouter","Proveedor de modelos (GLM, Kimi, el que uses). El token es opcional para precios.",c.openrouter,
+      `<div style="margin-top:10px"><button class="btn ghost" onclick="syncPrecios(this)">Sincronizar precios de modelos sin precio</button></div>`)}
+    <h2>Modo — desde dónde se sirve el panel</h2>
+    <div class="conncard"><h3>Local <span class="tag hot">activo</span></h3>
+      <p>Tu máquina, 127.0.0.1. Un solo usuario, cero red. Es el modo de hoy.</p></div>
+    <div class="conncard"><h3>VPS <span class="tag">con el daemon</span></h3>
+      <p>Mientras llega el modo <code>serve</code>: <code>ssh -L 7717:localhost:7717 tu-vps</code> te da este mismo panel del VPS, hoy, sin infraestructura.</p></div>
+    <div class="conncard"><h3>Kubernetes <span class="tag">con el daemon</span></h3>
+      <p>Un deployment por cliente, colector local reportando (ADR-0001/0008). Fase 7 del plan — sin botón hasta que exista de verdad.</p></div>`;
+}
+async function conectar(prov,btn){
+  const tk=document.getElementById("tk-"+prov).value.trim();
+  const m=document.getElementById("msg-"+prov);
+  const r=await op("/api/op/connect",{provider:prov,token:tk},btn);
+  if(r.ok){ m.className="opmsg"; m.textContent="Listo — validado contra el proveedor y guardado."; document.getElementById("tk-"+prov).value=""; }
+  else { m.className="opmsg err"; m.textContent=r.error; }
+}
+async function syncPrecios(btn){
+  const m=document.getElementById("msg-openrouter");
+  const r=await op("/api/op/sync-prices",{},btn);
+  if(!r.ok){ m.className="opmsg err"; m.textContent=r.error; return; }
+  m.className="opmsg";
+  m.textContent=r.note|| (r.added.length?`Listo — precio nuevo para: ${r.added.join(", ")}.`:"")
+    + (r.missing&&r.missing.length?` Sin match en OpenRouter: ${r.missing.join(", ")} — agrégalos a mano en pricing.json.`:"");
+}
+
+// ── responder / pasar contexto ──
+function respondBox(session,label,ph){
+  return `<h2>${label}</h2>
+    <p class="lede">Reanuda esa sesión con tu texto (<code>claude --resume</code>). El agente responde por turno; lo verás llegar aquí y en el bus.</p>
+    <div class="fld" style="max-width:none"><textarea id="r-text" placeholder="${ph}"></textarea></div>
+    <button class="btn" onclick="responder('${session}',this)">Enviar</button>
+    <div id="r-msg" class="opmsg"></div>`;
+}
+async function responder(session,btn){
+  const t=document.getElementById("r-text").value.trim();
+  const m=document.getElementById("r-msg");
+  if(!t){ m.className="opmsg err"; m.textContent="Escribe algo primero."; return; }
+  const r=await op("/api/op/respond",{session,text:t},btn);
+  if(r.ok){ m.className="opmsg"; m.textContent="Enviado — el agente retoma. Su respuesta llega por turno."; document.getElementById("r-text").value=""; }
+  else { m.className="opmsg err"; m.textContent=r.error; }
 }
 
 // ── stream en vivo (solo la sesión abierta) ──

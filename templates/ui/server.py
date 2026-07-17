@@ -2,9 +2,13 @@
 """harness-ui — el panel de vidrio del harness. `make ui`.
 
 LEYES DE ESTA UI (no negociables):
-  1. SOLO OBSERVA. No lanza agentes, no aprueba, no cancela, no escribe en el
-     workspace. El plano de control del harness son los comandos y los gates;
-     una UI que además actúa es una segunda puerta a main, y solo hay una.
+  1. OBSERVAR es de solo lectura; OPERAR crea TRABAJO, jamás merges (ADR-0010).
+     El panel puede lanzar /auto, responder a una sesión y guardar tokens de
+     proveedores — y todo lo lanzado enfrenta LOS MISMOS gates, presupuestos y
+     paradas que si lo tecleara el humano. A main se llega por una sola puerta:
+     ship.sh. Guardrails del plano de operar: 127.0.0.1, token anti-CSRF por
+     arranque + header custom + check de Host, secretos write-only (0600,
+     jamás devueltos, jamás logueados, jamás a un agente).
   2. SOLO 127.0.0.1. Nunca 0.0.0.0.
   3. JAMÁS muestra valores de secretos: no lee .secrets, y todo texto pasa por
      redact() antes de salir. La ley de secretos también aplica a los píxeles.
@@ -25,6 +29,11 @@ import json
 import os
 import re
 import sys
+import shutil
+import subprocess
+import secrets as pysecrets
+import uuid
+import urllib.request
 import time
 import threading
 import queue
@@ -38,6 +47,14 @@ ACTIVE_WINDOW = 90        # sin records nuevos en 90s → ya no está "activo"
 MAX_EVENTS = 300
 MAX_TEXT = 1200
 MAX_SESSIONS = 12       # sesiones que el panel sigue a la vez
+
+# ── El plano de OPERAR (ADR-0010) ─────────────────────────────────────────
+# Token por arranque: se inyecta en el HTML servido y se exige como header en
+# todo POST. Una página web ajena no puede mandar headers custom a 127.0.0.1
+# sin un preflight CORS que este server nunca contesta → drive-by imposible.
+OP_TOKEN = pysecrets.token_hex(16)
+CONFIG_DIR = os.environ.get('HARNESS_CONFIG_DIR') or os.path.join(
+    os.path.expanduser('~'), '.config', 'harness')
 
 # ── Redacción (defensa en profundidad: el hook ya redacta; aquí otra vez) ──
 _SECRET_PATTERNS = [
@@ -536,11 +553,198 @@ class State:
             'transcripts': bool(self.project_dir),
             'sessions': sessions,
             'tasks': self.tasks, 'events': self.events[-120:],
+            'connections': self.connections(),
+            'runs': self.runs(),
+            'mode': 'local', 'op': True,
             'tokens': tot, 'cost': round(cost, 4),
             'unpriced': sorted({a['model'] for aa in by_sess.values() for a in aa
                                 if not a['priced'] and a['model']}),
             'uptime': round(now - self.started),
         }
+
+    # ── OPERAR (ADR-0010): crear trabajo, jamás merges ──────────────────
+    def _emit(self, kind, summary, task='', ok=None):
+        """El bus, desde Python. Mismo shape que emit.sh; mismo redact."""
+        try:
+            os.makedirs(os.path.join(self.ws, '.harness'), exist_ok=True)
+            e = {'ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                 'kind': kind, 'task': task, 'actor': 'panel',
+                 'summary': redact(summary)[:400]}
+            if ok is not None:
+                e['ok'] = ok
+            with open(os.path.join(self.ws, '.harness', 'events.jsonl'), 'a') as fh:
+                fh.write(json.dumps(e) + '\n')
+        except OSError:
+            pass
+
+    def _launch(self, args, logname):
+        """Lanza claude headless, desacoplado del server. Devuelve pid."""
+        binname = os.environ.get('HARNESS_CLAUDE_BIN', 'claude')
+        claude = shutil.which(binname)
+        if not claude:
+            raise RuntimeError("no encuentro el CLI '%s' en PATH — el plano de "
+                               "operar lanza agentes reales y lo necesita" % binname)
+        logdir = os.path.join(self.ws, '.harness', 'runs')
+        os.makedirs(logdir, exist_ok=True)
+        lf = open(os.path.join(logdir, logname), 'ab')
+        p = subprocess.Popen([claude] + args, cwd=self.ws, stdout=lf, stderr=lf,
+                             stdin=subprocess.DEVNULL, start_new_session=True)
+        return p.pid
+
+    def _record_run(self, task, session, pid, kind):
+        try:
+            # crea su propio directorio: depender de que _launch corrió antes
+            # es un orden implícito que ya nos falló una vez (en tests)
+            os.makedirs(os.path.join(self.ws, '.harness'), exist_ok=True)
+            with open(os.path.join(self.ws, '.harness', 'runs.jsonl'), 'a') as fh:
+                fh.write(json.dumps({'ts': int(time.time()), 'task': task,
+                                     'session': session, 'pid': pid, 'kind': kind}) + '\n')
+        except OSError:
+            pass
+
+    def runs(self):
+        out = []
+        try:
+            with open(os.path.join(self.ws, '.harness', 'runs.jsonl')) as fh:
+                for line in fh:
+                    try:
+                        out.append(json.loads(line))
+                    except ValueError:
+                        pass
+        except OSError:
+            pass
+        return out[-50:]
+
+    def op_task(self, b):
+        title = (b.get('title') or '').strip()
+        origin = b.get('origin') or 'prompt'
+        ticket = (b.get('ticket') or '').strip()
+        if origin == 'ticket' and not ticket:
+            raise ValueError('origen ticket sin id de ticket')
+        if origin != 'ticket' and not title:
+            raise ValueError('falta el título')
+        if origin == 'ticket':
+            tid = ticket
+        else:
+            slug = re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')
+            slug = '-'.join(slug.split('-')[:3]) or 'tarea'
+            tid = 'AUTO-%s-%s' % (time.strftime('%Y%m%d'), slug)
+            n = 2
+            while os.path.exists(os.path.join(self.ws, 'tasks', tid)):
+                tid = 'AUTO-%s-%s-%d' % (time.strftime('%Y%m%d'), slug, n); n += 1
+        tdir = os.path.join(self.ws, 'tasks', tid)
+        os.makedirs(tdir, exist_ok=True)
+        fm = ['---', 'id: %s' % tid, 'title: "%s"' % title.replace('"', "'"),
+              'origin: %s' % ('ticket' if origin == 'ticket' else 'prompt'),
+              'source: panel',
+              'priority: %s' % (b.get('priority') or 'P2'),
+              'max_parallel: %d' % max(1, min(12, int(b.get('max_parallel') or 3))),
+              'assumptions_ok: %s' % ('true' if b.get('assumptions_ok', True) else 'false'),
+              'review_before_ship: %s' % ('true' if b.get('review_before_ship') else 'false')]
+        if b.get('model'):
+            fm.append('preferred_model: %s' % b['model'])
+        if b.get('budget'):
+            fm.append('budget_usd: %s' % b['budget'])
+        fm += ['created: %s' % time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), '---', '']
+        body = (b.get('context') or '').strip()
+        with open(os.path.join(tdir, 'task.md'), 'w') as fh:
+            fh.write('\n'.join(fm) + (body + '\n' if body else ''))
+        sid = str(uuid.uuid4())
+        args = ['-p', '/auto %s' % (tid if origin != 'ticket' else ticket),
+                '--session-id', sid]
+        if b.get('model'):
+            args += ['--model', b['model']]
+        pid = self._launch(args, '%s.log' % tid)
+        self._record_run(tid, sid, pid, 'auto')
+        self._emit('phase', 'intake — tarea creada desde el panel y lanzada '
+                   '(sesión %s…)' % sid[:8], task=tid)
+        return {'id': tid, 'session': sid, 'pid': pid}
+
+    def op_respond(self, b):
+        session = (b.get('session') or '').strip()
+        text = (b.get('text') or '').strip()
+        if not session or not text:
+            raise ValueError('faltan session o text')
+        pid = self._launch(['-p', text, '--resume', session],
+                           'respond-%s.log' % session[:8])
+        task = next((r['task'] for r in reversed(self.runs())
+                     if r.get('session') == session and r.get('task')), '')
+        self._record_run(task, session, pid, 'respond')
+        self._emit('decision', 'el humano respondió desde el panel: %s' % text[:160],
+                   task=task)
+        return {'session': session, 'pid': pid}
+
+    def op_connect(self, b):
+        prov = b.get('provider')
+        token = (b.get('token') or '').strip()
+        if prov not in ('linear', 'openrouter'):
+            raise ValueError('proveedor desconocido')
+        if not token:
+            raise ValueError('falta el token')
+        # VALIDAR ANTES DE GUARDAR (la lección del token de Vault: presencia
+        # sin vigencia es peor que ausencia).
+        if prov == 'linear':
+            req = urllib.request.Request('https://api.linear.app/graphql',
+                data=json.dumps({'query': '{ viewer { id } }'}).encode(),
+                headers={'Authorization': token, 'Content-Type': 'application/json'})
+        else:
+            req = urllib.request.Request('https://openrouter.ai/api/v1/key',
+                headers={'Authorization': 'Bearer ' + token})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                if r.status != 200:
+                    raise ValueError('el proveedor devolvió %d' % r.status)
+        except urllib.error.HTTPError as e:
+            raise ValueError('token inválido (%s devolvió %d)' % (prov, e.code))
+        except urllib.error.URLError as e:
+            raise ValueError('no pude llegar a %s: %s' % (prov, e.reason))
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        path = os.path.join(CONFIG_DIR, '%s-token' % prov)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w') as fh:
+            fh.write(token + '\n')
+        return {'provider': prov, 'connected': True}
+
+    def connections(self):
+        return {p: os.path.exists(os.path.join(CONFIG_DIR, '%s-token' % p))
+                for p in ('linear', 'openrouter')}
+
+    def op_sync_prices(self, _b):
+        """Precios reales desde OpenRouter para los modelos observados SIN precio."""
+        snap = self.snapshot()
+        targets = snap.get('unpriced') or []
+        if not targets:
+            return {'added': [], 'missing': [],
+                    'note': 'todos los modelos observados ya tienen precio'}
+        req = urllib.request.Request('https://openrouter.ai/api/v1/models')
+        tokf = os.path.join(CONFIG_DIR, 'openrouter-token')
+        if os.path.exists(tokf):
+            req.add_header('Authorization', 'Bearer ' + open(tokf).read().strip())
+        with urllib.request.urlopen(req, timeout=15) as r:
+            catalog = json.loads(r.read()).get('data', [])
+        norm = lambda x: re.sub(r'[^a-z0-9]', '', x.lower())
+        added, missing = [], []
+        ppath = os.path.join(HERE, 'pricing.json')
+        table = json.load(open(ppath))
+        for t in targets:
+            hit = next((m for m in catalog
+                        if norm(t) in norm(m.get('id', '')) or
+                           norm(m.get('id', '').split('/')[-1]) in norm(t)), None)
+            pr = (hit or {}).get('pricing') or {}
+            try:
+                inp, out = float(pr.get('prompt', 0)), float(pr.get('completion', 0))
+            except (TypeError, ValueError):
+                inp = out = 0
+            if hit and inp > 0:
+                table.setdefault('models', {})[t] = {
+                    'input': round(inp * 1e6, 4), 'output': round(out * 1e6, 4)}
+                added.append(t)
+            else:
+                missing.append(t)
+        if added:
+            json.dump(table, open(ppath, 'w'), indent=2, ensure_ascii=False)
+            self.pricing = self._load_pricing()
+        return {'added': added, 'missing': missing}
 
     def tick(self):
         with self.lock:
@@ -569,7 +773,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/':
             try:
                 with open(os.path.join(HERE, 'app.html'), 'rb') as fh:
-                    return self._send(200, 'text/html; charset=utf-8', fh.read())
+                    html = fh.read().replace(b'__OP_TOKEN__', OP_TOKEN.encode())
+                    return self._send(200, 'text/html; charset=utf-8', html)
             except OSError:
                 return self._send(500, 'text/plain', b'falta scripts/ui/app.html')
         if path == '/api/state':
@@ -578,6 +783,43 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/api/stream':
             return self._stream()
         self._send(404, 'text/plain', b'not found')
+
+    def do_POST(self):
+        # Guardias anti-CSRF (ADR-0010): Host local + token del arranque en un
+        # header custom. El preflight CORS que exigiría ese header nunca se
+        # contesta, así que una página web ajena no puede llegar aquí.
+        host = (self.headers.get('Host') or '').split(':')[0]
+        if host not in ('127.0.0.1', 'localhost'):
+            return self._send(403, 'application/json',
+                              b'{"error":"solo 127.0.0.1"}')
+        if self.headers.get('X-Corvux-Token') != OP_TOKEN:
+            return self._send(403, 'application/json',
+                              b'{"error":"token de operacion invalido - recarga la pagina"}')
+        try:
+            ln = min(int(self.headers.get('Content-Length') or 0), 262144)
+            body = json.loads(self.rfile.read(ln) or b'{}')
+        except ValueError:
+            return self._send(400, 'application/json', b'{"error":"JSON invalido"}')
+        routes = {
+            '/api/op/task': self.state.op_task,
+            '/api/op/respond': self.state.op_respond,
+            '/api/op/connect': self.state.op_connect,
+            '/api/op/sync-prices': self.state.op_sync_prices,
+        }
+        fn = routes.get(self.path.split('?')[0])
+        if not fn:
+            return self._send(404, 'application/json', b'{"error":"no existe"}')
+        try:
+            with self.state.lock:
+                out = fn(body)
+            return self._send(200, 'application/json',
+                              json.dumps({'ok': True, **out}).encode())
+        except (ValueError, RuntimeError) as e:
+            return self._send(400, 'application/json',
+                              json.dumps({'ok': False, 'error': str(e)}).encode())
+        except Exception as e:
+            return self._send(500, 'application/json',
+                              json.dumps({'ok': False, 'error': '%s: %s' % (type(e).__name__, e)}).encode())
 
     def _stream(self):
         q = queue.Queue(maxsize=200)

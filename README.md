@@ -22,6 +22,7 @@ Le apuntas a una carpeta con tus repositorios y genera un *harness* completo y a
 10. [Qué tan flexible es](#qué-tan-flexible-es)
 11. [Actualizaciones](#actualizaciones)
 12. [Estructura de este repo](#estructura-de-este-repo)
+13. [Tests](#tests)
 
 ---
 
@@ -384,17 +385,22 @@ La regla que lo hace funcionar es negativa: **si la razón para parar no está e
 make ui          # o: make ui PORT=8080
 ```
 
-Cuatro pestañas: **Ahora** (fases + tarjetas de agentes + streaming), **Grafo** (árbol de spawns), **Tokens** (consumo y costo por agente), **Eventos** (el bus del harness).
+Dos zonas en la barra lateral, y la distinción es la arquitectura entera:
+
+- **OBSERVAR** — Resumen (qué te espera, la curva de concurrencia, las últimas decisiones), Tareas (pipeline + ledger de supuestos + la historia paso a paso que escriben `ship.sh` y `/auto`), Sesiones (cada terminal con su gantt de agentes, árbol de spawns y el texto por turno), Gastos (día × modelo, por sesión, tabla de precios).
+- **OPERAR** — Nueva tarea (un formulario que escribe `tasks/<id>/task.md` y lanza `claude -p "/auto <id>"` headless con `--session-id` conocido: la tarea aparece sola en Sesiones), responder a un agente que te espera (reanuda SU sesión con `claude --resume`), Conexiones (Linear/OpenRouter: el token se **valida contra el proveedor antes de guardarse**, va a `~/.config/harness/` con chmod 600, y jamás se muestra ni pasa por un agente), y sincronizar precios reales desde OpenRouter para los modelos observados sin precio.
 
 ### Las cinco leyes del panel
 
-Un panel de observación en un sistema cuya filosofía es "los agentes proponen, los sistemas deterministas verifican" tiene que ganarse su lugar. Estas son sus reglas, y explican casi todo su diseño:
+Un panel en un sistema cuya filosofía es "los agentes proponen, los sistemas deterministas verifican" tiene que ganarse su lugar. Estas son sus reglas, y explican casi todo su diseño:
 
-1. **SOLO OBSERVA.** No lanza agentes, no aprueba, no cancela, no escribe en el workspace. El plano de control son los comandos y los gates. Una UI que además actúa es una segunda puerta a main, y solo hay una.
-2. **Solo `127.0.0.1`.** Nunca `0.0.0.0`. El panel muestra tu código y tus tareas.
-3. **Jamás muestra valores de secretos.** No lee `.secrets`, y todo texto pasa por redacción (patrones de GitHub, Vault, JWT, AWS, Slack, Linear…) antes de salir. La ley de secretos también aplica a los píxeles. *(Verificado: metimos un `ghp_…` real en los eventos de prueba y salió como `[REDACTADO]`.)*
+1. **OPERAR CREA TRABAJO, JAMÁS MERGES** (ADR-0010 del daemon). El panel puede *crear* una tarea y *pasarle contexto* a un agente — exactamente lo que ya podías hacer desde una terminal — pero todo lo que lanza pasa por los mismos gates: a main solo se llega por `ship.sh`. No hay botón de aprobar, ni de mergear, ni de saltarse un gate; el operador tampoco puede editar `ship.sh`, hooks ni `settings.json` desde aquí. Crear trabajo ≠ publicar trabajo.
+2. **Solo `127.0.0.1`.** Nunca `0.0.0.0`. Y como ahora hay endpoints que actúan: cada arranque genera un token anti-CSRF que viaja en el HTML y debe volver en el header `X-Corvux-Token` (un `<form>` de otra página no puede poner headers custom), y se verifica el header `Host` contra DNS rebinding. Los tres controles tienen test.
+3. **Jamás muestra valores de secretos.** No lee `.secrets`, `connections` expone presencia (`true`/`false`), nunca el valor, y todo texto pasa por redacción (GitHub, Vault, JWT, AWS, Slack, Linear…) antes de salir. La ley de secretos también aplica a los píxeles. *(La suite mete un token de cada familia y verifica que sale `[REDACTADO]` — y ya cachó un bug real: el `\b` de sed no existe en macOS y cuatro familias viajaban sin redactar.)*
 4. **Cero dependencias.** Stdlib de Python 3 y un HTML. Un panel que exige `npm install` se pudre en tres meses.
 5. **Degrada, no explota.** Lee dos fuentes con dos niveles de confianza: `.harness/events.jsonl` + `tasks/` son **nuestros** (estables); los transcripts de Claude Code son **prestados** (formato interno, cambia entre versiones). Si el parseo falla, el panel sigue vivo con lo que el harness sí controla y te lo dice arriba en rojo.
+
+El formulario de Nueva tarea escribe preferencias que `/auto` **respeta como ley**: `review_before_ship: true` fuerza una pausa antes del primer ship, `assumptions_ok: false` convierte cada ambigüedad en una parada en vez de un supuesto, `max_parallel` acota los implementers y `budget_usd` convierte pasarse de presupuesto en una parada.
 
 ### Lo que el panel NO hace, y por qué
 
@@ -550,6 +556,7 @@ commands/          /harness-init · /harness-doctor · /harness-update
 skills/            harness-init/SKILL.md — el cerebro: fases, clustering, entrevista, tabla de generación
 catalog/           capabilities.yaml — el menú: 57 capacidades con detect/tier/profiles/install
 scripts/           discover.sh · doctor.sh (deterministas, portables macOS/Linux, bash 3.2)
+tests/             la suite (./tests/run.sh) — ver "Tests" abajo
 templates/         todo lo que se genera:
   ├── CLAUDE.md, README, manifest, models, answers, settings, Makefile, semgrep
   ├── agents/      architect · implementer · reviewer · qa · svc-agent (abogado genérico)
@@ -562,6 +569,25 @@ templates/         todo lo que se genera:
   ├── ui/          server.py · app.html · pricing.json (el panel, `make ui`)
   └── cronjobs/    cron-runner + 12 jobs + manifiesto K8s
 ```
+
+## Tests
+
+```
+./tests/run.sh        # todo (~40s: el lock prueba su gracia de 15s en tiempo real)
+./tests/run.sh fast   # salta el test lento del lock
+```
+
+La suite prueba **el código real de los templates** — no copias ni mocks del sistema bajo prueba — y cada test crea su workspace temporal y lo borra: nada toca tu workspace ni la red.
+
+| Test | Qué protege |
+|---|---|
+| `test_emit.sh` | El bus: shape del evento, `ok` booleano, **redacción de las 7 familias de secretos**, fail-open, sourceable desde sh/zsh con `set -u` |
+| `test_track_read.sh` | La evidencia: la tarea se deriva de la ruta (jamás de estado compartido), cero contaminación entre tareas, ids maliciosos no construyen rutas |
+| `test_ship_lock.sh` | El lock de ship: las dos ventanas de muerte que costaron un lock inmortal, y que un dueño vivo jamás pierde su lock |
+| `test_server.py` | El panel: ADR-0004 (modelo sin precio = None, jamás tarifa de Opus), normalización del bus, y todo el plano de operar sin red (validación, frontmatter, dedupe de ids, tokens 0600) |
+| `test_op_http.py` | El plano de operar por HTTP contra el server real: 403 sin token / token malo / Host raro, crear tarea lanza un `claude` de verdad (stub que graba sus args), responder reanuda LA sesión pedida |
+
+La suite ya se pagó el primer día: cachó que el `\b` de sed no existe en macOS (cuatro familias de secretos viajaban sin redactar), seis templates sin bit de ejecución, y un `_record_run` que dependía en silencio del orden de llamadas.
 
 ## Canon de referencia
 

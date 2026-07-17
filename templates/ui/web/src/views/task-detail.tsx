@@ -1,11 +1,13 @@
+import { useEffect, useState } from "react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { VHead, H2, Lede, Code, PendAlert, Story, Sup, Empty } from "@/components/bits"
 import { RespondBox } from "@/components/respond-box"
 import { TaskGitPanel } from "@/components/task-git"
+import { TaskFlow } from "@/components/task-flow"
 import { cn } from "@/lib/utils"
-import { BUSKINDS, PHASES, pending, type Snapshot, type Task } from "@/lib/harness"
+import { BUSKINDS, PHASES, pending, type BusEvent, type Snapshot, type Task } from "@/lib/harness"
 import { ArrowLeft } from "lucide-react"
 import type { Go } from "@/App"
 
@@ -13,7 +15,19 @@ const blank = (id: string): Task => ({ id, title: "", origin: "", phase: null, d
 
 export function TaskDetail({ s, id, go }: { s: Snapshot; id: string; go: Go }) {
   const t = s.tasks.find((x) => x.id === id) || blank(id)
-  const tevs = s.events.filter((e) => BUSKINDS.includes(e.kind) && e.task === id)
+  // arco COMPLETO de la tarea (todos sus eventos, no la ventana del snapshot);
+  // mientras carga, cae a lo que sí trae el snapshot para no parpadear vacío.
+  const snapEvs = s.events.filter((e) => BUSKINDS.includes(e.kind) && e.task === id)
+  const [full, setFull] = useState<BusEvent[] | null>(null)
+  useEffect(() => {
+    let live = true
+    const load = () => fetch(`/api/task-events?task=${encodeURIComponent(id)}`)
+      .then((r) => r.json()).then((d) => { if (live && Array.isArray(d)) setFull(d) }).catch(() => {})
+    load()
+    const iv = setInterval(load, 4000)
+    return () => { live = false; clearInterval(iv) }
+  }, [id])
+  const tevs = (full && full.length ? full : snapEvs).filter((e) => BUSKINDS.includes(e.kind))
   const p = pending(s).find((e) => e.task === id)
   const run = (s.runs || []).slice().reverse().find((r) => r.task === id && r.session)
   return (
@@ -60,6 +74,12 @@ export function TaskDetail({ s, id, go }: { s: Snapshot; id: string; go: Go }) {
           <H2>Supuestos que hizo el agente</H2>
           <Lede>Cada uno con su evidencia y con lo que costaría deshacerlo si resultó falso.</Lede>
           {t.assumptions.map((a, i) => <Sup key={i} text={a} />)}
+        </>
+      )}
+      {tevs.length > 1 && (
+        <>
+          <H2 sub="cómo avanzó y cuándo retrocedió — pasa el mouse por cada nodo">El recorrido</H2>
+          <TaskFlow evs={tevs} />
         </>
       )}
       <TaskGitPanel id={id} />

@@ -338,6 +338,18 @@ class TestPhase0(Base):
         # el comando 'ran' no metió basura de shell
         self.assertNotIn('cd ', g['read'])
 
+
+    def test_task_events_arco_completo(self):
+        os.makedirs(os.path.join(self.ws, '.harness'))
+        with open(os.path.join(self.ws, '.harness', 'events.jsonl'), 'w') as fh:
+            fh.write(json.dumps({'ts': '2026-07-17T11:00:00Z', 'kind': 'phase', 'task': 'X', 'summary': 'intake'}) + '\n')
+            fh.write(json.dumps({'ts': '2026-07-17T11:45:00Z', 'kind': 'gate', 'task': 'X', 'summary': 'gate_x', 'ok': 'false'}) + '\n')
+            fh.write(json.dumps({'ts': '2026-07-17T12:00:00Z', 'kind': 'ship', 'task': 'Y', 'summary': 'otra tarea'}) + '\n')
+        ev = self.state.task_events('X')
+        self.assertEqual(len(ev), 2)                 # solo los de X, no los de Y
+        self.assertIs(ev[1]['ok'], False)            # 'false' normalizado a bool
+        self.assertEqual(self.state.task_events('../x'), [])
+
     def test_task_git_id_malicioso(self):
         g = self.state.task_git('../../etc')
         self.assertEqual(g, {'repos': [], 'read': []})

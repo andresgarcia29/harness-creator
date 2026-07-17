@@ -79,7 +79,7 @@ export type Snapshot = {
   prices?: Record<string, { input: number; output: number }>
   unpriced?: string[]; warning?: string | null
   connections?: Record<string, boolean>; runs?: { task: string; session: string; kind: string }[]
-  mode?: string; op?: boolean
+  mode?: string; op?: boolean; workspace?: { name: string; path: string }
   toolbox?: Toolbox; mcp?: McpServer[]; herdr?: HerdrState | null
 }
 export type Toolbox = {
@@ -115,6 +115,7 @@ export type TaskGit = { repos: RepoGit[]; read: string[] }
 export type HerdrPane = {
   pane_id: string; workspace_id: string; tab_id: string
   cwd: string; foreground_cwd: string; agent_status: string; focused: boolean
+  program?: string
 }
 export type HerdrWorkspace = {
   workspace_id: string; label: string; number: number

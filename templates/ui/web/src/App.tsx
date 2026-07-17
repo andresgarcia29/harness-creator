@@ -62,7 +62,7 @@ export default function App() {
               : view.name === "connections" ? <Connections s={snap} />
               : view.name === "docs" ? <Docs s={snap} />
               : view.name === "tools" ? <Tools s={snap} />
-              : view.name === "terminals" ? <Terminals s={snap} />
+              : view.name === "terminals" ? <Terminals s={snap} go={setView} />
               : <Dash s={snap} go={setView} />}
           </div>
         </div>

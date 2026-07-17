@@ -12,7 +12,7 @@ import {
 import { cn } from "@/lib/utils"
 import { op } from "@/lib/harness"
 import { toast } from "sonner"
-import { MoreHorizontal, OctagonX, SquareX, Trash2 } from "lucide-react"
+import { MoreHorizontal, OctagonX, SquareX, Trash2, Columns2, Power } from "lucide-react"
 import { DropdownMenuSeparator } from "@/components/ui/dropdown-menu"
 
 type Action = { action: string; id: string; verb: string; danger?: boolean }
@@ -51,7 +51,7 @@ function useConfirm() {
 }
 
 // Menú de una VENTANA (pane): interrumpir o cerrar.
-export function PaneActions({ paneId, label, running, extra }: { paneId: string; label: string; running: boolean; extra?: ReactNode }) {
+export function PaneActions({ paneId, tabId, label, running, extra }: { paneId: string; tabId?: string; label: string; running: boolean; extra?: ReactNode }) {
   const { ask, dialog } = useConfirm()
   return (
     <>
@@ -77,6 +77,14 @@ export function PaneActions({ paneId, label, running, extra }: { paneId: string;
             `Cierra «${label}» y mata su proceso. No se puede deshacer.`)}>
             <SquareX className="size-3.5" /> Cerrar terminal
           </DropdownMenuItem>
+          {tabId && (
+            <DropdownMenuItem variant="destructive" onClick={() => ask(
+              { action: "close-tab", id: tabId, verb: "cerré el tab", danger: true },
+              "Cerrar tab",
+              `Cierra el tab entero y todos sus panes. No se puede deshacer.`)}>
+              <Columns2 className="size-3.5" /> Cerrar tab entero
+            </DropdownMenuItem>
+          )}
           {extra && <><DropdownMenuSeparator />{extra}</>}
         </DropdownMenuContent>
       </DropdownMenu>
@@ -104,6 +112,32 @@ export function WorkspaceActions({ wsId, label, wsExtra }: { wsId: string; label
             "Cerrar workspace",
             `Cierra el workspace «${label}» de herdr y TODOS sus panes. No se puede deshacer.`)}>
             <Trash2 className="size-3.5" /> Cerrar workspace entero
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {dialog}
+    </>
+  )
+}
+
+
+// Detener la sesión ENTERA de herdr — la acción más destructiva (cierra todo).
+export function SessionStop() {
+  const { ask, dialog } = useConfirm()
+  return (
+    <>
+      <DropdownMenu>
+        <DropdownMenuTrigger
+          title="más acciones de herdr"
+          className="grid size-8 place-items-center rounded-md border border-border text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground">
+          <MoreHorizontal className="size-4" />
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuItem variant="destructive" onClick={() => ask(
+            { action: "stop-session", id: "default", verb: "detuve la sesión de herdr", danger: true },
+            "Detener herdr por completo",
+            "Cierra TODAS tus terminales de herdr (todos los workspaces, tabs y panes) y detiene el server. Tendrás que relanzar `herdr`. No se puede deshacer.")}>
+            <Power className="size-3.5" /> Detener sesión de herdr
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

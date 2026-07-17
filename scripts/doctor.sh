@@ -181,14 +181,24 @@ else
   ok "contexto siempre-inyectado ≈ ${ctx_tokens} tokens (bajo el techo de 1500)"
 fi
 
-# 8c · La UI (solo lectura, solo local)
+# 8c · La UI (observa local; opera solo creando trabajo — ADR-0010)
 if [ -f "$WS/scripts/ui/server.py" ]; then
   ok "panel local presente (make ui)"
   grep -q "ui-emit.sh" "$WS/.claude/settings.json" 2>/dev/null \
     || warn "ui-emit.sh no está registrado en .claude/settings.json — el panel vivirá de tasks/ y transcripts, sin el bus de eventos del harness"
   grep -q "track-read.sh" "$WS/.claude/settings.json" 2>/dev/null \
     || warn "track-read.sh no está registrado — sin él, ship.sh no puede verificar la evidencia de la compliance matrix (gate_evidence queda ciego)"
+  command -v claude >/dev/null 2>&1 \
+    || warn "el CLI 'claude' no está en PATH — el plano de OPERAR del panel (Nueva tarea, responder a un agente) lanza 'claude -p' headless y sin él esos botones devolverán error (observar sigue funcionando)"
 fi
+
+# 8d · Bits de ejecución: un hook sin +x falla EN SILENCIO (Claude Code no
+# puede ejecutarlo y nadie te lo dice). La suite del instalador cachó seis
+# templates así; aquí vigilamos la instancia instalada.
+for f in "$WS"/scripts/*.sh "$WS"/.claude/hooks/*.sh; do
+  [ -f "$f" ] || continue
+  [ -x "$f" ] || warn "$(basename "$f") no es ejecutable — chmod +x ${f#"$WS"/} (un hook sin +x observa nada y un script sin +x muere en el primer uso)"
+done
 
 # 9 · Constituciones DRAFT pendientes de ratificar
 drafts=$(grep -l "status: DRAFT" "$WS"/.claude/agents/*.md "$WS"/docs/constitution.md "$WS"/specs/*/spec.md 2>/dev/null | wc -l | tr -d ' ')

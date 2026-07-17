@@ -31,12 +31,16 @@ _emit_ws() {
 }
 
 _emit_redact() {
+  # OJO: nada de \b — el sed de macOS (BSD) no lo soporta y el patrón entero
+  # deja de matchear EN SILENCIO: las llaves sk-/vault/slack/jwt viajaban al
+  # bus sin redactar en Mac. Lo cachó tests/test_emit.sh. El borde de palabra
+  # portable es (^|[^A-Za-z0-9_-]) conservando el prefijo con \1.
   sed -E \
     -e 's/(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/[REDACTADO:gh]/g' \
-    -e 's/\b(hvs|hvb)\.[A-Za-z0-9_-]{20,}/[REDACTADO:vault]/g' \
-    -e 's/\bsk-[A-Za-z0-9_-]{20,}/[REDACTADO:key]/g' \
-    -e 's/\bxox[baprs]-[A-Za-z0-9-]{10,}/[REDACTADO:slack]/g' \
-    -e 's/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/[REDACTADO:jwt]/g' \
+    -e 's/(^|[^A-Za-z0-9_-])(hvs|hvb)\.[A-Za-z0-9_-]{20,}/\1[REDACTADO:vault]/g' \
+    -e 's/(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}/\1[REDACTADO:key]/g' \
+    -e 's/(^|[^A-Za-z0-9_-])xox[baprs]-[A-Za-z0-9-]{10,}/\1[REDACTADO:slack]/g' \
+    -e 's/(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/\1[REDACTADO:jwt]/g' \
     -e 's/(AKIA|ASIA)[A-Z0-9]{12,}/[REDACTADO:aws]/g' \
     -e 's/lin_api_[A-Za-z0-9]{20,}/[REDACTADO:linear]/g' \
     -e 's/((password|passwd|secret|token|api_?key|authorization)["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"']?)[^"'"'"' ,}]{6,}/\1[REDACTADO]/gI'

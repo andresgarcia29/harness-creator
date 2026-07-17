@@ -53,6 +53,21 @@ del trabajo y no habrá aclaraciones. Entonces:
    `tasks/<id>/` y su trazabilidad es el trailer `Task: <id>`. Si
    querías el ticket, la entrada era A.
 
+## Paso 0.4 — Preferencias del panel (si task.md trae `source: panel`)
+
+El humano pudo configurar CÓMO trabajar desde el formulario del panel. Su
+frontmatter es LEY para esta tarea:
+
+- `review_before_ship: true` → trata esta tarea como `autonomy: checkpoint`
+  aunque answers diga full: UNA pausa con resumen antes del primer ship.
+- `assumptions_ok: false` → NO asumas nada: cada ambigüedad que normalmente
+  iría al ledger es una PARADA (emítela) que espera al humano.
+- `max_parallel: N` → nunca más de N implementers a la vez, aunque `bd ready`
+  permita más.
+- `budget_usd: X` → revisa ccusage al cerrar cada fase; si lo superaste, PARA
+  y repórtalo (el presupuesto agotado es una parada, no una sugerencia).
+- `preferred_model` ya se aplicó al lanzarte; regístralo en el reporte.
+
 ## Paso 0.5 — El ledger de supuestos (por qué no necesitas preguntar)
 
 Sin humano en el loop, la ambigüedad no se rebota: **se resuelve, se

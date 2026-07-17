@@ -6,7 +6,7 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 import { usd, type Snapshot } from "@/lib/harness"
-import { LayoutDashboard, ListTodo, Radio, ChartNoAxesColumn, Plus, Cable, Sun, Moon, Monitor } from "lucide-react"
+import { LayoutDashboard, ListTodo, Radio, ChartNoAxesColumn, Plus, Cable, Sun, Moon, Monitor, BookOpen, Blocks } from "lucide-react"
 import { useTheme, type Theme } from "@/hooks/use-theme"
 import type { View } from "@/App"
 
@@ -19,6 +19,10 @@ const OBSERVE = [
 const OPERATE = [
   { v: "new", label: "Nueva tarea", icon: Plus },
   { v: "connections", label: "Conexiones", icon: Cable },
+] as const
+const GUIDE = [
+  { v: "docs", label: "Docs", icon: BookOpen },
+  { v: "tools", label: "Skills & MCP", icon: Blocks },
 ] as const
 
 export function AppSidebar({ view, go, snap, live }: {
@@ -49,7 +53,7 @@ export function AppSidebar({ view, go, snap, live }: {
         </div>
       </SidebarHeader>
       <SidebarContent>
-        {[["Observar", OBSERVE] as const, ["Operar", OPERATE] as const].map(([label, items]) => (
+        {[["Observar", OBSERVE] as const, ["Operar", OPERATE] as const, ["Guía", GUIDE] as const].map(([label, items]) => (
           <SidebarGroup key={label}>
             <SidebarGroupLabel className="text-[10px] font-bold uppercase tracking-[0.16em] text-muted-foreground/60">{label}</SidebarGroupLabel>
             <SidebarGroupContent>

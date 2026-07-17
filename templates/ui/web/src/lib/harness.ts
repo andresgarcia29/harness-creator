@@ -41,6 +41,20 @@ export type Snapshot = {
   unpriced?: string[]; warning?: string | null
   connections?: Record<string, boolean>; runs?: { task: string; session: string; kind: string }[]
   mode?: string; op?: boolean
+  toolbox?: Toolbox; mcp?: McpServer[]
+}
+export type Toolbox = {
+  version: string
+  commands: { name: string; desc: string; args: string }[]
+  agents: { name: string; desc: string }[]
+  make: { target: string; desc: string }[]
+  gates: string[]; hooks: string[]
+  skills: { name: string; desc: string; ok: boolean }[]
+}
+export type McpProbe = { ok: boolean; ms: number; server?: string; version?: string; error?: string; auth_hint?: boolean; at?: string }
+export type McpServer = {
+  name: string; command: string; args: string[]; wrapped: boolean
+  bin_ok: boolean; secrets_ok: boolean | null; env: string[]; probe?: McpProbe | null
 }
 
 export const who = (a: Agent) => (a.id === "main" ? "orquestador" : a.desc || a.type || a.id.slice(0, 10))

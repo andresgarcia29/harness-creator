@@ -223,5 +223,85 @@ class TestSyncPrices(Base):
             panel.HERE = old_here
 
 
+
+
+class TestToolbox(Base):
+    def _fixture(self):
+        ws = self.ws
+        os.makedirs(os.path.join(ws, '.claude', 'commands'))
+        with open(os.path.join(ws, '.claude', 'commands', 'auto.md'), 'w') as fh:
+            fh.write('---\ndescription: Ticket a produccion\nargument-hint: <ticket>\n---\ncuerpo')
+        os.makedirs(os.path.join(ws, '.claude', 'agents'))
+        with open(os.path.join(ws, '.claude', 'agents', 'architect.md'), 'w') as fh:
+            fh.write('---\ndescription: El arquitecto\n---\n')
+        os.makedirs(os.path.join(ws, '.claude', 'skills', 'deploy'))
+        with open(os.path.join(ws, '.claude', 'skills', 'deploy', 'SKILL.md'), 'w') as fh:
+            fh.write('---\nname: deploy\ndescription: despliega\n---\n')
+        with open(os.path.join(ws, 'Makefile'), 'w') as fh:
+            fh.write('ui: ## panel en vivo\n\techo hola\nship: ## gates + push\n\techo x\n')
+        os.makedirs(os.path.join(ws, 'scripts'))
+        with open(os.path.join(ws, 'scripts', 'ship.sh'), 'w') as fh:
+            fh.write('gate_trailer() { :; }\ngate_secrets() { :; }\n')
+
+    def test_inventario_real(self):
+        self._fixture()
+        tb = self.state.scan_toolbox()
+        self.assertEqual(tb['commands'][0]['name'], '/auto')
+        self.assertEqual(tb['commands'][0]['desc'], 'Ticket a produccion')
+        self.assertEqual(tb['agents'][0]['name'], 'architect')
+        self.assertEqual([m['target'] for m in tb['make']], ['ui', 'ship'])
+        self.assertEqual(tb['gates'], ['gate_secrets', 'gate_trailer'])
+        self.assertEqual(tb['skills'][0]['name'], 'deploy')
+
+    def test_workspace_vacio_no_inventa(self):
+        tb = self.state.scan_toolbox()
+        self.assertEqual(tb['commands'], [])   # vacio que ensena, jamas datos fake
+        self.assertEqual(tb['gates'], [])
+
+
+class TestMcp(Base):
+    def _stub_mcp(self, ok=True):
+        """Un MCP de palo que SI habla el protocolo (o no, para el caso triste)."""
+        path = os.path.join(self.ws, 'stub-mcp.py')
+        with open(path, 'w') as fh:
+            if ok:
+                fh.write('''import json,sys
+line = sys.stdin.readline()
+req = json.loads(line)
+print(json.dumps({"jsonrpc":"2.0","id":req["id"],"result":{
+  "serverInfo":{"name":"stub","version":"9.9"},"capabilities":{}}}), flush=True)
+''')
+            else:
+                fh.write('import sys; sys.stderr.write("Unauthorized: bad token\\n"); sys.exit(1)\n')
+        return path
+
+    def _mcp_json(self, path):
+        with open(os.path.join(self.ws, '.mcp.json'), 'w') as fh:
+            json.dump({'mcpServers': {'stub': {'command': sys.executable, 'args': [path]}}}, fh)
+
+    def test_checks_estaticos(self):
+        self._mcp_json(self._stub_mcp())
+        m = self.state.mcp_servers()[0]
+        self.assertEqual(m['name'], 'stub')
+        self.assertTrue(m['bin_ok'])
+        self.assertIsNone(m['secrets_ok'])      # sin with-secrets: no aplica
+        self.assertIsNone(m['probe'])           # sin sondear: no se declara nada
+
+    def test_sonda_habla_el_protocolo(self):
+        self._mcp_json(self._stub_mcp(ok=True))
+        r = self.state.op_probe_mcp({})['probed']['stub']
+        self.assertTrue(r['ok'])
+        self.assertEqual(r['server'], 'stub')
+        # y el resultado queda en el snapshot siguiente
+        self.assertTrue(self.state.mcp_servers()[0]['probe']['ok'])
+
+    def test_sonda_honesta_cuando_falla(self):
+        self._mcp_json(self._stub_mcp(ok=False))
+        r = self.state.op_probe_mcp({})['probed']['stub']
+        self.assertFalse(r['ok'])
+        self.assertIn('Unauthorized', r['error'])
+        self.assertTrue(r['auth_hint'])         # el error de auth SE DICE
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=0)

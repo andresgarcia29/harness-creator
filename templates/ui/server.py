@@ -560,6 +560,7 @@ class State:
             'connections': self.connections(),
             'runs': self.runs(),
             'mode': 'local', 'op': True,
+            'toolbox': self.scan_toolbox(), 'mcp': self.mcp_servers(),
             'tokens': tot, 'cost': round(cost, 4),
             'unpriced': sorted({a['model'] for aa in by_sess.values() for a in aa
                                 if not a['priced'] and a['model']}),
@@ -750,6 +751,181 @@ class State:
             self.pricing = self._load_pricing()
         return {'added': added, 'missing': missing}
 
+    # ── DOCS + SKILLS & MCP: inventario REAL de la instancia ─────────────
+    # Nada de prosa inventada: comandos, agentes, targets, gates, hooks,
+    # skills y MCPs se LEEN de los archivos del workspace. Si algo no está,
+    # no aparece — la ley de vacíos que enseñan aplica también aquí.
+
+    @staticmethod
+    def _frontmatter(path):
+        """description/argument-hint/name del frontmatter YAML simple."""
+        out = {}
+        try:
+            with open(path, errors='replace') as fh:
+                first = fh.readline().strip()
+                if first != '---':
+                    return out
+                for line in fh:
+                    line = line.rstrip('\n')
+                    if line.strip() == '---':
+                        break
+                    if ':' in line and not line.startswith((' ', '\t')):
+                        k, v = line.split(':', 1)
+                        out[k.strip()] = v.strip().strip('"\'')
+        except OSError:
+            pass
+        return out
+
+    def scan_toolbox(self):
+        """Comandos, agentes, targets, gates, hooks, skills — cache 30 s."""
+        now = time.time()
+        if getattr(self, '_toolbox_ts', 0) > now - 30:
+            return self._toolbox
+        ws = self.ws
+        tb = {'commands': [], 'agents': [], 'make': [], 'gates': [],
+              'hooks': [], 'skills': [], 'version': ''}
+        try:
+            tb['version'] = open(os.path.join(ws, '.harness-version')).read().strip()
+        except OSError:
+            pass
+        for f in sorted(glob.glob(os.path.join(ws, '.claude', 'commands', '*.md'))):
+            fm = self._frontmatter(f)
+            tb['commands'].append({
+                'name': '/' + os.path.basename(f)[:-3],
+                'desc': fm.get('description', ''),
+                'args': fm.get('argument-hint', '')})
+        for f in sorted(glob.glob(os.path.join(ws, '.claude', 'agents', '*.md'))):
+            fm = self._frontmatter(f)
+            tb['agents'].append({'name': os.path.basename(f)[:-3],
+                                 'desc': fm.get('description', '')[:180]})
+        for d in sorted(glob.glob(os.path.join(ws, '.claude', 'skills', '*'))):
+            sk = os.path.join(d, 'SKILL.md')
+            if os.path.isfile(sk):
+                fm = self._frontmatter(sk)
+                tb['skills'].append({'name': fm.get('name', os.path.basename(d)),
+                                     'desc': fm.get('description', '')[:180],
+                                     'ok': bool(fm)})
+        try:
+            with open(os.path.join(ws, 'Makefile'), errors='replace') as fh:
+                for line in fh:
+                    m = re.match(r'^([a-z][a-z0-9-]*):.*?## (.+)$', line)
+                    if m:
+                        tb['make'].append({'target': m.group(1), 'desc': m.group(2).strip()})
+        except OSError:
+            pass
+        try:
+            ship = open(os.path.join(ws, 'scripts', 'ship.sh'), errors='replace').read()
+            tb['gates'] = sorted(set(re.findall(r'\bgate_[a-z_]+', ship)))
+        except OSError:
+            pass
+        try:
+            cfg = json.load(open(os.path.join(ws, '.claude', 'settings.json')))
+            names = set()
+            for entries in (cfg.get('hooks') or {}).values():
+                for e in entries if isinstance(entries, list) else []:
+                    for h in e.get('hooks', []):
+                        cmd = h.get('command', '')
+                        if cmd:
+                            names.add(os.path.basename(cmd.split()[0]))
+            tb['hooks'] = sorted(names)
+        except (OSError, ValueError):
+            pass
+        self._toolbox, self._toolbox_ts = tb, now
+        return tb
+
+    def mcp_servers(self):
+        """Los MCPs de .mcp.json con checks ESTÁTICOS (binario, secretos).
+        El estado vivo (¿contesta?, ¿autenticado?) lo pone op_probe_mcp."""
+        out = []
+        try:
+            cfg = json.load(open(os.path.join(self.ws, '.mcp.json')))
+        except (OSError, ValueError):
+            return out
+        probes = getattr(self, '_mcp_probes', {})
+        for name, sv in (cfg.get('mcpServers') or {}).items():
+            cmd = sv.get('command', '')
+            args = sv.get('args', [])
+            wrapped = 'with-secrets' in cmd
+            realbin = args[0] if wrapped and args else cmd
+            binpath = (os.path.join(self.ws, cmd) if '/' in cmd and not os.path.isabs(cmd) else cmd)
+            bin_ok = bool(shutil.which(realbin)) and (not wrapped or os.path.exists(binpath))
+            secrets_ok = None   # None = no aplica
+            if wrapped:
+                secrets_ok = os.path.exists(os.path.join(self.ws, '.secrets'))
+            envkeys = sorted((sv.get('env') or {}).keys())
+            out.append({'name': name, 'command': cmd, 'args': args[:6],
+                        'wrapped': wrapped, 'bin_ok': bin_ok,
+                        'secrets_ok': secrets_ok, 'env': envkeys,
+                        'probe': probes.get(name)})
+        return out
+
+    def op_probe_mcp(self, _b):
+        """Sonda VIVA: lanza cada MCP y hace el handshake JSON-RPC initialize.
+        La única prueba honesta de 'funciona' es hablarle el protocolo; la de
+        'autenticado' es que arranque con sus credenciales y conteste."""
+        try:
+            cfg = json.load(open(os.path.join(self.ws, '.mcp.json')))
+        except (OSError, ValueError):
+            raise ValueError('este workspace no tiene .mcp.json')
+        servers = cfg.get('mcpServers') or {}
+        results = {}
+
+        def probe(name, sv):
+            cmd = sv.get('command', '')
+            if '/' in cmd and not os.path.isabs(cmd):
+                cmd = os.path.join(self.ws, cmd)
+            full = [cmd] + sv.get('args', [])
+            env = dict(os.environ, **(sv.get('env') or {}))
+            t0 = time.time()
+            try:
+                p = subprocess.Popen(full, cwd=self.ws, env=env,
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE)
+                req = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize',
+                                  'params': {'protocolVersion': '2025-06-18',
+                                             'capabilities': {},
+                                             'clientInfo': {'name': 'harness-panel', 'version': '1'}}})
+                out, err = p.communicate((req + '\n').encode(), timeout=12)
+                ms = int((time.time() - t0) * 1000)
+                for line in out.decode(errors='replace').splitlines():
+                    line = line.strip()
+                    if not line.startswith('{'):
+                        continue
+                    try:
+                        r = json.loads(line)
+                    except ValueError:
+                        continue
+                    if r.get('id') == 1 and 'result' in r:
+                        info = (r['result'].get('serverInfo') or {})
+                        return {'ok': True, 'ms': ms,
+                                'server': info.get('name', ''), 'version': info.get('version', '')}
+                    if r.get('id') == 1 and 'error' in r:
+                        return {'ok': False, 'ms': ms,
+                                'error': redact(str(r['error'].get('message', '')))[:160]}
+                tail = redact(err.decode(errors='replace').strip().splitlines()[-1:] and
+                              err.decode(errors='replace').strip().splitlines()[-1] or 'salió sin contestar')[:160]
+                auth = any(w in tail.lower() for w in ('auth', 'unauthorized', '401', 'token', 'credential', 'api key', 'apikey'))
+                return {'ok': False, 'ms': ms, 'error': tail, 'auth_hint': auth}
+            except subprocess.TimeoutExpired:
+                p.kill()
+                return {'ok': False, 'ms': 12000,
+                        'error': 'no contestó en 12 s (npx/uvx pueden tardar la primera vez — reintenta)'}
+            except OSError as e:
+                return {'ok': False, 'ms': 0, 'error': redact(str(e))[:160]}
+
+        threads = {}
+        for name, sv in servers.items():
+            th = threading.Thread(target=lambda n=name, s=sv: results.__setitem__(n, probe(n, s)))
+            th.start()
+            threads[name] = th
+        for th in threads.values():
+            th.join(timeout=14)
+        stamp = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        for r in results.values():
+            r['at'] = stamp
+        self._mcp_probes = dict(getattr(self, '_mcp_probes', {}), **results)
+        return {'probed': results}
+
     def tick(self):
         with self.lock:
             self.scan_events()
@@ -829,6 +1005,7 @@ class Handler(BaseHTTPRequestHandler):
             '/api/op/respond': self.state.op_respond,
             '/api/op/connect': self.state.op_connect,
             '/api/op/sync-prices': self.state.op_sync_prices,
+            '/api/op/probe-mcp': self.state.op_probe_mcp,
         }
         fn = routes.get(self.path.split('?')[0])
         if not fn:

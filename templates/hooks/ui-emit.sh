@@ -50,7 +50,15 @@ redact() {
 emit() { printf '%s\n' "$1" >> "$BUS" 2>/dev/null; }
 
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-task="$(cat "$BUS_DIR/current-task" 2>/dev/null | head -1 | tr -d '\n')"
+# La tarea se DERIVA del cwd (worktrees/<task>/<repo>), nunca de un archivo
+# compartido: con diez sesiones abiertas, un .harness/current-task global se
+# pisa entre sesiones y etiqueta los eventos con la tarea equivocada. Sin estado
+# compartido no hay estado que corromper.
+cwd="$(printf '%s' "$payload" | jq -r '.cwd // ""' 2>/dev/null)"
+case "$cwd" in
+  */worktrees/*) task="$(printf '%s' "${cwd#*/worktrees/}" | cut -d/ -f1)" ;;
+  *) task="" ;;
+esac
 
 case "$KIND" in
   tool)

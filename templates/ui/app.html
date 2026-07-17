@@ -616,7 +616,7 @@ const BEAT={ "stop":["wait","Te paré"], "gate":["ok","Pasó el gate"],
 function renderStory(s){
   const evs=s.events.filter(e=>e.kind!=="tool"||e.ok==="false");
   if(!evs.length){ $("story").innerHTML=demoStory(s); return; }
-  $("story").innerHTML=`<div class="story">${evs.slice().reverse().map(e=>{
+  $("story").innerHTML=`<div class="story">${evs.map(e=>{
     let [k,lbl]=BEAT[e.kind]||["ok",e.kind];
     if(e.ok==="false"||e.ok===false){ k="blocked"; lbl="Bloqueé"; }
     return `<div class="beat" data-k="${k}">

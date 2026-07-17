@@ -192,6 +192,7 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `scripts/bootstrap.sh` | scripts/bootstrap.sh.tmpl | siempre — {{ENSURE_LINES}} se llena con UNA línea `ensure`/`require` por capacidad elegida, derivando el comando real del campo `install:` del catálogo (brew en macOS; `require` para SDKs pesados: flutter, gcloud, kubectl) |
 | `scripts/ship.sh` | scripts/ship.sh.tmpl | siempre |
 | `scripts/worktree-task.sh`, `scripts/quiet.sh`, `scripts/with-secrets.sh` | scripts/ | siempre |
+| `scripts/emit.sh` | scripts/emit.sh | siempre — el bus del harness: lo que ship.sh y /auto DECIDEN. Fail-open, redacta antes de escribir. Sin esto el panel solo ve agentes y tokens (la mitad prestada), nunca las decisiones ni los gates (la nuestra) |
 | `scripts/secrets.sh` | scripts/secrets.sh.tmpl | siempre (fuente según answers) |
 | `scripts/ticket-pull.sh`, `scripts/ticket-close.sh` | scripts/ticket-*.tmpl | tickets=linear (github: adapta los mismos contratos a `gh issue`) |
 | `scripts/deploy-watch.sh` | scripts/deploy-watch.sh.tmpl | si hay CD (gha/argocd/kargo en inventory) |

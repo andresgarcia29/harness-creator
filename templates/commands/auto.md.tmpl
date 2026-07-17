@@ -160,6 +160,30 @@ vive en `tasks/<id>/` y en los commits del worktree, no en su
 conversación. Dos muertes del mismo rol en la misma tarea → humano con
 el último estado.
 
+## Cuenta lo que decides (el bus)
+
+El humano no está mirando la consola: está mirando el panel (`make ui`). Lo que
+no emitas al bus, para él NO PASÓ. Emite con `scripts/emit.sh <kind> "<texto>" [ok]`
+— es fail-open y cuesta milisegundos:
+
+```bash
+scripts/emit.sh phase "implement — 3 tareas del DAG en paralelo"
+scripts/emit.sh assumption "límite 100 req/min · porque la spec GW-4 lo fija · si es falso: una constante"
+scripts/emit.sh decision "svc-atlas objetó; ganó la evidencia de architecture/map.md"
+scripts/emit.sh stop "abogado svc-hermes en DRAFT — necesito que lo ratifiques"
+```
+
+Reglas:
+- **Una línea por HECHO, no por paso.** No narres ("ahora voy a leer X"): cuenta
+  lo que decidiste y por qué. Si no cabría en el tablero de un no-técnico, no va.
+- **Cada entrada del ledger se emite** como `assumption`, con su evidencia y su
+  costo de reversión — es exactamente lo que el humano audita al volver.
+- **Cada parada se emite** como `stop`, con lo que necesitas de él. Esa es la
+  línea que enciende el "TE ESTÁ ESPERANDO" del panel: si no la emites, el humano
+  no sabe que lo esperas y tu autonomía le costó una hora de espera ciega.
+- Los gates los emite `ship.sh` solo: no los dupliques.
+- Español llano. Lo lee alguien que no sabe qué es un worktree.
+
 ## Reglas de orquestación
 
 - Estado SIEMPRE en `tasks/<id>/`. Si la sesión muere, `/auto <task-id>`

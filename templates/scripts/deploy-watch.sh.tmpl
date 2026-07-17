@@ -9,6 +9,10 @@
 # Uso: deploy-watch.sh <task-id> <repo>
 # Córrelo autenticado: scripts/with-secrets.sh scripts/deploy-watch.sh ...
 set -uo pipefail
+
+# El bus: el humano mira el panel, no esta consola. Fail-open.
+# shellcheck source=/dev/null
+[ -f "$WS/scripts/emit.sh" ] && . "$WS/scripts/emit.sh" || emit() { :; }
 TASK="${1:?uso: deploy-watch.sh <task-id> <repo>}"
 REPO="${2:?uso: deploy-watch.sh <task-id> <repo>}"
 WS="$(cd "$(dirname "$0")/.." && pwd)"

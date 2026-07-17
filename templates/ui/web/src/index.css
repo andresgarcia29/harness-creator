@@ -208,3 +208,10 @@
   --ok: #34d399; --wait: #fbbf24; --bad: #fb7185; --brand: #818cf8;
 }
 
+
+/* ═══ Terminales: pantalla + cursor de bloque ═══ */
+.terminal-screen{background:#0a0a0e;background-image:radial-gradient(ellipse at top, rgba(124,140,255,.03), transparent 60%)}
+.term-cursor{display:inline-block;width:7px;height:13px;margin-left:1px;vertical-align:text-bottom;
+  background:#4ade80;animation:term-blink 1.1s steps(1) infinite}
+@keyframes term-blink{50%{opacity:0}}
+@media (prefers-reduced-motion: reduce){.term-cursor{animation:none}}

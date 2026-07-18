@@ -18,6 +18,8 @@ import { FolderGit2, Radio, ChevronDown, Check, X, Bot, Boxes, ArrowRight,
 import { PaneActions, WorkspaceActions, SessionStop } from "@/components/herdr-actions"
 import { NewWorkspace, SplitItems, NewTerminalItem } from "@/components/herdr-open"
 import { HerdrSessions, ActivateHerdr } from "@/components/herdr-sessions"
+import { TargetSwitcher } from "@/components/target-switcher"
+import { withTarget } from "@/lib/target"
 import type { Go } from "@/App"
 
 const STATUS: Record<string, { label: string; chip: string; dot: string; pulse?: boolean }> = {
@@ -94,7 +96,7 @@ function Screen({ paneId, open, onText }: { paneId: string; open: boolean; onTex
   useEffect(() => {
     if (!open) return
     let live = true
-    const load = () => fetch(`/api/herdr/pane?id=${encodeURIComponent(paneId)}&fmt=ansi`)
+    const load = () => fetch(withTarget(`/api/herdr/pane?id=${encodeURIComponent(paneId)}&fmt=ansi`))
       .then((r) => r.json()).then((d) => { if (live) { setText(d.text ?? ""); onText?.(d.text ?? "") } }).catch(() => {})
     load()
     const iv = setInterval(load, 1200)
@@ -303,25 +305,35 @@ export function Terminals({ s: snap, go }: { s: Snapshot; go: Go }) {
   const h = (snap.herdr || null) as HerdrState | null
   const canOp = snap.op !== false
 
-  const head = <VHead title="Terminales" sub="lo que corre en TU terminal, y el harness que cada una avanza"
-    right={h?.available ? (
+  const targets = snap.targets || []
+  const head = <VHead title="Terminales" sub="lo que corre en esa máquina, y el harness que cada terminal avanza"
+    right={
       <span className="flex items-center gap-2">
-        {canOp && <NewWorkspace />}
-        {canOp && <SessionStop />}
-        <span className="flex items-center gap-1.5 rounded-full border border-(--ok)/40 bg-(--ok)/8 px-2.5 py-1 text-[10px] font-semibold text-(--ok)">
-          <Radio className="size-3 animate-pulse" /> herdr {h.version} · en vivo
-        </span>
+        {canOp && <TargetSwitcher targets={targets} />}
+        {h?.available && canOp && <NewWorkspace />}
+        {h?.available && canOp && <SessionStop />}
+        {h?.available && (
+          <span className="flex items-center gap-1.5 rounded-full border border-(--ok)/40 bg-(--ok)/8 px-2.5 py-1 text-[10px] font-semibold text-(--ok)">
+            <Radio className="size-3 animate-pulse" /> herdr {h.version} · en vivo
+          </span>
+        )}
       </span>
-    ) : undefined} />
+    } />
 
   // Instalado pero el server no corre: ofrecemos activarlo aquí mismo (headless)
   // y mostramos las sesiones paradas para poder borrarlas.
   if (!h || !h.available) {
     const installed = !!h?.installed
+    const targets = snap.targets || []
     return (
       <>
-        <VHead title="Terminales" sub="lo que corre en TU terminal, y el harness que cada una avanza"
-          right={installed && canOp ? <ActivateHerdr /> : undefined} />
+        <VHead title="Terminales" sub="lo que corre en esa máquina, y el harness que cada terminal avanza"
+          right={
+            <span className="flex items-center gap-2">
+              {canOp && <TargetSwitcher targets={targets} />}
+              {installed && canOp && <ActivateHerdr />}
+            </span>
+          } />
         {installed && h?.sessions && <HerdrSessions sessions={h.sessions} canOp={canOp} />}
         <Empty title={installed ? "herdr está instalado, pero el server no corre" : "herdr no está conectado"}>
           {installed ? (

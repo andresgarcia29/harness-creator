@@ -1,5 +1,6 @@
 // La lógica del panel, portada 1:1 del app.html anterior — las derivaciones
 // son REALES y se explican en pantalla (leyes de honestidad intactas).
+import { getTarget } from "@/lib/target"
 
 export const PHASES: [string, string][] = [
   ["intake", "Intake"], ["rfc", "RFC"], ["implement", "Implement"],
@@ -84,6 +85,7 @@ export type Snapshot = {
   connections?: Record<string, boolean>; runs?: { task: string; session: string; kind: string }[]
   mode?: string; op?: boolean; workspace?: { name: string; path: string }
   toolbox?: Toolbox; mcp?: McpServer[]; herdr?: HerdrState | null
+  targets?: HerdrTarget[]
 }
 export type Toolbox = {
   version: string
@@ -129,6 +131,9 @@ export type HerdrAgent = { name: string; pane_id: string; workspace_id: string; 
 // Una sesión de herdr (el multiplexor persistente): lo que mantiene VIVAS las
 // terminales. running=false → quedó como registro y se puede borrar.
 export type HerdrSession = { name: string; running: boolean; default: boolean; dir?: string }
+// Un destino remoto (VPS) donde corre herdr, alcanzable por SSH. name = alias
+// amigable; ssh = alias de ~/.ssh/config o user@host.
+export type HerdrTarget = { name: string; ssh: string }
 export type HerdrState = {
   available: boolean; installed?: boolean; version: string; reason?: string
   workspaces: HerdrWorkspace[]; tabs: HerdrTab[]; panes: HerdrPane[]; agents: HerdrAgent[]
@@ -250,13 +255,17 @@ export function supuesto(a: string) {
 
 declare global { interface Window { __OP: string } }
 
-// POST al plano de operar: token anti-CSRF en header custom (ADR-0010)
+// POST al plano de operar: token anti-CSRF en header custom (ADR-0010). Mete el
+// target activo (máquina local o VPS) en el body, salvo que ya venga uno — así
+// toda acción de herdr va a la máquina que estás viendo. Ops no-herdr lo ignoran.
 export async function op(path: string, body: unknown): Promise<any> {
   try {
+    const b = (body && typeof body === "object") ? body as Record<string, unknown> : {}
+    const withTgt = "target" in b ? b : { ...b, target: getTarget() }
     const r = await fetch(path, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Corvux-Token": window.__OP },
-      body: JSON.stringify(body),
+      body: JSON.stringify(withTgt),
     })
     return await r.json()
   } catch (e) {

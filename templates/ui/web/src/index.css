@@ -219,35 +219,24 @@
 .term-cursor{display:inline-block;width:7px;height:14px;margin-left:1px;vertical-align:text-bottom;
   background:#4ade80;animation:term-blink 1.1s steps(1) infinite}
 
-/* ═══ Barra de teclas: keycaps con relieve real (brillo arriba, sombra abajo,
-   y un "click" al presionar) ═══ */
-.keycap{display:inline-flex;align-items:center;justify-content:center;gap:3px;
-  height:28px;min-width:30px;padding:0 9px;border-radius:8px;
-  font:600 11.5px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.02em;
-  color:rgba(233,233,240,.74);
-  background:linear-gradient(180deg,rgba(255,255,255,.10),rgba(255,255,255,.028) 55%,rgba(0,0,0,.12));
-  border:1px solid rgba(255,255,255,.09);border-top-color:rgba(255,255,255,.17);
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.10),0 1px 1.5px rgba(0,0,0,.5),0 2px 0 rgba(0,0,0,.30);
-  transition:transform .07s ease,box-shadow .13s ease,background .14s ease,color .14s ease,border-color .14s ease;
+/* ═══ Barra de teclas: keycaps FLAT y premium (Linear/Vercel) — superficies
+   planas, borde hairline, hover sutil; sin relieve, sombras ni "click" ═══ */
+.keycap{display:inline-flex;align-items:center;justify-content:center;gap:4px;
+  height:26px;min-width:28px;padding:0 8px;border-radius:7px;
+  font:500 11.5px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.01em;
+  color:rgba(236,236,243,.6);
+  background:rgba(255,255,255,.035);
+  border:1px solid rgba(255,255,255,.08);
+  transition:background .13s ease,color .13s ease,border-color .13s ease;
   cursor:pointer;user-select:none;-webkit-tap-highlight-color:transparent}
-.keycap svg{width:13px;height:13px}
-.keycap:hover{color:#fff;border-color:rgba(129,140,255,.55);
-  background:linear-gradient(180deg,rgba(129,140,255,.24),rgba(129,140,255,.06));
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.15),0 2px 7px rgba(99,102,241,.30),0 2px 0 rgba(0,0,0,.28)}
-.keycap:active{transform:translateY(1.5px);
-  box-shadow:inset 0 1px 2px rgba(0,0,0,.45)}
-.keycap-esc{color:var(--wait);border-color:rgba(251,191,36,.38);border-top-color:rgba(251,191,36,.5);
-  background:linear-gradient(180deg,rgba(251,191,36,.20),rgba(251,191,36,.04) 60%,rgba(0,0,0,.10))}
-.keycap-esc:hover{color:#fde68a;border-color:rgba(251,191,36,.72);
-  background:linear-gradient(180deg,rgba(251,191,36,.32),rgba(251,191,36,.09));
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.16),0 2px 7px rgba(251,191,36,.30),0 2px 0 rgba(0,0,0,.28)}
-.keycap-danger{color:var(--bad);border-color:rgba(251,113,133,.38);border-top-color:rgba(251,113,133,.5);
-  background:linear-gradient(180deg,rgba(251,113,133,.20),rgba(251,113,133,.04) 60%,rgba(0,0,0,.10))}
-.keycap-danger:hover{color:#fda4af;border-color:rgba(251,113,133,.72);
-  background:linear-gradient(180deg,rgba(251,113,133,.32),rgba(251,113,133,.09));
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.16),0 2px 7px rgba(251,113,133,.32),0 2px 0 rgba(0,0,0,.28)}
-.keysep{width:1px;height:15px;border-radius:1px;
-  background:linear-gradient(180deg,transparent,rgba(255,255,255,.12),transparent)}
-@media (prefers-reduced-motion: reduce){.keycap{transition:none}.keycap:active{transform:none}}
+.keycap svg{width:13px;height:13px;opacity:.9}
+.keycap:hover{color:rgba(255,255,255,.94);background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.16)}
+.keycap:active{background:rgba(255,255,255,.05);color:rgba(255,255,255,.8)}
+.keycap-esc{color:var(--wait);background:rgba(251,191,36,.075);border-color:rgba(251,191,36,.22)}
+.keycap-esc:hover{color:#fde68a;background:rgba(251,191,36,.14);border-color:rgba(251,191,36,.42)}
+.keycap-danger{color:var(--bad);background:rgba(251,113,133,.075);border-color:rgba(251,113,133,.22)}
+.keycap-danger:hover{color:#fda4af;background:rgba(251,113,133,.14);border-color:rgba(251,113,133,.42)}
+.keysep{width:1px;height:14px;background:rgba(255,255,255,.09)}
+@media (prefers-reduced-motion: reduce){.keycap{transition:none}}
 @keyframes term-blink{50%{opacity:0}}
 @media (prefers-reduced-motion: reduce){.term-cursor{animation:none}}

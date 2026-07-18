@@ -2,16 +2,63 @@ import { useEffect, useState } from "react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
-import { VHead, H2, Lede, Code, PendAlert, Story, Sup, Empty } from "@/components/bits"
+import { VHead, H2, Lede, Code, PendAlert, Story, Sup, Empty, NumCell } from "@/components/bits"
 import { RespondBox } from "@/components/respond-box"
 import { TaskGitPanel } from "@/components/task-git"
 import { TaskFlow } from "@/components/task-flow"
+import { Gantt } from "@/components/charts"
 import { cn } from "@/lib/utils"
-import { BUSKINDS, PHASES, pending, type BusEvent, type Snapshot, type Task } from "@/lib/harness"
-import { ArrowLeft } from "lucide-react"
+import { BUSKINDS, PHASES, pending, sessionsOfTask, rollupSessions, estado, liveAgents, n, usd,
+  type BusEvent, type Session, type Snapshot, type Task } from "@/lib/harness"
+import { ArrowLeft, ArrowRight } from "lucide-react"
 import type { Go } from "@/App"
 
 const blank = (id: string): Task => ({ id, title: "", origin: "", phase: null, done: [], verdicts: { pass: 0, total: 0 }, assumptions: [] })
+
+// Una tarea CONTIENE sus sesiones (las corridas de agente en su worktree). Aquí
+// se ven dentro de la tarea, cada una con su grafo — no separadas. Clic → sesión.
+function TaskSessions({ s, taskId, go }: { s: Snapshot; taskId: string; go: Go }) {
+  const list = sessionsOfTask(s, taskId)
+  if (!list.length) return null
+  const roll = rollupSessions(list)
+  return (
+    <>
+      <H2 sub="una tarea puede correr en varias sesiones — cada una con su propio grafo">Sus sesiones</H2>
+      <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11.5px] text-muted-foreground/80">
+        <span className="font-medium text-foreground/70">{list.length} sesión{list.length > 1 ? "es" : ""}</span>
+        {roll.live > 0 && <span className="flex items-center gap-1.5 font-semibold text-(--ok)"><i className="size-1.5 animate-pulse rounded-full bg-(--ok)" />{roll.live} agente{roll.live > 1 ? "s" : ""} vivo{roll.live > 1 ? "s" : ""}</span>}
+        <span className="font-mono">{n(roll.out)} tokens</span>
+        <span className="font-mono">{usd(roll.cost)} est.</span>
+      </div>
+      <div className="mb-2 grid gap-3">{list.map((x) => <SessionRow key={x.id} x={x} go={go} />)}</div>
+    </>
+  )
+}
+
+function SessionRow({ x, go }: { x: Session; go: Go }) {
+  const [g, est, on] = estado(x)
+  const A = x.agents.filter((a) => a.first_ts && a.last_ts)
+  const t0 = A.length ? Math.min(...A.map((a) => a.first_ts)) : 0
+  const t1 = A.length ? Math.max(...A.map((a) => a.last_ts)) : 0
+  return (
+    <Card className="overflow-hidden py-0">
+      <button onClick={() => go({ name: "session", id: x.id })}
+        className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-accent/40">
+        <span className={cn("w-3 shrink-0 text-center font-mono text-[13px] font-semibold", on && "animate-pulse text-(--ok)")}>{g}</span>
+        <span className="shrink-0 font-mono text-[12px] font-semibold text-(--brand)">{x.short}</span>
+        <span className="w-24 shrink-0 text-[12.5px] font-medium">{est}</span>
+        <span className="hidden min-w-0 flex-1 truncate text-xs text-muted-foreground/70 sm:block">{(x.last_text || "").slice(0, 110)}</span>
+        <NumCell v={`${x.n_agents} · ${liveAgents(x)}`} l="agentes · vivos" className="hidden md:block" />
+        <NumCell v={n(x.tokens.out)} l="tokens" className="hidden sm:block" />
+        <NumCell v={usd(x.cost)} l="est." />
+        <ArrowRight className="size-3.5 shrink-0 text-muted-foreground/40" />
+      </button>
+      {A.length > 1 && (
+        <div className="border-t p-4"><Gantt A={A} t0={t0} t1={t1} peak={x.peak} /></div>
+      )}
+    </Card>
+  )
+}
 
 export function TaskDetail({ s, id, go }: { s: Snapshot; id: string; go: Go }) {
   const t = s.tasks.find((x) => x.id === id) || blank(id)
@@ -69,6 +116,7 @@ export function TaskDetail({ s, id, go }: { s: Snapshot; id: string; go: Go }) {
           </div>
         </CardContent></Card>
       )}
+      <TaskSessions s={s} taskId={id} go={go} />
       {t.assumptions.length > 0 && (
         <>
           <H2>Supuestos que hizo el agente</H2>

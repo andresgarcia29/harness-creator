@@ -69,6 +69,7 @@ export type Session = {
   // live_by: CÓMO sabemos que vive. "herdr"/"live" = corre AHORA (verdad de
   // campo, no mtime); "recent" = activa hace poco, sin confirmar; "" = reposo.
   live_by?: string
+  cwd?: string // ancla su TAREA (worktrees/<id>/): una sesión vive en una tarea
 }
 export type BusEvent = { ts: string; kind: string; task?: string; actor?: string; summary: string; ok?: boolean }
 export type Task = {
@@ -163,6 +164,31 @@ export function estado(x: Session): [string, string, boolean] {
 // vivo (herdr, o mtime cuando no hay herdr). Así "agentes vivos" no miente.
 export const liveAgents = (x: Session): number =>
   x.live_by === "herdr" || x.live_by === "live" ? x.n_active : 0
+
+// cwd → id de tarea si vive en worktrees/<id>/ (la convención del harness).
+export function taskOfCwd(cwd?: string): string | undefined {
+  const m = (cwd || "").match(/\/worktrees\/([^/]+)/)
+  return m ? m[1] : undefined
+}
+
+// Las sesiones que PERTENECEN a una tarea: las que corren en su worktree (por
+// cwd) o las que el panel lanzó para ella (snap.runs). Una tarea CONTIENE sus
+// sesiones — por eso las mostramos dentro de la tarea, no separadas.
+export function sessionsOfTask(s: Snapshot, taskId: string): Session[] {
+  const viaRuns = new Set((s.runs || []).filter((r) => r.task === taskId).map((r) => r.session))
+  return s.sessions.filter((x) => taskOfCwd(x.cwd) === taskId || viaRuns.has(x.id))
+}
+
+// Suma de tokens/costo de un grupo de sesiones (para el rollup de una tarea).
+export function rollupSessions(list: Session[]): { out: number; cost: number | null; live: number } {
+  let out = 0, cost = 0, known = false, live = 0
+  for (const x of list) {
+    out += x.tokens.out
+    if (x.cost != null) { cost += x.cost; known = true }
+    live += liveAgents(x)
+  }
+  return { out, cost: known ? cost : null, live }
+}
 
 // La alerta se DERIVA: el último evento de cada tarea es stop → te espera;
 // ok=false → un gate bloqueó. Nada más se considera pendiente.

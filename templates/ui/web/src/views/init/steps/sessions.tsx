@@ -17,6 +17,23 @@ export function SessionsStep({ init }: { init: InitState }) {
   const [ctx, setCtx] = useState("")
   const [busy, setBusy] = useState(false)
 
+  if (init.target) {
+    return (
+      <StepShell
+        title="Tu primera tarea"
+        lede={<>El harness vive en <b>{init.target}</b>: las tareas se lanzan ALLÁ (con
+          <Code>harness ui</Code> en el VPS, o un túnel SSH al panel remoto). Salta este paso
+          y termina la instalación.</>}
+        steps={[step]}
+        actions={
+          <Button variant="outline" onClick={() => initOp("step", { step: "first-task", action: "skip" })}>
+            Saltar — las lanzo en el VPS
+          </Button>
+        }
+      />
+    )
+  }
+
   const crear = async () => {
     setBusy(true)
     const r = await op("/api/op/task", {

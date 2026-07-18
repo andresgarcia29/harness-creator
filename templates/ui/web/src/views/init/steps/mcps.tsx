@@ -56,6 +56,12 @@ export function McpsStep({ init }: { init: InitState }) {
         </Button>
       }
     >
+      {init.target && (
+        <div className="rounded-xl border border-(--wait)/40 bg-(--wait)/8 p-3 text-[12px] text-muted-foreground">
+          Instalación remota en <b>{init.target}</b>: aquí eliges qué MCPs van (se materializan
+          allá al continuar); los <b>secretos se certifican en el VPS</b> con <span className="font-mono">make init</span>.
+        </div>
+      )}
       <div className="space-y-3">
         {visible.map((it) => (
           <div key={it.name} className="rounded-2xl border p-3.5">

@@ -87,7 +87,9 @@ export function DiscoverStep({ init }: { init: InitState }) {
     toast.success("Configuración confirmada — sigue Agentes")
   }
 
-  if (dStep?.status !== "ok") {
+  // sin inventario aún: la pantalla de arranque. Con inventario, las tabs se
+  // quedan aunque el discover esté re-corriendo (re-escanear no te saca).
+  if (!inv) {
     return (
       <StepShell
         title="Auto-discover"
@@ -135,6 +137,20 @@ export function DiscoverStep({ init }: { init: InitState }) {
         <TabsContent value="hallazgos" className="space-y-4 pt-3">
           {!inv ? <Empty title="Sin inventario">Corre el auto-discover.</Empty> : (
             <>
+              <div className="flex items-center justify-between">
+                <p className="text-[11.5px] text-muted-foreground">
+                  {inv.repo_count} repos inventariados — corrige cualquier rol equivocado (agrega
+                  abogados automáticamente si lo vuelves service).
+                </p>
+                <Button size="sm" variant="outline" className="gap-1.5" disabled={dStep?.status === "running"}
+                  onClick={async () => {
+                    const r = await initOp("step", { step: "discover", action: "run" })
+                    if (!r.ok) toast.error(r.error)
+                  }}>
+                  {dStep?.status === "running" ? <Loader2 className="size-3.5 animate-spin" /> : <ScanSearch className="size-3.5" />}
+                  Re-escanear
+                </Button>
+              </div>
               <div className="overflow-x-auto rounded-2xl border">
                 <table className="w-full text-[12px]">
                   <thead><tr className="border-b text-left text-[10.5px] uppercase tracking-wider text-muted-foreground">

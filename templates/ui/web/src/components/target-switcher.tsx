@@ -1,9 +1,10 @@
 // Selector de MÁQUINA: local o un VPS por SSH. Cambia qué herdr ves en
-// Terminales (y a dónde van las acciones). Agregar un VPS sólo pide un alias de
-// ~/.ssh/config o user@host — la llave la maneja OpenSSH, el panel nunca toca
-// credenciales. El daemon corre `ssh <destino> herdr …` con quoting a prueba de
-// inyección; el navegador manda el NOMBRE, nunca un comando.
-import { useState } from "react"
+// Terminales (y a dónde van las acciones). Cada VPS muestra un dot de conexión
+// (verde=herdr corriendo, ámbar=alcanzable/parado, rojo=no conecta). Agregar
+// sólo pide un alias de ~/.ssh/config o user@host — la llave la maneja OpenSSH,
+// el panel nunca toca credenciales. El daemon corre `ssh <destino> herdr …` con
+// quoting a prueba de inyección; el navegador manda el NOMBRE, nunca un comando.
+import { useEffect, useState } from "react"
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
   DropdownMenuSeparator, DropdownMenuTrigger,
@@ -15,13 +16,47 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { cn } from "@/lib/utils"
 import { toast } from "sonner"
-import { op, type HerdrTarget } from "@/lib/harness"
+import { op, type HerdrTarget, type TargetProbe } from "@/lib/harness"
 import { useTarget } from "@/lib/target"
-import { Monitor, Server, Check, Plus, Trash2, ChevronsUpDown } from "lucide-react"
+import { Monitor, Server, Check, Plus, Trash2, ChevronsUpDown, Loader2, Plug } from "lucide-react"
+
+// Dot de conexión de un target según su probe.
+function StatusDot({ p }: { p?: TargetProbe }) {
+  const [tone, title] =
+    !p ? ["bg-muted-foreground/40", "sin estado aún"]
+      : p.running ? ["bg-(--ok) animate-pulse", "herdr corriendo"]
+        : p.reachable ? ["bg-(--wait)", "herdr instalado, server parado"]
+          : p.ssh_ok ? ["bg-(--wait)", "conecté por SSH, pero herdr no respondió"]
+            : ["bg-(--bad)", "no conecta por SSH"]
+  return <i className={cn("size-2 shrink-0 rounded-full", tone)} title={title} />
+}
+
+// Sondea el estado de todos los targets cada 15s (y al montar). SSH a cada uno,
+// concurrente en el daemon — no cada 2s, para no cargar.
+function useTargetStatus(count: number): Record<string, TargetProbe> {
+  const [status, setStatus] = useState<Record<string, TargetProbe>>({})
+  useEffect(() => {
+    if (count === 0) return
+    let live = true
+    const poll = async () => {
+      const r = await op("/api/op/targets", { action: "status", target: "" })
+      if (live && r.ok && Array.isArray(r.status)) {
+        const m: Record<string, TargetProbe> = {}
+        for (const s of r.status as TargetProbe[]) m[s.name] = s
+        setStatus(m)
+      }
+    }
+    poll()
+    const iv = setInterval(poll, 15000)
+    return () => { live = false; clearInterval(iv) }
+  }, [count])
+  return status
+}
 
 export function TargetSwitcher({ targets }: { targets: HerdrTarget[] }) {
   const [active, setActive] = useTarget()
   const [addOpen, setAddOpen] = useState(false)
+  const status = useTargetStatus(targets.length)
   const current = active ? targets.find((t) => t.name === active) : undefined
   const label = active ? (current?.name || active) : "esta máquina"
 
@@ -31,9 +66,10 @@ export function TargetSwitcher({ targets }: { targets: HerdrTarget[] }) {
         <DropdownMenuTrigger className="flex h-8 items-center gap-1.5 rounded-md border border-border bg-card px-2.5 text-[12px] font-medium transition-colors hover:bg-accent">
           {active ? <Server className="size-3.5 text-(--brand)" /> : <Monitor className="size-3.5 text-muted-foreground" />}
           <span className="max-w-[140px] truncate">{label}</span>
+          {active && <StatusDot p={status[active]} />}
           <ChevronsUpDown className="size-3 text-muted-foreground/60" />
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="min-w-[220px]">
+        <DropdownMenuContent align="end" className="min-w-[240px]">
           <DropdownMenuLabel className="text-[11px] text-muted-foreground/70">Máquina que ves</DropdownMenuLabel>
           <DropdownMenuItem onClick={() => setActive("")}>
             <Monitor className="size-3.5" /> esta máquina (local)
@@ -42,9 +78,10 @@ export function TargetSwitcher({ targets }: { targets: HerdrTarget[] }) {
           {targets.length > 0 && <DropdownMenuSeparator />}
           {targets.map((t) => (
             <DropdownMenuItem key={t.name} onClick={() => setActive(t.name)}>
+              <StatusDot p={status[t.name]} />
               <Server className="size-3.5 text-(--brand)" />
               <span className="min-w-0 flex-1 truncate">{t.name}</span>
-              <span className="ml-1 truncate font-mono text-[10px] text-muted-foreground/50">{t.ssh}</span>
+              <span className="ml-1 max-w-[90px] truncate font-mono text-[10px] text-muted-foreground/50">{t.ssh}</span>
               <button onClick={(e) => { e.stopPropagation(); removeTarget(t.name, active, setActive) }}
                 title="quitar este destino" className="ml-1 rounded p-0.5 text-muted-foreground/50 hover:text-(--bad)">
                 <Trash2 className="size-3" />
@@ -67,7 +104,7 @@ async function removeTarget(name: string, active: string, setActive: (t: string)
   const r = await op("/api/op/targets", { action: "remove", name, target: "" })
   if (r.ok) {
     toast.success(`Destino «${name}» quitado.`)
-    if (active === name) setActive("") // si veías ese, vuelve a local
+    if (active === name) setActive("")
   } else toast.error(r.error || "no se pudo quitar")
 }
 
@@ -77,15 +114,23 @@ function AddTargetDialog({ open, onOpenChange, onAdded }: {
   const [name, setName] = useState("")
   const [ssh, setSsh] = useState("")
   const [busy, setBusy] = useState(false)
+  const [probe, setProbe] = useState<TargetProbe | null>(null)
+
+  const test = async () => {
+    setBusy(true); setProbe(null)
+    const r = await op("/api/op/targets", { action: "test", ssh, target: "" })
+    setBusy(false)
+    if (r.ok && r.probe) setProbe(r.probe as TargetProbe)
+    else toast.error(r.error || "no se pudo probar")
+  }
   const add = async () => {
     setBusy(true)
-    // target:"" para que el add no herede el target activo (es meta, no de herdr)
     const r = await op("/api/op/targets", { action: "add", name, ssh, target: "" })
     setBusy(false)
     if (r.ok) {
       toast.success(`VPS «${name}» agregado.`)
       onAdded(name)
-      onOpenChange(false); setName(""); setSsh("")
+      onOpenChange(false); setName(""); setSsh(""); setProbe(null)
     } else toast.error(r.error || "no se pudo agregar")
   }
   return (
@@ -105,17 +150,29 @@ function AddTargetDialog({ open, onOpenChange, onAdded }: {
           </div>
           <div>
             <label className="mb-1 block text-[11px] font-medium text-muted-foreground">Destino SSH</label>
-            <Input value={ssh} onChange={(e) => setSsh(e.target.value)} placeholder="alias de ~/.ssh/config o user@host" className="font-mono text-[12px]" />
+            <Input value={ssh} onChange={(e) => { setSsh(e.target.value); setProbe(null) }} placeholder="alias de ~/.ssh/config o user@host" className="font-mono text-[12px]" />
             <p className="mt-1 text-[10.5px] text-muted-foreground/60">
               Debe conectar con <code className="rounded bg-muted px-1">ssh &lt;destino&gt;</code> sin pedir contraseña (llave configurada).
             </p>
           </div>
+          {probe && (
+            <div className={cn("flex items-start gap-2 rounded-md border px-3 py-2 text-[11.5px]",
+              probe.running ? "border-(--ok)/40 bg-(--ok)/8 text-(--ok)"
+                : probe.reachable || probe.ssh_ok ? "border-(--wait)/40 bg-(--wait)/8 text-(--wait)"
+                  : "border-(--bad)/40 bg-(--bad)/8 text-(--bad)")}>
+              <StatusDot p={probe} />
+              <span>{probe.message}</span>
+            </div>
+          )}
         </div>
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>Cancelar</Button>
-          <Button onClick={add} disabled={busy || !name.trim() || !ssh.trim()} className={cn(busy && "opacity-70")}>
-            {busy ? "agregando…" : "Agregar VPS"}
+        <DialogFooter className="flex-col-reverse gap-2 sm:flex-row sm:justify-between">
+          <Button variant="outline" onClick={test} disabled={busy || !ssh.trim()} className="gap-1.5">
+            {busy ? <Loader2 className="size-3.5 animate-spin" /> : <Plug className="size-3.5" />} Probar conexión
           </Button>
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>Cancelar</Button>
+            <Button onClick={add} disabled={busy || !name.trim() || !ssh.trim()}>Agregar VPS</Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>

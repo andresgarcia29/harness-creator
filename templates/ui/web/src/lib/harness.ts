@@ -143,6 +143,7 @@ export type InitState = {
   answers_rev?: number
   role_overrides?: Record<string, string>
   recommendations?: Record<string, string>
+  archaeology?: { agent: string; status: InitStatus; detail?: string }[]
 }
 export type Toolbox = {
   version: string

@@ -69,7 +69,7 @@ export function Welcome({ init, targets }: { init: InitState; targets: HerdrTarg
       ) : (
         <>
           {targets.length > 0 && (
-            <Fld label="¿Dónde se crea?" hint="local, o un VPS por SSH">
+            <Fld label="¿Dónde se crea?" hint="los VPS salen de tus máquinas del panel (~/.config/harness/targets.json)">
               <Select value={init.target || "local"}
                 onValueChange={async (v) => {
                   const r = await initOp("target", { name: v === "local" ? "" : v })
@@ -83,6 +83,13 @@ export function Welcome({ init, targets }: { init: InitState; targets: HerdrTarg
                   {targets.map((t) => <SelectItem key={t.name} value={t.name}>VPS: {t.name}</SelectItem>)}
                 </SelectContent>
               </Select>
+              {init.target && (
+                <p className="mt-1.5 text-[11px] text-muted-foreground/70">
+                  El harness nace en <b>{init.target}</b>. No hace falta que el VPS tenga nada
+                  instalado: el binario <Code>harness</Code> se instala solo al continuar
+                  (del release público). La ruta de abajo es la del VPS.
+                </p>
+              )}
             </Fld>
           )}
           <Fld label="Carpeta del workspace" hint="absoluta o ~/…">

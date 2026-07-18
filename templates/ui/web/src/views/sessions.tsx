@@ -1,6 +1,6 @@
 import { VHead, Empty, NumCell } from "@/components/bits"
 import { cn } from "@/lib/utils"
-import { estado, n, usd, fecha, type Snapshot } from "@/lib/harness"
+import { estado, liveAgents, n, usd, fecha, type Snapshot } from "@/lib/harness"
 import type { Go } from "@/App"
 
 export function Sessions({ s, go }: { s: Snapshot; go: Go }) {
@@ -26,7 +26,7 @@ export function Sessions({ s, go }: { s: Snapshot; go: Go }) {
               <span className="hidden min-w-0 flex-1 truncate text-xs text-muted-foreground/80 sm:block">
                 {(x.last_text || "").slice(0, 140) || "(sin texto)"}
               </span>
-              <NumCell v={`${x.n_agents} · ${x.n_active}`} l="agentes · vivos" className="hidden md:block" />
+              <NumCell v={`${x.n_agents} · ${liveAgents(x)}`} l="agentes · vivos" className="hidden md:block" />
               <NumCell v={n(x.tokens.out)} l="tokens" className="hidden sm:block" />
               <NumCell v={usd(x.cost)} l="est." />
               <NumCell v={x.idle < 60 ? "ahora" : fecha(s.ts - x.idle)} l="últ. act." className="hidden md:block" />

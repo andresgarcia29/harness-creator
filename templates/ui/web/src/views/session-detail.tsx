@@ -69,12 +69,16 @@ export function SessionDetail({ s, id, go, texts }: { s: Snapshot; id: string; g
   const kids = x.agents.filter((a) => a.id !== "main")
   // seed: lo último dicho por agente (del snapshot) + lo llegado por SSE
   const seed = x.agents.filter((a) => a.last_text).sort((a, b) => a.last_ts - b.last_ts).slice(-8)
-  const agentRow = (a: (typeof x.agents)[0], root = false) => (
+  const agentRow = (a: (typeof x.agents)[0], root = false) => {
+    // el punto verde "trabajando" sólo si la sesión está viva DE VERDAD (herdr),
+    // no por mtime — coherente con el badge de arriba.
+    const act = a.active && on
+    return (
     <div key={a.id} className={cn("flex items-center gap-2.5 border-b px-3.5 py-2 text-[12.5px] last:border-b-0",
       root ? "bg-secondary/60" : "relative pl-8")}>
       {!root && <span className="absolute left-3.5 text-[11px] text-border">└</span>}
-      <span className={cn("w-3 shrink-0 text-center font-mono text-xs font-semibold", a.active && "animate-pulse text-(--ok)")}>
-        {a.active ? "●" : "○"}
+      <span className={cn("w-3 shrink-0 text-center font-mono text-xs font-semibold", act && "animate-pulse text-(--ok)")}>
+        {act ? "●" : "○"}
       </span>
       <span className="min-w-0 flex-1 truncate">
         {who(a)}
@@ -82,9 +86,10 @@ export function SessionDetail({ s, id, go, texts }: { s: Snapshot; id: string; g
       </span>
       <NumCell v={n(a.usage.out)} l="tokens" className="w-[72px]" />
       <NumCell v={usd(a.cost)} l="est." className="hidden w-[58px] sm:block" />
-      <NumCell v={a.active ? "trabajando" : dur(a.idle)} l={a.active ? "ahora" : "desde hace"} className="hidden w-[98px] md:block" />
+      <NumCell v={act ? "trabajando" : dur(a.idle)} l={act ? "ahora" : "desde hace"} className="hidden w-[98px] md:block" />
     </div>
-  )
+    )
+  }
   return (
     <>
       <Button variant="ghost" size="sm" className="-ml-2 mb-2 text-muted-foreground" onClick={() => go({ name: "sessions" })}>

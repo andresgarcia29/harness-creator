@@ -8,8 +8,9 @@ import { Badge } from "@/components/ui/badge"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { toast } from "sonner"
 import { Fld, Code, StatusBadge } from "@/components/bits"
-import { CircleCheck, FolderOpen, FolderSearch, Loader2 } from "lucide-react"
+import { CircleCheck, FolderOpen, FolderSearch, Loader2, Plus } from "lucide-react"
 import type { HerdrTarget, InitState } from "@/lib/harness"
+import { AddTargetDialog } from "@/components/target-switcher"
 import { StepShell } from "../step-shell"
 import { initOp, stepOf } from "./../use-init"
 import { BrowseDialog } from "./browse-dialog"
@@ -23,6 +24,7 @@ export function Welcome({ init, targets }: { init: InitState; targets: HerdrTarg
   const [busy, setBusy] = useState(false)
   const [probe, setProbe] = useState<Probe | null>(null)
   const [browsing, setBrowsing] = useState(false)
+  const [addingVps, setAddingVps] = useState(false)
   const timer = useRef<number | undefined>(undefined)
 
   // Validación en vivo: el server es quien sabe de rutas (normaliza, checa
@@ -68,8 +70,8 @@ export function Welcome({ init, targets }: { init: InitState; targets: HerdrTarg
         </div>
       ) : (
         <>
-          {targets.length > 0 && (
-            <Fld label="¿Dónde se crea?" hint="los VPS salen de tus máquinas del panel (~/.config/harness/targets.json)">
+          <Fld label="¿Dónde se crea?" hint="los VPS salen de tus máquinas del panel (~/.config/harness/targets.json)">
+            <div className="flex gap-2">
               <Select value={init.target || "local"}
                 onValueChange={async (v) => {
                   const r = await initOp("target", { name: v === "local" ? "" : v })
@@ -83,15 +85,25 @@ export function Welcome({ init, targets }: { init: InitState; targets: HerdrTarg
                   {targets.map((t) => <SelectItem key={t.name} value={t.name}>VPS: {t.name}</SelectItem>)}
                 </SelectContent>
               </Select>
-              {init.target && (
-                <p className="mt-1.5 text-[11px] text-muted-foreground/70">
-                  El harness nace en <b>{init.target}</b>. No hace falta que el VPS tenga nada
-                  instalado: el binario <Code>harness</Code> se instala solo al continuar
-                  (del release público). La ruta de abajo es la del VPS.
-                </p>
-              )}
-            </Fld>
-          )}
+              <Button variant="outline" title="Añadir un VPS (se prueba el SSH antes de guardar)"
+                className="shrink-0 gap-1.5" onClick={() => setAddingVps(true)}>
+                <Plus className="size-3.5" /> VPS
+              </Button>
+            </div>
+            {init.target && (
+              <p className="mt-1.5 text-[11px] text-muted-foreground/70">
+                El harness nace en <b>{init.target}</b>. No hace falta que el VPS tenga nada
+                instalado: el binario <Code>harness</Code> se instala solo al continuar
+                (del release público). La ruta de abajo es la del VPS.
+              </p>
+            )}
+          </Fld>
+          <AddTargetDialog open={addingVps} onOpenChange={setAddingVps}
+            onAdded={async (name) => {
+              const r = await initOp("target", { name })
+              if (r.ok) toast.success(`El harness se creará en ${name}`)
+              else toast.error(r.error)
+            }} />
           <Fld label="Carpeta del workspace" hint="absoluta o ~/…">
             <div className="flex gap-2">
               <Input value={path} onChange={(e) => setPath(e.target.value)} className="font-mono text-[13px]" spellCheck={false} />

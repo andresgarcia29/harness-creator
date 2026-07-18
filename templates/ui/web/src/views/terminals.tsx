@@ -14,7 +14,12 @@ import { parsePrompt, type Prompt } from "@/lib/prompt-parse"
 import { cn } from "@/lib/utils"
 import { op, taskRollup, PHASES, type Snapshot, type HerdrState, type HerdrPane, type TaskRollup } from "@/lib/harness"
 import { FolderGit2, Radio, ChevronDown, Check, X, Bot, Boxes, ArrowRight,
-  ArrowUp, ArrowDown, ArrowLeft, ArrowRight as ArrowRightIcon, CornerDownLeft, Delete, OctagonX, Loader2 } from "lucide-react"
+  ArrowUp, ArrowDown, ArrowLeft, ArrowRight as ArrowRightIcon, CornerDownLeft, Delete, OctagonX, Loader2,
+  Maximize2, Minus } from "lucide-react"
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { PaneActions, WorkspaceActions, SessionStop } from "@/components/herdr-actions"
 import { NewWorkspace, SplitItems, NewTerminalItem } from "@/components/herdr-open"
 import { HerdrSessions, ActivateHerdr } from "@/components/herdr-sessions"
@@ -90,7 +95,7 @@ function tidyScreen(raw: string): string {
   return out.join("\n")
 }
 
-function Screen({ paneId, open, onText }: { paneId: string; open: boolean; onText?: (t: string) => void }) {
+function Screen({ paneId, open, big, onText }: { paneId: string; open: boolean; big?: boolean; onText?: (t: string) => void }) {
   const [text, setText] = useState<string | null>(null)
   const boxRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -105,11 +110,15 @@ function Screen({ paneId, open, onText }: { paneId: string; open: boolean; onTex
   useEffect(() => { const el = boxRef.current; if (el) el.scrollTop = el.scrollHeight }, [text])
   if (!open) return null
   return (
-    <div ref={boxRef} className="terminal-screen max-h-[420px] min-h-[84px] overflow-auto px-4 py-3">
+    <div ref={boxRef} className={cn("terminal-screen overflow-auto px-4 py-3",
+      big ? "h-full min-h-0" : "max-h-[420px] min-h-[84px]")}>
       {text == null ? (
         <span className="text-[11.5px] text-white/30">conectando al PTY…</span>
       ) : (
-        <pre className="term-pre whitespace-pre font-mono text-[12.5px] text-[#d4d4dc]">
+        // w-fit + mx-auto: el contenido (a menudo un pane split, media pantalla)
+        // se centra en vez de dejar un vacío a la derecha; si es más ancho que el
+        // marco, desborda y hace scroll horizontal normal.
+        <pre className="term-pre mx-auto w-fit whitespace-pre font-mono text-[12.5px] text-[#d4d4dc]">
           <Ansi text={tidyScreen(text)} />
           <span className="term-cursor" />
         </pre>
@@ -225,11 +234,11 @@ function taskOfPane(cwd: string): string | null {
 // La consola completa de un pane: pantalla + respuestas interactivas + barra de
 // teclas + prompt. Reutilizable — la usa cada TerminalWindow y también el cajón
 // de terminal embebido en la vista del grafo de una sesión.
-export function PaneConsole({ paneId, canOp, open = true }: { paneId: string; canOp: boolean; open?: boolean }) {
+export function PaneConsole({ paneId, canOp, open = true, big }: { paneId: string; canOp: boolean; open?: boolean; big?: boolean }) {
   const [prompt, setPrompt] = useState<Prompt>(null)
   return (
     <>
-      <Screen paneId={paneId} open={open} onText={(t) => setPrompt(parsePrompt(t))} />
+      <Screen paneId={paneId} open={open} big={big} onText={(t) => setPrompt(parsePrompt(t))} />
       {open && canOp && prompt && <InteractiveAnswer paneId={paneId} prompt={prompt} />}
       {open && canOp && <KeyBar paneId={paneId} />}
       {open && canOp && <Prompt paneId={paneId} />}
@@ -261,6 +270,9 @@ function TerminalWindow({ p, tabLabel, canOp, snap, go }: {
 }) {
   const busy = p.agent_status === "working" || p.agent_status === "blocked"
   const [open, setOpen] = useState(busy)
+  const [max, setMax] = useState(false)
+  const [confirmClose, setConfirmClose] = useState(false)
+  const [closing, setClosing] = useState(false)
   const s = st(p.agent_status)
   const cwdFull = p.foreground_cwd || p.cwd || ""
   const cwd = cwdFull.replace(/^\/Users\/[^/]+/, "~")
@@ -268,35 +280,119 @@ function TerminalWindow({ p, tabLabel, canOp, snap, go }: {
   const inHarness = !!wsPath && cwdFull.startsWith(wsPath)
   const taskId = inHarness ? taskOfPane(cwdFull) : null
   const task = taskId ? taskRollup(snap).find((r) => r.id === taskId) : undefined
+  const label = tabLabel || p.pane_id
+
+  // Esc cierra el modo maximizado.
+  useEffect(() => {
+    if (!max) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setMax(false) }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [max])
+
+  const doClose = async () => {
+    setClosing(true)
+    const r = await op("/api/op/herdr", { action: "close-pane", id: p.pane_id })
+    setClosing(false); setConfirmClose(false)
+    if (r.ok) toast.success("Terminal cerrada.")
+    else toast.error(r.error || "no se pudo cerrar")
+  }
+
+  // Semáforo macOS FUNCIONAL: rojo=cerrar (confirma), amarillo=minimizar,
+  // verde=maximizar. El glifo aparece al hover, como en macOS.
+  const lights = (
+    <span className="flex items-center gap-1.5">
+      <button type="button" disabled={!canOp} title={canOp ? "cerrar terminal" : "cerrar (sólo lectura)"}
+        onClick={(e) => { e.stopPropagation(); setConfirmClose(true) }}
+        className="group/l grid size-3 place-items-center rounded-full bg-[#ff5f57]/90 transition hover:bg-[#ff5f57] disabled:cursor-not-allowed disabled:opacity-40">
+        <X className="size-2 text-black/60 opacity-0 group-hover/l:opacity-100" strokeWidth={3} />
+      </button>
+      <button type="button" title="minimizar"
+        onClick={(e) => { e.stopPropagation(); setOpen(false) }}
+        className="group/l grid size-3 place-items-center rounded-full bg-[#febc2e]/90 transition hover:bg-[#febc2e]">
+        <Minus className="size-2 text-black/60 opacity-0 group-hover/l:opacity-100" strokeWidth={3} />
+      </button>
+      <button type="button" title="maximizar"
+        onClick={(e) => { e.stopPropagation(); setMax(true); setOpen(true) }}
+        className={cn("group/l grid size-3 place-items-center rounded-full transition",
+          p.agent_status === "working" ? "bg-[#28c840] animate-pulse" : "bg-[#28c840]/70 hover:bg-[#28c840]")}>
+        <Maximize2 className="size-[7px] text-black/60 opacity-0 group-hover/l:opacity-100" strokeWidth={3} />
+      </button>
+    </span>
+  )
+
+  const chrome = (min: boolean) => (
+    <>
+      {lights}
+      {p.program && (
+        <span className="ml-1 flex shrink-0 items-center gap-1 rounded-md border border-(--brand)/40 bg-(--brand)/10 px-1.5 py-0.5 text-[10px] font-semibold text-(--brand)">
+          <Bot className="size-3" /> {p.program}
+        </span>
+      )}
+      <span className="truncate font-mono text-[12px] font-semibold text-white/85">{label}</span>
+      <span className="hidden truncate font-mono text-[10.5px] text-white/30 md:inline">{cwd}</span>
+      <span className="flex-1" />
+      <span className={cn("flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider", s.chip)}>
+        <i className={cn("size-1.5 rounded-full", s.dot, s.pulse && "animate-pulse")} />{s.label}
+      </span>
+      {min && canOp && <span onClick={(e) => e.stopPropagation()}>
+        <PaneActions paneId={p.pane_id} tabId={p.tab_id} label={label} running={busy} extra={<SplitItems paneId={p.pane_id} />} />
+      </span>}
+      {min
+        ? <button type="button" onClick={() => setOpen((o) => !o)} title={open ? "minimizar" : "expandir"}
+            className="grid size-6 place-items-center rounded text-white/30 hover:text-white/70">
+            <ChevronDown className={cn("size-3.5 transition-transform duration-200", !open && "-rotate-90")} />
+          </button>
+        : <button type="button" onClick={() => setMax(false)} title="cerrar vista grande (Esc)"
+            className="grid size-6 place-items-center rounded text-white/40 hover:bg-white/10 hover:text-white/90">
+            <X className="size-4" />
+          </button>}
+    </>
+  )
 
   return (
     <div className={cn("group overflow-hidden rounded-xl border bg-[#0e0e13] shadow-[0_10px_30px_rgba(0,0,0,.5)] transition-all",
       p.agent_status === "working" ? "border-(--ok)/30" : p.agent_status === "blocked" ? "border-(--bad)/35" : "border-white/10")}>
-      <button onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center gap-2.5 border-b border-white/8 bg-gradient-to-b from-white/[0.07] to-transparent px-4 py-2.5 text-left">
-        <span className="flex gap-1.5">
-          <i className="size-3 rounded-full bg-[#ff5f57]/90" />
-          <i className="size-3 rounded-full bg-[#febc2e]/90" />
-          <i className={cn("size-3 rounded-full", p.agent_status === "working" ? "bg-[#28c840] animate-pulse" : "bg-[#28c840]/60")} />
-        </span>
-        {p.program && (
-          <span className="ml-1 flex shrink-0 items-center gap-1 rounded-md border border-(--brand)/40 bg-(--brand)/10 px-1.5 py-0.5 text-[10px] font-semibold text-(--brand)">
-            <Bot className="size-3" /> {p.program}
-          </span>
-        )}
-        <span className="truncate font-mono text-[12px] font-semibold text-white/85">{tabLabel || p.pane_id}</span>
-        <span className="hidden truncate font-mono text-[10.5px] text-white/30 md:inline">{cwd}</span>
-        <span className="flex-1" />
-        <span className={cn("flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider", s.chip)}>
-          <i className={cn("size-1.5 rounded-full", s.dot, s.pulse && "animate-pulse")} />{s.label}
-        </span>
-        {canOp && <span onClick={(e) => e.stopPropagation()}>
-          <PaneActions paneId={p.pane_id} tabId={p.tab_id} label={tabLabel || p.pane_id} running={busy} extra={<SplitItems paneId={p.pane_id} />} />
-        </span>}
-        <ChevronDown className={cn("size-3.5 text-white/30 transition-transform duration-200", !open && "-rotate-90")} />
-      </button>
+      <div className="flex w-full items-center gap-2.5 border-b border-white/8 bg-gradient-to-b from-white/[0.07] to-transparent px-4 py-2.5">
+        {chrome(true)}
+      </div>
       {inHarness && <HarnessStrip wsName={snap.workspace?.name || "harness"} task={task} go={go} />}
       <PaneConsole paneId={p.pane_id} canOp={canOp} open={open} />
+
+      {/* Maximizar: overlay a pantalla casi completa, terminal grande y legible. */}
+      {max && (
+        <div className="fixed inset-0 z-50 flex bg-black/80 p-3 backdrop-blur-sm sm:p-6" onClick={() => setMax(false)}>
+          <div className={cn("mx-auto flex h-full w-full max-w-[1500px] flex-col overflow-hidden rounded-xl border bg-[#0e0e13] shadow-2xl",
+            p.agent_status === "working" ? "border-(--ok)/30" : p.agent_status === "blocked" ? "border-(--bad)/35" : "border-white/15")}
+            onClick={(e) => e.stopPropagation()}>
+            <div className="flex shrink-0 items-center gap-2.5 border-b border-white/8 bg-gradient-to-b from-white/[0.07] to-transparent px-4 py-2.5">
+              {chrome(false)}
+            </div>
+            {inHarness && <HarnessStrip wsName={snap.workspace?.name || "harness"} task={task} go={(v) => { setMax(false); go(v) }} />}
+            <div className="flex min-h-0 flex-1 flex-col">
+              <PaneConsole paneId={p.pane_id} canOp={canOp} open big />
+            </div>
+          </div>
+        </div>
+      )}
+
+      <AlertDialog open={confirmClose} onOpenChange={setConfirmClose}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Cerrar terminal</AlertDialogTitle>
+            <AlertDialogDescription>
+              Cierra «{label}» y mata su proceso{busy ? " (está trabajando)" : ""}. No se puede deshacer.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={closing}>Cancelar</AlertDialogCancel>
+            <AlertDialogAction onClick={(e) => { e.preventDefault(); doClose() }} disabled={closing}
+              className="bg-(--bad) text-white hover:bg-(--bad)/90">
+              {closing ? "…" : "Cerrar terminal"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

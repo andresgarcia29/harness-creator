@@ -2,7 +2,6 @@
 // (determinista) y correr la arqueología (LLM, por cluster, saltable).
 import { useEffect, useState } from "react"
 import { Button } from "@/components/ui/button"
-import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -20,6 +19,10 @@ export function AgentsStep({ init }: { init: InitState }) {
   const gStep = stepOf(init, "generate")
   const aStep = stepOf(init, "archaeology")
   const repos = (init.inventory?.repos || []).map((r) => r.name)
+  // servicios sin abogado: el agujero clásico del clustering (a ti se te
+  // fueron domos/agora/video-forge) — visible y arreglable con un clic
+  const roleOf = (name: string) =>
+    init.role_overrides?.[name] || init.inventory?.repos.find((r) => r.name === name)?.role_guess || "unknown"
   const [clusters, setClusters] = useState<InitCluster[] | null>(null)
   const [baseRev, setBaseRev] = useState(0)
   const [dirty, setDirty] = useState(false)
@@ -49,6 +52,8 @@ export function AgentsStep({ init }: { init: InitState }) {
     setClusters(cs)
     setDirty(true)
   }
+  const covered = new Set(clusters.flatMap((c) => c.repos))
+  const uncoveredServices = repos.filter((r) => roleOf(r) === "service" && !covered.has(r))
   const guardarYGenerar = async () => {
     const r = await initOp("answers", { rev: baseRev, patch: { clusters } })
     if (!r.ok) { toast.error(r.error === "rev" ? "el borrador cambió — recarga" : r.error); return }
@@ -72,6 +77,25 @@ export function AgentsStep({ init }: { init: InitState }) {
         </Button>
       }
     >
+      {uncoveredServices.length > 0 && (
+        <div className="rounded-xl border border-(--wait)/40 bg-(--wait)/8 p-3">
+          <p className="mb-1.5 flex items-center gap-2 text-[12.5px] font-medium">
+            <TriangleAlert className="size-4 text-(--wait)" /> {uncoveredServices.length} servicio(s) sin abogado
+          </p>
+          <p className="mb-2 text-[11.5px] text-muted-foreground">
+            Cada servicio que posee datos merece su abogado. Un clic los agrega:
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {uncoveredServices.map((r) => (
+              <button key={r}
+                className="rounded-lg border border-(--wait)/50 px-2 py-0.5 font-mono text-[11px] hover:bg-(--wait)/15"
+                onClick={() => upd((cs) => { cs.push({ agent: "svc-" + r, kind: "service", repos: [r] }) })}>
+                + svc-{r}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       {clusters.length > 12 && (
         <div className="flex items-center gap-2 rounded-xl border border-(--wait)/40 bg-(--wait)/8 p-3 text-[12px]">
           <TriangleAlert className="size-4 text-(--wait)" /> Más de 12 agentes — considera agrupar por dominio de negocio.
@@ -90,16 +114,25 @@ export function AgentsStep({ init }: { init: InitState }) {
               <button className="ml-auto text-muted-foreground/50 hover:text-(--bad)"
                 onClick={() => upd((cs) => { cs.splice(i, 1) })}><Trash2 className="size-4" /></button>
             </div>
-            <div className="mb-2 flex flex-wrap gap-2.5">
-              {repos.map((r) => (
-                <label key={r} className="flex items-center gap-1.5 text-[11.5px]">
-                  <Checkbox checked={c.repos.includes(r)}
-                    onCheckedChange={(v) => upd((cs) => {
-                      cs[i].repos = v === true ? [...cs[i].repos, r] : cs[i].repos.filter((x) => x !== r)
-                    })} />
-                  <span className="font-mono">{r}</span>
-                </label>
+            {/* SUS repos como chips (quitar con ×) + agregar de un dropdown —
+                el grid de 27 checkboxes por cluster era ilegible */}
+            <div className="mb-2 flex flex-wrap items-center gap-1.5">
+              {c.repos.map((r) => (
+                <span key={r} className="flex items-center gap-1 rounded-lg border bg-muted/40 px-2 py-0.5 font-mono text-[11px]">
+                  {r}
+                  <button className="text-muted-foreground/50 hover:text-(--bad)"
+                    onClick={() => upd((cs) => { cs[i].repos = cs[i].repos.filter((x) => x !== r) })}>×</button>
+                </span>
               ))}
+              {c.repos.length === 0 && <span className="text-[11px] text-(--bad)">sin repos</span>}
+              <Select value="" onValueChange={(v) => v && upd((cs) => { if (!cs[i].repos.includes(v)) cs[i].repos.push(v) })}>
+                <SelectTrigger className="h-6 w-32 text-[10.5px]"><SelectValue>+ repo…</SelectValue></SelectTrigger>
+                <SelectContent>
+                  {repos.filter((r) => !c.repos.includes(r)).map((r) => (
+                    <SelectItem key={r} value={r}>{r}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
             <Fld label="Posee" hint="qué datos/dominio defiende">
               <Input value={c.owns || ""} onChange={(e) => upd((cs) => { cs[i].owns = e.target.value })}

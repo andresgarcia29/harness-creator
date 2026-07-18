@@ -6,8 +6,16 @@ import { Button } from "@/components/ui/button"
 import { H2, Lede } from "@/components/bits"
 import { LogTail } from "./log-tail"
 import { initOp } from "./use-init"
-import { RotateCcw, TriangleAlert } from "lucide-react"
+import { Loader2, RotateCcw, TriangleAlert } from "lucide-react"
 import type { InitStep } from "@/lib/harness"
+
+// elapsed — "hace cuánto corre" legible (el snapshot llega cada 2s: el
+// re-render viene solo; sin esto un paso largo parece atascado).
+function elapsed(started?: number): string {
+  if (!started) return ""
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - started))
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`
+}
 
 export function StepShell({ title, lede, steps, children, actions }: {
   title: string; lede?: ReactNode
@@ -15,11 +23,21 @@ export function StepShell({ title, lede, steps, children, actions }: {
   children?: ReactNode; actions?: ReactNode
 }) {
   const failed = (steps || []).find((s) => s?.status === "fail")
+  const running = (steps || []).find((s) => s?.status === "running")
   const logs = (steps || []).flatMap((s) => s?.logs_tail || [])
   return (
     <div className="min-w-0 flex-1">
       <H2>{title}</H2>
       {lede && <Lede>{lede}</Lede>}
+      {running && (
+        <div className="mb-4 flex items-center gap-2.5 rounded-xl border border-(--wait)/40 bg-(--wait)/8 p-3">
+          <Loader2 className="size-4 shrink-0 animate-spin text-(--wait)" />
+          <span className="text-[12.5px]">
+            <b>{running.title}</b> corriendo{running.started ? <> · {elapsed(running.started)}</> : null} — el
+            avance va apareciendo en la bitácora de abajo.
+          </span>
+        </div>
+      )}
       {failed && (
         <div className="mb-4 flex items-start gap-2.5 rounded-xl border border-(--bad)/40 bg-(--bad)/8 p-3.5">
           <TriangleAlert className="mt-0.5 size-4 shrink-0 text-(--bad)" />

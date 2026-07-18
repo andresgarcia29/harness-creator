@@ -41,11 +41,12 @@ export function AppSidebar({ view, go, snap, live }: {
     view.name === v || (view.name === "task" && v === "tasks") || (view.name === "session" && v === "sessions")
   // Badges = señal, no ruido: cuántas tareas/sesiones y el costo. Las conexiones
   // NO llevan un conteo suelto (era la "batería" rara) — su estado vive en su vista.
-  // Modo setup: daemon sin workspace — el wizard es lo único útil. Con un init
-  // a medias sobre un workspace ya adoptado, «Instalación» aparece arriba con
-  // su progreso; terminado el init, desaparece del sidebar.
-  const setup = snap?.mode === "setup"
+  // Modo setup: daemon sin workspace — el wizard es lo único útil MIENTRAS el
+  // init está activo. Terminado (p.ej. instalación remota: el harness vive en
+  // el VPS), vuelve la navegación completa CON el selector de máquina — sin
+  // esto quedabas atrapado en un Resumen vacío sin poder hacer nada.
   const initActive = snap?.init?.active === true
+  const setup = snap?.mode === "setup" && initActive
   const initBadge = snap?.init
     ? `${snap.init.steps.filter((s) => s.status === "ok" || s.status === "skipped").length}/${snap.init.steps.length}`
     : ""
@@ -54,6 +55,7 @@ export function AppSidebar({ view, go, snap, live }: {
     sessions: String(snap?.sessions.length || ""),
     costs: snap?.cost != null ? usd(snap.cost) : "",
     init: initBadge,
+    docs: snap?.drafts?.length ? `${snap.drafts.length} DRAFT` : "",
   }
   const groups = setup
     ? [["Instalación", INSTALL] as const, ["Guía", GUIDE] as const]

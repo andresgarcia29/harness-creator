@@ -49,11 +49,26 @@ export function McpsStep({ init }: { init: InitState }) {
         handshake con él puesto — antes de eso no se guarda nada.</>}
       steps={[step]}
       actions={
-        <Button disabled={step?.status === "running"} className="gap-1.5"
-          onClick={async () => { const r = await initOp("step", { step: "mcps", action: step?.status === "fail" ? "retry" : "run" }); if (!r.ok) toast.error(r.error) }}>
-          {step?.status === "running" ? <Loader2 className="size-3.5 animate-spin" /> : <Wrench className="size-3.5" />}
-          Materializar selección
-        </Button>
+        <>
+          <Button variant="outline" disabled={busy === "@all"} className="gap-1.5"
+            onClick={async () => {
+              setBusy("@all")
+              const r = await initOp("probe-all")
+              setBusy("")
+              if (!r.ok) { toast.error(r.error); return }
+              toast.success(`${r.probed} MCP(s) sondeados con lo que ya había` +
+                (r.waiting_secret?.length ? ` · ${r.waiting_secret.length} esperan secreto a mano` : ""))
+              refresh()
+            }}>
+            {busy === "@all" ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}
+            Probar todos
+          </Button>
+          <Button disabled={step?.status === "running"} className="gap-1.5"
+            onClick={async () => { const r = await initOp("step", { step: "mcps", action: step?.status === "fail" ? "retry" : "run" }); if (!r.ok) toast.error(r.error) }}>
+            {step?.status === "running" ? <Loader2 className="size-3.5 animate-spin" /> : <Wrench className="size-3.5" />}
+            Materializar selección
+          </Button>
+        </>
       }
     >
       {init.target && (
@@ -94,12 +109,22 @@ export function McpsStep({ init }: { init: InitState }) {
               )}
             </div>
             <p className="mt-1 text-[11.5px] text-muted-foreground">{it.purpose}</p>
-            {it.enabled && (it.secrets?.length || 0) > 0 && it.secrets!.map((s) => (
+            {it.enabled && (it.secrets?.length || 0) > 0 && it.probe?.ok ? (
+              // certificado con secreto ya resuelto: nada que pedir
+              <div className="mt-2 flex items-center gap-2">
+                <Badge className="gap-1 bg-(--ok)/15 text-(--ok)" variant="outline">
+                  <BadgeCheck className="size-3" /> certificado · {it.probe.ms}ms
+                </Badge>
+                <span className="text-[10.5px] text-muted-foreground/60">
+                  secreto resuelto de .secrets/entorno — nada que teclear
+                </span>
+              </div>
+            ) : it.enabled && (it.secrets?.length || 0) > 0 ? it.secrets!.map((s) => (
               <SecretRow key={s.key} mcp={it.name} k={s.key}
                 saved={!!it.secrets_ok?.[s.key]} certified={!!it.probe?.ok}
                 busy={busy === it.name + s.key} setBusy={(b) => setBusy(b ? it.name + s.key : "")}
                 onDone={refresh} />
-            ))}
+            )) : null}
             {it.enabled && !it.secrets?.length && (
               <div className="mt-2 flex items-center gap-2">
                 <Button size="sm" variant="outline" className="h-7 gap-1.5 text-[11px]"

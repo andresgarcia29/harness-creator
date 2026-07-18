@@ -3,9 +3,10 @@
 import { Button } from "@/components/ui/button"
 import { toast } from "sonner"
 import { Code, Stats } from "@/components/bits"
-import { CircleCheck, Loader2, PartyPopper, Stethoscope } from "lucide-react"
+import { CircleCheck, Loader2, PartyPopper, Server, Stethoscope } from "lucide-react"
 import type { Go } from "@/App"
 import type { InitState } from "@/lib/harness"
+import { setTarget } from "@/lib/target"
 import { StepShell } from "../step-shell"
 import { initOp, stepOf } from "../use-init"
 
@@ -60,10 +61,18 @@ export function DoneStep({ init, go }: { init: InitState; go: Go }) {
           <PartyPopper className="size-5 shrink-0 text-(--ok)" />
           <div className="flex-1 text-[13px]">
             <p className="font-medium">Instalación completa.</p>
-            <p className="text-muted-foreground">El panel ya observa tu workspace; el día a día es <Code>/auto</Code>.</p>
+            <p className="text-muted-foreground">
+              {init.target
+                ? <>El harness vive en <b>{init.target}</b> — el panel lo observa por SSH (selector de máquina).</>
+                : <>El panel ya observa tu workspace; el día a día es <Code>/auto</Code>.</>}
+            </p>
           </div>
-          <Button onClick={() => go({ name: "dash" })} className="gap-1.5">
-            <CircleCheck className="size-3.5" /> Ir al panel
+          <Button className="gap-1.5" onClick={() => {
+            if (init.target) setTarget(init.target) // el panel entero muta a la máquina del harness
+            go({ name: "dash" })
+          }}>
+            {init.target ? <Server className="size-3.5" /> : <CircleCheck className="size-3.5" />}
+            {init.target ? `Ir al panel de ${init.target}` : "Ir al panel"}
           </Button>
         </div>
       )}

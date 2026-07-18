@@ -24,6 +24,9 @@ const FLOWS = [
   ["prs", "PRs con review humano"],
 ] as const
 const SECRET_SOURCES = ["vault", "gcp-secret-manager", "aws-secrets-manager", "doppler", "sops", "1password", "env"]
+// modelos conocidos — el default (sandwich de razonamiento) ya viene puesto;
+// esto es un dropdown para no teclear ids a mano
+const KNOWN_MODELS = ["claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5", "claude-fable-5"]
 
 // Rec — la evidencia bajo un campo pre-llenado (el porqué del default).
 function Rec({ k, recs }: { k: string; recs?: Record<string, string> }) {
@@ -221,13 +224,22 @@ export function DiscoverStep({ init }: { init: InitState }) {
                 </Select>
               </Fld>
 
-              <H2>Modelos</H2>
+              <H2 sub="el default ya es el sandwich de razonamiento — cámbialo solo si sabes por qué">Modelos</H2>
               <div className="grid gap-x-4 sm:grid-cols-2">
-                {(["architect", "reviewer", "implementer", "mechanical"] as const).map((rol) => (
-                  <Fld key={rol} label={rol}>
-                    <Input value={draft.models[rol]} onChange={(e) => upd((d) => { d.models[rol] = e.target.value })} className="font-mono text-[12px]" />
-                  </Fld>
-                ))}
+                {(["architect", "reviewer", "implementer", "mechanical"] as const).map((rol) => {
+                  const cur = draft.models[rol]
+                  const opts = KNOWN_MODELS.includes(cur) ? KNOWN_MODELS : [cur, ...KNOWN_MODELS]
+                  return (
+                    <Fld key={rol} label={rol}>
+                      <Select value={cur} onValueChange={(v) => v && upd((d) => { d.models[rol] = v })}>
+                        <SelectTrigger className="w-full font-mono text-[12px]"><SelectValue>{cur}</SelectValue></SelectTrigger>
+                        <SelectContent>
+                          {opts.map((mo) => <SelectItem key={mo} value={mo}>{mo}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </Fld>
+                  )
+                })}
               </div>
               <Fld label="Presupuesto de loop" hint="reintentos antes de parar">
                 <Input type="number" min={1} max={10} value={draft.loop_budget}

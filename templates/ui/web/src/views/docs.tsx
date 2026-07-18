@@ -1,11 +1,15 @@
 // Docs: TODO leído de la instancia real (.claude/commands, agents, Makefile,
 // ship.sh, settings.json) — nada de prosa que se pudra. Si un comando no
 // existe aquí, no aparece aquí.
+import { useState } from "react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
+import { toast } from "sonner"
+import { Gavel, Loader2 } from "lucide-react"
 import { VHead, H2, Lede, Code, Empty } from "@/components/bits"
-import type { Snapshot } from "@/lib/harness"
+import { op, type Snapshot } from "@/lib/harness"
 
 // Contexto de uso para lo CONOCIDO del harness; lo desconocido cae al desc real
 const GATE_DOCS: Record<string, string> = {
@@ -21,6 +25,51 @@ const HOOK_DOCS: Record<string, string> = {
   "ui-emit.sh": "manda eventos de sesión al bus del panel — observa, jamás bloquea",
 }
 
+// Ratificar — la ley que la arqueología propuso y nadie ha firmado. Un
+// abogado en DRAFT es la primera parada de /auto: aquí se firma, uno por
+// uno o todos. El flip es DRAFT→RATIFIED; el contenido no se toca.
+function DraftsPanel({ s }: { s: Snapshot }) {
+  const [busy, setBusy] = useState("")
+  const drafts = s.drafts || []
+  if (!drafts.length || s.op === false) return null
+  const ratify = async (path?: string) => {
+    setBusy(path || "@all")
+    const r = await op("/api/op/ratify", path ? { path } : { all: true })
+    setBusy("")
+    if (!r.ok && r.failed?.length) toast.error(`Fallaron: ${r.failed.join(" · ")}`)
+    else toast.success(path ? `Ratificado: ${path}` : `${r.ratified?.length || 0} documentos ratificados`)
+  }
+  return (
+    <div className="mb-6 rounded-2xl border border-(--wait)/45 bg-(--wait)/8 p-4">
+      <div className="mb-1 flex items-center gap-2">
+        <Gavel className="size-4 text-(--wait)" />
+        <span className="text-[13.5px] font-medium">{drafts.length} documento(s) en DRAFT — la ley espera tu firma</span>
+        <Button size="sm" className="ml-auto gap-1.5" disabled={busy !== ""} onClick={() => ratify()}>
+          {busy === "@all" && <Loader2 className="size-3.5 animate-spin" />} Ratificar todos
+        </Button>
+      </div>
+      <p className="mb-3 text-[11.5px] text-muted-foreground">
+        La arqueología propone; los humanos ratifican. <b>Léelos antes de firmar</b> — un abogado
+        en DRAFT es la primera parada de <Code>/auto</Code>. Se firman aquí (status → RATIFIED); editar el
+        contenido sigue siendo cosa del editor.
+      </p>
+      <div className="divide-y rounded-xl border bg-card">
+        {drafts.map((d) => (
+          <div key={d.path} className="flex items-center gap-2.5 px-3 py-1.5">
+            <Badge variant="outline" className="text-[9.5px]">{d.kind}</Badge>
+            <span className="text-[12.5px]">{d.title}</span>
+            <span className="truncate font-mono text-[10.5px] text-muted-foreground/60">{d.path}</span>
+            <Button size="sm" variant="outline" className="ml-auto h-6 shrink-0 text-[11px]"
+              disabled={busy !== ""} onClick={() => ratify(d.path)}>
+              {busy === d.path ? <Loader2 className="size-3 animate-spin" /> : "Ratificar"}
+            </Button>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export function Docs({ s }: { s: Snapshot }) {
   const tb = s.toolbox
   if (!tb) return <Empty><p>El server todavía no reporta el inventario.</p></Empty>
@@ -28,6 +77,7 @@ export function Docs({ s }: { s: Snapshot }) {
   return (
     <>
       <VHead title="Docs" sub={<>leído de esta instancia en vivo{tb.version ? <> · harness <b className="font-mono">v{tb.version}</b></> : null}</>} />
+      <DraftsPanel s={s} />
       {empty && (
         <Empty title="Esta instancia aún no tiene el harness completo">
           <p>No encuentro comandos en <Code>.claude/commands/</Code> ni targets documentados en el <Code>Makefile</Code>. Corre <Code>/harness-update .</Code> y esta página se llena sola.</p>

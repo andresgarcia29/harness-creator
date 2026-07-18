@@ -25,10 +25,19 @@ export function CloneStep({ init }: { init: InitState }) {
   const [repos, setRepos] = useState<ApiRepo[]>([])
   const [page, setPage] = useState(1)
   const [hasMore, setHasMore] = useState(false)
-  const [sel, setSel] = useState<Sel>({})
+  const [sel, setSel] = useState<Sel>(() => {
+    // arranca desde la selección ya guardada (resume): los checks no se pierden
+    const out: Sel = {}
+    for (const r of init.repos || []) out[r.full_name] = { checked: true, ref: r.ref || "" }
+    return out
+  })
+  const [q, setQ] = useState("")
   const [busy, setBusy] = useState(false)
   const cloneStep = stepOf(init, "clone")
   const cloning = cloneStep?.status === "running"
+  const shown = q.trim()
+    ? repos.filter((r) => r.full_name.toLowerCase().includes(q.trim().toLowerCase()))
+    : repos
 
   useEffect(() => {
     if (!init.github) return
@@ -82,7 +91,9 @@ export function CloneStep({ init }: { init: InitState }) {
     >
       {(init.repos?.length || 0) > 0 && (
         <div className="space-y-1.5 rounded-2xl border p-3.5">
-          <p className="mb-1 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">Selección actual</p>
+          <p className="mb-1 text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+            Selección actual · {init.repos!.filter((r) => r.status === "ok").length}/{init.repos!.length} clonados
+          </p>
           {init.repos!.map((r) => {
             const I = RICON[r.status]
             return (
@@ -104,8 +115,11 @@ export function CloneStep({ init }: { init: InitState }) {
           </SelectContent>
         </Select>
       </Fld>
+      <Fld label="Filtrar" hint={`${shown.length} de ${repos.length} cargados${hasMore ? " (hay más páginas)" : ""}`}>
+        <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="escribe para filtrar por nombre…" spellCheck={false} />
+      </Fld>
       <div className="max-h-80 overflow-y-auto rounded-2xl border">
-        {repos.map((r) => {
+        {shown.map((r) => {
           const s = sel[r.full_name] || { checked: false, ref: "" }
           return (
             <div key={r.full_name} className="flex items-center gap-2.5 border-b px-3.5 py-2 last:border-b-0">
@@ -124,7 +138,11 @@ export function CloneStep({ init }: { init: InitState }) {
             </div>
           )
         })}
-        {repos.length === 0 && <p className="p-4 text-[12px] text-muted-foreground/60">sin repos (¿scopes del token?)</p>}
+        {shown.length === 0 && (
+          <p className="p-4 text-[12px] text-muted-foreground/60">
+            {repos.length === 0 ? "sin repos (¿scopes del token?)" : "nada coincide con el filtro" + (hasMore ? " — carga más páginas abajo" : "")}
+          </p>
+        )}
       </div>
       {hasMore && (
         <Button variant="ghost" size="sm" onClick={() => setPage(page + 1)}>cargar más…</Button>

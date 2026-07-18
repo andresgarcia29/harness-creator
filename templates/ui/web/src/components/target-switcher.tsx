@@ -111,7 +111,7 @@ async function removeTarget(name: string, active: string, setActive: (t: string)
   } else toast.error(r.error || "no se pudo quitar")
 }
 
-function AddTargetDialog({ open, onOpenChange, onAdded }: {
+export function AddTargetDialog({ open, onOpenChange, onAdded }: {
   open: boolean; onOpenChange: (o: boolean) => void; onAdded: (name: string) => void
 }) {
   const [name, setName] = useState("")

@@ -5,21 +5,24 @@ import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { toast } from "sonner"
 import { Fld, Code, StatusBadge } from "@/components/bits"
-import { CircleCheck, FolderOpen, Loader2 } from "lucide-react"
-import type { InitState } from "@/lib/harness"
+import { CircleCheck, FolderOpen, FolderSearch, Loader2 } from "lucide-react"
+import type { HerdrTarget, InitState } from "@/lib/harness"
 import { StepShell } from "../step-shell"
 import { initOp, stepOf } from "./../use-init"
+import { BrowseDialog } from "./browse-dialog"
 
 type Probe = { ok: boolean; normalized?: string; exists?: boolean; writable?: boolean; empty?: boolean; error?: string }
 
-export function Welcome({ init }: { init: InitState }) {
+export function Welcome({ init, targets }: { init: InitState; targets: HerdrTarget[] }) {
   const fixed = !!init.workspace_path
   const [path, setPath] = useState(init.workspace_path || "~/harness-workspace")
   const [outside, setOutside] = useState(false)
   const [busy, setBusy] = useState(false)
   const [probe, setProbe] = useState<Probe | null>(null)
+  const [browsing, setBrowsing] = useState(false)
   const timer = useRef<number | undefined>(undefined)
 
   // Validación en vivo: el server es quien sabe de rutas (normaliza, checa
@@ -65,9 +68,34 @@ export function Welcome({ init }: { init: InitState }) {
         </div>
       ) : (
         <>
+          {targets.length > 0 && (
+            <Fld label="¿Dónde se crea?" hint="local, o un VPS por SSH">
+              <Select value={init.target || "local"}
+                onValueChange={async (v) => {
+                  const r = await initOp("target", { name: v === "local" ? "" : v })
+                  if (!r.ok) toast.error(r.error)
+                }}>
+                <SelectTrigger className="w-full"><SelectValue>
+                  {init.target ? `VPS: ${init.target}` : "esta máquina"}
+                </SelectValue></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="local">esta máquina</SelectItem>
+                  {targets.map((t) => <SelectItem key={t.name} value={t.name}>VPS: {t.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </Fld>
+          )}
           <Fld label="Carpeta del workspace" hint="absoluta o ~/…">
-            <Input value={path} onChange={(e) => setPath(e.target.value)} className="font-mono text-[13px]" spellCheck={false} />
+            <div className="flex gap-2">
+              <Input value={path} onChange={(e) => setPath(e.target.value)} className="font-mono text-[13px]" spellCheck={false} />
+              {!init.target && (
+                <Button variant="outline" size="icon" title="Explorar…" onClick={() => setBrowsing(true)}>
+                  <FolderSearch className="size-4" />
+                </Button>
+              )}
+            </div>
           </Fld>
+          <BrowseDialog open={browsing} onOpenChange={setBrowsing} onPick={setPath} />
           {probe && (
             <div className="flex flex-wrap items-center gap-1.5 text-[11.5px]">
               {probe.ok ? (

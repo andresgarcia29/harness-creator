@@ -27,7 +27,7 @@ export function Init({ s }: { s: Snapshot }) {
   const current = screenOf(init.step)
   const screen: ScreenId = viewing ?? current
   const body =
-    screen === "welcome" ? <Welcome init={init} />
+    screen === "welcome" ? <Welcome init={init} targets={s.targets || []} />
     : <Placeholder init={init} screen={screen} />
   return (
     <div data-marker={INIT_WIZARD}>

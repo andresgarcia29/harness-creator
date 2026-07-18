@@ -315,7 +315,7 @@ capabilities:
     purpose: "Runs/logs de Actions estructurados (debug de CI en rojo). Redundante si gh CLI basta"
     provider: mcp
     mcp: github
-    config: { command: "docker", args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"], wrap: true }
+    config: { command: "docker", args: ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server", "stdio"], wrap: true }
     secrets: [{ key: GITHUB_PERSONAL_ACCESS_TOKEN, source: "vault://<project>/harness/github" }]
     permission_tier: read-write
     profiles: [deployer, orquestador]

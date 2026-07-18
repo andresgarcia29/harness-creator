@@ -19,7 +19,7 @@ import { Tools } from "@/views/tools"
 import { Terminals } from "@/views/terminals"
 import { Init } from "@/views/init"
 import { useRoute } from "@/lib/router"
-import { useEffect } from "react"
+import { useEffect, useRef } from "react"
 
 export type View =
   | { name: "dash" } | { name: "tasks" } | { name: "task"; id: string }
@@ -33,10 +33,12 @@ export default function App() {
   const [view, setView] = useRoute()
   const { snap, live, texts } = useSnapshot()
   const narrow = view.name === "new" || view.name === "connections"
-  // Modo setup (daemon sin workspace): el wizard es lo único útil — aterriza
-  // ahí sí o sí (Docs se permite: es la guía).
+  // Modo setup con init activo: el ATERRIZAJE es el wizard — UNA vez. Después
+  // la navegación es libre (p.ej. observar un VPS con el selector de máquina).
+  const landed = useRef(false)
   useEffect(() => {
-    if (snap?.mode === "setup" && snap.init?.active && view.name !== "init" && view.name !== "docs") {
+    if (!landed.current && snap?.mode === "setup" && snap.init?.active && view.name === "dash") {
+      landed.current = true
       setView({ name: "init" })
     }
   }, [snap?.mode, snap?.init?.active, view.name, setView])

@@ -67,13 +67,22 @@ export function DoneStep({ init, go }: { init: InitState; go: Go }) {
                 : <>El panel ya observa tu workspace; el día a día es <Code>/auto</Code>.</>}
             </p>
           </div>
-          <Button className="gap-1.5" onClick={() => {
-            if (init.target) setTarget(init.target) // el panel entero muta a la máquina del harness
-            go({ name: "dash" })
-          }}>
-            {init.target ? <Server className="size-3.5" /> : <CircleCheck className="size-3.5" />}
-            {init.target ? `Ir al panel de ${init.target}` : "Ir al panel"}
-          </Button>
+          <div className="flex shrink-0 flex-col gap-1.5">
+            <Button className="gap-1.5" onClick={() => {
+              if (init.target) setTarget(init.target) // el panel entero muta a la máquina del harness
+              go({ name: "dash" })
+            }}>
+              {init.target ? <Server className="size-3.5" /> : <CircleCheck className="size-3.5" />}
+              {init.target ? `Ir al panel de ${init.target}` : "Ir al panel"}
+            </Button>
+            <Button variant="ghost" size="sm" className="text-[11.5px] text-muted-foreground"
+              onClick={async () => {
+                const r = await initOp("restart")
+                if (!r.ok) toast.error(r.error)
+              }}>
+              Empezar otra instalación
+            </Button>
+          </div>
         </div>
       )}
     </StepShell>

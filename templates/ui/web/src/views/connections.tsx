@@ -19,7 +19,7 @@ function ProviderCard({ id, name, icon, desc, ok, extra, placeholder, cta = "Con
     setBusy(true)
     const r = await op("/api/op/connect", { provider: id, token: tk.trim() })
     setBusy(false)
-    if (r.ok) { toast.success("Validado contra el proveedor y guardado."); setTk("") }
+    if (r.ok) { toast.success(r.note || "Validado contra el proveedor y guardado."); setTk("") }
     else toast.error(r.error || "no se pudo conectar")
   }
   return (
@@ -40,24 +40,31 @@ function ProviderCard({ id, name, icon, desc, ok, extra, placeholder, cta = "Con
   )
 }
 
-// El almacén REAL (SQLite): motor, ruta, tamaño, filas.
+// El almacén REAL: refleja el MOTOR que de verdad respalda al daemon —
+// SQLite (con ruta y tamaño del archivo) o Postgres (un servidor, sin archivo).
+// El engine sale de /api/db, no se asume.
 function DbCard() {
-  const [db, setDb] = useState<{ engine: string; path: string; size_bytes?: number; machines?: number; calls?: number; events?: number } | null>(null)
+  const [db, setDb] = useState<{ engine: string; path?: string; size_bytes?: number; machines?: number; calls?: number; events?: number } | null>(null)
   useEffect(() => { fetch("/api/db").then((r) => r.json()).then(setDb).catch(() => {}) }, [])
   if (!db) return null
+  const isPg = db.engine === "postgres"
   const mb = db.size_bytes ? (db.size_bytes / 1024 / 1024).toFixed(1) + " MB" : "—"
+  const filas = `${nfmt(db.calls)} llamadas · ${nfmt(db.events)} eventos · ${db.machines} máquina${(db.machines || 0) !== 1 ? "s" : ""}`
   return (
     <Card className="mb-3 py-0"><CardContent className="p-4 sm:p-5">
       <h3 className="flex items-center gap-2.5 font-heading text-[14.5px] font-bold">
-        <Database className="size-4 text-(--brand)" /> SQLite <StatusBadge on>activo</StatusBadge>
+        <Database className="size-4 text-(--brand)" /> {isPg ? "Postgres" : "SQLite"} <StatusBadge on>activo</StatusBadge>
       </h3>
       <div className="mt-2 grid gap-x-6 gap-y-1 text-[12px] text-muted-foreground sm:grid-cols-2">
-        <span className="truncate font-mono text-[11px]" title={db.path}>{db.path}</span>
-        <span>{mb} · {nfmt(db.calls)} llamadas · {nfmt(db.events)} eventos · {db.machines} máquina{(db.machines || 0) !== 1 ? "s" : ""}</span>
+        {isPg
+          ? <span className="font-mono text-[11px]">almacén central (servidor)</span>
+          : <span className="truncate font-mono text-[11px]" title={db.path}>{db.path}</span>}
+        <span>{isPg ? filas : `${mb} · ${filas}`}</span>
       </div>
       <p className="mt-2 text-[11.5px] leading-relaxed text-muted-foreground/70">
-        WAL, migraciones forward-only con respaldo automático. Cada máquina lleva su almacén; para centralizar
-        todo en uno, conecta un Postgres abajo (el modo nube lo usará como almacén compartido).
+        {isPg
+          ? <>El daemon está usando <b className="text-foreground/80">Postgres</b> como almacén central — el histórico de todas las máquinas conectadas vive aquí. Migraciones forward-only, se aplican solas al conectar.</>
+          : <>WAL, migraciones forward-only con respaldo automático. Cada máquina lleva su almacén; para centralizar todo en uno, conecta un Postgres abajo (se usará como almacén compartido tras reiniciar el panel).</>}
       </p>
     </CardContent></Card>
   )

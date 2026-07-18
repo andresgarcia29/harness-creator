@@ -65,6 +65,28 @@ function HarnessStrip({ wsName, task, go }: { wsName: string; task?: TaskRollup;
   )
 }
 
+// Limpia el volcado del PTY para que se vea como una terminal de verdad y no
+// como un TUI "quebrado": quita las líneas en blanco de arriba/abajo y colapsa
+// los huecos de 3+ líneas vacías (el área de transcript vacía de Claude Code)
+// a una sola. No toca columnas — sólo filas vacías — así las cajas siguen
+// alineadas. La "vacuidad" de un renglón se mide sin ANSI.
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Z0-9]/g
+function tidyScreen(raw: string): string {
+  const lines = raw.replace(/\r\n?/g, "\n").split("\n")
+  const blank = (l: string) => l.replace(ANSI_RE, "").trim() === ""
+  let start = 0, end = lines.length
+  while (start < end && blank(lines[start])) start++
+  while (end > start && blank(lines[end - 1])) end--
+  const out: string[] = []
+  let run = 0
+  for (let i = start; i < end; i++) {
+    if (blank(lines[i])) { run++; if (run <= 1) out.push("") }
+    else { run = 0; out.push(lines[i]) }
+  }
+  return out.join("\n")
+}
+
 function Screen({ paneId, open, onText }: { paneId: string; open: boolean; onText?: (t: string) => void }) {
   const [text, setText] = useState<string | null>(null)
   const boxRef = useRef<HTMLDivElement>(null)
@@ -80,12 +102,12 @@ function Screen({ paneId, open, onText }: { paneId: string; open: boolean; onTex
   useEffect(() => { const el = boxRef.current; if (el) el.scrollTop = el.scrollHeight }, [text])
   if (!open) return null
   return (
-    <div ref={boxRef} className="terminal-screen max-h-[360px] min-h-[84px] overflow-auto px-4 py-3">
+    <div ref={boxRef} className="terminal-screen max-h-[420px] min-h-[84px] overflow-auto px-4 py-3">
       {text == null ? (
         <span className="text-[11.5px] text-white/30">conectando al PTY…</span>
       ) : (
-        <pre className="whitespace-pre-wrap break-words font-mono text-[12px] leading-[1.55] text-[#d0d0d8]">
-          <Ansi text={text.trimEnd()} />
+        <pre className="term-pre whitespace-pre font-mono text-[12.5px] text-[#d4d4dc]">
+          <Ansi text={tidyScreen(text)} />
           <span className="term-cursor" />
         </pre>
       )}

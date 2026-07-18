@@ -9,63 +9,81 @@ import { toast } from "sonner"
 import { VHead, H2, Lede, Code, Empty, StatusBadge } from "@/components/bits"
 import { cn } from "@/lib/utils"
 import { op, type McpServer, type Snapshot } from "@/lib/harness"
-import { CircleCheck, CircleX, CircleDashed, KeyRound, Terminal } from "lucide-react"
+import { CircleCheck, CircleX, CircleDashed, KeyRound, Terminal, Package, Wrench, ChevronRight } from "lucide-react"
+
+function transportOf(m: McpServer): string {
+  const real = m.wrapped ? (m.args[0] || m.command) : m.command
+  if (/docker/.test(real)) return "docker"
+  if (/npx/.test(real)) return "npx"
+  if (/uvx|uv$/.test(real)) return "uvx"
+  return "binario"
+}
 
 function McpCard({ m }: { m: McpServer }) {
   const p = m.probe
+  const [showTools, setShowTools] = useState(false)
   const estado = p == null ? "sin probar" : p.ok ? "funciona" : "falló"
+  const tools = p?.tools || []
   const auth: [string, string] =
-    p == null
-      ? ["—", "text-muted-foreground/60"]
-      : p.ok
-        ? [m.wrapped || m.env.length ? "autenticado" : "no requiere auth", "text-(--ok)"]
-        : p.auth_hint
-          ? ["parece problema de credenciales", "text-(--bad)"]
-          : ["—", "text-muted-foreground/60"]
+    p == null ? ["—", "text-muted-foreground/60"]
+      : p.ok ? [m.wrapped || m.env.length ? "autenticado" : "no requiere auth", "text-(--ok)"]
+        : p.auth_hint ? ["parece problema de credenciales", "text-(--bad)"] : ["—", "text-muted-foreground/60"]
   return (
-    <Card className="py-0"><CardContent className="p-4">
-      <div className="flex flex-wrap items-center gap-2.5">
-        {p == null
-          ? <CircleDashed className="size-4 shrink-0 text-muted-foreground/50" />
-          : p.ok
-            ? <CircleCheck className="size-4 shrink-0 text-(--ok)" />
-            : <CircleX className="size-4 shrink-0 text-(--bad)" />}
-        <b className="font-mono text-[13px] font-semibold">{m.name}</b>
-        <StatusBadge on={p?.ok}>{estado}</StatusBadge>
-        {m.wrapped && (
-          <Badge variant="outline" className="rounded-full text-[9px] uppercase tracking-wider text-muted-foreground">
-            <KeyRound className="size-2.5" /> with-secrets
+    <Card className={cn("py-0 transition-colors", p?.ok && "border-(--ok)/25", p && !p.ok && "border-(--bad)/30")}>
+      <CardContent className="p-4">
+        <div className="flex flex-wrap items-center gap-2.5">
+          {p == null
+            ? <CircleDashed className="size-4 shrink-0 text-muted-foreground/50" />
+            : p.ok ? <CircleCheck className="size-4 shrink-0 text-(--ok)" /> : <CircleX className="size-4 shrink-0 text-(--bad)" />}
+          <b className="font-mono text-[13px] font-semibold">{m.name}</b>
+          <StatusBadge on={p?.ok}>{estado}</StatusBadge>
+          <Badge variant="outline" className="rounded-full text-[9px] uppercase tracking-wider text-muted-foreground/70">
+            <Package className="size-2.5" /> {transportOf(m)}
           </Badge>
+          {m.wrapped && (
+            <Badge variant="outline" className="rounded-full text-[9px] uppercase tracking-wider text-muted-foreground/70">
+              <KeyRound className="size-2.5" /> with-secrets
+            </Badge>
+          )}
+          {p?.ok && p.server && (
+            <span className="ml-auto font-mono text-[10.5px] text-muted-foreground/60">{p.server} {p.version} · {p.ms} ms</span>
+          )}
+        </div>
+        <div className="mt-1.5 flex items-center gap-2 font-mono text-[10.5px] text-muted-foreground/55">
+          <Terminal className="size-3 shrink-0" />
+          <span className="truncate">{m.command} {m.args.join(" ")}</span>
+        </div>
+        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11.5px]">
+          <span className={m.bin_ok ? "text-muted-foreground" : "text-(--bad)"}>binario: {m.bin_ok ? "en PATH ✓" : "NO encontrado"}</span>
+          {m.secrets_ok != null && (
+            <span className={m.secrets_ok ? "text-muted-foreground" : "text-(--wait)"}>secretos: {m.secrets_ok ? ".secrets ✓" : "falta .secrets"}</span>
+          )}
+          {m.env.length > 0 && <span className="text-muted-foreground">env: {m.env.join(", ")}</span>}
+          <span className={cn("font-medium", auth[1])}>{auth[0]}</span>
+        </div>
+        {/* Tools que expone de verdad (del handshake) */}
+        {p?.ok && tools.length > 0 && (
+          <div className="mt-2.5">
+            <button onClick={() => setShowTools((v) => !v)}
+              className="flex items-center gap-1 text-[11px] font-semibold text-(--brand) transition-colors hover:text-(--brand)/80">
+              <Wrench className="size-3" /> {tools.length} tool{tools.length !== 1 ? "s" : ""}
+              <ChevronRight className={cn("size-3 transition-transform", showTools && "rotate-90")} />
+            </button>
+            {showTools && (
+              <div className="mt-1.5 flex flex-wrap gap-1">
+                {tools.map((t) => (
+                  <span key={t} className="rounded-md border border-border bg-secondary/60 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">{t}</span>
+                ))}
+              </div>
+            )}
+          </div>
         )}
-        {p?.ok && p.server && (
-          <span className="font-mono text-[10.5px] text-muted-foreground/60">
-            {p.server} {p.version} · {p.ms} ms
-          </span>
+        {p && !p.ok && p.error && (
+          <p className="mt-2 rounded-lg border border-(--bad)/30 bg-(--bad)/8 px-3 py-1.5 font-mono text-[11px] text-muted-foreground">{p.error}</p>
         )}
-      </div>
-      <div className="mt-1.5 flex items-center gap-2 font-mono text-[10.5px] text-muted-foreground/60">
-        <Terminal className="size-3 shrink-0" />
-        <span className="truncate">{m.command} {m.args.join(" ")}</span>
-      </div>
-      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11.5px]">
-        <span className={m.bin_ok ? "text-muted-foreground" : "text-(--bad)"}>
-          binario: {m.bin_ok ? "en PATH ✓" : "NO encontrado"}
-        </span>
-        {m.secrets_ok != null && (
-          <span className={m.secrets_ok ? "text-muted-foreground" : "text-(--wait)"}>
-            secretos: {m.secrets_ok ? ".secrets presente ✓" : "falta .secrets — corre make secrets"}
-          </span>
-        )}
-        {m.env.length > 0 && <span className="text-muted-foreground">env: {m.env.join(", ")}</span>}
-        <span className={cn("font-medium", auth[1])}>{auth[0]}</span>
-      </div>
-      {p && !p.ok && p.error && (
-        <p className="mt-2 rounded-lg border border-(--bad)/30 bg-(--bad)/8 px-3 py-1.5 font-mono text-[11px] text-muted-foreground">
-          {p.error}
-        </p>
-      )}
-      {p?.at && <p className="mt-1.5 text-[10px] text-muted-foreground/50">probado {p.at.slice(11, 16)} UTC</p>}
-    </CardContent></Card>
+        {p?.at && <p className="mt-1.5 text-[10px] text-muted-foreground/50">probado {p.at.slice(11, 16)} UTC</p>}
+      </CardContent>
+    </Card>
   )
 }
 

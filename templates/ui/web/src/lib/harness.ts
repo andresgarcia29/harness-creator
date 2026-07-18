@@ -96,7 +96,7 @@ export type Toolbox = {
   gates: string[]; hooks: string[]
   skills: { name: string; desc: string; ok: boolean }[]
 }
-export type McpProbe = { ok: boolean; ms: number; server?: string; version?: string; error?: string; auth_hint?: boolean; at?: string }
+export type McpProbe = { ok: boolean; ms: number; server?: string; version?: string; error?: string; auth_hint?: boolean; at?: string; tools?: string[] }
 export type McpServer = {
   name: string; command: string; args: string[]; wrapped: boolean
   bin_ok: boolean; secrets_ok: boolean | null; env: string[]; probe?: McpProbe | null

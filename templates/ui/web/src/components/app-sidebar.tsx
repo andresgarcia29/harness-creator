@@ -36,11 +36,12 @@ export function AppSidebar({ view, go, snap, live }: {
   const nav = (v: View) => { go(v); if (isMobile) setOpenMobile(false) }
   const active = (v: string) =>
     view.name === v || (view.name === "task" && v === "tasks") || (view.name === "session" && v === "sessions")
+  // Badges = señal, no ruido: cuántas tareas/sesiones y el costo. Las conexiones
+  // NO llevan un conteo suelto (era la "batería" rara) — su estado vive en su vista.
   const badges: Record<string, string> = {
     tasks: String(snap?.tasks.length || ""),
     sessions: String(snap?.sessions.length || ""),
     costs: snap?.cost != null ? usd(snap.cost) : "",
-    connections: String(Object.values(snap?.connections || {}).filter(Boolean).length || ""),
   }
   return (
     <Sidebar collapsible="offcanvas">

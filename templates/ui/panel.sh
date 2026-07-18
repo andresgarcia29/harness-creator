@@ -7,7 +7,7 @@
 set -euo pipefail
 PORT="${1:-7717}"
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VER="0.45.0"
+VER="0.46.0"
 REPO="andresgarcia29/harness-daemon"
 BIN="$DIR/harnessd"
 

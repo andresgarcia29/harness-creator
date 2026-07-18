@@ -17,6 +17,7 @@ import { FolderGit2, Radio, ChevronDown, Check, X, Bot, Boxes, ArrowRight,
   ArrowUp, ArrowDown, ArrowLeft, ArrowRight as ArrowRightIcon, CornerDownLeft, Delete, OctagonX } from "lucide-react"
 import { PaneActions, WorkspaceActions, SessionStop } from "@/components/herdr-actions"
 import { NewWorkspace, SplitItems, NewTerminalItem } from "@/components/herdr-open"
+import { HerdrSessions, ActivateHerdr } from "@/components/herdr-sessions"
 import type { Go } from "@/App"
 
 const STATUS: Record<string, { label: string; chip: string; dot: string; pulse?: boolean }> = {
@@ -219,12 +220,45 @@ function taskOfPane(cwd: string): string | null {
   return m ? m[1] : null
 }
 
+// La consola completa de un pane: pantalla + respuestas interactivas + barra de
+// teclas + prompt. Reutilizable — la usa cada TerminalWindow y también el cajón
+// de terminal embebido en la vista del grafo de una sesión.
+export function PaneConsole({ paneId, canOp, open = true }: { paneId: string; canOp: boolean; open?: boolean }) {
+  const [prompt, setPrompt] = useState<Prompt>(null)
+  return (
+    <>
+      <Screen paneId={paneId} open={open} onText={(t) => setPrompt(parsePrompt(t))} />
+      {open && canOp && prompt && <InteractiveAnswer paneId={paneId} prompt={prompt} />}
+      {open && canOp && <KeyBar paneId={paneId} />}
+      {open && canOp && <Prompt paneId={paneId} />}
+    </>
+  )
+}
+
+// Reverso de taskOfPane: dada una tarea del harness, encuentra el pane de herdr
+// que la trabaja (cwd dentro de worktrees/<tarea>/). Prefiere el que está
+// trabajando si hay varios. Así la vista de la sesión puede mostrar su terminal.
+export function paneForTask(snap: Snapshot, taskId: string | null | undefined): HerdrPane | undefined {
+  if (!taskId) return undefined
+  const wsPath = snap.workspace?.path || ""
+  const panes = snap.herdr?.panes || []
+  const match = panes.filter((p) => {
+    const cwd = p.foreground_cwd || p.cwd || ""
+    return !!wsPath && cwd.startsWith(wsPath) && taskOfPane(cwd) === taskId
+  })
+  return match.find((p) => p.agent_status === "working") || match[0]
+}
+
+// La tarea que trabaja una sesión (vía snap.runs, el mapeo sesión→tarea).
+export function taskOfSession(snap: Snapshot, sessionId: string): string | undefined {
+  return snap.runs?.find((r) => r.session === sessionId)?.task
+}
+
 function TerminalWindow({ p, tabLabel, canOp, snap, go }: {
   p: HerdrPane; tabLabel?: string; canOp: boolean; snap: Snapshot; go: Go
 }) {
   const busy = p.agent_status === "working" || p.agent_status === "blocked"
   const [open, setOpen] = useState(busy)
-  const [prompt, setPrompt] = useState<Prompt>(null)
   const s = st(p.agent_status)
   const cwdFull = p.foreground_cwd || p.cwd || ""
   const cwd = cwdFull.replace(/^\/Users\/[^/]+/, "~")
@@ -260,10 +294,7 @@ function TerminalWindow({ p, tabLabel, canOp, snap, go }: {
         <ChevronDown className={cn("size-3.5 text-white/30 transition-transform duration-200", !open && "-rotate-90")} />
       </button>
       {inHarness && <HarnessStrip wsName={snap.workspace?.name || "harness"} task={task} go={go} />}
-      <Screen paneId={p.pane_id} open={open} onText={(t) => setPrompt(parsePrompt(t))} />
-      {open && canOp && prompt && <InteractiveAnswer paneId={p.pane_id} prompt={prompt} />}
-      {open && canOp && <KeyBar paneId={p.pane_id} />}
-      {open && canOp && <Prompt paneId={p.pane_id} />}
+      <PaneConsole paneId={p.pane_id} canOp={canOp} open={open} />
     </div>
   )
 }
@@ -283,17 +314,32 @@ export function Terminals({ s: snap, go }: { s: Snapshot; go: Go }) {
       </span>
     ) : undefined} />
 
-  if (!h || !h.available)
+  // Instalado pero el server no corre: ofrecemos activarlo aquí mismo (headless)
+  // y mostramos las sesiones paradas para poder borrarlas.
+  if (!h || !h.available) {
+    const installed = !!h?.installed
     return (
       <>
-        {head}
-        <Empty title="herdr no está conectado">
-          <p>{h?.reason || "Este backend no reporta herdr (la vista vive en el daemon)."}</p>
-          <p className="pt-1"><b className="text-foreground/80">herdr</b> es un multiplexor de terminales para agentes (opcional, como tmux pero con consciencia de agentes). Corre tus agentes — Claude Code, Kimi, Codex, Vertex — dentro de herdr y esta vista te los muestra <b>todos</b> en vivo, con el harness que cada uno avanza reflejado en su ventana.</p>
-          <p className="pt-1 text-muted-foreground/60">Instala herdr, lánzalo con <Code>herdr</Code>, y corre tus agentes dentro. El resto del panel funciona sin él.</p>
+        <VHead title="Terminales" sub="lo que corre en TU terminal, y el harness que cada una avanza"
+          right={installed && canOp ? <ActivateHerdr /> : undefined} />
+        {installed && h?.sessions && <HerdrSessions sessions={h.sessions} canOp={canOp} />}
+        <Empty title={installed ? "herdr está instalado, pero el server no corre" : "herdr no está conectado"}>
+          {installed ? (
+            <>
+              <p>Actívalo con el botón <b className="text-foreground/80">Activar herdr</b> de arriba — arranca el server <b>headless</b> (por debajo, sin abrir ningún TUI). En cuanto levante, tus terminales aparecen aquí en vivo.</p>
+              <p className="pt-1 text-muted-foreground/60">También puedes lanzarlo tú con <Code>herdr</Code> (con TUI) o <Code>herdr server</Code> (headless). Y arriba ves tus sesiones — las paradas se pueden borrar.</p>
+            </>
+          ) : (
+            <>
+              <p>{h?.reason || "Este backend no reporta herdr (la vista vive en el daemon)."}</p>
+              <p className="pt-1"><b className="text-foreground/80">herdr</b> es un multiplexor de terminales para agentes (opcional, como tmux pero con consciencia de agentes). Corre tus agentes — Claude Code, Kimi, Codex, Vertex — dentro de herdr y esta vista te los muestra <b>todos</b> en vivo, con el harness que cada uno avanza reflejado en su ventana.</p>
+              <p className="pt-1 text-muted-foreground/60">Instala herdr, lánzalo con <Code>herdr</Code>, y corre tus agentes dentro. El resto del panel funciona sin él.</p>
+            </>
+          )}
         </Empty>
       </>
     )
+  }
 
   const byWs = h.workspaces.map((w) => ({ w, panes: h.panes.filter((p) => p.workspace_id === w.workspace_id) }))
   const working = h.panes.filter((p) => p.agent_status === "working").length
@@ -316,6 +362,7 @@ export function Terminals({ s: snap, go }: { s: Snapshot; go: Go }) {
           {blocked > 0 && <span className="flex items-center gap-1.5 font-semibold text-(--bad)"><i className="size-2 animate-pulse rounded-full bg-(--bad)" />{blocked} esperándote</span>}
         </div>
       )}
+      {h.sessions && h.sessions.length > 0 && <HerdrSessions sessions={h.sessions} canOp={canOp} />}
       <div className="grid gap-6">
         {byWs.map(({ w, panes }) => (
           <section key={w.workspace_id}>

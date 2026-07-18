@@ -1,4 +1,3 @@
-import { useState } from "react"
 import { SidebarInset, SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar"
 import { Toaster } from "@/components/ui/sonner"
 import { Alert, AlertDescription } from "@/components/ui/alert"
@@ -18,6 +17,7 @@ import { Connections } from "@/views/connections"
 import { Docs } from "@/views/docs"
 import { Tools } from "@/views/tools"
 import { Terminals } from "@/views/terminals"
+import { useRoute } from "@/lib/router"
 
 export type View =
   | { name: "dash" } | { name: "tasks" } | { name: "task"; id: string }
@@ -27,7 +27,7 @@ export type View =
 export type Go = (v: View) => void
 
 export default function App() {
-  const [view, setView] = useState<View>({ name: "dash" })
+  const [view, setView] = useRoute()
   const { snap, live, texts } = useSnapshot()
   const narrow = view.name === "new" || view.name === "connections"
   return (

@@ -73,7 +73,7 @@ export default function App() {
               : view.name === "docs" ? <Docs s={snap} />
               : view.name === "tools" ? <Tools s={snap} />
               : view.name === "terminals" ? <Terminals s={snap} go={setView} />
-              : view.name === "init" ? <Init s={snap} />
+              : view.name === "init" ? <Init s={snap} go={setView} />
               : <Dash s={snap} go={setView} />}
           </div>
         </div>

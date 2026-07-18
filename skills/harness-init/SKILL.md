@@ -160,6 +160,22 @@ harness; cada agente es contexto y mantenimiento.
 
 ## Fase 3 — Generación
 
+**Camino preferido (determinista, cero tokens):** si `command -v harness`
+existe (instalado con `brew install andresgarcia29/agm/harness`), NO
+instancies a mano: escribe las respuestas de la entrevista como JSON del
+esquema de answers y corre
+
+```bash
+harness generate --workspace <ws> --answers <answers.json>
+```
+
+El binario embebe estos mismos templates (sincronizados por release), aplica
+la tabla completa de abajo con idempotencia por sha256 (lo personalizado va a
+`.new`, jamás se pisa) y registra la instancia para `harness update`. Después
+salta directo a la Fase 3.5. La tabla manual queda como fallback cuando el
+binario no está — y como especificación de paridad (el test de la suite
+compara ambos sets de destinos).
+
 Instancia desde `${CLAUDE_PLUGIN_ROOT}/templates/` al workspace.
 Scripts SIEMPRE con `chmod +x`. Tabla completa:
 

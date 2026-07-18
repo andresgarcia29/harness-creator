@@ -11,16 +11,27 @@ cd "$(dirname "$0")"
 command -v jq >/dev/null || { echo "falta jq (los hooks y el bus lo usan)"; exit 1; }
 command -v python3 >/dev/null || { echo "falta python3 (el panel lo usa)"; exit 1; }
 
-# el frontend: la fuente React (web/src) tiene las 8 vistas y el build
+# el frontend: la fuente React (web/src) tiene las vistas y el build
 # vendoreado (dist/) existe y trae el placeholder del token — sin dist, el
 # panel instalado sirve 404 y nadie compila Node en la máquina del usuario
-for v in dash tasks task-detail sessions session-detail costs new-task connections docs tools; do
+for v in dash tasks task-detail sessions session-detail costs new-task connections docs tools terminals; do
   [ -f "../templates/ui/web/src/views/$v.tsx" ] || { echo "vista perdida: $v"; exit 1; }
 done
+# el wizard de init (servido por el daemon Go): raíz + pantallas
+for v in index stepper step-shell log-tail; do
+  [ -f "../templates/ui/web/src/views/init/$v.tsx" ] || { echo "init perdido: $v"; exit 1; }
+done
+for v in welcome github clone requirements discover agents mcps sessions done browse-dialog placeholder; do
+  [ -f "../templates/ui/web/src/views/init/steps/$v.tsx" ] || { echo "paso de init perdido: $v"; exit 1; }
+done
+grep -q '"init"' ../templates/ui/web/src/lib/router.ts || { echo "la ruta init no está en el router"; exit 1; }
+grep -q 'init?: InitState' ../templates/ui/web/src/lib/harness.ts || { echo "el snapshot no tipa init"; exit 1; }
 [ -f ../templates/ui/dist/index.html ] || { echo "falta dist/ (corre npm run build en templates/ui/web)"; exit 1; }
 grep -q "__OP_TOKEN__" ../templates/ui/dist/index.html || { echo "dist/index.html sin el placeholder del token anti-CSRF"; exit 1; }
 /bin/ls ../templates/ui/dist/assets/*.js >/dev/null 2>&1 || { echo "dist sin assets"; exit 1; }
-echo "── frontend: 10 vistas en web/src + dist vendoreado con token ✓"
+# dist al día: el marcador del wizard debe estar en el bundle vendoreado
+grep -q "harness-init-wizard" ../templates/ui/dist/assets/*.js || { echo "dist desactualizado: sin el wizard de init (re-corre npm run build)"; exit 1; }
+echo "── frontend: 11 vistas + wizard init (9 pantallas) + dist vendoreado al día ✓"
 
 failed=0
 for t in test_emit.sh test_track_read.sh; do

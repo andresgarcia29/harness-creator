@@ -3,9 +3,9 @@ import {
   SidebarGroupLabel, SidebarHeader, SidebarMenu, SidebarMenuBadge,
   SidebarMenuButton, SidebarMenuItem, useSidebar,
 } from "@/components/ui/sidebar"
-import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 import { usd, type Snapshot } from "@/lib/harness"
+import { TargetSwitcher } from "@/components/target-switcher"
 import { LayoutDashboard, ListTodo, Radio, ChartNoAxesColumn, Plus, Cable, Sun, Moon, Monitor, BookOpen, Blocks, SquareTerminal } from "lucide-react"
 import { useTheme, type Theme } from "@/hooks/use-theme"
 import type { View } from "@/App"
@@ -45,14 +45,14 @@ export function AppSidebar({ view, go, snap, live }: {
   }
   return (
     <Sidebar collapsible="offcanvas">
-      <SidebarHeader className="px-4 pb-2 pt-5">
+      <SidebarHeader className="gap-2.5 px-4 pb-2 pt-5">
         <div className="flex items-center gap-2.5">
           <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-gradient-to-br from-primary to-(--brand) font-heading text-sm font-bold text-white shadow-[0_0_10px_rgba(99,102,241,.35)]">c</span>
           <b className="font-heading text-[15px] font-bold tracking-tight">corvux</b>
-          <Badge variant="outline" className="rounded-full border-primary/35 bg-primary/10 text-[8.5px] font-bold uppercase tracking-wider text-(--brand)">
-            {snap?.mode || "local"}
-          </Badge>
         </div>
+        {/* Selector de MÁQUINA global: muta TODA la página (tareas, sesiones,
+            costo, terminales) hacia la máquina elegida — local o un VPS. */}
+        <TargetSwitcher targets={snap?.targets || []} full />
       </SidebarHeader>
       <SidebarContent>
         {/* Operar se esconde cuando el backend es solo-lectura (op:false) —

@@ -211,7 +211,12 @@
 
 /* ═══ Terminales: pantalla + cursor de bloque ═══ */
 .terminal-screen{background:#0a0a0e;background-image:radial-gradient(ellipse at top, rgba(124,140,255,.03), transparent 60%)}
-.term-cursor{display:inline-block;width:7px;height:13px;margin-left:1px;vertical-align:text-bottom;
+/* Rejilla fija de terminal: line-height apretado para que los caracteres de
+   caja (─│╭╮╰╯) conecten sin huecos, y sin ligaduras/tracking que descuadren
+   las columnas. Tabular-nums mantiene los dígitos alineados. */
+.term-pre{line-height:1.2;letter-spacing:0;font-variant-ligatures:none;
+  font-feature-settings:"liga" 0,"calt" 0;font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+.term-cursor{display:inline-block;width:7px;height:14px;margin-left:1px;vertical-align:text-bottom;
   background:#4ade80;animation:term-blink 1.1s steps(1) infinite}
 @keyframes term-blink{50%{opacity:0}}
 @media (prefers-reduced-motion: reduce){.term-cursor{animation:none}}

@@ -10,6 +10,7 @@ import { screenOf, type ScreenId } from "./use-init"
 import { Welcome } from "./steps/welcome"
 import { GithubStep } from "./steps/github"
 import { CloneStep } from "./steps/clone"
+import { RequirementsStep } from "./steps/requirements"
 import { Placeholder } from "./steps/placeholder"
 
 // Marcador para el guard de tests (detecta un dist desactualizado sin Node).
@@ -32,6 +33,7 @@ export function Init({ s }: { s: Snapshot }) {
     screen === "welcome" ? <Welcome init={init} targets={s.targets || []} />
     : screen === "github" ? <GithubStep init={init} />
     : screen === "clone" ? <CloneStep init={init} />
+    : screen === "requirements" ? <RequirementsStep init={init} />
     : <Placeholder init={init} screen={screen} />
   return (
     <div data-marker={INIT_WIZARD}>

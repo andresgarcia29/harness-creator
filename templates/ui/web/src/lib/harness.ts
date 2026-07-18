@@ -123,9 +123,13 @@ export type HerdrWorkspace = {
 }
 export type HerdrTab = { tab_id: string; workspace_id: string; label: string; agent_status: string; pane_count: number }
 export type HerdrAgent = { name: string; pane_id: string; workspace_id: string; agent_status: string; cwd: string }
+// Una sesión de herdr (el multiplexor persistente): lo que mantiene VIVAS las
+// terminales. running=false → quedó como registro y se puede borrar.
+export type HerdrSession = { name: string; running: boolean; default: boolean; dir?: string }
 export type HerdrState = {
-  available: boolean; version: string; reason?: string
+  available: boolean; installed?: boolean; version: string; reason?: string
   workspaces: HerdrWorkspace[]; tabs: HerdrTab[]; panes: HerdrPane[]; agents: HerdrAgent[]
+  sessions?: HerdrSession[]
 }
 
 export const who = (a: Agent) => (a.id === "main" ? "orquestador" : a.desc || a.type || a.id.slice(0, 10))

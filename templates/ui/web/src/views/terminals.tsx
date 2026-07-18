@@ -141,20 +141,20 @@ async function sendKeys(paneId: string, keys: string[]) {
   if (!r.ok) toast.error(r.error || "no se pudo")
 }
 
-// Un keycap de la barra de control. Manda una tecla cruda al TUI.
+// Un keycap de la barra de control — se ve y se siente como tecla real (relieve
+// + click). Manda una tecla cruda al TUI.
 function Keycap({ paneId, k, title, children, tone = "normal" }: {
   paneId: string; k: string; title: string; children: ReactNode; tone?: "normal" | "escape" | "danger"
 }) {
   return (
-    <button onClick={() => sendKeys(paneId, [k])} title={title}
-      className={cn("grid h-7 min-w-7 place-items-center rounded-md border px-1.5 font-mono text-[11px] transition-colors",
-        tone === "escape" && "border-(--wait)/40 bg-(--wait)/10 text-(--wait) hover:bg-(--wait)/20",
-        tone === "danger" && "border-(--bad)/40 bg-(--bad)/10 text-(--bad) hover:bg-(--bad)/20",
-        tone === "normal" && "border-white/12 bg-white/[0.05] text-white/70 hover:border-(--brand)/40 hover:bg-(--brand)/10 hover:text-white/90")}>
+    <button type="button" onClick={() => sendKeys(paneId, [k])} title={title}
+      className={cn("keycap", tone === "escape" && "keycap-esc", tone === "danger" && "keycap-danger")}>
       {children}
     </button>
   )
 }
+
+const KeySep = () => <span className="keysep" aria-hidden />
 
 // Barra de teclas de control — lo que te deja MANEJAR un TUI de pantalla
 // completa (el picker de Claude Code, listas, editores): Escape para salir,
@@ -162,20 +162,20 @@ function Keycap({ paneId, k, title, children, tone = "normal" }: {
 // atrapado en cuanto un agente mostraba algo que no fuera un sí/no simple.
 function KeyBar({ paneId }: { paneId: string }) {
   return (
-    <div className="flex flex-wrap items-center gap-1.5 border-t border-white/8 bg-[#0b0b0f] px-4 py-1.5">
-      <span className="mr-1 text-[9.5px] font-semibold uppercase tracking-wide text-white/25">teclas</span>
+    <div className="flex flex-wrap items-center gap-2 border-t border-white/8 bg-gradient-to-b from-[#0d0d12] to-[#0a0a0e] px-4 py-2">
+      <span className="mr-0.5 select-none text-[9.5px] font-semibold uppercase tracking-[0.14em] text-white/25">teclas</span>
       <Keycap paneId={paneId} k="Escape" title="Escape — salir de un menú / picker" tone="escape">esc</Keycap>
-      <span className="mx-0.5 h-4 w-px bg-white/10" />
-      <Keycap paneId={paneId} k="Up" title="flecha arriba"><ArrowUp className="size-3" /></Keycap>
-      <Keycap paneId={paneId} k="Down" title="flecha abajo"><ArrowDown className="size-3" /></Keycap>
-      <Keycap paneId={paneId} k="Left" title="flecha izquierda"><ArrowLeft className="size-3" /></Keycap>
-      <Keycap paneId={paneId} k="Right" title="flecha derecha"><ArrowRightIcon className="size-3" /></Keycap>
-      <span className="mx-0.5 h-4 w-px bg-white/10" />
-      <Keycap paneId={paneId} k="Enter" title="Enter — confirmar / seleccionar"><CornerDownLeft className="size-3" /></Keycap>
+      <KeySep />
+      <Keycap paneId={paneId} k="Up" title="flecha arriba"><ArrowUp /></Keycap>
+      <Keycap paneId={paneId} k="Down" title="flecha abajo"><ArrowDown /></Keycap>
+      <Keycap paneId={paneId} k="Left" title="flecha izquierda"><ArrowLeft /></Keycap>
+      <Keycap paneId={paneId} k="Right" title="flecha derecha"><ArrowRightIcon /></Keycap>
+      <KeySep />
+      <Keycap paneId={paneId} k="Enter" title="Enter — confirmar / seleccionar"><CornerDownLeft /></Keycap>
       <Keycap paneId={paneId} k="Tab" title="Tab — autocompletar / siguiente">tab</Keycap>
-      <Keycap paneId={paneId} k="Backspace" title="Backspace — borrar"><Delete className="size-3" /></Keycap>
-      <span className="mx-0.5 h-4 w-px bg-white/10" />
-      <Keycap paneId={paneId} k="C-c" title="Ctrl-C — interrumpir el proceso" tone="danger"><OctagonX className="size-3" /> ^C</Keycap>
+      <Keycap paneId={paneId} k="Backspace" title="Backspace — borrar"><Delete /></Keycap>
+      <KeySep />
+      <Keycap paneId={paneId} k="C-c" title="Ctrl-C — interrumpir el proceso" tone="danger"><OctagonX /> ^C</Keycap>
     </div>
   )
 }

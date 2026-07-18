@@ -11,6 +11,7 @@ import { Welcome } from "./steps/welcome"
 import { GithubStep } from "./steps/github"
 import { CloneStep } from "./steps/clone"
 import { RequirementsStep } from "./steps/requirements"
+import { DiscoverStep } from "./steps/discover"
 import { Placeholder } from "./steps/placeholder"
 
 // Marcador para el guard de tests (detecta un dist desactualizado sin Node).
@@ -34,6 +35,7 @@ export function Init({ s }: { s: Snapshot }) {
     : screen === "github" ? <GithubStep init={init} />
     : screen === "clone" ? <CloneStep init={init} />
     : screen === "requirements" ? <RequirementsStep init={init} />
+    : screen === "discover" ? <DiscoverStep init={init} />
     : <Placeholder init={init} screen={screen} />
   return (
     <div data-marker={INIT_WIZARD}>

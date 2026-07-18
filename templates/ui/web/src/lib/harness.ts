@@ -102,12 +102,47 @@ export type InitReq = {
   install?: string; auto_run?: boolean; needs_sudo?: boolean; optional?: boolean
   purpose?: string; error?: string
 }
+export type InvRepo = {
+  name: string; current_branch: string; remote: string; role_guess: string
+  file_count: number; languages: string[]; signals: string[]; has_claude_md: boolean
+}
+export type Inventory = {
+  workspace: string; repo_count: number; repos: InvRepo[]
+  secret_hints: string[]; by_role: Record<string, string[]>; summary: Record<string, string[]>
+}
+export type InitCluster = { agent: string; kind: string; repos: string[]; owns?: string }
+export type InitCapSel = {
+  name: string; bin?: string; mcp?: string; tier: string; scope: string
+  profiles?: string[]; tools_allowed?: string[] | null
+}
+export type InitAnswers = {
+  project: { name: string; ticket_prefix: string }
+  instance: { repo: string }
+  flow: string
+  models: { architect: string; reviewer: string; implementer: string; mechanical: string }
+  loop_budget: number
+  autonomy: string
+  dag: string[]
+  clusters: InitCluster[]
+  capabilities: InitCapSel[] | null
+  secrets: { source: string; refs: string[] | null; vault_addr?: string; kv_base?: string }
+  tickets: { provider: string }
+  memory: { provider: string; profiles: string[] }
+  deploy: { org?: string; argocd_prefix?: string; kargo_project?: string; canary_tenant?: string; rollback_mode?: string }
+  principles: string[] | null
+  cronjobs: { enabled: boolean; jobs: string[] | null; runner?: string }
+}
 export type InitState = {
   active: boolean; step: string; steps: InitStep[]
   workspace_path?: string; target?: string; completed_at?: number
   github?: { mode: "gh" | "pat"; user: string } | null
   repos?: InitRepo[]
   requirements?: InitReq[]
+  inventory?: Inventory | null
+  answers?: InitAnswers | null
+  answers_rev?: number
+  role_overrides?: Record<string, string>
+  recommendations?: Record<string, string>
 }
 export type Toolbox = {
   version: string

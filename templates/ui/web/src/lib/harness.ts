@@ -135,10 +135,12 @@ export type HerdrSession = { name: string; running: boolean; default: boolean; d
 // amigable; ssh = alias de ~/.ssh/config o user@host.
 export type HerdrTarget = { name: string; ssh: string }
 export type HerdrState = {
-  available: boolean; installed?: boolean; version: string; reason?: string
+  available: boolean; installed?: boolean; stale?: boolean; version: string; reason?: string
   workspaces: HerdrWorkspace[]; tabs: HerdrTab[]; panes: HerdrPane[]; agents: HerdrAgent[]
   sessions?: HerdrSession[]
 }
+// Estado de conexión de un destino (probe): para los dots del selector.
+export type TargetProbe = { name: string; reachable: boolean; ssh_ok: boolean; running: boolean; message: string }
 
 export const who = (a: Agent) => (a.id === "main" ? "orquestador" : a.desc || a.type || a.id.slice(0, 10))
 

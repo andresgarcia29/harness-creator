@@ -14,7 +14,7 @@ import { parsePrompt, type Prompt } from "@/lib/prompt-parse"
 import { cn } from "@/lib/utils"
 import { op, taskRollup, PHASES, type Snapshot, type HerdrState, type HerdrPane, type TaskRollup } from "@/lib/harness"
 import { FolderGit2, Radio, ChevronDown, Check, X, Bot, Boxes, ArrowRight,
-  ArrowUp, ArrowDown, ArrowLeft, ArrowRight as ArrowRightIcon, CornerDownLeft, Delete, OctagonX } from "lucide-react"
+  ArrowUp, ArrowDown, ArrowLeft, ArrowRight as ArrowRightIcon, CornerDownLeft, Delete, OctagonX, Loader2 } from "lucide-react"
 import { PaneActions, WorkspaceActions, SessionStop } from "@/components/herdr-actions"
 import { NewWorkspace, SplitItems, NewTerminalItem } from "@/components/herdr-open"
 import { HerdrSessions, ActivateHerdr } from "@/components/herdr-sessions"
@@ -313,9 +313,15 @@ export function Terminals({ s: snap, go }: { s: Snapshot; go: Go }) {
         {h?.available && canOp && <NewWorkspace />}
         {h?.available && canOp && <SessionStop />}
         {h?.available && (
-          <span className="flex items-center gap-1.5 rounded-full border border-(--ok)/40 bg-(--ok)/8 px-2.5 py-1 text-[10px] font-semibold text-(--ok)">
-            <Radio className="size-3 animate-pulse" /> herdr {h.version} · en vivo
-          </span>
+          h.stale ? (
+            <span className="flex items-center gap-1.5 rounded-full border border-(--wait)/40 bg-(--wait)/8 px-2.5 py-1 text-[10px] font-semibold text-(--wait)" title={h.reason}>
+              <Loader2 className="size-3 animate-spin" /> reconectando…
+            </span>
+          ) : (
+            <span className="flex items-center gap-1.5 rounded-full border border-(--ok)/40 bg-(--ok)/8 px-2.5 py-1 text-[10px] font-semibold text-(--ok)">
+              <Radio className="size-3 animate-pulse" /> herdr {h.version} · en vivo
+            </span>
+          )
         )}
       </span>
     } />

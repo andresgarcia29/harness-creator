@@ -6,7 +6,7 @@ import {
 import { cn } from "@/lib/utils"
 import { usd, type Snapshot } from "@/lib/harness"
 import { TargetSwitcher } from "@/components/target-switcher"
-import { LayoutDashboard, ListTodo, Radio, ChartNoAxesColumn, Plus, Cable, Sun, Moon, Monitor, BookOpen, Blocks, SquareTerminal } from "lucide-react"
+import { LayoutDashboard, ListTodo, Radio, ChartNoAxesColumn, Plus, Cable, Sun, Moon, Monitor, BookOpen, Blocks, SquareTerminal, Rocket } from "lucide-react"
 import { useTheme, type Theme } from "@/hooks/use-theme"
 import type { View } from "@/App"
 
@@ -25,6 +25,9 @@ const GUIDE = [
   { v: "docs", label: "Docs", icon: BookOpen },
   { v: "tools", label: "Skills & MCP", icon: Blocks },
 ] as const
+const INSTALL = [
+  { v: "init", label: "Init", icon: Rocket },
+] as const
 
 export function AppSidebar({ view, go, snap, live }: {
   view: View; go: (v: View) => void; snap: Snapshot | null; live: boolean
@@ -38,11 +41,28 @@ export function AppSidebar({ view, go, snap, live }: {
     view.name === v || (view.name === "task" && v === "tasks") || (view.name === "session" && v === "sessions")
   // Badges = señal, no ruido: cuántas tareas/sesiones y el costo. Las conexiones
   // NO llevan un conteo suelto (era la "batería" rara) — su estado vive en su vista.
+  // Modo setup: daemon sin workspace — el wizard es lo único útil. Con un init
+  // a medias sobre un workspace ya adoptado, «Instalación» aparece arriba con
+  // su progreso; terminado el init, desaparece del sidebar.
+  const setup = snap?.mode === "setup"
+  const initActive = snap?.init?.active === true
+  const initBadge = snap?.init
+    ? `${snap.init.steps.filter((s) => s.status === "ok" || s.status === "skipped").length}/${snap.init.steps.length}`
+    : ""
   const badges: Record<string, string> = {
     tasks: String(snap?.tasks.length || ""),
     sessions: String(snap?.sessions.length || ""),
     costs: snap?.cost != null ? usd(snap.cost) : "",
+    init: initBadge,
   }
+  const groups = setup
+    ? [["Instalación", INSTALL] as const, ["Guía", GUIDE] as const]
+    : [
+        ...(initActive ? [["Instalación", INSTALL] as const] : []),
+        ["Observar", OBSERVE] as const,
+        ...(snap?.op === false ? [] : [["Operar", OPERATE] as const]),
+        ["Guía", GUIDE] as const,
+      ]
   return (
     <Sidebar collapsible="offcanvas">
       <SidebarHeader className="gap-2.5 px-4 pb-2 pt-5">
@@ -51,15 +71,14 @@ export function AppSidebar({ view, go, snap, live }: {
           <b className="font-heading text-[15px] font-bold tracking-tight">corvux</b>
         </div>
         {/* Selector de MÁQUINA global: muta TODA la página (tareas, sesiones,
-            costo, terminales) hacia la máquina elegida — local o un VPS. */}
-        <TargetSwitcher targets={snap?.targets || []} full />
+            costo, terminales) hacia la máquina elegida — local o un VPS.
+            En modo setup se oculta: el wizard configura ESTA máquina. */}
+        {!setup && <TargetSwitcher targets={snap?.targets || []} full />}
       </SidebarHeader>
       <SidebarContent>
         {/* Operar se esconde cuando el backend es solo-lectura (op:false) —
             p.ej. servido por el daemon, que aún no ejecuta (ADR-0010). */}
-        {([["Observar", OBSERVE] as const,
-           ...(snap?.op === false ? [] : [["Operar", OPERATE] as const]),
-           ["Guía", GUIDE] as const]).map(([label, items]) => (
+        {groups.map(([label, items]) => (
           <SidebarGroup key={label}>
             <SidebarGroupLabel className="text-[10px] font-bold uppercase tracking-[0.16em] text-muted-foreground/60">{label}</SidebarGroupLabel>
             <SidebarGroupContent>

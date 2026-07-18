@@ -17,19 +17,29 @@ import { Connections } from "@/views/connections"
 import { Docs } from "@/views/docs"
 import { Tools } from "@/views/tools"
 import { Terminals } from "@/views/terminals"
+import { Init } from "@/views/init"
 import { useRoute } from "@/lib/router"
+import { useEffect } from "react"
 
 export type View =
   | { name: "dash" } | { name: "tasks" } | { name: "task"; id: string }
   | { name: "sessions" } | { name: "session"; id: string }
   | { name: "costs" } | { name: "new" } | { name: "connections" }
   | { name: "docs" } | { name: "tools" } | { name: "terminals" }
+  | { name: "init" }
 export type Go = (v: View) => void
 
 export default function App() {
   const [view, setView] = useRoute()
   const { snap, live, texts } = useSnapshot()
   const narrow = view.name === "new" || view.name === "connections"
+  // Modo setup (daemon sin workspace): el wizard es lo único útil — aterriza
+  // ahí sí o sí (Docs se permite: es la guía).
+  useEffect(() => {
+    if (snap?.mode === "setup" && snap.init?.active && view.name !== "init" && view.name !== "docs") {
+      setView({ name: "init" })
+    }
+  }, [snap?.mode, snap?.init?.active, view.name, setView])
   return (
     <SidebarProvider>
       <AppSidebar view={view} go={setView} snap={snap} live={live} />
@@ -63,6 +73,7 @@ export default function App() {
               : view.name === "docs" ? <Docs s={snap} />
               : view.name === "tools" ? <Tools s={snap} />
               : view.name === "terminals" ? <Terminals s={snap} go={setView} />
+              : view.name === "init" ? <Init s={snap} />
               : <Dash s={snap} go={setView} />}
           </div>
         </div>

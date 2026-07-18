@@ -2,22 +2,12 @@ import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { toast } from "sonner"
-import { VHead, H2, Code } from "@/components/bits"
+import { VHead, H2, Code, Fld } from "@/components/bits"
 import { op, type Snapshot } from "@/lib/harness"
 import type { Go } from "@/App"
-
-const Fld = ({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) => (
-  <div className="mb-4">
-    <Label className="mb-1.5 block text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
-      {label} {hint && <i className="font-normal normal-case tracking-normal not-italic text-muted-foreground/60">{hint}</i>}
-    </Label>
-    {children}
-  </div>
-)
 
 export function NewTask({ s, go }: { s: Snapshot; go: Go }) {
   const models = Object.keys(s.prices || {})

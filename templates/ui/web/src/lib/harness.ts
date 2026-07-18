@@ -87,6 +87,18 @@ export type Snapshot = {
   mode?: string; op?: boolean; workspace?: { name: string; path: string }
   toolbox?: Toolbox; mcp?: McpServer[]; herdr?: HerdrState | null
   targets?: HerdrTarget[]; archived_tasks?: string[]
+  init?: InitState | null
+}
+// ── el wizard de onboarding (plano de init, ADR-0011 del daemon) ──
+// El servidor es la verdad del estado: la UI solo manda acciones y deriva.
+export type InitStatus = "pending" | "running" | "ok" | "fail" | "skipped"
+export type InitStep = {
+  id: string; title: string; status: InitStatus
+  detail?: string; error?: string; logs_tail?: string[]
+}
+export type InitState = {
+  active: boolean; step: string; steps: InitStep[]
+  workspace_path?: string; target?: string; completed_at?: number
 }
 export type Toolbox = {
   version: string

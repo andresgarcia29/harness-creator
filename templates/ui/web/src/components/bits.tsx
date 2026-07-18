@@ -1,6 +1,7 @@
 import type { ReactNode } from "react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
+import { Label } from "@/components/ui/label"
 import { cn } from "@/lib/utils"
 import { beats, supuesto, fecha, diaLabel, toEpoch, type Beat, type BusEvent } from "@/lib/harness"
 import { CirclePause, CircleX } from "lucide-react"
@@ -172,5 +173,18 @@ export function StatusBadge({ on, children }: { on?: boolean; children: ReactNod
     >
       {children}
     </Badge>
+  )
+}
+
+// Campo de formulario con label uppercase + hint — el patrón de Nueva tarea,
+// extraído aquí porque el wizard de init lo usa en todos sus formularios.
+export function Fld({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+  return (
+    <div className="mb-4">
+      <Label className="mb-1.5 block text-[10.5px] font-semibold uppercase tracking-wider text-muted-foreground">
+        {label} {hint && <i className="font-normal normal-case tracking-normal not-italic text-muted-foreground/60">{hint}</i>}
+      </Label>
+      {children}
+    </div>
   )
 }

@@ -6,14 +6,15 @@
 //
 // Los "workspaces" de esta vista son los de HERDR (multiplexor, como tmux) —
 // todas las terminales de la máquina, tengan harness o no.
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState, type ReactNode } from "react"
 import { toast } from "sonner"
 import { VHead, Lede, Code, Empty } from "@/components/bits"
 import { Ansi } from "@/lib/ansi"
 import { parsePrompt, type Prompt } from "@/lib/prompt-parse"
 import { cn } from "@/lib/utils"
 import { op, taskRollup, PHASES, type Snapshot, type HerdrState, type HerdrPane, type TaskRollup } from "@/lib/harness"
-import { FolderGit2, Radio, ChevronDown, Check, X, Bot, Boxes, ArrowRight } from "lucide-react"
+import { FolderGit2, Radio, ChevronDown, Check, X, Bot, Boxes, ArrowRight,
+  ArrowUp, ArrowDown, ArrowLeft, ArrowRight as ArrowRightIcon, CornerDownLeft, Delete, OctagonX } from "lucide-react"
 import { PaneActions, WorkspaceActions, SessionStop } from "@/components/herdr-actions"
 import { NewWorkspace, SplitItems, NewTerminalItem } from "@/components/herdr-open"
 import type { Go } from "@/App"
@@ -95,6 +96,45 @@ function Screen({ paneId, open, onText }: { paneId: string; open: boolean; onTex
 async function sendKeys(paneId: string, keys: string[]) {
   const r = await op("/api/op/herdr-key", { pane: paneId, keys })
   if (!r.ok) toast.error(r.error || "no se pudo")
+}
+
+// Un keycap de la barra de control. Manda una tecla cruda al TUI.
+function Keycap({ paneId, k, title, children, tone = "normal" }: {
+  paneId: string; k: string; title: string; children: ReactNode; tone?: "normal" | "escape" | "danger"
+}) {
+  return (
+    <button onClick={() => sendKeys(paneId, [k])} title={title}
+      className={cn("grid h-7 min-w-7 place-items-center rounded-md border px-1.5 font-mono text-[11px] transition-colors",
+        tone === "escape" && "border-(--wait)/40 bg-(--wait)/10 text-(--wait) hover:bg-(--wait)/20",
+        tone === "danger" && "border-(--bad)/40 bg-(--bad)/10 text-(--bad) hover:bg-(--bad)/20",
+        tone === "normal" && "border-white/12 bg-white/[0.05] text-white/70 hover:border-(--brand)/40 hover:bg-(--brand)/10 hover:text-white/90")}>
+      {children}
+    </button>
+  )
+}
+
+// Barra de teclas de control — lo que te deja MANEJAR un TUI de pantalla
+// completa (el picker de Claude Code, listas, editores): Escape para salir,
+// flechas para navegar, Enter/Tab/Backspace y Ctrl-C. Sin esto quedabas
+// atrapado en cuanto un agente mostraba algo que no fuera un sí/no simple.
+function KeyBar({ paneId }: { paneId: string }) {
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 border-t border-white/8 bg-[#0b0b0f] px-4 py-1.5">
+      <span className="mr-1 text-[9.5px] font-semibold uppercase tracking-wide text-white/25">teclas</span>
+      <Keycap paneId={paneId} k="Escape" title="Escape — salir de un menú / picker" tone="escape">esc</Keycap>
+      <span className="mx-0.5 h-4 w-px bg-white/10" />
+      <Keycap paneId={paneId} k="Up" title="flecha arriba"><ArrowUp className="size-3" /></Keycap>
+      <Keycap paneId={paneId} k="Down" title="flecha abajo"><ArrowDown className="size-3" /></Keycap>
+      <Keycap paneId={paneId} k="Left" title="flecha izquierda"><ArrowLeft className="size-3" /></Keycap>
+      <Keycap paneId={paneId} k="Right" title="flecha derecha"><ArrowRightIcon className="size-3" /></Keycap>
+      <span className="mx-0.5 h-4 w-px bg-white/10" />
+      <Keycap paneId={paneId} k="Enter" title="Enter — confirmar / seleccionar"><CornerDownLeft className="size-3" /></Keycap>
+      <Keycap paneId={paneId} k="Tab" title="Tab — autocompletar / siguiente">tab</Keycap>
+      <Keycap paneId={paneId} k="Backspace" title="Backspace — borrar"><Delete className="size-3" /></Keycap>
+      <span className="mx-0.5 h-4 w-px bg-white/10" />
+      <Keycap paneId={paneId} k="C-c" title="Ctrl-C — interrumpir el proceso" tone="danger"><OctagonX className="size-3" /> ^C</Keycap>
+    </div>
+  )
 }
 
 function InteractiveAnswer({ paneId, prompt }: { paneId: string; prompt: Prompt }) {
@@ -200,6 +240,7 @@ function TerminalWindow({ p, tabLabel, canOp, snap, go }: {
       {inHarness && <HarnessStrip wsName={snap.workspace?.name || "harness"} task={task} go={go} />}
       <Screen paneId={p.pane_id} open={open} onText={(t) => setPrompt(parsePrompt(t))} />
       {open && canOp && prompt && <InteractiveAnswer paneId={p.pane_id} prompt={prompt} />}
+      {open && canOp && <KeyBar paneId={p.pane_id} />}
       {open && canOp && <Prompt paneId={p.pane_id} />}
     </div>
   )

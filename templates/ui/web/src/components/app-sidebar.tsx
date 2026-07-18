@@ -41,12 +41,12 @@ export function AppSidebar({ view, go, snap, live }: {
     view.name === v || (view.name === "task" && v === "tasks") || (view.name === "session" && v === "sessions")
   // Badges = señal, no ruido: cuántas tareas/sesiones y el costo. Las conexiones
   // NO llevan un conteo suelto (era la "batería" rara) — su estado vive en su vista.
-  // Modo setup: daemon sin workspace — el wizard es lo único útil MIENTRAS el
-  // init está activo. Terminado (p.ej. instalación remota: el harness vive en
-  // el VPS), vuelve la navegación completa CON el selector de máquina — sin
-  // esto quedabas atrapado en un Resumen vacío sin poder hacer nada.
+  // Modo setup: daemon sin workspace local. El wizard va ARRIBA mientras hay
+  // init, pero la navegación completa y el selector de máquina se quedan
+  // SIEMPRE: sin workspace local aún puedes observar un VPS (?target=) —
+  // esconder la nav te dejaba atrapado en un Resumen vacío.
   const initActive = snap?.init?.active === true
-  const setup = snap?.mode === "setup" && initActive
+  const setup = false
   const initBadge = snap?.init
     ? `${snap.init.steps.filter((s) => s.status === "ok" || s.status === "skipped").length}/${snap.init.steps.length}`
     : ""
@@ -57,14 +57,13 @@ export function AppSidebar({ view, go, snap, live }: {
     init: initBadge,
     docs: snap?.drafts?.length ? `${snap.drafts.length} DRAFT` : "",
   }
-  const groups = setup
-    ? [["Instalación", INSTALL] as const, ["Guía", GUIDE] as const]
-    : [
-        ...(initActive ? [["Instalación", INSTALL] as const] : []),
-        ["Observar", OBSERVE] as const,
-        ...(snap?.op === false ? [] : [["Operar", OPERATE] as const]),
-        ["Guía", GUIDE] as const,
-      ]
+  void setup
+  const groups = [
+    ...(initActive ? [["Instalación", INSTALL] as const] : []),
+    ["Observar", OBSERVE] as const,
+    ...(snap?.op === false ? [] : [["Operar", OPERATE] as const]),
+    ["Guía", GUIDE] as const,
+  ]
   return (
     <Sidebar collapsible="offcanvas">
       <SidebarHeader className="gap-2.5 px-4 pb-2 pt-5">
@@ -75,7 +74,7 @@ export function AppSidebar({ view, go, snap, live }: {
         {/* Selector de MÁQUINA global: muta TODA la página (tareas, sesiones,
             costo, terminales) hacia la máquina elegida — local o un VPS.
             En modo setup se oculta: el wizard configura ESTA máquina. */}
-        {!setup && <TargetSwitcher targets={snap?.targets || []} full />}
+        <TargetSwitcher targets={snap?.targets || []} full />
       </SidebarHeader>
       <SidebarContent>
         {/* Operar se esconde cuando el backend es solo-lectura (op:false) —

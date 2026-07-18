@@ -19,11 +19,19 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
    el archivo real de la instancia.
 3. Clasifica cada diferencia según la PROPIEDAD del archivo:
    - **Propiedad del plugin** (scripts/{doctor,bootstrap,secrets,ship,
-     worktree-task,quiet,with-secrets}.sh, hooks): upstream gana por
+     worktree-task,quiet,with-secrets}.sh, hooks, y **el panel**:
+     `scripts/ui/{panel.sh,server.py,pricing.json,dist/}`): upstream gana por
      default — re-instancia con las respuestas del answers y propón el
      archivo completo. Un parche local aquí casi siempre fue un fix que
      YA subió al plugin; verifica que la lógica local esté contenida en
      la nueva versión antes de reemplazar.
+     · El PANEL es especialmente importante en updates recientes: `panel.sh`
+       (nuevo) hace que `make ui` corra el **daemon Go `harnessd`** en vez de
+       `server.py`, y el `dist/` trae el frontend nuevo (multi-máquina,
+       terminales, sonda de MCP, archivar). El BINARIO `harnessd` NO es un
+       archivo a diffear — `panel.sh` lo baja solo del release privado en el
+       primer `make ui` (o cae a server.py si no hay acceso). Tras actualizar,
+       recuérdale al humano correr `make ui` para bajar el daemon nuevo.
    - **Propiedad de la instancia** (harness-answers, models.yaml,
      CLAUDE.md, constituciones, specs, docs): lo local gana — es ley
      del proyecto; si choca con un cambio upstream, muestra ambos y

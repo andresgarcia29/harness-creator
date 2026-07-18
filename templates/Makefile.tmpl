@@ -29,7 +29,7 @@ watch: ## vigila el deploy: make watch TASK=<id> REPO=<repo>
 usage: ## costo por sesión/tarea (ccusage — la báscula oficial)
 	@ccusage
 
-ui: ## panel en vivo: agentes, fases, tokens (solo lectura, solo 127.0.0.1)
-	@python3 scripts/ui/server.py --port $(or $(PORT),7717) --workspace . --open
+ui: ## panel en vivo: agentes, fases, tokens, terminales, otras máquinas (solo lectura, solo 127.0.0.1)
+	@bash scripts/ui/panel.sh $(or $(PORT),7717)
 
 .PHONY: help init doctor secrets wt wt-rm ship watch usage ui

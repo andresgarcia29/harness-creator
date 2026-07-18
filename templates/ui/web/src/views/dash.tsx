@@ -3,7 +3,7 @@ import { VHead, H2, Lede, Code, Stats, Story, Empty } from "@/components/bits"
 import { ConcChart } from "@/components/charts-recharts"
 import { cn } from "@/lib/utils"
 import {
-  BUSKINDS, n, usd, fecha, rel, taskRollup,
+  BUSKINDS, n, usd, fecha, rel, taskRollup, liveAgents,
   type Snapshot, type TaskStatus, type TaskRollup,
 } from "@/lib/harness"
 import { CirclePause, CircleX, Rocket, Loader, ArrowRight } from "lucide-react"
@@ -48,7 +48,7 @@ function TaskCard({ r, go }: { r: TaskRollup; go: Go }) {
 }
 
 export function Dash({ s, go }: { s: Snapshot; go: Go }) {
-  const acts = s.sessions.reduce((x, y) => x + y.n_active, 0)
+  const acts = s.sessions.reduce((x, y) => x + liveAgents(y), 0)
   const hasAny = s.sessions.length || s.tasks.length || s.events.length
   if (!hasAny)
     return (

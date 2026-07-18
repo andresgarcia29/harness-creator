@@ -65,6 +65,9 @@ export type Session = {
   id: string; short: string; model?: string; n_agents: number; n_active: number
   peak: number; idle: number; tokens: { out: number; cache_read: number }
   cost: number | null; last_text?: string; agents: Agent[]
+  // live_by: CÓMO sabemos que vive. "herdr"/"live" = corre AHORA (verdad de
+  // campo, no mtime); "recent" = activa hace poco, sin confirmar; "" = reposo.
+  live_by?: string
 }
 export type BusEvent = { ts: string; kind: string; task?: string; actor?: string; summary: string; ok?: boolean }
 export type Task = {
@@ -134,9 +137,22 @@ export type HerdrState = {
 
 export const who = (a: Agent) => (a.id === "main" ? "orquestador" : a.desc || a.type || a.id.slice(0, 10))
 
+// Estado HONESTO de una sesión. Prioriza la verdad de campo (live_by, que cruza
+// con las terminales vivas de herdr) sobre el mtime del transcript, que mentía
+// marcando "Trabajando" algo que ya terminó o que nunca corrió aquí.
+//   herdr/live → corre AHORA (verde, pulsa)
+//   recent     → activa hace poco, sin confirmar en vivo (ámbar, no pulsa)
+//   idle<600   → en pausa    ·   resto → en reposo
 export function estado(x: Session): [string, string, boolean] {
-  return x.n_active ? ["●", "Trabajando", true] : x.idle < 600 ? ["◐", "En pausa", false] : ["○", "En reposo", false]
+  if (x.live_by === "herdr" || x.live_by === "live") return ["●", "Trabajando", true]
+  if (x.live_by === "recent") return ["◐", "Activa hace poco", false]
+  return x.idle < 600 ? ["◐", "En pausa", false] : ["○", "En reposo", false]
 }
+
+// Agentes VIVOS de verdad: n_active sólo cuenta si la sesión está confirmada en
+// vivo (herdr, o mtime cuando no hay herdr). Así "agentes vivos" no miente.
+export const liveAgents = (x: Session): number =>
+  x.live_by === "herdr" || x.live_by === "live" ? x.n_active : 0
 
 // La alerta se DERIVA: el último evento de cada tarea es stop → te espera;
 // ok=false → un gate bloqueó. Nada más se considera pendiente.

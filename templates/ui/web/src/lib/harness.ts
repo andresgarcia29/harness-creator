@@ -96,9 +96,12 @@ export type InitStep = {
   id: string; title: string; status: InitStatus
   detail?: string; error?: string; logs_tail?: string[]
 }
+export type InitRepo = { full_name: string; ref?: string; status: InitStatus; error?: string }
 export type InitState = {
   active: boolean; step: string; steps: InitStep[]
   workspace_path?: string; target?: string; completed_at?: number
+  github?: { mode: "gh" | "pat"; user: string } | null
+  repos?: InitRepo[]
 }
 export type Toolbox = {
   version: string

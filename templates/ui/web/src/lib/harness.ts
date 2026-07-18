@@ -120,7 +120,10 @@ export type TaskGit = { repos: RepoGit[]; read: string[] }
 export type HerdrPane = {
   pane_id: string; workspace_id: string; tab_id: string
   cwd: string; foreground_cwd: string; agent_status: string; focused: boolean
-  program?: string
+  program?: string; agent?: string
+  // id de la sesión del agente → su transcripción JSONL completa (ruta A del
+  // "historial completo"). Si falta, el pane es un shell (ruta B: backlog).
+  agent_session?: { value?: string; agent?: string; kind?: string }
 }
 export type HerdrWorkspace = {
   workspace_id: string; label: string; number: number

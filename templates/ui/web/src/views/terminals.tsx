@@ -274,12 +274,58 @@ export function taskOfSession(snap: Snapshot, sessionId: string): string | undef
   return snap.runs?.find((r) => r.session === sessionId)?.task
 }
 
+// Historial COMPLETO de una terminal: si el pane corre un agente, la
+// transcripción JSONL real (todo); si es un shell, el backlog de pantalla
+// acumulado. "Siempre tener todo". Scroll pegado-al-fondo como el vivo.
+function FullHistory({ pane, session }: { pane: string; session?: string }) {
+  const [data, setData] = useState<{ text: string; kind: string } | null>(null)
+  const boxRef = useRef<HTMLDivElement>(null)
+  const stick = useRef(true)
+  useEffect(() => {
+    let live = true
+    const load = () => fetch(withTarget(`/api/herdr/history?pane=${encodeURIComponent(pane)}&session=${encodeURIComponent(session || "")}`))
+      .then((r) => r.json()).then((d) => { if (live) setData(d) }).catch(() => {})
+    load()
+    const iv = setInterval(load, 4000) // el historial cambia lento
+    return () => { live = false; clearInterval(iv) }
+  }, [pane, session])
+  useEffect(() => { const el = boxRef.current; if (el && stick.current) el.scrollTop = el.scrollHeight }, [data])
+  const onScroll = () => {
+    const el = boxRef.current
+    if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+  }
+  if (!data) return <div className="grid min-h-0 flex-1 place-items-center text-[12px] text-white/30">cargando historial…</div>
+  if (!data.text) return <div className="grid min-h-0 flex-1 place-items-center text-[12px] text-white/30">sin historial todavía — se llena mientras miras la terminal</div>
+  return (
+    <div ref={boxRef} onScroll={onScroll} className="terminal-screen min-h-0 flex-1 overflow-auto px-5 py-4">
+      {data.kind === "transcript"
+        ? <Transcript text={data.text} />
+        : <pre className="term-pre mx-auto w-fit whitespace-pre font-mono text-[12.5px] text-[#d4d4dc]"><Ansi text={data.text} /></pre>}
+    </div>
+  )
+}
+
+// Render legible de la transcripción de un agente (roles + texto).
+function Transcript({ text }: { text: string }) {
+  return (
+    <div className="mx-auto max-w-[880px] text-[13px] leading-relaxed text-[#d0d0d8]">
+      {text.split("\n").map((l, i) => {
+        if (l === "▸ tú") return <div key={i} className="mt-5 mb-1 text-[10.5px] font-bold uppercase tracking-wider text-(--brand)">tú</div>
+        if (l === "● claude") return <div key={i} className="mt-5 mb-1 text-[10.5px] font-bold uppercase tracking-wider text-(--ok)">claude</div>
+        if (l.startsWith("  ⚙ ")) return <div key={i} className="font-mono text-[11.5px] text-white/40">⚙ {l.slice(4)}</div>
+        return <p key={i} className="whitespace-pre-wrap break-words">{l || " "}</p>
+      })}
+    </div>
+  )
+}
+
 function TerminalWindow({ p, tabLabel, canOp, snap, go }: {
   p: HerdrPane; tabLabel?: string; canOp: boolean; snap: Snapshot; go: Go
 }) {
   const busy = p.agent_status === "working" || p.agent_status === "blocked"
   const [open, setOpen] = useState(busy)
   const [max, setMax] = useState(false)
+  const [histMode, setHistMode] = useState(false)
   const [confirmClose, setConfirmClose] = useState(false)
   const [closing, setClosing] = useState(false)
   const s = st(p.agent_status)
@@ -378,9 +424,24 @@ function TerminalWindow({ p, tabLabel, canOp, snap, go }: {
               {chrome(false)}
             </div>
             {inHarness && <HarnessStrip wsName={snap.workspace?.name || "harness"} task={task} go={(v) => { setMax(false); go(v) }} />}
-            <div className="flex min-h-0 flex-1 flex-col">
-              <PaneConsole paneId={p.pane_id} canOp={canOp} open big />
+            {/* En vivo (pantalla) ↔ Historial completo (transcripción/backlog). */}
+            <div className="flex shrink-0 items-center gap-1 border-b border-white/8 bg-[#0b0b0f] px-3 py-1.5">
+              {([[false, "En vivo"], [true, "Historial completo"]] as const).map(([m, label]) => (
+                <button key={label} type="button" onClick={() => setHistMode(m)}
+                  className={cn("rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors",
+                    histMode === m ? "bg-white/10 text-white/90" : "text-white/40 hover:text-white/70")}>
+                  {label}
+                </button>
+              ))}
+              {histMode && (
+                <span className="ml-1.5 text-[10px] text-white/30">
+                  {p.agent_session?.value ? "· transcripción real del agente" : "· backlog de pantalla (desde que lo miras)"}
+                </span>
+              )}
             </div>
+            {histMode
+              ? <FullHistory pane={p.pane_id} session={p.agent_session?.value} />
+              : <div className="flex min-h-0 flex-1 flex-col"><PaneConsole paneId={p.pane_id} canOp={canOp} open big /></div>}
           </div>
         </div>
       )}

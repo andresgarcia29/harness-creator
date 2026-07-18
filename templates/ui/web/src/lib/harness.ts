@@ -85,7 +85,7 @@ export type Snapshot = {
   connections?: Record<string, boolean>; runs?: { task: string; session: string; kind: string }[]
   mode?: string; op?: boolean; workspace?: { name: string; path: string }
   toolbox?: Toolbox; mcp?: McpServer[]; herdr?: HerdrState | null
-  targets?: HerdrTarget[]
+  targets?: HerdrTarget[]; archived_tasks?: string[]
 }
 export type Toolbox = {
   version: string

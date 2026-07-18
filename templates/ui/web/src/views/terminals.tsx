@@ -162,8 +162,8 @@ const KeySep = () => <span className="keysep" aria-hidden />
 // atrapado en cuanto un agente mostraba algo que no fuera un sí/no simple.
 function KeyBar({ paneId }: { paneId: string }) {
   return (
-    <div className="flex flex-wrap items-center gap-2 border-t border-white/8 bg-gradient-to-b from-[#0d0d12] to-[#0a0a0e] px-4 py-2">
-      <span className="mr-0.5 select-none text-[9.5px] font-semibold uppercase tracking-[0.14em] text-white/25">teclas</span>
+    <div className="flex flex-wrap items-center gap-2 border-t border-white/8 bg-[#0b0b0f] px-4 py-2">
+      <span className="mr-0.5 select-none text-[9.5px] font-medium uppercase tracking-[0.16em] text-white/22">teclas</span>
       <Keycap paneId={paneId} k="Escape" title="Escape — salir de un menú / picker" tone="escape">esc</Keycap>
       <KeySep />
       <Keycap paneId={paneId} k="Up" title="flecha arriba"><ArrowUp /></Keycap>

@@ -28,6 +28,22 @@ Le apuntas a una carpeta con tus repositorios y genera un *harness* completo y a
 
 ## Quickstart
 
+**Camino A — el wizard web (recomendado):**
+
+```bash
+brew install andresgarcia29/agm/harness
+harness init          # abre el wizard en http://127.0.0.1:7180/#/init
+```
+
+El wizard te lleva de cero a harness: carpeta → GitHub (gh o PAT) → clonar
+repos → requisitos → auto-discover → entrevista pre-llenada con evidencia →
+agentes + arqueología → MCPs con secretos certificados → primeras tareas →
+doctor en verde. Todo idempotente y reanudable: si algo muere, `harness init`
+retoma en el paso exacto. Scriptable sin UI: `harness discover` +
+`harness generate --answers answers.json`.
+
+**Camino B — el plugin de Claude Code (la entrevista conversacional):**
+
 ```bash
 # 1. Prepara el workspace: tus repos clonados bajo repos/
 mkdir mi-workspace && cd mi-workspace

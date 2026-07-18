@@ -53,7 +53,7 @@ function useTargetStatus(count: number): Record<string, TargetProbe> {
   return status
 }
 
-export function TargetSwitcher({ targets }: { targets: HerdrTarget[] }) {
+export function TargetSwitcher({ targets, full }: { targets: HerdrTarget[]; full?: boolean }) {
   const [active, setActive] = useTarget()
   const [addOpen, setAddOpen] = useState(false)
   const status = useTargetStatus(targets.length)
@@ -63,13 +63,14 @@ export function TargetSwitcher({ targets }: { targets: HerdrTarget[] }) {
   return (
     <>
       <DropdownMenu>
-        <DropdownMenuTrigger className="flex h-8 items-center gap-1.5 rounded-md border border-border bg-card px-2.5 text-[12px] font-medium transition-colors hover:bg-accent">
-          {active ? <Server className="size-3.5 text-(--brand)" /> : <Monitor className="size-3.5 text-muted-foreground" />}
-          <span className="max-w-[140px] truncate">{label}</span>
+        <DropdownMenuTrigger className={cn("flex h-8 items-center gap-1.5 rounded-md border border-border bg-card px-2.5 text-[12px] font-medium transition-colors hover:bg-accent",
+          full ? "w-full" : "")}>
+          {active ? <Server className="size-3.5 shrink-0 text-(--brand)" /> : <Monitor className="size-3.5 shrink-0 text-muted-foreground" />}
+          <span className={cn("truncate", full ? "flex-1 text-left" : "max-w-[140px]")}>{label}</span>
           {active && <StatusDot p={status[active]} />}
-          <ChevronsUpDown className="size-3 text-muted-foreground/60" />
+          <ChevronsUpDown className="size-3 shrink-0 text-muted-foreground/60" />
         </DropdownMenuTrigger>
-        <DropdownMenuContent align="end" className="min-w-[240px]">
+        <DropdownMenuContent align={full ? "start" : "end"} className="min-w-[240px]">
           <DropdownMenuGroup>
             <DropdownMenuLabel className="text-[11px] text-muted-foreground/70">Máquina que ves</DropdownMenuLabel>
             <DropdownMenuItem onClick={() => setActive("")}>
@@ -115,6 +116,7 @@ function AddTargetDialog({ open, onOpenChange, onAdded }: {
 }) {
   const [name, setName] = useState("")
   const [ssh, setSsh] = useState("")
+  const [path, setPath] = useState("")
   const [busy, setBusy] = useState(false)
   const [probe, setProbe] = useState<TargetProbe | null>(null)
 
@@ -127,12 +129,12 @@ function AddTargetDialog({ open, onOpenChange, onAdded }: {
   }
   const add = async () => {
     setBusy(true)
-    const r = await op("/api/op/targets", { action: "add", name, ssh, target: "" })
+    const r = await op("/api/op/targets", { action: "add", name, ssh, path, target: "" })
     setBusy(false)
     if (r.ok) {
       toast.success(`VPS «${name}» agregado.`)
       onAdded(name)
-      onOpenChange(false); setName(""); setSsh(""); setProbe(null)
+      onOpenChange(false); setName(""); setSsh(""); setPath(""); setProbe(null)
     } else toast.error(r.error || "no se pudo agregar")
   }
   return (
@@ -155,6 +157,13 @@ function AddTargetDialog({ open, onOpenChange, onAdded }: {
             <Input value={ssh} onChange={(e) => { setSsh(e.target.value); setProbe(null) }} placeholder="alias de ~/.ssh/config o user@host" className="font-mono text-[12px]" />
             <p className="mt-1 text-[10.5px] text-muted-foreground/60">
               Debe conectar con <code className="rounded bg-muted px-1">ssh &lt;destino&gt;</code> sin pedir contraseña (llave configurada).
+            </p>
+          </div>
+          <div>
+            <label className="mb-1 block text-[11px] font-medium text-muted-foreground">Ruta del workspace en el VPS <span className="text-muted-foreground/50">(opcional)</span></label>
+            <Input value={path} onChange={(e) => setPath(e.target.value)} placeholder="/home/user/mi-proyecto" className="font-mono text-[12px]" />
+            <p className="mt-1 text-[10.5px] text-muted-foreground/60">
+              Para ver también sus <b>tareas, sesiones y costo</b> (no sólo terminales), el VPS debe correr <code className="rounded bg-muted px-1">harnessd</code>; esta es la carpeta del harness allá.
             </p>
           </div>
           {probe && (

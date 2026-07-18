@@ -23,7 +23,6 @@ import {
 import { PaneActions, WorkspaceActions, SessionStop } from "@/components/herdr-actions"
 import { NewWorkspace, SplitItems, NewTerminalItem } from "@/components/herdr-open"
 import { HerdrSessions, ActivateHerdr } from "@/components/herdr-sessions"
-import { TargetSwitcher } from "@/components/target-switcher"
 import { withTarget } from "@/lib/target"
 import type { Go } from "@/App"
 
@@ -471,11 +470,9 @@ export function Terminals({ s: snap, go }: { s: Snapshot; go: Go }) {
   const h = (snap.herdr || null) as HerdrState | null
   const canOp = snap.op !== false
 
-  const targets = snap.targets || []
   const head = <VHead title="Terminales" sub="lo que corre en esa máquina, y el harness que cada terminal avanza"
     right={
       <span className="flex items-center gap-2">
-        {canOp && <TargetSwitcher targets={targets} />}
         {h?.available && canOp && <NewWorkspace />}
         {h?.available && canOp && <SessionStop />}
         {h?.available && (
@@ -496,16 +493,10 @@ export function Terminals({ s: snap, go }: { s: Snapshot; go: Go }) {
   // y mostramos las sesiones paradas para poder borrarlas.
   if (!h || !h.available) {
     const installed = !!h?.installed
-    const targets = snap.targets || []
     return (
       <>
         <VHead title="Terminales" sub="lo que corre en esa máquina, y el harness que cada terminal avanza"
-          right={
-            <span className="flex items-center gap-2">
-              {canOp && <TargetSwitcher targets={targets} />}
-              {installed && canOp && <ActivateHerdr />}
-            </span>
-          } />
+          right={installed && canOp ? <ActivateHerdr /> : undefined} />
         {installed && h?.sessions && <HerdrSessions sessions={h.sessions} canOp={canOp} />}
         <Empty title={installed ? "herdr está instalado, pero el server no corre" : "herdr no está conectado"}>
           {installed ? (

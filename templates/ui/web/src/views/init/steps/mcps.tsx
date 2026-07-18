@@ -72,9 +72,10 @@ export function McpsStep({ init }: { init: InitState }) {
       }
     >
       {init.target && (
-        <div className="rounded-xl border border-(--wait)/40 bg-(--wait)/8 p-3 text-[12px] text-muted-foreground">
-          Instalación remota en <b>{init.target}</b>: aquí eliges qué MCPs van (se materializan
-          allá al continuar); los <b>secretos se certifican en el VPS</b> con <span className="font-mono">make init</span>.
+        <div className="rounded-xl border bg-muted/30 p-3 text-[12px] text-muted-foreground">
+          Instalación remota: la sonda corre <b>en {init.target}</b> vía SSH — mismo flujo desde
+          aquí. Un secreto que pegues viaja por stdin del ssh (jamás en argumentos) y, si el MCP
+          contesta allá, queda en el <span className="font-mono">.secrets</span> del VPS.
         </div>
       )}
       <div className="space-y-3">

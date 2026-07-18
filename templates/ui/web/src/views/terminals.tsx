@@ -98,6 +98,10 @@ function tidyScreen(raw: string): string {
 function Screen({ paneId, open, big, onText }: { paneId: string; open: boolean; big?: boolean; onText?: (t: string) => void }) {
   const [text, setText] = useState<string | null>(null)
   const boxRef = useRef<HTMLDivElement>(null)
+  // "pegado al fondo": sólo auto-scrolleamos si el usuario YA está abajo. Si
+  // subió a leer, lo dejamos ahí (antes lo jalaba al fondo cada 1.2s → "el
+  // scroll no servía"). Vuelve a seguir el fondo en cuanto baja del todo.
+  const stick = useRef(true)
   useEffect(() => {
     if (!open) return
     let live = true
@@ -107,11 +111,16 @@ function Screen({ paneId, open, big, onText }: { paneId: string; open: boolean; 
     const iv = setInterval(load, 1200)
     return () => { live = false; clearInterval(iv) }
   }, [paneId, open])
-  useEffect(() => { const el = boxRef.current; if (el) el.scrollTop = el.scrollHeight }, [text])
+  useEffect(() => { const el = boxRef.current; if (el && stick.current) el.scrollTop = el.scrollHeight }, [text])
+  const onScroll = () => {
+    const el = boxRef.current
+    if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 28
+  }
   if (!open) return null
   return (
-    <div ref={boxRef} className={cn("terminal-screen overflow-auto px-4 py-3",
-      big ? "h-full min-h-0" : "max-h-[420px] min-h-[84px]")}>
+    <div ref={boxRef} onScroll={onScroll}
+      className={cn("terminal-screen overflow-auto px-4 py-3",
+        big ? "min-h-0 flex-1" : "max-h-[420px] min-h-[84px]")}>
       {text == null ? (
         <span className="text-[11.5px] text-white/30">conectando al PTY…</span>
       ) : (

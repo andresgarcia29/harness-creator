@@ -8,7 +8,7 @@ import { useCallback, useEffect, useState } from "react"
 import type { View } from "@/App"
 
 // Vistas simples (sin id) — el resto se maneja a mano por tener parámetro.
-const SIMPLE = ["dash", "tasks", "sessions", "costs", "new", "connections", "docs", "tools", "terminals"] as const
+const SIMPLE = ["dash", "tasks", "sessions", "costs", "new", "connections", "docs", "tools", "terminals", "init"] as const
 
 export function viewToPath(v: View): string {
   if (v.name === "task") return `/tasks/${encodeURIComponent(v.id)}`

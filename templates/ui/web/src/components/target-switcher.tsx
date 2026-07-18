@@ -6,7 +6,7 @@
 // quoting a prueba de inyección; el navegador manda el NOMBRE, nunca un comando.
 import { useEffect, useState } from "react"
 import {
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
+  DropdownMenu, DropdownMenuContent, DropdownMenuGroup, DropdownMenuItem, DropdownMenuLabel,
   DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import {
@@ -70,25 +70,27 @@ export function TargetSwitcher({ targets }: { targets: HerdrTarget[] }) {
           <ChevronsUpDown className="size-3 text-muted-foreground/60" />
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="min-w-[240px]">
-          <DropdownMenuLabel className="text-[11px] text-muted-foreground/70">Máquina que ves</DropdownMenuLabel>
-          <DropdownMenuItem onClick={() => setActive("")}>
-            <Monitor className="size-3.5" /> esta máquina (local)
-            {!active && <Check className="ml-auto size-3.5 text-(--ok)" />}
-          </DropdownMenuItem>
-          {targets.length > 0 && <DropdownMenuSeparator />}
-          {targets.map((t) => (
-            <DropdownMenuItem key={t.name} onClick={() => setActive(t.name)}>
-              <StatusDot p={status[t.name]} />
-              <Server className="size-3.5 text-(--brand)" />
-              <span className="min-w-0 flex-1 truncate">{t.name}</span>
-              <span className="ml-1 max-w-[90px] truncate font-mono text-[10px] text-muted-foreground/50">{t.ssh}</span>
-              <button onClick={(e) => { e.stopPropagation(); removeTarget(t.name, active, setActive) }}
-                title="quitar este destino" className="ml-1 rounded p-0.5 text-muted-foreground/50 hover:text-(--bad)">
-                <Trash2 className="size-3" />
-              </button>
-              {active === t.name && <Check className="size-3.5 text-(--ok)" />}
+          <DropdownMenuGroup>
+            <DropdownMenuLabel className="text-[11px] text-muted-foreground/70">Máquina que ves</DropdownMenuLabel>
+            <DropdownMenuItem onClick={() => setActive("")}>
+              <Monitor className="size-3.5" /> esta máquina (local)
+              {!active && <Check className="ml-auto size-3.5 text-(--ok)" />}
             </DropdownMenuItem>
-          ))}
+            {targets.map((t) => (
+              <DropdownMenuItem key={t.name} onClick={() => setActive(t.name)}>
+                <StatusDot p={status[t.name]} />
+                <Server className="size-3.5 text-(--brand)" />
+                <span className="min-w-0 flex-1 truncate">{t.name}</span>
+                <span className="ml-1 max-w-[90px] truncate font-mono text-[10px] text-muted-foreground/50">{t.ssh}</span>
+                <span role="button" tabIndex={-1}
+                  onClick={(e) => { e.stopPropagation(); removeTarget(t.name, active, setActive) }}
+                  title="quitar este destino" className="ml-1 rounded p-0.5 text-muted-foreground/50 hover:text-(--bad)">
+                  <Trash2 className="size-3" />
+                </span>
+                {active === t.name && <Check className="size-3.5 text-(--ok)" />}
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuGroup>
           <DropdownMenuSeparator />
           <DropdownMenuItem onClick={() => setAddOpen(true)}>
             <Plus className="size-3.5" /> Agregar VPS…

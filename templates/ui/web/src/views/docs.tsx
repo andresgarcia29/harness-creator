@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { toast } from "sonner"
-import { Eye, Gavel, Loader2 } from "lucide-react"
+import { Eye, Gavel, Loader2, Pickaxe } from "lucide-react"
 import { VHead, H2, Lede, Code, Empty } from "@/components/bits"
 import { op, type Snapshot } from "@/lib/harness"
 import { withTarget } from "@/lib/target"
@@ -26,21 +26,32 @@ const HOOK_DOCS: Record<string, string> = {
   "ui-emit.sh": "manda eventos de sesión al bus del panel — observa, jamás bloquea",
 }
 
-// Ratificar — la ley que la arqueología propuso y nadie ha firmado. Un
-// abogado en DRAFT es la primera parada de /auto: aquí se LEE (visor
-// integrado) y se firma, uno por uno o todos. El flip es DRAFT→RATIFIED.
-function DraftsPanel({ s }: { s: Snapshot }) {
+// La Ley — TODOS los documentos (DRAFT y ratificados) con visor permanente:
+// firmar no te quita poder leerlos, y cada cluster se puede re-excavar
+// (arqueología dirigida) cuando su realidad cambie. El panel como
+// controlador del harness, no solo espejo.
+function LawPanel({ s }: { s: Snapshot }) {
   const [busy, setBusy] = useState("")
   const [viewing, setViewing] = useState("")
   const [content, setContent] = useState<Record<string, string>>({})
-  const drafts = s.drafts || []
-  if (!drafts.length || s.op === false) return null
+  const law = s.law || []
+  if (!law.length || s.op === false) return null
+  const drafts = law.filter((d) => d.status === "draft")
   const ratify = async (path?: string) => {
     setBusy(path || "@all")
     const r = await op("/api/op/ratify", path ? { path } : { all: true })
     setBusy("")
     if (!r.ok && r.failed?.length) toast.error(`Fallaron: ${r.failed.join(" · ")}`)
     else toast.success(path ? `Ratificado: ${path}` : `${r.ratified?.length || 0} documentos ratificados`)
+  }
+  const excavate = async (agent: string) => {
+    setBusy("exc:" + agent)
+    toast.info(`Re-excavando ${agent} — el modelo lee README/migraciones/protos (puede tardar 1-3 min)…`)
+    const r = await op("/api/op/excavate", { agent })
+    setBusy("")
+    setContent({}) // el contenido cambió: invalida el cache del visor
+    if (!r.ok) toast.error(r.error || "la arqueología falló")
+    else toast.success(`${agent} re-excavado — queda en DRAFT esperando tu firma`)
   }
   const ver = async (path: string) => {
     if (viewing === path) { setViewing(""); return }
@@ -51,34 +62,52 @@ function DraftsPanel({ s }: { s: Snapshot }) {
     }
   }
   return (
-    <div className="mb-6 rounded-2xl border border-(--wait)/45 bg-(--wait)/8 p-4">
+    <div className={cnLaw(drafts.length > 0)}>
       <div className="mb-1 flex items-center gap-2">
-        <Gavel className="size-4 text-(--wait)" />
-        <span className="text-[13.5px] font-medium">{drafts.length} documento(s) en DRAFT — la ley espera tu firma</span>
-        <Button size="sm" className="ml-auto gap-1.5" disabled={busy !== ""} onClick={() => ratify()}>
-          {busy === "@all" && <Loader2 className="size-3.5 animate-spin" />} Ratificar todos
-        </Button>
+        <Gavel className={drafts.length ? "size-4 text-(--wait)" : "size-4 text-(--ok)"} />
+        <span className="text-[13.5px] font-medium">
+          La ley · {law.length} documento(s){drafts.length ? ` — ${drafts.length} en DRAFT esperando tu firma` : " — toda ratificada"}
+        </span>
+        {drafts.length > 0 && (
+          <Button size="sm" className="ml-auto gap-1.5" disabled={busy !== ""} onClick={() => ratify()}>
+            {busy === "@all" && <Loader2 className="size-3.5 animate-spin" />} Ratificar todos
+          </Button>
+        )}
       </div>
       <p className="mb-3 text-[11.5px] text-muted-foreground">
-        La arqueología propone; los humanos ratifican. <b>Ábrelos con «Ver» y léelos antes de
-        firmar</b> — un abogado en DRAFT es la primera parada de <Code>/auto</Code>. Se firman aquí
-        (status → RATIFIED); editar el contenido sigue siendo cosa del editor.
+        La arqueología propone; los humanos ratifican. <b>«Ver» abre cualquier documento</b> (firmado
+        o no). <b>«Re-excavar»</b> vuelve a correr la arqueología de ese cluster (queda en DRAFT
+        hasta que firmes de nuevo) — útil cuando el servicio cambió de verdad.
       </p>
       <div className="divide-y rounded-xl border bg-card">
-        {drafts.map((d) => (
+        {law.map((d) => (
           <div key={d.path}>
             <div className="flex items-center gap-2.5 px-3 py-1.5">
               <Badge variant="outline" className="text-[9.5px]">{d.kind}</Badge>
+              {d.status === "draft"
+                ? <Badge variant="outline" className="border-(--wait)/50 text-[9.5px] text-(--wait)">DRAFT</Badge>
+                : d.status === "ratified"
+                  ? <Badge variant="outline" className="border-(--ok)/50 text-[9.5px] text-(--ok)">RATIFICADA</Badge>
+                  : null}
               <span className="text-[12.5px]">{d.title}</span>
               <span className="truncate font-mono text-[10.5px] text-muted-foreground/60">{d.path}</span>
               <Button size="sm" variant="ghost" className="ml-auto h-6 shrink-0 gap-1 text-[11px]"
                 onClick={() => ver(d.path)}>
                 <Eye className="size-3" /> {viewing === d.path ? "Cerrar" : "Ver"}
               </Button>
-              <Button size="sm" variant="outline" className="h-6 shrink-0 text-[11px]"
-                disabled={busy !== ""} onClick={() => ratify(d.path)}>
-                {busy === d.path ? <Loader2 className="size-3 animate-spin" /> : "Ratificar"}
-              </Button>
+              {d.agent && (
+                <Button size="sm" variant="ghost" className="h-6 shrink-0 gap-1 text-[11px] text-muted-foreground"
+                  disabled={busy !== ""} onClick={() => excavate(d.agent!)}>
+                  {busy === "exc:" + d.agent ? <Loader2 className="size-3 animate-spin" /> : <Pickaxe className="size-3" />}
+                  Re-excavar
+                </Button>
+              )}
+              {d.status === "draft" && (
+                <Button size="sm" variant="outline" className="h-6 shrink-0 text-[11px]"
+                  disabled={busy !== ""} onClick={() => ratify(d.path)}>
+                  {busy === d.path ? <Loader2 className="size-3 animate-spin" /> : "Ratificar"}
+                </Button>
+              )}
             </div>
             {viewing === d.path && (
               <pre className="max-h-80 overflow-auto border-t bg-muted/30 p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">
@@ -92,6 +121,12 @@ function DraftsPanel({ s }: { s: Snapshot }) {
   )
 }
 
+function cnLaw(hasDrafts: boolean): string {
+  return hasDrafts
+    ? "mb-6 rounded-2xl border border-(--wait)/45 bg-(--wait)/8 p-4"
+    : "mb-6 rounded-2xl border p-4"
+}
+
 export function Docs({ s }: { s: Snapshot }) {
   const tb = s.toolbox
   if (!tb) return <Empty><p>El server todavía no reporta el inventario.</p></Empty>
@@ -99,7 +134,7 @@ export function Docs({ s }: { s: Snapshot }) {
   return (
     <>
       <VHead title="Docs" sub={<>leído de esta instancia en vivo{tb.version ? <> · harness <b className="font-mono">v{tb.version}</b></> : null}</>} />
-      <DraftsPanel s={s} />
+      <LawPanel s={s} />
       {empty && (
         <Empty title="Esta instancia aún no tiene el harness completo">
           <p>No encuentro comandos en <Code>.claude/commands/</Code> ni targets documentados en el <Code>Makefile</Code>. Corre <Code>/harness-update .</Code> y esta página se llena sola.</p>

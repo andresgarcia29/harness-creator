@@ -89,6 +89,7 @@ export type Snapshot = {
   targets?: HerdrTarget[]; archived_tasks?: string[]
   init?: InitState | null
   drafts?: DraftDoc[]
+  law?: LawDoc[]
 }
 // ── el wizard de onboarding (plano de init, ADR-0011 del daemon) ──
 // El servidor es la verdad del estado: la UI solo manda acciones y deriva.
@@ -98,6 +99,7 @@ export type InitStep = {
   detail?: string; error?: string; started?: number; logs_tail?: string[]
 }
 export type DraftDoc = { path: string; kind: string; title: string }
+export type LawDoc = { path: string; kind: string; title: string; status: string; agent?: string }
 export type InitRepo = { full_name: string; ref?: string; status: InitStatus; error?: string }
 export type InitReq = {
   name: string; bin: string; ok: boolean; version?: string; installing?: boolean

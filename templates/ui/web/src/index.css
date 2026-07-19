@@ -131,83 +131,178 @@
     @apply font-sans;
     }
 }
-/* ═══ Corvux Agora — Light "Enterprise Clean" (style.md §2.2) ═══ */
+/* ═══════════════════════════════════════════════════════════════════
+   Corvux Agora · "Glass 2026" — monocromo + translucidez con física real.
+   Reglas del sistema:
+   · Paleta neutra pura (sin tinte azul); el color SOLO donde significa algo:
+     --ok/--wait/--bad (estados), --brand (activo/vivo), charts.
+   · primary = TINTA (negro en claro, blanco en oscuro): las acciones se ven
+     premium sin gritar; el indigo queda como acento, no como pintura.
+   · BLUR solo donde flota (popover/dialog/sheet/sidebar): profundidad real
+     sin fundir la GPU — las cards logran su vidrio con alpha sobre la
+     escenografía del fondo, no con backdrop-filter en 40 superficies.
+   ═══════════════════════════════════════════════════════════════════ */
 :root {
-  --background: oklch(0.984 0.003 247.86);       /* #f8fafc blue-gray suave */
-  --foreground: oklch(0.208 0.042 265.75);       /* #0f172a slate profundo */
-  --card: oklch(1 0 0);                          /* cards blanco puro */
-  --card-foreground: oklch(0.208 0.042 265.75);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.208 0.042 265.75);
-  --primary: oklch(0.585 0.233 277.12);          /* indigo #6366f1 constante */
-  --primary-foreground: oklch(0.984 0.003 247.86);
-  --secondary: oklch(0.929 0.013 255.51);        /* #e2e8f0 */
-  --secondary-foreground: oklch(0.208 0.042 265.75);
-  --muted: oklch(0.968 0.007 247.9);             /* #f1f5f9 */
-  --muted-foreground: oklch(0.554 0.046 257.42); /* #64748b */
-  --accent: oklch(0.968 0.007 247.9);
-  --accent-foreground: oklch(0.208 0.042 265.75);
-  --destructive: oklch(0.586 0.222 17.58);       /* rose #e11d48 */
-  --border: oklch(0.929 0.013 255.51);           /* #e2e8f0 bordes limpios */
-  --input: oklch(0.929 0.013 255.51);
-  --ring: oklch(0.585 0.233 277.12);
-  --chart-1: oklch(0.585 0.233 277.12);
+  --background: oklch(0.965 0 0);
+  --foreground: oklch(0.17 0 0);
+  --card: oklch(1 0 0 / 66%);
+  --card-foreground: oklch(0.17 0 0);
+  --popover: oklch(1 0 0 / 92%);
+  --popover-foreground: oklch(0.17 0 0);
+  --primary: oklch(0.2 0 0);                     /* tinta */
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0 0 0 / 5%);
+  --secondary-foreground: oklch(0.2 0 0);
+  --muted: oklch(0 0 0 / 4.5%);
+  --muted-foreground: oklch(0.46 0 0);
+  --accent: oklch(0 0 0 / 5.5%);
+  --accent-foreground: oklch(0.17 0 0);
+  --destructive: oklch(0.586 0.222 17.58);
+  --border: oklch(0 0 0 / 9%);
+  --input: oklch(0 0 0 / 11%);
+  --ring: oklch(0.55 0.19 277);                  /* foco visible con guiño indigo */
+  --chart-1: oklch(0.55 0.19 277);
   --chart-2: oklch(0.609 0.126 221.72);
   --chart-3: oklch(0.596 0.145 163.22);
   --chart-4: oklch(0.666 0.157 58.32);
   --chart-5: oklch(0.586 0.222 17.58);
-  --sidebar: oklch(0.984 0.003 247.86);
-  --sidebar-foreground: oklch(0.208 0.042 265.75);
-  --sidebar-primary: oklch(0.585 0.233 277.12);
-  --sidebar-primary-foreground: oklch(0.984 0.003 247.86);
-  --sidebar-accent: oklch(0.929 0.013 255.51);
-  --sidebar-accent-foreground: oklch(0.208 0.042 265.75);
-  --sidebar-border: oklch(0.929 0.013 255.51);
-  --sidebar-ring: oklch(0.585 0.233 277.12);
-  /* semánticos con contraste sobre blanco */
-  --ok: #059669; --wait: #d97706; --bad: #e11d48; --brand: #4f46e5;
+  --sidebar: oklch(1 0 0 / 52%);
+  --sidebar-foreground: oklch(0.17 0 0);
+  --sidebar-primary: oklch(0.2 0 0);
+  --sidebar-primary-foreground: oklch(0.99 0 0);
+  --sidebar-accent: oklch(0 0 0 / 5%);
+  --sidebar-accent-foreground: oklch(0.17 0 0);
+  --sidebar-border: oklch(0 0 0 / 7%);
+  --sidebar-ring: oklch(0.55 0.19 277);
+  /* semánticos (contraste AA sobre las superficies claras) */
+  --ok: #047857; --wait: #b45309; --bad: #be123c; --brand: #4f46e5;
+  /* glass */
+  --glass-highlight: oklch(1 0 0 / 60%);
+  --shadow-soft: 0 1px 2px oklch(0 0 0 / 5%), 0 8px 24px -12px oklch(0 0 0 / 18%);
+  --shadow-float: 0 2px 8px oklch(0 0 0 / 7%), 0 24px 48px -16px oklch(0 0 0 / 22%);
+  /* escenografía: halo superior + malla suave, monocroma */
+  --scene:
+    radial-gradient(1100px 480px at 18% -8%, oklch(1 0 0 / 85%), transparent 62%),
+    radial-gradient(900px 420px at 96% 4%, oklch(0.9 0.02 277 / 28%), transparent 60%),
+    linear-gradient(oklch(0.965 0 0), oklch(0.945 0 0));
+  /* motion */
+  --dur-fast: 120ms; --dur: 190ms; --ease: cubic-bezier(.32,.72,.24,1);
 }
 
-/* ═══ Corvux Agora — dark True Black OLED + indigo #6366f1 (style.md) ═══
-   Se anexa después del preset para ganar en la cascada sin editarlo. */
 .dark {
-  --background: oklch(0 0 0);                    /* negro puro */
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.145 0.004 285.82);             /* elevación sutil #0a0a0b */
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.145 0.004 285.82);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.585 0.233 277.12);          /* indigo #6366f1 */
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.21 0.006 285.88);         /* #18181b */
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.17 0.005 285.86);
-  --muted-foreground: oklch(0.712 0.013 286.07); /* #a1a1aa */
-  --accent: oklch(0.21 0.006 285.88);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.586 0.222 17.58);       /* rose #e11d48 */
-  --border: oklch(0.246 0.006 285.9);            /* #1e1e21 */
-  --input: oklch(0.246 0.006 285.9);
-  --ring: oklch(0.585 0.233 277.12);
-  --chart-1: oklch(0.585 0.233 277.12);          /* indigo */
-  --chart-2: oklch(0.715 0.143 215.22);          /* cyan */
-  --chart-3: oklch(0.696 0.17 162.48);           /* green */
-  --chart-4: oklch(0.769 0.188 70.08);           /* amber */
-  --chart-5: oklch(0.645 0.246 16.44);           /* rose */
-  --sidebar: oklch(0 0 0);                       /* el sidebar vive en el negro */
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.585 0.233 277.12);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.21 0.006 285.88);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(0.246 0.006 285.9);
-  --sidebar-ring: oklch(0.585 0.233 277.12);
-}
-/* estados semánticos (Agora): verde=activo/pasó · ámbar=te espera · rose=bloqueó */
-.dark {
-  --ok: #34d399; --wait: #fbbf24; --bad: #fb7185; --brand: #818cf8;
+  --background: oklch(0 0 0);                    /* True Black OLED: identidad */
+  --foreground: oklch(0.97 0 0);
+  --card: oklch(1 0 0 / 4.5%);
+  --card-foreground: oklch(0.97 0 0);
+  --popover: oklch(0.17 0 0 / 90%);
+  --popover-foreground: oklch(0.97 0 0);
+  --primary: oklch(0.95 0 0);                    /* tinta inversa */
+  --primary-foreground: oklch(0.14 0 0);
+  --secondary: oklch(1 0 0 / 7%);
+  --secondary-foreground: oklch(0.97 0 0);
+  --muted: oklch(1 0 0 / 5.5%);
+  --muted-foreground: oklch(0.72 0 0);
+  --accent: oklch(1 0 0 / 7%);
+  --accent-foreground: oklch(0.97 0 0);
+  --destructive: oklch(0.586 0.222 17.58);
+  --border: oklch(1 0 0 / 9%);
+  --input: oklch(1 0 0 / 12%);
+  --ring: oklch(0.68 0.16 277);
+  --chart-1: oklch(0.585 0.233 277.12);
+  --chart-2: oklch(0.715 0.143 215.22);
+  --chart-3: oklch(0.696 0.17 162.48);
+  --chart-4: oklch(0.769 0.188 70.08);
+  --chart-5: oklch(0.645 0.246 16.44);
+  --sidebar: oklch(1 0 0 / 3%);
+  --sidebar-foreground: oklch(0.97 0 0);
+  --sidebar-primary: oklch(0.95 0 0);
+  --sidebar-primary-foreground: oklch(0.14 0 0);
+  --sidebar-accent: oklch(1 0 0 / 7%);
+  --sidebar-accent-foreground: oklch(0.97 0 0);
+  --sidebar-border: oklch(1 0 0 / 7%);
+  --sidebar-ring: oklch(0.68 0.16 277);
+  --ok: #34d399; --wait: #fbbf24; --bad: #fb7185; --brand: #a5b4fc;
+  --glass-highlight: oklch(1 0 0 / 9%);
+  --shadow-soft: 0 1px 2px oklch(0 0 0 / 50%), 0 8px 24px -12px oklch(0 0 0 / 70%);
+  --shadow-float: 0 2px 8px oklch(0 0 0 / 55%), 0 24px 56px -16px oklch(0 0 0 / 80%);
+  --scene:
+    radial-gradient(1100px 520px at 18% -8%, oklch(1 0 0 / 5.5%), transparent 62%),
+    radial-gradient(900px 460px at 96% 4%, oklch(0.55 0.12 277 / 9%), transparent 60%),
+    linear-gradient(oklch(0.02 0 0), oklch(0 0 0));
 }
 
+/* ═══ Escenografía: el vidrio necesita algo detrás ═══ */
+body {
+  background-color: var(--background);
+  background-image:
+    var(--scene),
+    /* ruido casi imperceptible (SVG inline, 0 red) */
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.022'/%3E%3C/svg%3E");
+  background-attachment: fixed;
+}
+
+/* ═══ Vidrio: blur SOLO donde flota (una regla cubre TODAS las capas) ═══
+   El valor vive en custom properties: el minificador colapsa el espacio de
+   la lista de filtros (`blur()saturate()`) y Chrome descarta la declaración
+   — var() se conserva textual. */
+:root { --glass-pop: blur(20px) saturate(1.5); --glass-nav: blur(22px) saturate(1.35); }
+@supports (backdrop-filter: blur(1px)) {
+  .bg-popover { -webkit-backdrop-filter: var(--glass-pop); backdrop-filter: var(--glass-pop); }
+  /* El sidebar de escritorio NO lleva blur: es fixed sobre un fondo fixed
+     (backdrop estático = blur invisible) y dos backdrop-filter superpuestos
+     invierten capas en Chrome (el texto del sidebar se pintaba SOBRE los
+     menús). En móvil sí: el sheet flota sobre contenido real. */
+  [data-mobile="true"].bg-sidebar { -webkit-backdrop-filter: var(--glass-nav); backdrop-filter: var(--glass-nav); }
+  /* Los Positioner de Base UI traen isolation:isolate; combinado con el
+     backdrop-filter del popup, Chrome compone el vidrio DEBAJO del sidebar
+     fixed. Sin isolate (solo donde hay vidrio) la composición es correcta. */
+  .isolate:has(.bg-popover) { isolation: auto; }
+  /* Y el fade de entrada (opacity<1) muta el backdrop root a mitad de
+     animación: Chrome deja el vidrio mal ordenado hasta el siguiente
+     repaint. Neutralizamos SOLO la opacity de tw-animate — el zoom/slide
+     (transform puro) siguen vivos y no rompen nada. */
+  .bg-popover { --tw-enter-opacity: 1; --tw-exit-opacity: 1; }
+}
+@supports not (backdrop-filter: blur(1px)) {
+  /* degradación elegante: superficies sólidas, misma jerarquía */
+  :root { --popover: oklch(0.99 0 0); --sidebar: oklch(0.985 0 0); --card: oklch(1 0 0); }
+  .dark { --popover: oklch(0.17 0 0); --sidebar: oklch(0.12 0 0); --card: oklch(0.15 0 0); }
+}
+.bg-popover { box-shadow: var(--shadow-float), inset 0 1px 0 var(--glass-highlight); }
+.bg-card { box-shadow: inset 0 1px 0 var(--glass-highlight); }
+
+/* ═══ Tipografía: la escala oficial (adiós a los 14 tamaños ad-hoc) ═══ */
+.t-display { font-family: var(--font-heading); font-size: 27px; font-weight: 700; letter-spacing: -0.022em; line-height: 1.15; }
+.t-title   { font-family: var(--font-heading); font-size: 17px; font-weight: 650; letter-spacing: -0.012em; }
+.t-section { font-size: 11px; font-weight: 650; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted-foreground); }
+.t-body    { font-size: 13px; line-height: 1.6; }
+.t-caption { font-size: 11.5px; color: var(--muted-foreground); }
+.t-num     { font-variant-numeric: tabular-nums; }
+
+/* ═══ Foco y accesibilidad ═══ */
+/* En @layer base para que los outline-none/focus propios de cada
+   componente (capa utilities, posterior) puedan ganarle. */
+@layer base {
+  :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+}
+::selection { background: oklch(0.55 0.19 277 / 22%); }
+
+/* ═══ Motion: breve, consistente, respetuoso ═══ */
+button, a, [role="button"], input, select, textarea {
+  transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
+}
+.view-enter { animation: view-enter var(--dur) var(--ease) both; }
+@keyframes view-enter { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
+/* ═══ Scrollbars discretos ═══ */
+* { scrollbar-width: thin; scrollbar-color: oklch(0.5 0 0 / 30%) transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: oklch(0.5 0 0 / 28%); border-radius: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
 
 /* ═══ Terminales: pantalla + cursor de bloque ═══ */
 .terminal-screen{background:#0a0a0e;background-image:radial-gradient(ellipse at top, rgba(124,140,255,.03), transparent 60%)}

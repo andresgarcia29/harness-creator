@@ -45,14 +45,14 @@ export default function App() {
   return (
     <SidebarProvider>
       <AppSidebar view={view} go={setView} snap={snap} live={live} />
-      {/* Raised Canvas (Agora AppShell): el contenido flota sobre el sidebar */}
-      <SidebarInset className="min-h-svh bg-card md:mt-2.5 md:rounded-tl-[2rem] md:border-l md:border-t">
+      {/* Glass Canvas: el contenido flota sobre la escenografía del fondo */}
+      <SidebarInset className="min-h-svh bg-card md:mt-2.5 md:rounded-tl-[2rem] md:border-l md:border-t md:shadow-(--shadow-soft)">
         <div className="flex items-center gap-2 border-b px-4 py-2.5 md:hidden">
           <SidebarTrigger />
           <span className="font-heading text-sm font-bold">corvux</span>
         </div>
-        <div className="px-5 py-7 sm:px-8 md:px-11 md:py-9">
-          <div className={cn("mx-auto", narrow ? "max-w-[680px]" : "max-w-[1160px]")}>
+        <div className="px-5 py-7 pb-[max(1.75rem,env(safe-area-inset-bottom))] sm:px-8 md:px-11 md:py-9">
+          <div key={view.name} className={cn("view-enter mx-auto", narrow ? "max-w-[680px]" : "max-w-[1160px]")}>
             {snap?.warning && (
               <Alert className="mb-4 border-(--wait)/45 bg-(--wait)/8">
                 <TriangleAlert className="text-(--wait)" />

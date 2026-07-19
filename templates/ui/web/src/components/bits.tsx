@@ -10,7 +10,7 @@ import { CirclePause, CircleX } from "lucide-react"
 export function VHead({ title, sub, right, mono }: { title: ReactNode; sub?: ReactNode; right?: ReactNode; mono?: boolean }) {
   return (
     <div className="mb-6 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-      <h1 className={cn("font-heading text-2xl font-bold tracking-tight", mono && "font-mono")}>{title}</h1>
+      <h1 className={cn("t-display", mono && "font-mono tracking-normal")}>{title}</h1>
       {sub && <span className="text-xs text-muted-foreground">{sub}</span>}
       {right && <span className="ml-auto flex items-center gap-2">{right}</span>}
     </div>
@@ -19,7 +19,7 @@ export function VHead({ title, sub, right, mono }: { title: ReactNode; sub?: Rea
 
 export function H2({ children, sub }: { children: ReactNode; sub?: ReactNode }) {
   return (
-    <h2 className="mb-1.5 mt-7 flex flex-wrap items-baseline gap-2 text-[11.5px] font-semibold uppercase tracking-[0.09em] text-muted-foreground first:mt-0">
+    <h2 className="t-section mb-1.5 mt-7 flex flex-wrap items-baseline gap-2 first:mt-0">
       {children}
       {sub && <span className="normal-case tracking-normal text-muted-foreground/70">{sub}</span>}
     </h2>

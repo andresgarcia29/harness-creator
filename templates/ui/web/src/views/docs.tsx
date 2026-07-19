@@ -7,9 +7,10 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { toast } from "sonner"
-import { Gavel, Loader2 } from "lucide-react"
+import { Eye, Gavel, Loader2 } from "lucide-react"
 import { VHead, H2, Lede, Code, Empty } from "@/components/bits"
 import { op, type Snapshot } from "@/lib/harness"
+import { withTarget } from "@/lib/target"
 
 // Contexto de uso para lo CONOCIDO del harness; lo desconocido cae al desc real
 const GATE_DOCS: Record<string, string> = {
@@ -26,10 +27,12 @@ const HOOK_DOCS: Record<string, string> = {
 }
 
 // Ratificar — la ley que la arqueología propuso y nadie ha firmado. Un
-// abogado en DRAFT es la primera parada de /auto: aquí se firma, uno por
-// uno o todos. El flip es DRAFT→RATIFIED; el contenido no se toca.
+// abogado en DRAFT es la primera parada de /auto: aquí se LEE (visor
+// integrado) y se firma, uno por uno o todos. El flip es DRAFT→RATIFIED.
 function DraftsPanel({ s }: { s: Snapshot }) {
   const [busy, setBusy] = useState("")
+  const [viewing, setViewing] = useState("")
+  const [content, setContent] = useState<Record<string, string>>({})
   const drafts = s.drafts || []
   if (!drafts.length || s.op === false) return null
   const ratify = async (path?: string) => {
@@ -38,6 +41,14 @@ function DraftsPanel({ s }: { s: Snapshot }) {
     setBusy("")
     if (!r.ok && r.failed?.length) toast.error(`Fallaron: ${r.failed.join(" · ")}`)
     else toast.success(path ? `Ratificado: ${path}` : `${r.ratified?.length || 0} documentos ratificados`)
+  }
+  const ver = async (path: string) => {
+    if (viewing === path) { setViewing(""); return }
+    setViewing(path)
+    if (!content[path]) {
+      const r = await fetch(withTarget(`/api/doc?path=${encodeURIComponent(path)}`)).then((x) => x.json()).catch(() => null)
+      setContent((c) => ({ ...c, [path]: r?.ok ? r.content : `(no pude leerlo: ${r?.error || "error"})` }))
+    }
   }
   return (
     <div className="mb-6 rounded-2xl border border-(--wait)/45 bg-(--wait)/8 p-4">
@@ -49,20 +60,31 @@ function DraftsPanel({ s }: { s: Snapshot }) {
         </Button>
       </div>
       <p className="mb-3 text-[11.5px] text-muted-foreground">
-        La arqueología propone; los humanos ratifican. <b>Léelos antes de firmar</b> — un abogado
-        en DRAFT es la primera parada de <Code>/auto</Code>. Se firman aquí (status → RATIFIED); editar el
-        contenido sigue siendo cosa del editor.
+        La arqueología propone; los humanos ratifican. <b>Ábrelos con «Ver» y léelos antes de
+        firmar</b> — un abogado en DRAFT es la primera parada de <Code>/auto</Code>. Se firman aquí
+        (status → RATIFIED); editar el contenido sigue siendo cosa del editor.
       </p>
       <div className="divide-y rounded-xl border bg-card">
         {drafts.map((d) => (
-          <div key={d.path} className="flex items-center gap-2.5 px-3 py-1.5">
-            <Badge variant="outline" className="text-[9.5px]">{d.kind}</Badge>
-            <span className="text-[12.5px]">{d.title}</span>
-            <span className="truncate font-mono text-[10.5px] text-muted-foreground/60">{d.path}</span>
-            <Button size="sm" variant="outline" className="ml-auto h-6 shrink-0 text-[11px]"
-              disabled={busy !== ""} onClick={() => ratify(d.path)}>
-              {busy === d.path ? <Loader2 className="size-3 animate-spin" /> : "Ratificar"}
-            </Button>
+          <div key={d.path}>
+            <div className="flex items-center gap-2.5 px-3 py-1.5">
+              <Badge variant="outline" className="text-[9.5px]">{d.kind}</Badge>
+              <span className="text-[12.5px]">{d.title}</span>
+              <span className="truncate font-mono text-[10.5px] text-muted-foreground/60">{d.path}</span>
+              <Button size="sm" variant="ghost" className="ml-auto h-6 shrink-0 gap-1 text-[11px]"
+                onClick={() => ver(d.path)}>
+                <Eye className="size-3" /> {viewing === d.path ? "Cerrar" : "Ver"}
+              </Button>
+              <Button size="sm" variant="outline" className="h-6 shrink-0 text-[11px]"
+                disabled={busy !== ""} onClick={() => ratify(d.path)}>
+                {busy === d.path ? <Loader2 className="size-3 animate-spin" /> : "Ratificar"}
+              </Button>
+            </div>
+            {viewing === d.path && (
+              <pre className="max-h-80 overflow-auto border-t bg-muted/30 p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap">
+                {content[d.path] ?? "cargando…"}
+              </pre>
+            )}
           </div>
         ))}
       </div>

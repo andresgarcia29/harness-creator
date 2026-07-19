@@ -3,6 +3,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { H2, Lede } from "@/components/bits"
 import { cn } from "@/lib/utils"
 import { fecha, type TaskGit } from "@/lib/harness"
+import { withTarget } from "@/lib/target"
 import { GitBranch, GitCommit, GitPullRequest, BookOpen, ArrowUpRight, CircleDot } from "lucide-react"
 
 // Metadata de git de una tarea: qué repos toca vs lee, branch, commits, y si
@@ -11,17 +12,17 @@ export function TaskGitPanel({ id }: { id: string }) {
   const [g, setG] = useState<TaskGit | null>(null)
   useEffect(() => {
     let live = true
-    fetch(`/api/task-git?task=${encodeURIComponent(id)}`)
+    fetch(withTarget(`/api/task-git?task=${encodeURIComponent(id)}`))
       .then((r) => r.json()).then((d) => { if (live) setG(d) }).catch(() => {})
     return () => { live = false }
   }, [id])
-  if (!g || (!g.repos.length && !g.read.length)) return null
+  if (!g || (!(g.repos || []).length && !(g.read || []).length)) return null
   return (
     <>
       <H2 sub="git en vivo — qué se tocó, qué se leyó">Repos y cambios</H2>
       <Lede>Los repos con <b>worktree</b> son los que la tarea modifica; los <b>leídos</b> los consultó sin tocarlos.</Lede>
       <div className="grid gap-2.5">
-        {g.repos.map((r) => (
+        {(g.repos || []).map((r) => (
           <Card key={r.repo} className="py-0"><CardContent className="p-4">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
               <span className="font-mono text-[13px] font-semibold">{r.repo}</span>
@@ -66,7 +67,7 @@ export function TaskGitPanel({ id }: { id: string }) {
           <Card className="border-dashed py-0"><CardContent className="flex flex-wrap items-center gap-2 p-3.5">
             <BookOpen className="size-3.5 text-muted-foreground/60" />
             <span className="text-[11.5px] text-muted-foreground/70">solo leídos:</span>
-            {g.read.map((r) => (
+            {(g.read || []).map((r) => (
               <span key={r} className="rounded-md bg-secondary px-2 py-0.5 font-mono text-[11px] text-muted-foreground">{r}</span>
             ))}
           </CardContent></Card>

@@ -12,6 +12,7 @@ import { BUSKINDS, PHASES, pending, sessionsOfTask, rollupSessions, estado, live
   type BusEvent, type Session, type Snapshot, type Task } from "@/lib/harness"
 import { ArrowLeft, ArrowRight } from "lucide-react"
 import type { Go } from "@/App"
+import { withTarget } from "@/lib/target"
 
 const blank = (id: string): Task => ({ id, title: "", origin: "", phase: null, done: [], verdicts: { pass: 0, total: 0 }, assumptions: [] })
 
@@ -68,7 +69,7 @@ export function TaskDetail({ s, id, go }: { s: Snapshot; id: string; go: Go }) {
   const [full, setFull] = useState<BusEvent[] | null>(null)
   useEffect(() => {
     let live = true
-    const load = () => fetch(`/api/task-events?task=${encodeURIComponent(id)}`)
+    const load = () => fetch(withTarget(`/api/task-events?task=${encodeURIComponent(id)}`))
       .then((r) => r.json()).then((d) => { if (live && Array.isArray(d)) setFull(d) }).catch(() => {})
     load()
     const iv = setInterval(load, 4000)
@@ -97,7 +98,7 @@ export function TaskDetail({ s, id, go }: { s: Snapshot; id: string; go: Go }) {
         <Card className="mb-3.5 py-0"><CardContent className="p-4">
           <div className="flex">
             {PHASES.map(([pid, lb]) => {
-              const d = t.done.includes(pid), now = t.phase === pid
+              const d = (t.done || []).includes(pid), now = t.phase === pid
               return (
                 <div key={pid} className="relative flex-1 pt-[19px] text-center">
                   {pid !== "archive" && (
@@ -117,7 +118,7 @@ export function TaskDetail({ s, id, go }: { s: Snapshot; id: string; go: Go }) {
         </CardContent></Card>
       )}
       <TaskSessions s={s} taskId={id} go={go} />
-      {t.assumptions.length > 0 && (
+      {(t.assumptions || []).length > 0 && (
         <>
           <H2>Supuestos que hizo el agente</H2>
           <Lede>Cada uno con su evidencia y con lo que costaría deshacerlo si resultó falso.</Lede>

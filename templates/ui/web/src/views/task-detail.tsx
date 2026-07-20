@@ -6,9 +6,10 @@ import { VHead, H2, Lede, Code, PendAlert, Story, Sup, Empty, NumCell } from "@/
 import { RespondBox } from "@/components/respond-box"
 import { TaskGitPanel } from "@/components/task-git"
 import { TaskFlow } from "@/components/task-flow"
+import { Constellation } from "@/components/task-constellation"
 import { Gantt } from "@/components/charts"
 import { cn } from "@/lib/utils"
-import { BUSKINDS, PHASES, pending, sessionsOfTask, rollupSessions, estado, liveAgents, n, usd,
+import { BUSKINDS, PHASES, pending, sessionsOfTask, rollupSessions, estado, liveAgents, n, usd, toEpoch,
   type BusEvent, type Session, type Snapshot, type Task } from "@/lib/harness"
 import { ArrowLeft, ArrowRight } from "lucide-react"
 import type { Go } from "@/App"
@@ -18,10 +19,12 @@ const blank = (id: string): Task => ({ id, title: "", origin: "", phase: null, d
 
 // Una tarea CONTIENE sus sesiones (las corridas de agente en su worktree). Aquí
 // se ven dentro de la tarea, cada una con su grafo — no separadas. Clic → sesión.
-function TaskSessions({ s, taskId, go }: { s: Snapshot; taskId: string; go: Go }) {
-  const list = sessionsOfTask(s, taskId)
+function TaskSessions({ s, taskId, go, evs }: { s: Snapshot; taskId: string; go: Go; evs: BusEvent[] }) {
+  const list = sessionsOfTask(s, taskId, evs)
   if (!list.length) return null
   const roll = rollupSessions(list)
+  // qué lanzó cada sesión (runs.jsonl): la constelación lo enseña como contexto
+  const kindOf = new Map((s.runs || []).filter((r) => r.task === taskId && r.kind).map((r) => [r.session, r.kind]))
   return (
     <>
       <H2 sub="una tarea puede correr en varias sesiones — cada una con su propio grafo">Sus sesiones</H2>
@@ -31,6 +34,7 @@ function TaskSessions({ s, taskId, go }: { s: Snapshot; taskId: string; go: Go }
         <span className="font-mono">{n(roll.out)} tokens</span>
         <span className="font-mono">{usd(roll.cost)} est.</span>
       </div>
+      <Constellation list={list} kindOf={kindOf} go={go} />
       <div className="mb-2 grid gap-3">{list.map((x) => <SessionRow key={x.id} x={x} go={go} />)}</div>
     </>
   )
@@ -76,6 +80,9 @@ export function TaskDetail({ s, id, go }: { s: Snapshot; id: string; go: Go }) {
     return () => { live = false; clearInterval(iv) }
   }, [id])
   const tevs = (full && full.length ? full : snapEvs).filter((e) => BUSKINDS.includes(e.kind))
+  // para vincular sesiones se usa TODO el bus (los eventos tool mencionan la
+  // sesión por su scratchpad); el arco visible sigue siendo solo BUSKINDS
+  const evsAll = full && full.length ? full : s.events.filter((e) => e.task === id)
   const p = pending(s).find((e) => e.task === id)
   const run = (s.runs || []).slice().reverse().find((r) => r.task === id && r.session)
   return (
@@ -117,7 +124,7 @@ export function TaskDetail({ s, id, go }: { s: Snapshot; id: string; go: Go }) {
           </div>
         </CardContent></Card>
       )}
-      <TaskSessions s={s} taskId={id} go={go} />
+      <TaskSessions s={s} taskId={id} go={go} evs={evsAll} />
       {(t.assumptions || []).length > 0 && (
         <>
           <H2>Supuestos que hizo el agente</H2>
@@ -127,8 +134,25 @@ export function TaskDetail({ s, id, go }: { s: Snapshot; id: string; go: Go }) {
       )}
       {tevs.length > 1 && (
         <>
-          <H2 sub="cómo avanzó y cuándo retrocedió — pasa el mouse por cada nodo">El recorrido</H2>
-          <TaskFlow evs={tevs} />
+          <H2 sub="cómo avanzó y cuándo retrocedió — pasa el mouse por cada nodo, clic te lleva a ese momento">El recorrido</H2>
+          <TaskFlow evs={tevs} live={rollupSessions(sessionsOfTask(s, id, evsAll)).live > 0}
+            onJump={(ts) => {
+              // el nodo del grafo y su beat en la historia comparten timestamp;
+              // los gates agrupados caen al beat más cercano en el tiempo
+              const els = Array.from(document.querySelectorAll<HTMLElement>("[data-ts]"))
+              if (!els.length) return
+              const t = toEpoch(ts)
+              let best = els[0], bd = Infinity
+              for (const el of els) {
+                const d = Math.abs(toEpoch(el.dataset.ts || "") - t)
+                if (d < bd) { bd = d; best = el }
+              }
+              // instant: el smooth lo cancelan los relayouts del SSE en vivo
+              best.scrollIntoView({ behavior: "instant", block: "center" })
+              best.classList.remove("beat-flash"); void best.offsetWidth
+              best.classList.add("beat-flash")
+              setTimeout(() => best.classList.remove("beat-flash"), 1800)
+            }} />
         </>
       )}
       <TaskGitPanel id={id} />

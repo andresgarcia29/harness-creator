@@ -5,7 +5,7 @@ import {
   BUSKINDS, usd, fecha, rel, taskRollup, pending, taskOfCwd,
   type Snapshot, type TaskStatus, type TaskRollup, type HerdrPane,
 } from "@/lib/harness"
-import { CirclePause, CircleX, Rocket, Loader, ArrowRight, Bot, TerminalSquare } from "lucide-react"
+import { CirclePause, CircleX, Rocket, Loader, ArrowRight, Bot, TerminalSquare, Activity, Sparkles, BookOpen, Plus } from "lucide-react"
 import type { Go } from "@/App"
 
 const STATUS: Record<TaskStatus, { color: string; ring: string; Icon: typeof Rocket }> = {
@@ -68,6 +68,7 @@ function TaskCard({ r, go }: { r: TaskRollup; go: Go }) {
 function LivePane({ p, go }: { p: HerdrPane; go: Go }) {
   const blocked = p.agent_status === "blocked"
   const task = taskOfCwd(p.foreground_cwd || p.cwd)
+  const cwd = (p.foreground_cwd || p.cwd || "").split("/").filter(Boolean).pop() || "terminal"
   return (
     <button onClick={() => go({ name: "terminals" })}
       className={cn("group flex items-center gap-3 rounded-2xl border p-3.5 text-left transition-all hover:shadow-[0_0_16px_rgba(99,102,241,.12)]",
@@ -80,10 +81,10 @@ function LivePane({ p, go }: { p: HerdrPane; go: Go }) {
       )}
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <span className="truncate font-mono text-[12px] font-semibold">{p.program || p.pane_id}</span>
+          <span className="truncate font-mono text-[12px] font-semibold">{task || cwd}</span>
           {task && <span className="shrink-0 font-mono text-[11px] text-(--brand)">◈ {task}</span>}
         </div>
-        <p className="truncate text-[11.5px] text-muted-foreground/70">{blocked ? "te está esperando en su terminal" : "trabajando…"}</p>
+        <p className="truncate text-[11.5px] text-muted-foreground/70">{blocked ? "te está esperando en su terminal" : task ? `avanzando ${task}` : `trabajando en ${cwd}`}</p>
       </div>
       <span className={cn("shrink-0 text-[9px] font-bold uppercase tracking-wider", blocked ? "text-(--bad)" : "text-(--ok)")}>
         {blocked ? "te espera" : "trabajando"}
@@ -98,12 +99,39 @@ export function Dash({ s, go }: { s: Snapshot; go: Go }) {
   if (!hasAny)
     return (
       <>
-        <VHead title="Resumen" sub="todo el espacio de trabajo · en vivo" />
-        <Empty title="Todavía no hay nada que observar">
-          <p><b className="text-foreground/80">Tareas</b> — aparecen cuando llegue un ticket o cuando corras <Code>/auto</Code>.</p>
-          <p><b className="text-foreground/80">Sesiones</b> — aparecen cuando un agente empiece a trabajar en el repositorio.</p>
-          <p><b className="text-foreground/80">Alertas</b> — si algo necesita una decisión tuya, lo verás en grande.</p>
-        </Empty>
+        <VHead title="Centro de control" sub="telemetría, decisiones y agentes en una sola superficie" />
+        <div className="launchpad overflow-hidden rounded-[28px] border border-(--brand)/20 p-6 sm:p-9">
+          <div className="grid items-center gap-9 lg:grid-cols-[minmax(0,1fr)_360px]">
+            <div className="relative z-10">
+              <span className="mb-4 inline-flex items-center gap-2 rounded-full border border-(--ok)/25 bg-(--ok)/8 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-(--ok)">
+                <Activity className="size-3 animate-pulse" /> Sistema listo
+              </span>
+              <h2 className="max-w-[650px] font-heading text-[clamp(30px,5vw,54px)] font-semibold leading-[.98] tracking-[-0.055em]">
+                Tu ingeniería,<br/><span className="text-(--brand)">completamente observable.</span>
+              </h2>
+              <p className="mt-5 max-w-[58ch] text-[13px] leading-6 text-muted-foreground">
+                Corvux convierte cada tarea, agente y decisión en una señal legible. Lanza el primer trabajo y observa cómo aparece su historia en tiempo real.
+              </p>
+              <div className="mt-7 flex flex-wrap gap-2.5">
+                {s.op !== false && <button onClick={() => go({ name: "new" })} className="hero-action"><Plus className="size-4" /> Crear primera tarea <ArrowRight className="size-3.5" /></button>}
+                <button onClick={() => go({ name: "docs" })} className="hero-action hero-action-ghost"><BookOpen className="size-4" /> Explorar la guía</button>
+              </div>
+            </div>
+            <div className="signal-orbit" aria-hidden="true">
+              <div className="orbit-ring orbit-ring-a"><i /></div>
+              <div className="orbit-ring orbit-ring-b"><i /></div>
+              <div className="orbit-core"><Sparkles className="size-8" /><span>LIVE</span></div>
+              <span className="orbit-label orbit-label-a">AGENTS</span>
+              <span className="orbit-label orbit-label-b">GATES</span>
+              <span className="orbit-label orbit-label-c">LEDGER</span>
+            </div>
+          </div>
+          <div className="mt-9 grid gap-px overflow-hidden rounded-2xl border border-border bg-border sm:grid-cols-3">
+            {[["01", "Tareas", "Trabajo con trazabilidad"], ["02", "Sesiones", "Agentes en tiempo real"], ["03", "Decisiones", "Nada se pierde"]].map(([n, t, d]) => (
+              <div key={n} className="bg-background/60 p-4 backdrop-blur-sm"><span className="font-mono text-[9px] text-(--brand)">{n}</span><b className="ml-2 text-[12px]">{t}</b><p className="mt-1 text-[10.5px] text-muted-foreground">{d}</p></div>
+            ))}
+          </div>
+        </div>
       </>
     )
 

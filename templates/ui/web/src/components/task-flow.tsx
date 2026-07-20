@@ -45,7 +45,7 @@ export function TaskFlow({ evs, live = false, onJump }: {
   const ts = evs.map((e) => toEpoch(e.ts))
   const t0 = Math.min(...ts), t1 = Math.max(...ts)
   const span = t1 - t0
-  const W = 1000, LBL = 150, PADR = 20, ROW = 34, TOP = 14
+  const W = 960, LBL = 104, PADR = 18, ROW = 29, TOP = 18
   const lanes = PHASES.length
   const H = TOP + lanes * ROW + 10
   const x = (i: number) => {
@@ -134,25 +134,30 @@ export function TaskFlow({ evs, live = false, onJump }: {
 
   return (
     <div ref={wrap} className="relative">
-      <div className="overflow-x-auto rounded-xl border bg-card p-3">
+      <div className="task-flow overflow-hidden rounded-2xl border border-border/80 bg-card shadow-(--shadow-soft)">
         {/* fricción y volumen, contados del bus — no editorializados */}
-        <div className="mb-2 flex flex-wrap items-center gap-x-3.5 gap-y-1 px-1 text-[10.5px] text-muted-foreground/80">
-          <span className="font-mono font-semibold text-foreground/80">⏱ {fmtDur(span)}</span>
-          {counts.dec > 0 && <span>{counts.dec} decisiones</span>}
-          {counts.sup > 0 && <span>{counts.sup} supuestos</span>}
-          {counts.gok > 0 && <span className="text-(--ok)">{counts.gok} gates ✓</span>}
-          {counts.blk > 0 && <span className="font-semibold text-(--bad)">{counts.blk} bloqueos</span>}
-          {counts.depBad > 0 && <span className="font-semibold text-(--bad)">{counts.depBad} deploy rojo</span>}
-          {counts.stop > 0 && <span className="text-(--wait)">{counts.stop} paradas</span>}
-          {counts.ship > 0 && <span className="text-(--ok)">{counts.ship} ships</span>}
-          {retro > 0 && <span className="text-(--wait)">{retro} retroceso{retro > 1 ? "s" : ""}</span>}
-          {live && <span className="ml-auto flex items-center gap-1.5 font-semibold text-(--ok)"><i className="size-1.5 animate-pulse rounded-full bg-(--ok)" />en vivo</span>}
+        <div className="flex flex-wrap items-center gap-2 border-b border-border/65 bg-foreground/[0.018] px-4 py-3.5 sm:px-5">
+          <div className="mr-auto">
+            <b className="block font-heading text-[13px] tracking-tight">Telemetría de ejecución</b>
+            <span className="text-[9.5px] text-muted-foreground/65">{nodes.length} señales conectadas · selecciónalas para abrir el instante</span>
+          </div>
+          <span className="flow-current"><i className={live ? "animate-pulse" : ""} />{PHASES[curLane]?.[1] || "Intake"}</span>
+          <span className="flow-kpi"><b>{fmtDur(span)}</b><small>duración</small></span>
+          {counts.dec > 0 && <span className="flow-kpi"><b>{counts.dec}</b><small>decisiones</small></span>}
+          {counts.sup > 0 && <span className="flow-kpi"><b>{counts.sup}</b><small>supuestos</small></span>}
+          {(counts.blk + counts.depBad + retro) > 0 && <span className="flow-kpi flow-kpi-warn"><b>{counts.blk + counts.depBad + retro}</b><small>fricciones</small></span>}
+          {live && <span className="ml-1 flex items-center gap-1.5 rounded-full border border-(--ok)/20 bg-(--ok)/8 px-2.5 py-1 text-[9px] font-bold uppercase tracking-wider text-(--ok)"><i className="size-1.5 animate-pulse rounded-full bg-(--ok)" />en vivo</span>}
         </div>
-        <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} className="block w-full min-w-[680px]"
-          style={{ height: Math.min(H, 320) }} onMouseMove={onMove} onMouseLeave={() => { setTcur(null); setHv(null) }}>
+        <div className="overflow-x-auto px-3 pt-4 sm:px-5">
+        <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} className="block w-full min-w-[590px]"
+          style={{ height: Math.min(H, 280) }} onMouseMove={onMove} onMouseLeave={() => { setTcur(null); setHv(null) }}>
+          <defs>
+            <linearGradient id="flow-path" x1="0" x2="1"><stop stopColor="var(--brand-strong)" /><stop offset="1" stopColor="var(--brand-soft)" /></linearGradient>
+          </defs>
           {/* carriles */}
           {PHASES.map(([k, lbl], i) => (
             <g key={i}>
+              {live && i === curLane && <rect x={LBL - 8} y={laneY(i) - ROW / 2 + 2} width={W - LBL - PADR + 8} height={ROW - 4} rx={7} fill="var(--brand)" opacity={0.055} />}
               <line x1={LBL} y1={laneY(i)} x2={W - PADR} y2={laneY(i)} stroke="var(--border)" strokeDasharray="2 4" strokeWidth={1} />
               <text x={LBL - 10} y={laneY(i) + 3.5} textAnchor="end" fontSize={10.5}
                 fill={live && i === curLane ? "var(--brand)" : "var(--muted-foreground)"}
@@ -177,7 +182,7 @@ export function TaskFlow({ evs, live = false, onJump }: {
             </g>
           )}
           {/* la línea del recorrido */}
-          <path d={path} fill="none" stroke="var(--brand)" strokeWidth={1.6} strokeOpacity={0.55}
+          <path d={path} fill="none" stroke="url(#flow-path)" strokeWidth={2.2} strokeOpacity={0.72}
             strokeLinejoin="round" />
           {/* nodos */}
           {nodes.map((nd, i) => {
@@ -217,10 +222,10 @@ export function TaskFlow({ evs, live = false, onJump }: {
               </g>
             )
           })}
-        </svg>
+        </svg></div>
         {/* dónde se fue el tiempo: fase a fase, del bus real */}
         {aggTotal > 0 && aggList.length > 1 && (
-          <div className="mt-2 px-1">
+          <div className="border-t border-border/55 px-4 py-3 sm:px-5">
             <div className="flex h-1.5 overflow-hidden rounded-full">
               {aggList.map(([ph, secs]) => (
                 <div key={ph} style={{ width: `${(secs / aggTotal) * 100}%`, background: "var(--brand)", opacity: 0.22 + 0.1 * LANE_OF[ph] }} />
@@ -236,12 +241,12 @@ export function TaskFlow({ evs, live = false, onJump }: {
             </div>
           </div>
         )}
-        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 px-1 text-[10.5px] text-muted-foreground/70">
+        <div className="flex flex-wrap gap-x-4 gap-y-1 border-t border-border/55 px-4 py-2.5 text-[9.5px] text-muted-foreground/70 sm:px-5">
           <span className="flex items-center gap-1.5"><i className="size-2 rounded-full bg-(--ok)" />gate ok · ship · deploy</span>
           <span className="flex items-center gap-1.5"><i className="size-2 rounded-full bg-(--bad)" />bloqueó · deploy rojo</span>
           <span className="flex items-center gap-1.5"><i className="size-2 rounded-full bg-(--wait)" />te espera</span>
           <span className="flex items-center gap-1.5"><i className="size-2 rounded-full bg-primary" />fase · decisión</span>
-          <span className="ml-auto italic">clic en un nodo = ir a ese momento · la línea que sube = retrocedió</span>
+          {retro > 0 && <span className="ml-auto font-semibold text-(--wait)">{retro} retroceso{retro > 1 ? "s" : ""} detectado{retro > 1 ? "s" : ""}</span>}
         </div>
       </div>
       {/* tarjeta de hover: el evento completo, no un tooltip nativo */}

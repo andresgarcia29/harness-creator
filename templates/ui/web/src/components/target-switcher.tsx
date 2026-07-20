@@ -63,29 +63,29 @@ export function TargetSwitcher({ targets, full }: { targets: HerdrTarget[]; full
   return (
     <>
       <DropdownMenu>
-        <DropdownMenuTrigger className={cn("flex h-8 items-center gap-1.5 rounded-md border border-border bg-card px-2.5 text-[12px] font-medium transition-colors hover:bg-accent",
+        <DropdownMenuTrigger className={cn("flex h-10 items-center gap-2 rounded-xl border border-border/80 bg-card px-3 text-[11.5px] font-semibold shadow-(--shadow-soft) transition-all hover:border-(--brand)/25 hover:bg-accent",
           full ? "w-full" : "")}>
           {active ? <Server className="size-3.5 shrink-0 text-(--brand)" /> : <Monitor className="size-3.5 shrink-0 text-muted-foreground" />}
           <span className={cn("truncate", full ? "flex-1 text-left" : "max-w-[140px]")}>{label}</span>
           {active && <StatusDot p={status[active]} />}
           <ChevronsUpDown className="size-3 shrink-0 text-muted-foreground/60" />
         </DropdownMenuTrigger>
-        <DropdownMenuContent align={full ? "start" : "end"} className="min-w-[240px]">
+        <DropdownMenuContent align={full ? "start" : "end"} sideOffset={8} className="min-w-[286px] rounded-2xl border border-border/80 p-2 shadow-(--shadow-float)">
           <DropdownMenuGroup>
-            <DropdownMenuLabel className="text-[11px] text-muted-foreground/70">Máquina que ves</DropdownMenuLabel>
-            <DropdownMenuItem onClick={() => setActive("")}>
-              <Monitor className="size-3.5" /> esta máquina (local)
+            <DropdownMenuLabel className="px-2 pb-2 pt-1 font-mono text-[8.5px] font-bold uppercase tracking-[0.18em] text-muted-foreground/60">Fuente de telemetría</DropdownMenuLabel>
+            <DropdownMenuItem onClick={() => setActive("")} className={cn("rounded-xl px-2.5 py-2.5", !active && "bg-(--brand)/8")}>
+              <span className="grid size-8 shrink-0 place-items-center rounded-lg border bg-background/40"><Monitor className="size-3.5" /></span>
+              <span className="min-w-0 flex-1"><b className="block text-[11.5px]">Esta máquina</b><small className="block text-[9px] text-muted-foreground/60">entorno local</small></span>
               {!active && <Check className="ml-auto size-3.5 text-(--ok)" />}
             </DropdownMenuItem>
             {targets.map((t) => (
-              <DropdownMenuItem key={t.name} onClick={() => setActive(t.name)}>
+              <DropdownMenuItem key={t.name} onClick={() => setActive(t.name)} className={cn("rounded-xl px-2.5 py-2.5", active === t.name && "bg-(--brand)/8")}>
                 <StatusDot p={status[t.name]} />
-                <Server className="size-3.5 text-(--brand)" />
-                <span className="min-w-0 flex-1 truncate">{t.name}</span>
-                <span className="ml-1 max-w-[90px] truncate font-mono text-[10px] text-muted-foreground/50">{t.ssh}</span>
+                <span className="grid size-8 shrink-0 place-items-center rounded-lg border border-(--brand)/15 bg-(--brand)/[0.05]"><Server className="size-3.5 text-(--brand)" /></span>
+                <span className="min-w-0 flex-1"><b className="block truncate text-[11.5px]">{t.name}</b><small className="block truncate font-mono text-[9px] text-muted-foreground/55">{t.ssh}</small></span>
                 <span role="button" tabIndex={-1}
                   onClick={(e) => { e.stopPropagation(); removeTarget(t.name, active, setActive) }}
-                  title="quitar este destino" className="ml-1 rounded p-0.5 text-muted-foreground/50 hover:text-(--bad)">
+                  title="quitar este destino" className="ml-1 rounded-lg p-1.5 text-muted-foreground/35 opacity-0 hover:bg-(--bad)/10 hover:text-(--bad) group-focus/dropdown-menu-item:opacity-100 group-hover/dropdown-menu-item:opacity-100">
                   <Trash2 className="size-3" />
                 </span>
                 {active === t.name && <Check className="size-3.5 text-(--ok)" />}
@@ -93,8 +93,8 @@ export function TargetSwitcher({ targets, full }: { targets: HerdrTarget[]; full
             ))}
           </DropdownMenuGroup>
           <DropdownMenuSeparator />
-          <DropdownMenuItem onClick={() => setAddOpen(true)}>
-            <Plus className="size-3.5" /> Agregar VPS…
+          <DropdownMenuItem onClick={() => setAddOpen(true)} className="rounded-xl px-3 py-2.5 text-[11px] font-semibold text-(--brand)">
+            <Plus className="size-3.5" /> Agregar otra máquina
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

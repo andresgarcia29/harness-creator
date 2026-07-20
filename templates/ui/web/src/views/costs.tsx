@@ -37,7 +37,7 @@ export function Costs({ s, go }: { s: Snapshot; go: Go }) {
       <H2 sub="días con actividad observada · apilado por modelo">Gasto estimado por día</H2>
       <Card className="py-0"><CardContent className="p-4"><DayCostChart s={s} /></CardContent></Card>
       <H2>Por modelo</H2>
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_240px]">
+      <div className={models.length ? "grid gap-4 lg:grid-cols-[minmax(0,1fr)_240px]" : "grid gap-4"}>
       <div className="overflow-x-auto">
         <Table>
           <TableHeader><TableRow>
@@ -63,21 +63,23 @@ export function Costs({ s, go }: { s: Snapshot; go: Go }) {
           </TableBody>
         </Table>
       </div>
-      <div className="hidden lg:block"><ModelShareChart s={s} /></div>
+      {models.length > 0 && <div className="hidden lg:block"><ModelShareChart s={s} /></div>}
       </div>
-      <H2 sub="cada una por separado">Sesiones que más han gastado</H2>
-      <div className="grid gap-2.5">
-        {sess.map((x) => (
-          <button key={x.id} onClick={() => go({ name: "session", id: x.id })}
-            className="flex w-full min-w-0 items-center gap-3.5 overflow-hidden rounded-xl border border-border bg-card p-3.5 px-4 text-left transition-all hover:border-primary/45 hover:shadow-[0_0_10px_rgba(99,102,241,.2)]">
-            <span className="shrink-0 font-mono text-[12.5px] font-semibold text-(--brand)">{x.short}</span>
-            <span className="hidden min-w-0 flex-1 truncate text-xs text-muted-foreground/80 sm:block">{(x.last_text || "").slice(0, 110)}</span>
-            <NumCell v={n(x.tokens.out)} l="tokens" />
-            <NumCell v={usd(x.cost)} l="est." />
-            <span className="w-[120px] shrink-0"><HBar pct={((x.cost || 0) / maxS) * 100} /></span>
-          </button>
-        ))}
-      </div>
+      {sess.length > 0 && <>
+        <H2 sub="cada una por separado">Sesiones que más han gastado</H2>
+        <div className="grid gap-2.5">
+          {sess.map((x) => (
+            <button key={x.id} onClick={() => go({ name: "session", id: x.id })}
+              className="flex w-full min-w-0 items-center gap-3.5 overflow-hidden rounded-xl border border-border bg-card p-3.5 px-4 text-left transition-all hover:border-primary/45 hover:shadow-[0_0_10px_rgba(99,102,241,.2)]">
+              <span className="shrink-0 font-mono text-[12.5px] font-semibold text-(--brand)">{x.short}</span>
+              <span className="hidden min-w-0 flex-1 truncate text-xs text-muted-foreground/80 sm:block">{(x.last_text || "").slice(0, 110)}</span>
+              <NumCell v={n(x.tokens.out)} l="tokens" />
+              <NumCell v={usd(x.cost)} l="est." />
+              <span className="w-[120px] shrink-0"><HBar pct={((x.cost || 0) / maxS) * 100} /></span>
+            </button>
+          ))}
+        </div>
+      </>}
       <H2 sub={<>$ por millón de tokens · edítala en <Code>scripts/ui/pricing.json</Code> — el panel la relee sola</>}>Tabla de precios</H2>
       <div className="max-w-[520px]">
         <Table>

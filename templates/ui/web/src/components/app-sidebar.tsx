@@ -4,9 +4,9 @@ import {
   SidebarMenuButton, SidebarMenuItem, useSidebar,
 } from "@/components/ui/sidebar"
 import { cn } from "@/lib/utils"
-import { usd, type Snapshot } from "@/lib/harness"
+import { taskRollup, usd, type Snapshot } from "@/lib/harness"
 import { TargetSwitcher } from "@/components/target-switcher"
-import { LayoutDashboard, ListTodo, Radio, ChartNoAxesColumn, Plus, Cable, Sun, Moon, Monitor, BookOpen, Blocks, SquareTerminal, Rocket } from "lucide-react"
+import { LayoutDashboard, ListTodo, Radio, ChartNoAxesColumn, Plus, Cable, Sun, Moon, Monitor, BookOpen, Blocks, SquareTerminal, Rocket, Orbit, ArrowUpRight, Activity } from "lucide-react"
 import { useTheme, type Theme } from "@/hooks/use-theme"
 import type { View } from "@/App"
 
@@ -17,10 +17,7 @@ const OBSERVE = [
   { v: "terminals", label: "Terminales", icon: SquareTerminal },
   { v: "costs", label: "Gastos", icon: ChartNoAxesColumn },
 ] as const
-const OPERATE = [
-  { v: "new", label: "Nueva tarea", icon: Plus },
-  { v: "connections", label: "Conexiones", icon: Cable },
-] as const
+const OPERATE = [{ v: "connections", label: "Conexiones", icon: Cable }] as const
 const GUIDE = [
   { v: "docs", label: "Docs", icon: BookOpen },
   { v: "tools", label: "Skills & MCP", icon: Blocks },
@@ -57,6 +54,8 @@ export function AppSidebar({ view, go, snap, live }: {
     init: initBadge,
     docs: snap?.drafts?.length ? `${snap.drafts.length} DRAFT` : "",
   }
+  const activeTasks = snap ? taskRollup(snap).filter((t) => t.status !== "ship").length : 0
+  const liveSessions = snap?.sessions.filter((x) => x.live_by === "herdr" || x.live_by === "live").length || 0
   void setup
   const groups = [
     ...(initActive ? [["Instalación", INSTALL] as const] : []),
@@ -66,21 +65,36 @@ export function AppSidebar({ view, go, snap, live }: {
   ]
   return (
     <Sidebar collapsible="offcanvas">
-      <SidebarHeader className="gap-2.5 px-4 pb-2 pt-5">
-        <div className="flex items-center gap-2.5">
-          <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-gradient-to-br from-primary to-(--brand) font-heading text-sm font-bold text-white shadow-[0_0_10px_rgba(99,102,241,.35)]">c</span>
-          <b className="font-heading text-[15px] font-bold tracking-tight">corvux</b>
+      <SidebarHeader className="gap-3 px-4 pb-3 pt-5">
+        <div className="flex items-center gap-3 px-1">
+          <span className="brand-glyph" aria-hidden="true"><Orbit className="size-4" /></span>
+          <span className="min-w-0">
+            <b className="block font-heading text-[16px] font-bold leading-none tracking-[-0.03em]">corvux</b>
+            <span className="mt-1 block font-mono text-[8px] uppercase tracking-[0.24em] text-muted-foreground/55">agent observatory</span>
+          </span>
         </div>
         {/* Selector de MÁQUINA global: muta TODA la página (tareas, sesiones,
             costo, terminales) hacia la máquina elegida — local o un VPS.
             En modo setup se oculta: el wizard configura ESTA máquina. */}
         <TargetSwitcher targets={snap?.targets || []} full />
+        {snap?.op !== false && (
+          <button onClick={() => nav({ name: "new" })} className={cn("sidebar-launch group", active("new") && "is-active")}>
+            <span className="sidebar-launch-icon"><Plus /></span>
+            <span className="min-w-0 flex-1 text-left"><b>Nueva tarea</b><small>Orquestar una misión</small></span>
+            <ArrowUpRight className="size-3.5 opacity-55 transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5" />
+          </button>
+        )}
+        <div className="sidebar-pulse">
+          <span><Activity /><b>{activeTasks}</b><small>activas</small></span>
+          <i />
+          <span><Radio /><b>{liveSessions}</b><small>en vivo</small></span>
+        </div>
       </SidebarHeader>
       <SidebarContent>
         {/* Operar se esconde cuando el backend es solo-lectura (op:false) —
             p.ej. servido por el daemon, que aún no ejecuta (ADR-0010). */}
         {groups.map(([label, items]) => (
-          <SidebarGroup key={label}>
+          <SidebarGroup key={label} className="px-3 py-1.5">
             <SidebarGroupLabel className="text-[10px] font-bold uppercase tracking-[0.16em] text-muted-foreground/60">{label}</SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
@@ -89,9 +103,9 @@ export function AppSidebar({ view, go, snap, live }: {
                     <SidebarMenuButton
                       isActive={active(it.v)}
                       onClick={() => nav({ name: it.v } as View)}
-                      className="rounded-xl data-[active=true]:bg-primary/15 data-[active=true]:text-(--brand) data-[active=true]:shadow-[inset_0_0_0_1px_rgba(99,102,241,.18)]"
+                      className="nav-item h-9 rounded-xl px-2.5 data-[active=true]:bg-(--brand)/10 data-[active=true]:text-foreground"
                     >
-                      <it.icon className={cn("transition-transform", active(it.v) && "scale-110")} />
+                      <span className={cn("nav-icon-tile", active(it.v) && "is-active")}><it.icon /></span>
                       <span>{it.label}</span>
                     </SidebarMenuButton>
                     {badges[it.v] && <SidebarMenuBadge className="font-mono text-[10.5px] text-muted-foreground/70">{badges[it.v]}</SidebarMenuBadge>}
@@ -102,7 +116,7 @@ export function AppSidebar({ view, go, snap, live }: {
           </SidebarGroup>
         ))}
       </SidebarContent>
-      <SidebarFooter className="border-t border-sidebar-border px-4 py-3.5">
+      <SidebarFooter className="sidebar-status mx-3 mb-3 rounded-2xl border border-sidebar-border px-3.5 py-3">
         <div className="flex items-center gap-2 text-[11px] text-muted-foreground/80">
           <span className={cn("size-[7px] shrink-0 rounded-full",
             live ? "bg-(--ok) shadow-[0_0_8px_rgba(16,185,129,.6)] animate-pulse" : "bg-muted-foreground/40")} />
@@ -115,9 +129,8 @@ export function AppSidebar({ view, go, snap, live }: {
             <ThemeIcon className="size-3.5" />
           </button>
         </div>
-        <p className="text-[10px] leading-relaxed text-muted-foreground/50">
-          Operar crea trabajo, jamás merges: todo lo que lances desde aquí pasa por
-          los mismos gates. A main solo se llega por <span className="font-mono">ship.sh</span>.
+        <p className="mt-1.5 text-[9.5px] leading-relaxed text-muted-foreground/45">
+          Observa todo. Opera con gates. A <span className="font-mono text-muted-foreground/70">main</span> solo se llega por <span className="font-mono text-muted-foreground/70">ship.sh</span>.
         </p>
       </SidebarFooter>
     </Sidebar>

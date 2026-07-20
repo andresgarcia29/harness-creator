@@ -34,7 +34,7 @@ grep -q "harness-init-wizard" ../templates/ui/dist/assets/*.js || { echo "dist d
 echo "── frontend: 11 vistas + wizard init (9 pantallas) + dist vendoreado al día ✓"
 
 failed=0
-for t in test_emit.sh test_track_read.sh test_docs.sh; do
+for t in test_emit.sh test_track_read.sh test_docs.sh test_build_slot.sh test_gowork_shims.sh; do
   echo; bash "$t" || failed=1
 done
 if [ "${1:-}" != "fast" ]; then

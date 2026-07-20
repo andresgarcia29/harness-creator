@@ -406,6 +406,31 @@ Dos zonas en la barra lateral, y la distinción es la arquitectura entera:
 - **OBSERVAR** — Resumen (qué te espera, la curva de concurrencia, las últimas decisiones), Tareas (pipeline + ledger de supuestos + la historia paso a paso que escriben `ship.sh` y `/auto`), Sesiones (cada terminal con su gantt de agentes, árbol de spawns y el texto por turno), Gastos (día × modelo, por sesión, tabla de precios).
 - **OPERAR** — Nueva tarea (un formulario que escribe `tasks/<id>/task.md` y lanza `claude -p "/auto <id>"` headless con `--session-id` conocido: la tarea aparece sola en Sesiones), responder a un agente que te espera (reanuda SU sesión con `claude --resume`), Conexiones (Linear/OpenRouter: el token se **valida contra el proveedor antes de guardarse**, va a `~/.config/harness/` con chmod 600, y jamás se muestra ni pasa por un agente), y sincronizar precios reales desde OpenRouter para los modelos observados sin precio.
 
+### De dónde sale el panel: tres repos (ADR-0003)
+
+El panel NO vive en este repo. Es un stack de tres repositorios con una
+dependencia estrictamente unidireccional — el mismo DAG `infra → service →
+frontend` que el harness le impone a la plataforma del usuario:
+
+| Repo | Rol |
+|---|---|
+| **harness-creator** (este) | Genera la *policy* (agentes, pipeline, gates, hooks, docs) y su salida en disco. NO contiene el panel. |
+| **harness-daemon** | Observador **por-máquina**. Sirve el panel en `127.0.0.1` y es **dueño del contrato de API**. |
+| **harness-ui** | Cliente **fleet** (Vite/React). Se conecta a N daemons por SSH/herdr; consume el contrato por codegen. |
+
+**La ley de la dependencia:** el daemon *no contiene las reglas del harness* — las
+**lee como datos**. Su entrada es el **contrato de estado en disco** que este
+repo produce en cada workspace: `tasks/<id>/` (task.md, plan, veredictos,
+supuestos), `.beads/` (issues), `.harness/runs.jsonl` (procedencia sesión→tarea)
+y los transcripts de los agentes. El daemon observa ese estado y lo reporta; la
+UI lo muestra. Cambiar la *forma* de ese estado en disco es un cambio de contrato
+que impacta al daemon — no un detalle interno de harness-creator.
+
+**Auth:** ninguna a nivel app. El multi-máquina va por túneles SSH (herdr), así
+que las llaves SSH son la auth y cada daemon sigue `127.0.0.1-only`. `make ui`
+prefiere el `harness` instalado por brew (el binario del daemon, versionado por
+su cuenta) sobre cualquier binario vendorizado — ver `templates/ui/panel.sh`.
+
 ### Las cinco leyes del panel
 
 Un panel en un sistema cuya filosofía es "los agentes proponen, los sistemas deterministas verifican" tiene que ganarse su lugar. Estas son sus reglas, y explican casi todo su diseño:

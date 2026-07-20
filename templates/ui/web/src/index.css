@@ -285,6 +285,16 @@ body {
 @layer base {
   :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 }
+
+/* ═══ El grafo vivo: aristas activas en movimiento + flash de la historia ═══ */
+@keyframes edge-dash { to { stroke-dashoffset: -14; } }
+.edge-live { stroke-dasharray: 7 7; animation: edge-dash 0.9s linear infinite; }
+/* clic en un nodo del recorrido → el beat de la historia se ilumina y apaga */
+@keyframes beat-flash {
+  0% { background: color-mix(in oklab, var(--brand) 20%, transparent); }
+  100% { background: transparent; }
+}
+.beat-flash { animation: beat-flash 1.6s var(--ease) both; border-radius: 8px; }
 ::selection { background: oklch(0.55 0.19 277 / 22%); }
 
 /* ═══ Motion: breve, consistente, respetuoso ═══ */

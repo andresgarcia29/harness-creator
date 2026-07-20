@@ -112,6 +112,7 @@ export function Story({ evs, taskOf, onTask, group = true, dated = false }: {
               </div>
             )}
             <div
+              data-ts={b.ts}
               className={cn("relative pb-4 pl-6 last:pb-0.5", onTask && "cursor-pointer")}
               onClick={onTask && taskOf ? () => onTask(taskOf(i)) : undefined}
             >

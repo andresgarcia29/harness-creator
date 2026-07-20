@@ -233,11 +233,17 @@ export function taskOfCwd(cwd?: string): string | undefined {
 }
 
 // Las sesiones que PERTENECEN a una tarea: las que corren en su worktree (por
-// cwd) o las que el panel lanzó para ella (snap.runs). Una tarea CONTIENE sus
-// sesiones — por eso las mostramos dentro de la tarea, no separadas.
-export function sessionsOfTask(s: Snapshot, taskId: string): Session[] {
+// cwd), las que el panel lanzó para ella (snap.runs), o las que el propio bus
+// menciona por su short id ("…(sesión 0320c6a2…)"): /auto escribe quién es al
+// arrancar, así que el vínculo es dato registrado, no una inferencia.
+export function sessionsOfTask(s: Snapshot, taskId: string, evs?: BusEvent[]): Session[] {
   const viaRuns = new Set((s.runs || []).filter((r) => r.task === taskId).map((r) => r.session))
-  return s.sessions.filter((x) => taskOfCwd(x.cwd) === taskId || viaRuns.has(x.id))
+  const mentioned = new Set<string>()
+  for (const e of evs || []) {
+    for (const m of e.summary.matchAll(/\b[0-9a-f]{8}\b/g)) mentioned.add(m[0])
+  }
+  return s.sessions.filter((x) =>
+    taskOfCwd(x.cwd) === taskId || viaRuns.has(x.id) || mentioned.has(x.short))
 }
 
 // Suma de tokens/costo de un grupo de sesiones (para el rollup de una tarea).

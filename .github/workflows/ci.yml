@@ -1,0 +1,24 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Contratos Python compilan
+        run: python3 -m py_compile templates/scripts/evidence.py templates/scripts/harness-policy.py
+      - name: Templates shell parsean
+        run: |
+          bash -n templates/scripts/ship.sh.tmpl
+          bash -n templates/scripts/bootstrap.sh.tmpl
+          bash -n templates/hooks/block-direct-push.sh
+      - name: Suite del installer
+        run: bash tests/run.sh

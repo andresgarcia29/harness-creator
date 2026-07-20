@@ -1,21 +1,94 @@
 import { useEffect, useState } from "react"
 import { Badge } from "@/components/ui/badge"
-import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
-import { VHead, H2, Lede, Code, PendAlert, Story, Sup, Empty, NumCell } from "@/components/bits"
+import { H2, Lede, Code, PendAlert, Story, Sup, Empty, NumCell } from "@/components/bits"
 import { RespondBox } from "@/components/respond-box"
 import { TaskGitPanel } from "@/components/task-git"
 import { TaskFlow } from "@/components/task-flow"
 import { Constellation } from "@/components/task-constellation"
 import { Gantt } from "@/components/charts"
 import { cn } from "@/lib/utils"
-import { BUSKINDS, PHASES, pending, sessionsOfTask, rollupSessions, estado, liveAgents, n, usd, toEpoch,
-  type BusEvent, type Session, type Snapshot, type Task } from "@/lib/harness"
-import { ArrowLeft, ArrowRight } from "lucide-react"
+import { BUSKINDS, PHASES, pending, sessionsOfTask, rollupSessions, estado, liveAgents, n, usd, toEpoch, taskRollup, rel,
+  type BusEvent, type Session, type Snapshot, type Task, type TaskStatus } from "@/lib/harness"
+import { Activity, ArrowLeft, ArrowRight, Check, CheckCircle2, CirclePause, Radio, Route, ScrollText, ShieldAlert } from "lucide-react"
 import type { Go } from "@/App"
 import { withTarget } from "@/lib/target"
 
 const blank = (id: string): Task => ({ id, title: "", origin: "", phase: null, done: [], verdicts: { pass: 0, total: 0 }, assumptions: [] })
+
+const TASK_STATUS: Record<TaskStatus, { label: string; Icon: typeof Activity; tone: string }> = {
+  work: { label: "En progreso", Icon: Activity, tone: "text-(--brand) border-(--brand)/25 bg-(--brand)/10" },
+  wait: { label: "Esperando decisión", Icon: CirclePause, tone: "text-(--wait) border-(--wait)/25 bg-(--wait)/10" },
+  block: { label: "Bloqueada", Icon: ShieldAlert, tone: "text-(--bad) border-(--bad)/25 bg-(--bad)/10" },
+  ship: { label: "Completada", Icon: CheckCircle2, tone: "text-(--ok) border-(--ok)/25 bg-(--ok)/10" },
+}
+
+function TaskHero({ t, id, phase, status, live, lastTs, eventCount, go }: {
+  t: Task; id: string; phase: string; status: TaskStatus; live: number; lastTs: string; eventCount: number; go: Go
+}) {
+  const st = TASK_STATUS[status]
+  const active = Math.max(0, PHASES.findIndex(([pid]) => pid === phase))
+  return (
+    <section className="task-hero mb-5 overflow-hidden rounded-3xl border border-border/80">
+      <div className="relative z-10 p-5 sm:p-7">
+        <button onClick={() => go({ name: "tasks" })} className="mb-6 inline-flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.14em] text-muted-foreground hover:text-foreground">
+          <ArrowLeft className="size-3.5" /> Volver a tareas
+        </button>
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_230px] lg:items-end">
+          <div className="min-w-0">
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <span className={cn("inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[9px] font-bold uppercase tracking-[0.12em]", st.tone)}>
+                <st.Icon className={cn("size-3", status === "work" && "animate-pulse")} />{st.label}
+              </span>
+              {t.origin && <Badge variant="outline" className="h-6 rounded-full px-2.5 text-[8.5px] uppercase tracking-[0.14em]">{t.origin}</Badge>}
+              {live > 0 && <span className="inline-flex items-center gap-1.5 text-[9.5px] font-semibold text-(--ok)"><i className="size-1.5 animate-pulse rounded-full bg-(--ok)" />{live} agente{live > 1 ? "s" : ""} en vivo</span>}
+            </div>
+            <span className="mb-2 block font-mono text-[9px] font-bold uppercase tracking-[0.2em] text-(--brand)">Mission brief / {phase || "intake"}</span>
+            <h1 className="max-w-[25ch] break-words font-heading text-[clamp(24px,3.2vw,42px)] font-[680] leading-[1.02] tracking-[-0.045em]">{id}</h1>
+            <p className={cn("mt-3 max-w-[70ch] text-[13px] leading-relaxed", t.title ? "text-foreground/75" : "italic text-muted-foreground/55")}>
+              {t.title || "Ejecución trazable desde la intención hasta producción."}
+            </p>
+          </div>
+          <div className="task-hero-console grid grid-cols-2 gap-px overflow-hidden rounded-2xl border border-border/80 bg-border/70 lg:grid-cols-1">
+            <div><span>Fase actual</span><b className="capitalize text-(--brand)">{phase || "Intake"}</b></div>
+            <div><span>Última señal</span><b>{lastTs ? rel(lastTs) : "sin actividad"}</b></div>
+            <div><span>Eventos</span><b>{eventCount}</b></div>
+            <div><span>Veredictos</span><b>{t.verdicts.total ? `${t.verdicts.pass}/${t.verdicts.total}` : "—"}</b></div>
+          </div>
+        </div>
+        <div className="mt-7 overflow-x-auto pb-1">
+          <div className="grid min-w-[620px] grid-cols-7 gap-2">
+            {PHASES.map(([pid, label], i) => {
+              const done = (t.done || []).includes(pid) || i < active
+              const now = pid === phase
+              return <div key={pid} className={cn("flight-step", done && "is-done", now && "is-now")}>
+                <span>{done && !now ? <Check /> : now ? <Radio /> : String(i + 1).padStart(2, "0")}</span>
+                <div><small>{now ? "Ahora" : done ? "Listo" : "Después"}</small><b>{label}</b></div>
+              </div>
+            })}
+          </div>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function MissionSectionHead({ index, title, description, kind }: {
+  index: string; title: string; description: string; kind: "route" | "log"
+}) {
+  const Icon = kind === "route" ? Route : ScrollText
+  return (
+    <div className="mission-section-head mt-9 mb-3 flex items-start gap-3">
+      <span className="mission-section-icon"><Icon /></span>
+      <div className="min-w-0 flex-1">
+        <span>{index} / Mission data</span>
+        <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+          <h2>{title}</h2><p>{description}</p>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 // Una tarea CONTIENE sus sesiones (las corridas de agente en su worktree). Aquí
 // se ven dentro de la tarea, cada una con su grafo — no separadas. Clic → sesión.
@@ -85,44 +158,17 @@ export function TaskDetail({ s, id, go }: { s: Snapshot; id: string; go: Go }) {
   const evsAll = full && full.length ? full : s.events.filter((e) => e.task === id)
   const p = pending(s).find((e) => e.task === id)
   const run = (s.runs || []).slice().reverse().find((r) => r.task === id && r.session)
+  const roll = taskRollup(s).find((r) => r.id === id)
+  const sessionRoll = rollupSessions(sessionsOfTask(s, id, evsAll))
+  const phase = roll?.phase || t.phase || "intake"
   return (
     <>
-      <Button variant="ghost" size="sm" className="-ml-2 mb-2 text-muted-foreground" onClick={() => go({ name: "tasks" })}>
-        <ArrowLeft className="size-3.5" /> Tareas
-      </Button>
-      <VHead mono title={id} sub={t.title || ""} right={
-        <>
-          {t.origin && <Badge variant="outline" className="rounded-full text-[9px] uppercase tracking-wider text-muted-foreground">{t.origin}</Badge>}
-          {t.verdicts.total > 0 && <Badge variant="outline" className="rounded-full text-[9px] uppercase tracking-wider text-muted-foreground">veredictos {t.verdicts.pass}/{t.verdicts.total}</Badge>}
-        </>
-      } />
+      <TaskHero t={t} id={id} phase={phase} status={roll?.status || "work"} live={sessionRoll.live}
+        lastTs={roll?.lastTs || tevs[tevs.length - 1]?.ts || ""} eventCount={tevs.length} go={go} />
       {p && (
         <PendAlert kind={p._k}
           title={p._k === "block" ? "Un gate bloqueó esta tarea" : "Esta tarea te está esperando"}
           summary={p.summary} />
-      )}
-      {t.phase && (
-        <Card className="mb-3.5 py-0"><CardContent className="p-4">
-          <div className="flex">
-            {PHASES.map(([pid, lb]) => {
-              const d = (t.done || []).includes(pid), now = t.phase === pid
-              return (
-                <div key={pid} className="relative flex-1 pt-[19px] text-center">
-                  {pid !== "archive" && (
-                    <span className={cn("absolute left-1/2 right-[-50%] top-[5px] h-[1.5px]", d && !now ? "bg-primary/55" : "bg-border")} />
-                  )}
-                  <span className={cn(
-                    "absolute left-1/2 top-0 z-10 size-[11px] -translate-x-1/2 rounded-full border-2",
-                    d && !now ? "border-primary bg-primary" : now
-                      ? "animate-pulse border-(--brand) bg-card shadow-[0_0_0_4px_rgba(99,102,241,.2)]" : "border-border bg-card",
-                  )} />
-                  <b className={cn("text-[10.5px] font-medium",
-                    now ? "font-semibold text-(--brand)" : d ? "text-muted-foreground" : "text-muted-foreground/60")}>{lb}</b>
-                </div>
-              )
-            })}
-          </div>
-        </CardContent></Card>
       )}
       <TaskSessions s={s} taskId={id} go={go} evs={evsAll} />
       {(t.assumptions || []).length > 0 && (
@@ -134,8 +180,8 @@ export function TaskDetail({ s, id, go }: { s: Snapshot; id: string; go: Go }) {
       )}
       {tevs.length > 1 && (
         <>
-          <H2 sub="cómo avanzó y cuándo retrocedió — pasa el mouse por cada nodo, clic te lleva a ese momento">El recorrido</H2>
-          <TaskFlow evs={tevs} live={rollupSessions(sessionsOfTask(s, id, evsAll)).live > 0}
+          <MissionSectionHead index="01" kind="route" title="El recorrido" description="Fases, decisiones y fricción sobre una sola línea de tiempo." />
+          <TaskFlow evs={tevs} live={sessionRoll.live > 0}
             onJump={(ts) => {
               // el nodo del grafo y su beat en la historia comparten timestamp;
               // los gates agrupados caen al beat más cercano en el tiempo
@@ -156,10 +202,10 @@ export function TaskDetail({ s, id, go }: { s: Snapshot; id: string; go: Go }) {
         </>
       )}
       <TaskGitPanel id={id} />
-      <H2>La historia, paso a paso</H2>
-      <Lede>Lo escriben <Code>ship.sh</Code> y <Code>/auto</Code> — funciona con cualquier agente. Un gate que bloquea se enseña igual de grande que un éxito: es la única línea que no se puede fingir.</Lede>
+      <MissionSectionHead index="03" kind="log" title="La bitácora" description="Decisiones y cambios, ordenados para reconstruir cada momento." />
+      <Lede>Registro verificable escrito por <Code>ship.sh</Code> y <Code>/auto</Code>. Los bloqueos conservan el mismo peso visual que los éxitos.</Lede>
       {tevs.length ? (
-        <Card className="py-0"><CardContent className="p-5"><Story evs={tevs} dated /></CardContent></Card>
+        <Card className="mission-log overflow-hidden py-0"><CardContent className="p-4 sm:p-6"><Story evs={tevs} dated variant="mission" /></CardContent></Card>
       ) : (
         <Empty><p>Sin eventos del bus para esta tarea todavía.</p></Empty>
       )}

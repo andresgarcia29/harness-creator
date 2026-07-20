@@ -158,7 +158,7 @@ mi-workspace/
 
 ## El diagrama maestro: qué pasa cuando corres `/auto`
 
-Primero la **espina dorsal**: las tres entradas, dónde despierta cada agente, qué lo bloquea, y el hecho central — **todas las salidas hacia un humano son diez, y están en un solo nodo rojo**. Cada bloque tiene su zoom en la sección siguiente. Los colores importan; la leyenda está debajo.
+Primero la **espina dorsal**: las tres entradas, dónde despierta cada agente, qué lo bloquea, y el hecho central — **todas las salidas hacia un humano están enumeradas en `/auto`, y están en un solo nodo rojo**. Cada bloque tiene su zoom en la sección siguiente. Los colores importan; la leyenda está debajo.
 
 ```mermaid
 flowchart TD
@@ -387,7 +387,7 @@ Cuando el canary queda verde, `/archive` **fusiona el delta-spec en la spec maes
 
 ### Las 10 paradas — la lista es cerrada, y ese es el punto
 
-`/auto` para en exactamente diez lugares, y **cada uno es una ley del harness, no una preferencia**: ticket inexistente, bug irreproducible, contradice un ADR, decisión irreversible o que mueve ownership (→ ADR `PROPOSED` y para), abogado en DRAFT, RFC sin converger, subagente muerto dos veces, presupuesto de loop agotado, gate rojo tras 2 autofixes, deploy rojo. Nada más.
+`/auto` sólo para en la lista cerrada que vive en su comando, y **cada caso es una ley del harness, no una preferencia**. Esa plantilla es la fuente de verdad: añadir o retirar una parada exige cambiar el contrato y sus pruebas, no corregir un número repetido en prosa.
 
 La regla que lo hace funcionar es negativa: **si la razón para parar no está en esa lista, no es una razón — decide.** Preguntarte es un fallo de diseño, no prudencia. La red que sostiene esto no eres tú: son los gates deterministas, el canary y el rollback. Y `autonomy: checkpoint` en `harness-answers.yaml` te da **una** pausa —un resumen de 10 líneas antes del primer ship a main— para las primeras semanas, mientras le agarras confianza. Gradúa *cuándo se toca main*, no *cuánto piensa el agente*.
 
@@ -395,7 +395,7 @@ La regla que lo hace funcionar es negativa: **si la razón para parar no está e
 
 ## El panel: `make ui`
 
-`/auto` corre solo — pero "solo" no debería significar "a ciegas". `make ui` abre un panel local en `127.0.0.1:7717` que te deja ver, mientras el harness trabaja: **qué agentes están vivos ahora mismo** y en paralelo, en qué fase va cada tarea, el texto que van produciendo, tokens y costo por agente, el grafo de quién lanzó a quién, y **el ledger de supuestos** de cada tarea.
+`/auto` corre solo — pero "solo" no debería significar "a ciegas". `make ui` abre el panel local (por defecto `127.0.0.1:7180`) que te deja ver, mientras el harness trabaja: **qué agentes están vivos ahora mismo** y en paralelo, en qué fase va cada tarea, el texto que van produciendo, tokens y costo por agente, el grafo de quién lanzó a quién, y **el ledger de supuestos** de cada tarea.
 
 ```
 make ui          # o: make ui PORT=8080

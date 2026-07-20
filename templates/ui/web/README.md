@@ -1,5 +1,7 @@
 # React + TypeScript + Vite
 
+> Antes de modificar la interfaz de Corvux, lee y aplica [style.md](./style.md). Incluye el sistema visual, el proceso obligatorio de mejora y el checklist de validación.
+
 This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
 
 Currently, two official plugins are available:

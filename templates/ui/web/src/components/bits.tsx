@@ -4,22 +4,27 @@ import { Badge } from "@/components/ui/badge"
 import { Label } from "@/components/ui/label"
 import { cn } from "@/lib/utils"
 import { beats, supuesto, fecha, diaLabel, toEpoch, type Beat, type BusEvent } from "@/lib/harness"
-import { CirclePause, CircleX } from "lucide-react"
+import { CheckCircle2, CirclePause, CircleX, GitCommit, Lightbulb, Milestone } from "lucide-react"
 
 // Cabecera de vista: título DM Sans + subtítulo — y en móvil deja aire al trigger
 export function VHead({ title, sub, right, mono }: { title: ReactNode; sub?: ReactNode; right?: ReactNode; mono?: boolean }) {
   return (
-    <div className="mb-6 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-      <h1 className={cn("t-display", mono && "font-mono tracking-normal")}>{title}</h1>
-      {sub && <span className="text-xs text-muted-foreground">{sub}</span>}
-      {right && <span className="ml-auto flex items-center gap-2">{right}</span>}
+    <div className="view-head mb-7 flex flex-wrap items-end gap-x-4 gap-y-2 pb-5">
+      <div className="min-w-0 w-full sm:flex-1">
+        <span className="mb-2 flex items-center gap-2 font-mono text-[9px] font-semibold uppercase tracking-[0.22em] text-(--brand)">
+          <i className="h-px w-5 bg-(--brand)/70" /> Corvux intelligence
+        </span>
+        <h1 className={cn("t-display", mono && "font-mono tracking-normal")}>{title}</h1>
+        {sub && <div className="mt-1.5 max-w-[72ch] text-[11.5px] leading-relaxed text-muted-foreground">{sub}</div>}
+      </div>
+      {right && <span className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">{right}</span>}
     </div>
   )
 }
 
 export function H2({ children, sub }: { children: ReactNode; sub?: ReactNode }) {
   return (
-    <h2 className="t-section mb-1.5 mt-7 flex flex-wrap items-baseline gap-2 first:mt-0">
+    <h2 className="t-section mb-2 mt-8 flex flex-wrap items-baseline gap-2 first:mt-0">
       {children}
       {sub && <span className="normal-case tracking-normal text-muted-foreground/70">{sub}</span>}
     </h2>
@@ -37,10 +42,11 @@ export function Code({ children }: { children: ReactNode }) {
 // Stats: grid responsive (2 → 3 → 6 columnas)
 export function Stats({ items }: { items: [ReactNode, ReactNode][] }) {
   return (
-    <div className="mb-2 grid grid-cols-2 overflow-hidden rounded-2xl border sm:grid-cols-3 lg:grid-cols-6">
+    <div className="mb-3 grid overflow-hidden rounded-2xl border border-border/80 bg-card shadow-(--shadow-soft)" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}>
       {items.map(([v, l], i) => (
-        <div key={i} className="border-b border-r bg-card p-4 last:border-r-0 lg:border-b-0">
-          <b className="block font-mono text-xl font-semibold tracking-tight tabular-nums">{v}</b>
+        <div key={i} className="relative border-b border-r border-border/70 p-4 last:border-r-0 lg:border-b-0">
+          <i className="absolute inset-x-4 top-0 h-px bg-gradient-to-r from-transparent via-(--brand)/45 to-transparent" />
+          <b className="block font-heading text-2xl font-semibold tracking-[-0.04em] tabular-nums">{v}</b>
           <i className="text-[9.5px] uppercase not-italic tracking-wider text-muted-foreground/70">{l}</i>
         </div>
       ))}
@@ -93,11 +99,43 @@ const beatLbl: Record<Beat["k"], string> = {
 // agrupar gates consecutivos mentiría sobre a quién pertenecen).
 // dated: agrupa por día ("Hoy", "Ayer", "mié 17 jul") y muestra la fecha —
 // sin esto, HH:MM solo es ambiguo cuando el trabajo cruza días.
-export function Story({ evs, taskOf, onTask, group = true, dated = false }: {
+export function Story({ evs, taskOf, onTask, group = true, dated = false, variant = "default" }: {
   evs: BusEvent[]; taskOf?: (b: number) => string; onTask?: (id: string) => void; group?: boolean; dated?: boolean
+  variant?: "default" | "mission"
 }) {
   const bs = group ? beats(evs) : evs.map((e) => beats([e])[0])
   let lastDay = ""
+  if (variant === "mission") return (
+    <div className="mission-story">
+      {bs.map((b, i) => {
+        const day = dated ? diaLabel(b.ts) : ""
+        const showDay = dated && day !== lastDay
+        if (showDay) lastDay = day
+        const Icon = b.k === "hard" ? CheckCircle2 : b.k === "bad" ? CircleX : b.k === "wait" ? CirclePause
+          : b.lbl === "Asumí" ? Lightbulb : b.lbl === "Decidí" ? GitCommit : Milestone
+        const phase = b.lbl === "Fase" ? (b.p.toLowerCase().match(/\b(intake|rfc|implement|review|ship|deploy|archive)\b/) || [])[1] : ""
+        const displayLabel = phase ? `Fase · ${phase}` : b.lbl
+        return (
+          <div key={i}>
+            {showDay && <div className="mission-day"><span>{day}</span></div>}
+            <article data-ts={b.ts} className={cn("mission-beat", `mission-beat-${b.k}`, onTask && "cursor-pointer")}
+              onClick={onTask && taskOf ? () => onTask(taskOf(i)) : undefined}>
+              <span className="mission-beat-icon"><Icon /></span>
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                  <span className="mission-beat-index">{String(i + 1).padStart(2, "0")}</span>
+                  <span className={cn("mission-beat-label", beatLbl[b.k])}>{displayLabel}</span>
+                  <time>{dated && toEpoch(b.ts) ? fecha(b.ts) : (b.ts || "").slice(11, 16)}</time>
+                  {taskOf && <code>{taskOf(i)}</code>}
+                </div>
+                <p>{b.p}</p>
+              </div>
+            </article>
+          </div>
+        )
+      })}
+    </div>
+  )
   return (
     <div className="ml-2 border-l-[1.5px] border-border">
       {bs.map((b, i) => {
@@ -147,10 +185,13 @@ export function Sup({ text }: { text: string }) {
 
 export function Empty({ title, children }: { title?: string; children: ReactNode }) {
   return (
-    <Card className="border-dashed bg-card py-0">
-      <CardContent className="p-6">
-        {title && <h4 className="mb-2 font-heading text-sm font-bold">{title}</h4>}
-        <div className="max-w-[76ch] space-y-1 text-[12.5px] text-muted-foreground/80">{children}</div>
+    <Card className="empty-state border-dashed py-0">
+      <CardContent className="relative overflow-hidden p-7 sm:p-8">
+        <div className="empty-signal" aria-hidden="true"><i/><i/><i/></div>
+        <div className="relative z-10 pr-14 sm:pr-28">
+          {title && <h4 className="mb-2 font-heading text-base font-bold tracking-tight">{title}</h4>}
+          <div className="max-w-[76ch] space-y-1 text-[12.5px] leading-relaxed text-muted-foreground/80">{children}</div>
+        </div>
       </CardContent>
     </Card>
   )

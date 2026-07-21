@@ -1,0 +1,25 @@
+# Al cambiar los templates/assets del installer (incl. templates/ui/dist), avisa
+# al daemon para que reconstruya sus assets embebidos (sync-assets.sh) — cierra
+# la cadena harness-ui → installer → daemon (ADR-0003).
+# Requiere secret DAEMON_PAT: PAT con scope repo sobre andresgarcia29/harness-daemon.
+name: notify-daemon
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'templates/**'
+      - 'scripts/discover.sh'
+      - 'scripts/doctor.sh'
+      - 'catalog/**'
+      - 'prompts/**'
+  workflow_dispatch:
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: dispatch → harness-daemon (rebuild embedded assets)
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.DAEMON_PAT }}
+          repository: andresgarcia29/harness-daemon
+          event-type: installer-updated

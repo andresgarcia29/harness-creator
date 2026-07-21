@@ -1,0 +1,42 @@
+# Reconstruye templates/ui/dist desde harness-ui cuando su source cambia
+# (ADR-0003). Dispara scripts/sync-ui.sh y abre un PR si el dist cambió — nunca
+# mergea solo. Requiere secret HARNESS_UI_PAT: PAT con scope repo sobre
+# andresgarcia29/harness-ui (para clonarlo) y sobre este repo (para el PR).
+name: sync-ui
+on:
+  repository_dispatch:
+    types: [harness-ui-updated]
+  workflow_dispatch:
+jobs:
+  rebuild-dist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: checkout harness-ui
+        uses: actions/checkout@v4
+        with:
+          repository: andresgarcia29/harness-ui
+          token: ${{ secrets.HARNESS_UI_PAT }}
+          path: .harness-ui
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: reconstruye templates/ui/dist desde harness-ui
+        run: HARNESS_UI_REPO="$GITHUB_WORKSPACE/.harness-ui" bash scripts/sync-ui.sh
+      - name: PR si el dist cambió
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.HARNESS_UI_PAT }}
+          branch: chore/sync-ui
+          base: main
+          add-paths: templates/ui/dist
+          title: "chore: sync panel dist desde harness-ui"
+          commit-message: |
+            chore: reconstruye templates/ui/dist desde harness-ui
+
+            Automático (sync-ui.yml): harness-ui cambió.
+
+            Task: workspace-v53
+          body: |
+            Automático: `harness-ui` cambió y `scripts/sync-ui.sh` regeneró
+            `templates/ui/dist`. Al mergear, `notify-daemon.yml` avisa al daemon.

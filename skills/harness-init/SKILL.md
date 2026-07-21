@@ -187,9 +187,10 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `harness-answers.yaml` | harness-answers.yaml.tmpl | siempre (esquema fijo) |
 | `.harness-version` | versión del plugin | siempre |
 | `Makefile` | Makefile.tmpl | siempre |
-| `.gitignore` | inline: `repos/ worktrees/ locks/ .cache/ .secrets .secrets.d/ inventory.json` | siempre |
+| `.gitignore` | inline: `repos/ worktrees/ locks/ .cache/ .secrets .secrets.d/ inventory.json go.work go.work.sum` (go.work lo genera scripts/gowork.sh: derivable y por-máquina; .cache/ cubre el CPython de py.sh y el corepack de fe.sh) | siempre |
 | `.claude/settings.json` | settings.json.tmpl | siempre (hooks + denials read-only) |
 | `.claude/hooks/{block-direct-push,guard-canonical}.sh` | hooks/ | siempre (fail-CLOSED: bloquean) |
+| `.claude/hooks/guard-build-slot.sh` | hooks/ | siempre (fail-OPEN: bloquea `docker build/run` pelado, Ley 8; ya registrado en settings.json.tmpl junto a block-direct-push) |
 | `.claude/hooks/{track-read,ui-emit}.sh` | hooks/ | siempre (fail-OPEN: observan, `async: true`). track-read alimenta `gate_evidence` de ship.sh; ui-emit alimenta `make ui` |
 | `scripts/ui/{panel.sh,server.py,pricing.json,dist/}` | ui/ | siempre — el panel (`make ui`). `panel.sh` prefiere el **daemon Go `harnessd`** (multi-máquina, terminales en vivo, sonda de MCP, archivar, liveness) y lo baja del release privado si falta; cae a `server.py` (Python stdlib) si no hay binario. El frontend React viaja COMPILADO en dist/ (la fuente vive en el plugin, `templates/ui/web/`) — el usuario jamás necesita Node |
 | `.claude/agents/{architect,implementer,reviewer}.md` | agents/*.tmpl | siempre |
@@ -205,9 +206,11 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `k8s/cronjobs/<job>.yaml` | cronjobs/k8s-cronjob.yaml.tmpl | si eligió GKE, uno por job |
 | `ratchets.json` | inline: `{}` | si eligió ratchet-keeper |
 | `scripts/doctor.sh` | COPIA de `${CLAUDE_PLUGIN_ROOT}/scripts/doctor.sh` | siempre (instancia autocontenida) |
-| `scripts/bootstrap.sh` | scripts/bootstrap.sh.tmpl | siempre — {{ENSURE_LINES}} se llena con UNA línea `ensure`/`require` por capacidad elegida, derivando el comando real del campo `install:` del catálogo (brew en macOS; `require` para SDKs pesados: flutter, gcloud, kubectl) |
+| `scripts/bootstrap.sh` | scripts/bootstrap.sh.tmpl | siempre — {{ENSURE_LINES}} se llena con UNA línea `ensure`/`require` por capacidad elegida, derivando el comando real del campo `install:` del catálogo. REGLA de decisión: si `install:` es un comando de package manager (brew/npm/pip/go/uv…) → `ensure <bin> <comando>` (auto-instala); si es una URL o instrucción manual → `require <bin> "<url>"` (solo verifica, no instala). Ej.: gcloud con `install: brew install --cask gcloud-cli` → `ensure gcloud brew install --cask gcloud-cli`; flutter con URL → `require flutter "https://..."` |
 | `scripts/ship.sh` | scripts/ship.sh.tmpl | siempre |
 | `scripts/worktree-task.sh`, `scripts/quiet.sh`, `scripts/with-secrets.sh` | scripts/ | siempre |
+| `scripts/build-slot.sh` | scripts/ | siempre (semáforo de builds pesados, Ley 8; universal — perl/flock) |
+| `scripts/{gowork,py,fe}.sh` | scripts/ | siempre (loop interno nativo, Ley 9; no-op limpio si el stack no está: Go/Python/frontend) |
 | `scripts/emit.sh` | scripts/emit.sh | siempre — el bus del harness: lo que ship.sh y /auto DECIDEN. Fail-open, redacta antes de escribir. Sin esto el panel solo ve agentes y tokens (la mitad prestada), nunca las decisiones ni los gates (la nuestra) |
 | `scripts/secrets.sh` | scripts/secrets.sh.tmpl | siempre (fuente según answers) |
 | `scripts/ticket-pull.sh`, `scripts/ticket-close.sh` | scripts/ticket-*.tmpl | tickets=linear (github: adapta los mismos contratos a `gh issue`) |

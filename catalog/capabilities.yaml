@@ -109,7 +109,7 @@ capabilities:
     purpose: "GCP: logs, estado de recursos. Soporta keyless (token efímero vía Vault)"
     provider: cli
     bin: gcloud
-    install: "https://cloud.google.com/sdk/docs/install"
+    install: "brew install --cask gcloud-cli"
     secrets: [{ key: CLOUDSDK_AUTH_ACCESS_TOKEN, source: "vault://gcp/impersonated-account" }]
     permission_tier: read-only
     profiles: [deployer, orquestador]

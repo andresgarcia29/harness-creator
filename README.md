@@ -406,6 +406,31 @@ Dos zonas en la barra lateral, y la distinción es la arquitectura entera:
 - **OBSERVAR** — Resumen (qué te espera, la curva de concurrencia, las últimas decisiones), Tareas (pipeline + ledger de supuestos + la historia paso a paso que escriben `ship.sh` y `/auto`), Sesiones (cada terminal con su gantt de agentes, árbol de spawns y el texto por turno), Gastos (día × modelo, por sesión, tabla de precios).
 - **OPERAR** — Nueva tarea (un formulario que escribe `tasks/<id>/task.md` y lanza `claude -p "/auto <id>"` headless con `--session-id` conocido: la tarea aparece sola en Sesiones), responder a un agente que te espera (reanuda SU sesión con `claude --resume`), Conexiones (Linear/OpenRouter: el token se **valida contra el proveedor antes de guardarse**, va a `~/.config/harness/` con chmod 600, y jamás se muestra ni pasa por un agente), y sincronizar precios reales desde OpenRouter para los modelos observados sin precio.
 
+### De dónde sale el panel: tres repos (ADR-0003)
+
+El panel NO vive en este repo. Es un stack de tres repositorios con una
+dependencia estrictamente unidireccional — el mismo DAG `infra → service →
+frontend` que el harness le impone a la plataforma del usuario:
+
+| Repo | Rol |
+|---|---|
+| **harness-creator** (este) | Genera la *policy* (agentes, pipeline, gates, hooks, docs) y su salida en disco. NO contiene el panel. |
+| **harness-daemon** | Observador **por-máquina**. Sirve el panel en `127.0.0.1` y es **dueño del contrato de API**. |
+| **harness-ui** | Cliente **fleet** (Vite/React). Se conecta a N daemons por SSH/herdr; consume el contrato por codegen. |
+
+**La ley de la dependencia:** el daemon *no contiene las reglas del harness* — las
+**lee como datos**. Su entrada es el **contrato de estado en disco** que este
+repo produce en cada workspace: `tasks/<id>/` (task.md, plan, veredictos,
+supuestos), `.beads/` (issues), `.harness/runs.jsonl` (procedencia sesión→tarea)
+y los transcripts de los agentes. El daemon observa ese estado y lo reporta; la
+UI lo muestra. Cambiar la *forma* de ese estado en disco es un cambio de contrato
+que impacta al daemon — no un detalle interno de harness-creator.
+
+**Auth:** ninguna a nivel app. El multi-máquina va por túneles SSH (herdr), así
+que las llaves SSH son la auth y cada daemon sigue `127.0.0.1-only`. `make ui`
+prefiere el `harness` instalado por brew (el binario del daemon, versionado por
+su cuenta) sobre cualquier binario vendorizado — ver `templates/ui/panel.sh`.
+
 ### Las cinco leyes del panel
 
 Un panel en un sistema cuya filosofía es "los agentes proponen, los sistemas deterministas verifican" tiene que ganarse su lugar. Estas son sus reglas, y explican casi todo su diseño:
@@ -413,7 +438,7 @@ Un panel en un sistema cuya filosofía es "los agentes proponen, los sistemas de
 1. **OPERAR CREA TRABAJO, JAMÁS MERGES** (ADR-0010 del daemon). El panel puede *crear* una tarea y *pasarle contexto* a un agente — exactamente lo que ya podías hacer desde una terminal — pero todo lo que lanza pasa por los mismos gates: a main solo se llega por `ship.sh`. No hay botón de aprobar, ni de mergear, ni de saltarse un gate; el operador tampoco puede editar `ship.sh`, hooks ni `settings.json` desde aquí. Crear trabajo ≠ publicar trabajo.
 2. **Solo `127.0.0.1`.** Nunca `0.0.0.0`. Y como ahora hay endpoints que actúan: cada arranque genera un token anti-CSRF que viaja en el HTML y debe volver en el header `X-Corvux-Token` (un `<form>` de otra página no puede poner headers custom), y se verifica el header `Host` contra DNS rebinding. Los tres controles tienen test.
 3. **Jamás muestra valores de secretos.** No lee `.secrets`, `connections` expone presencia (`true`/`false`), nunca el valor, y todo texto pasa por redacción (GitHub, Vault, JWT, AWS, Slack, Linear…) antes de salir. La ley de secretos también aplica a los píxeles. *(La suite mete un token de cada familia y verifica que sale `[REDACTADO]` — y ya cachó un bug real: el `\b` de sed no existe en macOS y cuatro familias viajaban sin redactar.)*
-4. **Cero dependencias en runtime.** El frontend es React + shadcn/ui (los mismos componentes que Agora) pero viaja **compilado y vendoreado** en `dist/`: el server es stdlib de Python sirviendo estáticos y el usuario jamás corre `npm install`. Node existe solo para desarrollar el plugin (`templates/ui/web/`, `npm run build`).
+4. **Cero dependencias en runtime.** El frontend es React + shadcn/ui (los mismos componentes que Agora) pero viaja **compilado y vendoreado** en `dist/`: el server es stdlib de Python sirviendo estáticos y el usuario jamás corre `npm install`. Node existe solo para construir el panel (repo `harness-ui`; el installer lo trae con `scripts/sync-ui.sh`).
 5. **Degrada, no explota.** Lee dos fuentes con dos niveles de confianza: `.harness/events.jsonl` + `tasks/` son **nuestros** (estables); los transcripts de Claude Code son **prestados** (formato interno, cambia entre versiones). Si el parseo falla, el panel sigue vivo con lo que el harness sí controla y te lo dice arriba en rojo.
 
 El formulario de Nueva tarea escribe preferencias que `/auto` **respeta como ley**: `review_before_ship: true` fuerza una pausa antes del primer ship, `assumptions_ok: false` convierte cada ambigüedad en una parada en vez de un supuesto, `max_parallel` acota los implementers y `budget_usd` convierte pasarse de presupuesto en una parada.

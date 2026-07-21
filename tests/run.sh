@@ -26,7 +26,7 @@ for v in welcome github clone requirements discover agents mcps sessions done br
 done
 grep -q '"init"' ../templates/ui/web/src/lib/router.ts || { echo "la ruta init no está en el router"; exit 1; }
 grep -q 'init?: InitState' ../templates/ui/web/src/lib/harness.ts || { echo "el snapshot no tipa init"; exit 1; }
-[ -f ../templates/ui/dist/index.html ] || { echo "falta dist/ (corre npm run build en templates/ui/web)"; exit 1; }
+[ -f ../templates/ui/dist/index.html ] || { echo "falta dist/ (corre scripts/sync-ui.sh (build desde harness-ui))"; exit 1; }
 grep -q "__OP_TOKEN__" ../templates/ui/dist/index.html || { echo "dist/index.html sin el placeholder del token anti-CSRF"; exit 1; }
 /bin/ls ../templates/ui/dist/assets/*.js >/dev/null 2>&1 || { echo "dist sin assets"; exit 1; }
 # dist al día: el marcador del wizard debe estar en el bundle vendoreado

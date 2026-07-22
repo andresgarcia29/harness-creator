@@ -54,6 +54,23 @@ lo que prueba miente cuando el template cambia.
 Un PR que añade lógica sin test se revisa con lupa; un PR que la añade con
 test que ejercita el template real se mergea rápido.
 
+## Debug de CI (lecciones pagadas, no teoría)
+
+1. **Extrae TODAS las causas de una vez.** `gh run view <id> --log-failed`
+   + grep de `FAIL|❌|error` sobre el log completo. Un run rojo casi
+   nunca tiene una sola causa, y arreglar de a una quema un ciclo de CI
+   (~5 min) por causa. Fallos distintos comparten síntoma.
+2. **El CI no es tu máquina.** ubuntu: `sh` es dash (los bashisms
+   revientan), `/tmp` es plano (rutas `../..` resuelven a rutas reales
+   del sistema), no hay homebrew. Antes de declarar un fix: simula
+   (`dash -uc`, `PATH` restringido). La suite ya prueba dash cuando
+   existe; macOS pasa bashisms de chiripa.
+3. **La cascada de assets es real**: cada merge aquí invalida los
+   assets embebidos de los PRs de harness-daemon en vuelo (su check de
+   drift los pone rojos ANTES de sus tests, ocultando otros fallos).
+   Orden correcto: estabiliza este repo primero, sincroniza el daemon
+   al final (`scripts/sync-assets.sh` allá).
+
 ## Pull requests
 
 - Un PR = un cambio coherente. Los cambios acoplados (ej. esquema de

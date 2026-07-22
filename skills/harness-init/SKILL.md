@@ -123,18 +123,20 @@ harness; cada agente es contexto y mantenimiento.
    proyecto Kargo, tenant canary, y ROLLBACK_MODE auto|manual
    (recomienda auto: rollback primero, diagnóstico después).
 10. **Modelos**: primero el PROVEEDOR (anthropic | vertex | bedrock |
-    kimi | openrouter — default anthropic; si eligió otro, recuérdale
-    verificar los IDs de la sección `models.<provider>` contra su
-    catálogo y las env vars del backend). Después el sandwich EN
-    ALIASES (fast|smart|deep): architect/reviewer/abogados el más alto,
-    implementer el medio, mechanical el barato, y el alias de
-    ESCALACIÓN del implementer (regla: el gasto en razonamiento es
-    proporcional al fan-out del artefacto). Las respuestas se estampan
-    como ALIASES en `models.yaml`; los IDs reales los materializa
+    kimi | minimax | openrouter; default anthropic; si eligió otro,
+    recuérdale verificar los IDs de la sección `models.<provider>`
+    contra su catálogo y las env vars del backend). Después el sandwich
+    EN ALIASES con esta recomendación default (la semántica vive en
+    models.yaml): **deep = el pensador** (orquestador, architect,
+    abogados, escalación; en anthropic es Fable), **smart = el
+    productor** (implementer, reviewer, qa; en anthropic es Opus 4.8),
+    **fast = lo especificísimo** (mechanical y cronjobs cheap; en
+    anthropic es Sonnet, y solo ahí). Las respuestas se estampan como
+    ALIASES en `models.yaml`; los IDs reales los materializa
     `scripts/stamp-models.sh` en el frontmatter de los agentes.
-    `loop_budget` default 3. Si el humano elige el alias caro en TODO,
-    advierte el costo en latencia+dinero de qa/mechanical y registra la
-    decisión.
+    `loop_budget` default 3. Si el humano quiere deep en TODO,
+    advierte la latencia comprada donde no hay decisión (las reglas de
+    Fable de models.yaml) y registra la decisión.
 10b. **Autonomía de /auto**: full | checkpoint (recomendado para las
     primeras semanas). checkpoint = UNA sola pausa, un resumen antes
     del primer ship a main; full = ninguna pausa, los gates y el canary

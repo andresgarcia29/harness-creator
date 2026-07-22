@@ -6,6 +6,14 @@ set -u
 . "$(dirname "$0")/lib.sh"
 t_ws
 
+# El workspace va ANIDADO 3 niveles dentro del tmp: la aserción del id
+# malicioso comprueba que tasks/../../../etc no exista, y en el /tmp plano
+# de Linux esa ruta resolvía al /etc REAL del sistema (falso rojo que macOS,
+# con su /var/folders profundo, nunca veía). Anidado, el traversal se queda
+# dentro del sandbox del test en cualquier OS.
+WSROOT="$WS"; WS="$WS/nivel1/nivel2/nivel3"; mkdir -p "$WS"
+trap 'rm -rf "$WSROOT"' EXIT
+
 HOOK="$ROOT/templates/hooks/track-read.sh"
 export CLAUDE_PROJECT_DIR="$WS"
 

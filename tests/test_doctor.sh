@@ -53,6 +53,23 @@ bash "$WS/scripts/stamp-models.sh" >/dev/null 2>&1
 out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
 assert_contains "$out" "agentes alineados con models.yaml" "alineado: check en verde"
 
+echo "── doctor: hook registrado pero ausente = fail con remediación"
+
+mkdir -p "$WS/.claude/hooks"
+cat > "$WS/.claude/settings.json" <<'EOF'
+{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"$CLAUDE_PROJECT_DIR/.claude/hooks/guard-fantasma.sh"}]}]}}
+EOF
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_contains "$out" "guard-fantasma.sh" "detecta el hook fantasma (registrado sin archivo)"
+assert_contains "$out" "AUSENTE" "lo reporta como ausente, no como warning genérico"
+# presente pero sin +x: también fail, con su chmod
+touch "$WS/.claude/hooks/guard-fantasma.sh"
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_contains "$out" "no ejecutable" "hook sin +x: fail con chmod en la remediación"
+chmod +x "$WS/.claude/hooks/guard-fantasma.sh"
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+echo "$out" | grep -q "guard-fantasma" && fail "hook OK no debería reportarse" || pass "hook existente y ejecutable: silencio"
+
 echo "── doctor: los checks de cadena-completa existen"
 
 # los checks añadidos por la auditoría anti-consejo-vacío deben estar en el

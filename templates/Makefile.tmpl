@@ -14,6 +14,12 @@ doctor: ## salud del harness (CLIs, MCPs, hooks, links, secretos)
 secrets: ## materializa secretos ({{SECRETS_SOURCE}} → .secrets)
 	@bash scripts/secrets.sh pull
 
+models: ## re-estampa los agentes desde models.yaml (edítalo y corre esto)
+	@bash scripts/stamp-models.sh
+
+graph: ## construye/refresca el grafo de graphify (incremental por HEADs)
+	@bash scripts/graph-refresh.sh
+
 wt: ## crea worktrees: make wt TASK=<id> REPOS="a b"
 	@bash scripts/worktree-task.sh $(TASK) $(REPOS)
 

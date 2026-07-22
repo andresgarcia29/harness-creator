@@ -36,6 +36,10 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
        archivo a diffear — `panel.sh` lo baja solo del release público en el
        primer `make ui` (o cae a server.py si no hay acceso). Tras actualizar,
        recuérdale al humano correr `make ui` para bajar el daemon nuevo.
+   - **Skills, por capa**: upstream (las del manifest del generador) se
+     actualizan con el plugin; las `.managed` son de skills-sync (ni las
+     toques: `make skills` las gobierna); el RESTO de `.claude/skills/`
+     es ley local intocable. `skills.yaml` es ley local (jamás se pisa).
    - **Propiedad de la instancia** (harness-answers, models.yaml,
      CLAUDE.md, constituciones, specs, docs): lo local gana — es ley
      del proyecto; si choca con un cambio upstream, muestra ambos y

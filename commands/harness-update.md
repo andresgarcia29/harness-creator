@@ -11,7 +11,9 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
    versión coincide con la del plugin, dilo y termina.
 1b. **Migra el esquema del answers** si esta versión agregó campos
    (ej. `scope:` por capacidad según el campo `cronjob:` del catálogo,
-   `instance.repo`) SIN tocar las decisiones registradas. Pregunta SOLO
+   `instance.repo`, `models.provider` — default `anthropic` si el
+   answers no lo trae; los valores de `models.*` pasan a ser ALIASES
+   fast|smart|deep) SIN tocar las decisiones registradas. Pregunta SOLO
    las preguntas nuevas de la entrevista que el answers no responde.
 2. RE-INSTANCIA mentalmente cada template de
    `${CLAUDE_PLUGIN_ROOT}/templates/` con las respuestas registradas en
@@ -19,7 +21,9 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
    el archivo real de la instancia.
 3. Clasifica cada diferencia según la PROPIEDAD del archivo:
    - **Propiedad del plugin** (scripts/{doctor,bootstrap,secrets,ship,
-     worktree-task,quiet,with-secrets}.sh, hooks, y **el panel**:
+     worktree-task,quiet,with-secrets,repo-brief,stamp-models}.sh,
+     scripts/{harness-policy,evidence}.py, `harness-policy.json`,
+     `scripts/cronjobs/cron-runner.sh`, hooks, `AGENTS.md`, y **el panel**:
      `scripts/ui/{panel.sh,server.py,pricing.json,dist/}`): upstream gana por
      default — re-instancia con las respuestas del answers y propón el
      archivo completo. Un parche local aquí casi siempre fue un fix que
@@ -29,7 +33,7 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
        (nuevo) hace que `make ui` corra el **daemon Go `harnessd`** en vez de
        `server.py`, y el `dist/` trae el frontend nuevo (multi-máquina,
        terminales, sonda de MCP, archivar). El BINARIO `harnessd` NO es un
-       archivo a diffear — `panel.sh` lo baja solo del release privado en el
+       archivo a diffear — `panel.sh` lo baja solo del release público en el
        primer `make ui` (o cae a server.py si no hay acceso). Tras actualizar,
        recuérdale al humano correr `make ui` para bajar el daemon nuevo.
    - **Propiedad de la instancia** (harness-answers, models.yaml,
@@ -37,9 +41,25 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
      del proyecto; si choca con un cambio upstream, muestra ambos y
      que decida el humano.
 4. Presenta las actualizaciones como diffs individuales. NUNCA apliques
-   sin confirmación explícita por archivo.
+   sin confirmación explícita por archivo — **con una excepción: los
+   PAQUETES ATADOS se aceptan o rechazan juntos**, porque a medias
+   rompen la instancia. Decláraselo al humano antes de que elija:
+   - **Carriles**: `harness-policy.json` + `scripts/harness-policy.py` +
+     `.claude/commands/auto.md` + `scripts/ship.sh` (el /auto nuevo hace
+     `init --lane`, que el policy engine viejo rechaza; gate_lane y
+     escalate viven en los otros dos).
+   - **Modelos**: `models.yaml` (esquema aliases) +
+     `scripts/stamp-models.sh` + `scripts/cronjobs/cron-runner.sh` (el
+     runner viejo parsea el esquema inline viejo: con el models.yaml
+     nuevo muere en config-error) + re-estampado de agentes.
 5. Al aplicar: re-corre el doctor de la instancia y actualiza
-   `.harness-version`.
+   `.harness-version`. Si el update tocó models.yaml o agentes, corre
+   `bash scripts/stamp-models.sh` — el frontmatter de los agentes se
+   estampa desde la política, nunca a mano. **Migración de esquema de
+   models.yaml**: si la instancia trae el esquema viejo (roles con IDs
+   crudos, sin `provider:` ni secciones `models.<provider>`), migra:
+   `provider: anthropic`, traduce cada ID a su alias (fast|smart|deep)
+   y muestra el diff.
 
 Presta atención especial a: scripts/doctor.sh (es COPIA del plugin —
 casi siempre conviene actualizarla), hooks, y ship.sh (gates nuevos).

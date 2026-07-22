@@ -185,6 +185,10 @@ capabilities:
   - name: dependency-cruiser
     category: quality
     purpose: "Fronteras de módulos/capas en TS como GATE (la dirección de dependencias es ley)"
+    # A diferencia de import-linter/go-arch-lint (gates genéricos en ship.sh,
+    # activados por config), la invocación de depcruise depende del layout del
+    # repo (src dir + variante de config): cablearlo es añadir su comando al
+    # script de test del package.json — ship.sh lo corre vía npm test.
     provider: cli
     bin: depcruise
     install: "npm i -g dependency-cruiser"
@@ -239,7 +243,8 @@ capabilities:
     purpose: "Knowledge graph cross-repo (Tree-sitter+Leiden): preguntas de comprensión al grafo, no grep masivo (~71× menos tokens)"
     provider: cli
     bin: graphify
-    install: "uv tool install graphifyy"
+    install: "uv tool install graphifyy"   # doble y: así se llama el paquete en PyPI; el binario es graphify
+    post_install: "graphify install"        # registra la skill /graphify en los asistentes (Claude Code, Cursor, Codex…)
     permission_tier: read-only
     profiles: [arquitecto, jardinero, orquestador]
     detect: "workspace con 5+ repos"
@@ -504,6 +509,8 @@ capabilities:
   - name: jscpd
     category: hygiene
     purpose: "Duplicación multi-lenguaje (cubre Go/Py/TS/Dart en una pasada; reporter AI token-eficiente)"
+    # SIN consumidor automático aún: ningún gate/cronjob lo corre. Ofrécelo
+    # solo si el humano lo pide; candidato a check del reviewer en el futuro.
     provider: cli
     bin: jscpd
     install: "npm i -g jscpd"
@@ -551,6 +558,8 @@ capabilities:
   - name: cosign
     category: security
     purpose: "Firma keyless de imágenes + verificación en deploy: ningún agente despliega una imagen que no salió del pipeline"
+    # Se cablea en el CI del repo (sign en build, verify en admission/deploy),
+    # NO en prompts del harness — el instalador solo lo instala y lo documenta.
     provider: cli
     bin: cosign
     install: "brew install cosign"
@@ -593,6 +602,8 @@ capabilities:
   - name: sloth
     category: deploy
     purpose: "SLOs → recording rules multi-burn-rate; los AnalysisTemplates y el slo-watchdog leen burn rate, no error rate crudo"
+    # Herramienta de PLATAFORMA: genera las rules que Prometheus evalúa y que
+    # alimentan el webhook del slo-watchdog. Corre en CI de infra, no en agentes.
     provider: cli
     bin: sloth
     install: "brew install slok/tap/sloth"

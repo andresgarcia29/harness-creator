@@ -1,0 +1,60 @@
+# Contribuir a harness-creator
+
+*(English speakers: issues and PRs in English are welcome — the codebase docs
+are currently Spanish-first; see [README.en.md](README.en.md) for an overview.)*
+
+Gracias por querer contribuir. Este proyecto tiene una filosofía fuerte y las
+contribuciones que la respetan se mergean rápido.
+
+## La filosofía (léela antes de escribir código)
+
+**Los agentes proponen, los sistemas deterministas verifican.** Todo check que
+un script pueda hacer, lo hace un script; los modelos solo ponen juicio donde
+hay juicio. De ahí se derivan las reglas de este repo:
+
+1. **La regla anti-consejo-vacío.** Toda herramienta que un prompt cite debe
+   tener su cadena completa: quién la instala (catálogo → bootstrap) → quién
+   la alimenta (índices/configs con ciclo de vida) → quién la vigila (doctor,
+   con remediación) → quién la ejecuta (gate, cronjob o agente). Un PR que
+   añade una herramienta "recomendada" sin esa cadena no entra.
+2. **Todo archivo generado se registra** en la tabla de generación de
+   `skills/harness-init/SKILL.md`. Un template sin fila ahí nunca se instala.
+3. **Hooks y gates que bloquean son fail-closed; observadores son fail-open.**
+   No mezcles las familias.
+4. **Portabilidad: bash 3.2 (macOS de fábrica), BSD grep/find, sin GNU-ismos.**
+   El CI corre la suite con `/bin/bash` en macOS precisamente para cachar esto.
+5. **Los mensajes de error son prompts**: cada gate/fallo incluye su
+   remediación exacta.
+
+## Desarrollo
+
+```bash
+git clone https://github.com/andresgarcia29/harness-creator
+cd harness-creator
+./tests/run.sh          # la suite completa (~40s)
+./tests/run.sh fast     # salta el test lento del lock
+```
+
+Requisitos: bash, `jq`, `python3`. Nada más — la suite no toca la red y cada
+test crea y borra su workspace temporal.
+
+## Tests: la regla de oro
+
+**La suite prueba el código REAL de los templates, no copias.** Mira
+`tests/test_ship_lock.sh` o `tests/test_ship_gates.sh`: extraen las funciones
+del template con awk y las ejecutan de verdad. Si tu PR toca un template con
+lógica, el test debe extraer y ejercitar ESA lógica — un test que reimplementa
+lo que prueba miente cuando el template cambia.
+
+Un PR que añade lógica sin test se revisa con lupa; un PR que la añade con
+test que ejercita el template real se mergea rápido.
+
+## Pull requests
+
+- Un PR = un cambio coherente. Los cambios acoplados (ej. esquema de
+  models.yaml + su parser) van JUNTOS — a medias rompen instancias.
+- Corre `./tests/run.sh` y `shellcheck -S error` antes de abrir.
+- Si cambias el contrato de estado en disco (`tasks/<id>/`, `.harness/`,
+  `state.json`), decláralo en el PR: el daemon del panel lo consume
+  (ADR-0003) y es un cambio de contrato, no un detalle interno.
+- Español o inglés, ambos bienvenidos en issues/PRs.

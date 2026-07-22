@@ -33,7 +33,7 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
        (nuevo) hace que `make ui` corra el **daemon Go `harnessd`** en vez de
        `server.py`, y el `dist/` trae el frontend nuevo (multi-máquina,
        terminales, sonda de MCP, archivar). El BINARIO `harnessd` NO es un
-       archivo a diffear — `panel.sh` lo baja solo del release privado en el
+       archivo a diffear — `panel.sh` lo baja solo del release público en el
        primer `make ui` (o cae a server.py si no hay acceso). Tras actualizar,
        recuérdale al humano correr `make ui` para bajar el daemon nuevo.
    - **Propiedad de la instancia** (harness-answers, models.yaml,

@@ -91,8 +91,10 @@ resumes with `/auto <task-id>`.
 `make ui` serves a localhost-only read panel (tasks, live agents, costs,
 assumption ledger). Out of the box it runs on vendored Python stdlib +
 precompiled frontend — no npm, no network. An optional Go daemon
-(`harness-daemon`, separate repo) adds multi-machine views; the panel falls
-back automatically when it's not available.
+([harness-daemon](https://github.com/andresgarcia29/harness-daemon), MIT) adds
+multi-machine views via its companion
+([harness-ui](https://github.com/andresgarcia29/harness-ui), MIT); the panel
+falls back automatically when it's not available.
 
 ## Tests
 

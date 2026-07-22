@@ -20,6 +20,9 @@ models: ## re-estampa los agentes desde models.yaml (edítalo y corre esto)
 pull: ## todos los repos al último main, en paralelo (--rebase) + grafo
 	@bash scripts/pull-all.sh
 
+skills: ## sincroniza la capa compartida de skills (skills.yaml)
+	@bash scripts/skills-sync.sh
+
 graph: ## construye/refresca el grafo de graphify (incremental por HEADs)
 	@bash scripts/graph-refresh.sh
 

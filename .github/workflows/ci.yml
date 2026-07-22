@@ -10,7 +10,13 @@ permissions:
 
 jobs:
   contracts:
-    runs-on: ubuntu-latest
+    # La promesa de portabilidad (macOS/Linux, bash 3.2) se PRUEBA, no se
+    # declara: en macOS la suite corre con /bin/bash (3.2 de fábrica).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Contratos Python compilan
@@ -20,5 +26,19 @@ jobs:
           bash -n templates/scripts/ship.sh.tmpl
           bash -n templates/scripts/bootstrap.sh.tmpl
           bash -n templates/hooks/block-direct-push.sh
-      - name: Suite del installer
+      - name: Suite del installer (Linux)
+        if: runner.os == 'Linux'
         run: bash tests/run.sh
+      - name: Suite del installer (macOS, bash 3.2 de fábrica)
+        if: runner.os == 'macOS'
+        run: /bin/bash tests/run.sh
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck nivel error (gate; warnings son aspiracionales)
+        run: |
+          shellcheck --version
+          shellcheck -S error scripts/*.sh templates/scripts/*.sh templates/hooks/*.sh \
+            templates/cronjobs/cron-runner.sh templates/ui/panel.sh tests/*.sh

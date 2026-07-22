@@ -1,6 +1,6 @@
 # Contribuir a harness-creator
 
-*(English speakers: issues and PRs in English are welcome — the codebase docs
+*(English speakers: issues and PRs in English are welcome; the codebase docs
 are currently Spanish-first; see [README.en.md](README.en.md) for an overview.)*
 
 Gracias por querer contribuir. Este proyecto tiene una filosofía fuerte y las
@@ -25,6 +25,11 @@ hay juicio. De ahí se derivan las reglas de este repo:
    El CI corre la suite con `/bin/bash` en macOS precisamente para cachar esto.
 5. **Los mensajes de error son prompts**: cada gate/fallo incluye su
    remediación exacta.
+6. **Prohibido el guion largo "—" (em dash)** en docs, prompts,
+   commits y todo texto del repo: delata prosa generada por IA. Usa
+   coma, dos puntos o paréntesis. Hay un ratchet en la suite: el
+   conteo existente solo puede BAJAR, y un PR que lo sube no pasa.
+   (El "──" de las cajas de terminal es otro carácter y se permite.)
 
 ## Desarrollo
 
@@ -35,7 +40,7 @@ cd harness-creator
 ./tests/run.sh fast     # salta el test lento del lock
 ```
 
-Requisitos: bash, `jq`, `python3`. Nada más — la suite no toca la red y cada
+Requisitos: bash, `jq`, `python3`. Nada más: la suite no toca la red y cada
 test crea y borra su workspace temporal.
 
 ## Tests: la regla de oro
@@ -43,7 +48,7 @@ test crea y borra su workspace temporal.
 **La suite prueba el código REAL de los templates, no copias.** Mira
 `tests/test_ship_lock.sh` o `tests/test_ship_gates.sh`: extraen las funciones
 del template con awk y las ejecutan de verdad. Si tu PR toca un template con
-lógica, el test debe extraer y ejercitar ESA lógica — un test que reimplementa
+lógica, el test debe extraer y ejercitar ESA lógica; un test que reimplementa
 lo que prueba miente cuando el template cambia.
 
 Un PR que añade lógica sin test se revisa con lupa; un PR que la añade con
@@ -52,7 +57,7 @@ test que ejercita el template real se mergea rápido.
 ## Pull requests
 
 - Un PR = un cambio coherente. Los cambios acoplados (ej. esquema de
-  models.yaml + su parser) van JUNTOS — a medias rompen instancias.
+  models.yaml + su parser) van JUNTOS: a medias rompen instancias.
 - Corre `./tests/run.sh` y `shellcheck -S error` antes de abrir.
 - Si cambias el contrato de estado en disco (`tasks/<id>/`, `.harness/`,
   `state.json`), decláralo en el PR: el daemon del panel lo consume

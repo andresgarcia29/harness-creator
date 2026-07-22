@@ -29,7 +29,15 @@ pones juicio donde hace falta (topología, entrevista, generación).
      lo quita de manifest.yaml, del DAG, de la tabla del CLAUDE.md y de
      answers — y sugerir remover el clon. Una respuesta que contradice
      un artefacto sin generar su diff es una migración incompleta.
-  5. Nada se pisa sin confirmación. Al final actualiza `.harness-version`.
+  5. Nada se pisa sin confirmación — salvo que los **PAQUETES ATADOS se
+     aceptan/rechazan juntos** (a medias rompen la instancia; decláralo
+     antes de que el humano elija). Los vigentes: **carriles**
+     (harness-policy.json + harness-policy.py + auto.md + ship.sh) y
+     **modelos** (models.yaml esquema aliases + stamp-models.sh +
+     cron-runner.sh + re-estampado). La lista completa y las migraciones
+     de esquema viven en `commands/harness-update.md`.
+  6. Al final: `bash scripts/stamp-models.sh` si tocaste models.yaml o
+     agentes, re-corre el doctor, y actualiza `.harness-version`.
 - **Idempotencia por archivo** (también en instalación fresca): si un
   archivo existe, diff y pregunta. Nunca destruyas personalización local.
 - **Tokens**: no explores los repos a mano; el inventario ya lo hizo.
@@ -114,14 +122,19 @@ harness; cada agente es contexto y mantenimiento.
 9. **Deploy** (si hay CD): org de GitHub, prefijo de apps ArgoCD,
    proyecto Kargo, tenant canary, y ROLLBACK_MODE auto|manual
    (recomienda auto: rollback primero, diagnóstico después).
-10. **Modelos**: propone el sandwich — architect/reviewer/abogados el
-    modelo de razonamiento más alto disponible, implementer el medio,
-    mechanical el barato, y el modelo de ESCALACIÓN del implementer
-    (regla: el gasto en razonamiento es proporcional al fan-out del
-    artefacto). Va a `models.yaml` (política) y al frontmatter de los
-    agentes. `loop_budget` default 3. Si el humano elige el modelo
-    caro en TODO, advierte el costo en latencia+dinero de qa/mechanical
-    y registra la decisión.
+10. **Modelos**: primero el PROVEEDOR (anthropic | vertex | bedrock |
+    kimi | openrouter — default anthropic; si eligió otro, recuérdale
+    verificar los IDs de la sección `models.<provider>` contra su
+    catálogo y las env vars del backend). Después el sandwich EN
+    ALIASES (fast|smart|deep): architect/reviewer/abogados el más alto,
+    implementer el medio, mechanical el barato, y el alias de
+    ESCALACIÓN del implementer (regla: el gasto en razonamiento es
+    proporcional al fan-out del artefacto). Las respuestas se estampan
+    como ALIASES en `models.yaml`; los IDs reales los materializa
+    `scripts/stamp-models.sh` en el frontmatter de los agentes.
+    `loop_budget` default 3. Si el humano elige el alias caro en TODO,
+    advierte el costo en latencia+dinero de qa/mechanical y registra la
+    decisión.
 10b. **Autonomía de /auto**: full | checkpoint (recomendado para las
     primeras semanas). checkpoint = UNA sola pausa, un resumen antes
     del primer ship a main; full = ninguna pausa, los gates y el canary
@@ -187,7 +200,7 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `harness-answers.yaml` | harness-answers.yaml.tmpl | siempre (esquema fijo) |
 | `.harness-version` | versión del plugin | siempre |
 | `Makefile` | Makefile.tmpl | siempre |
-| `.gitignore` | inline: `repos/ worktrees/ locks/ .cache/ .secrets .secrets.d/ inventory.json go.work go.work.sum` (go.work lo genera scripts/gowork.sh: derivable y por-máquina; .cache/ cubre el CPython de py.sh y el corepack de fe.sh) | siempre |
+| `.gitignore` | inline: `repos/ worktrees/ locks/ .cache/ .secrets .secrets.d/ inventory.json go.work go.work.sum graphify-out/` (go.work lo genera scripts/gowork.sh: derivable y por-máquina; .cache/ cubre el CPython de py.sh, el corepack de fe.sh, los briefs y el stamp del grafo; graphify-out/ es derivable del código) | siempre |
 | `.claude/settings.json` | settings.json.tmpl | siempre (hooks + denials read-only) |
 | `.claude/hooks/{block-direct-push,guard-canonical}.sh` | hooks/ | siempre (fail-CLOSED: bloquean) |
 | `.claude/hooks/guard-build-slot.sh` | hooks/ | siempre (fail-OPEN: bloquea `docker build/run` pelado, Ley 8; ya registrado en settings.json.tmpl junto a block-direct-push) |
@@ -197,7 +210,9 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `.claude/agents/qa.md` | agents/qa.md.tmpl | si hay frontend/mobile o canary |
 | `.claude/agents/<abogado>.md` | agents/svc-agent.md.tmpl | UNO por cluster; `status: DRAFT` |
 | `.claude/commands/{feature,rfc,implement,review,ship,promote,archive,auto}.md` | commands/*.tmpl | siempre — /auto es el pipeline completo sin intervención humana y acepta ticket O prompt literal (autonomy en answers: full \| checkpoint) |
-| `models.yaml` | models.yaml.tmpl | siempre (política de ruteo de modelos) |
+| `models.yaml` | models.yaml.tmpl | siempre — LA perilla de modelos: provider + aliases (fast\|smart\|deep) por proveedor + rol→alias + overrides por agente |
+| `AGENTS.md` | AGENTS.md.tmpl | siempre — el mapa en el estándar multi-herramienta (Cursor, Kimi Code, Codex, Gemini CLI…): leyes, playbooks, modelos, dónde está la verdad. CLAUDE.md sigue siendo el de Claude Code; ambos se generan, ninguno es symlink |
+| `scripts/stamp-models.sh` | scripts/ | siempre — materializa models.yaml en el frontmatter de los agentes (`make models`); `resolve <alias\|rol>` lo usan /auto --model y cron-runner |
 | `docs/constitution.md` | docs/constitution.md.tmpl | siempre (DRAFT; §6 desde entrevista #11) |
 | `specs/<capability>/spec.md` | docs/spec.md.tmpl | UNO por dominio de ownership (esqueleto DRAFT; la arqueología los llena) |
 | `docs/harness/testing-policy.md` | docs/testing-policy.md.tmpl | siempre |
@@ -206,9 +221,14 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `k8s/cronjobs/<job>.yaml` | cronjobs/k8s-cronjob.yaml.tmpl | si eligió GKE, uno por job |
 | `ratchets.json` | inline: `{}` | si eligió ratchet-keeper |
 | `scripts/doctor.sh` | COPIA de `${CLAUDE_PLUGIN_ROOT}/scripts/doctor.sh` | siempre (instancia autocontenida) |
-| `scripts/bootstrap.sh` | scripts/bootstrap.sh.tmpl | siempre — {{ENSURE_LINES}} se llena con UNA línea `ensure`/`require` por capacidad elegida, derivando el comando real del campo `install:` del catálogo. REGLA de decisión: si `install:` es un comando de package manager (brew/npm/pip/go/uv…) → `ensure <bin> <comando>` (auto-instala); si es una URL o instrucción manual → `require <bin> "<url>"` (solo verifica, no instala). Ej.: gcloud con `install: brew install --cask gcloud-cli` → `ensure gcloud brew install --cask gcloud-cli`; flutter con URL → `require flutter "https://..."` |
+| `scripts/bootstrap.sh` | scripts/bootstrap.sh.tmpl | siempre — {{ENSURE_LINES}} se llena con UNA línea `ensure`/`require` por capacidad elegida, derivando el comando real del campo `install:` del catálogo. REGLA de decisión: si `install:` es un comando de package manager (brew/npm/pip/go/uv…) → `ensure <bin> <comando>` (auto-instala); si es una URL o instrucción manual → `require <bin> "<url>"` (solo verifica, no instala). Ej.: gcloud con `install: brew install --cask gcloud-cli` → `ensure gcloud brew install --cask gcloud-cli`; flutter con URL → `require flutter "https://..."`. Si la entrada trae `post_install:`, añade DESPUÉS de su ensure la línea `command -v <bin> >/dev/null && { <post_install> \|\| true; }` (idempotente, fail-open — ej. graphify registra su skill con `graphify install`) |
+| `.claude/skills/skill-creator/SKILL.md` | skills/skill-creator/SKILL.md | siempre — la guía para detectar procedimientos repetidos y empaquetarlos como skills bien formadas; el cronjob skill-miner la sigue |
 | `scripts/ship.sh` | scripts/ship.sh.tmpl | siempre |
 | `scripts/worktree-task.sh`, `scripts/quiet.sh`, `scripts/with-secrets.sh` | scripts/ | siempre |
+| `scripts/repo-brief.sh` | scripts/ | siempre — brief determinista por repo (`.cache/briefs/`); arranque en caliente de implementers/reviewers, $0 tokens |
+| `scripts/graph-refresh.sh` | scripts/ | si graphify elegido — el ciclo de vida del grafo: build inicial, `--update` incremental, stamp por HEADs. Sin esto, "usa graphify query" es un consejo vacío. Lo llaman el prefetch de /auto y /rfc, harness-janitor y `make graph` |
+| `scripts/harness-policy.py`, `scripts/evidence.py` | scripts/ | siempre — el policy engine v1 (transiciones por carril, escalate, validate-ship) y evidence v1; ship.sh y /auto los invocan |
+| `harness-policy.json` | policy.json | siempre — leyes ejecutables del flujo: transiciones por carril (express\|standard\|full), paradas permitidas, límites |
 | `scripts/build-slot.sh` | scripts/ | siempre (semáforo de builds pesados, Ley 8; universal — perl/flock) |
 | `scripts/{gowork,py,fe}.sh` | scripts/ | siempre (loop interno nativo, Ley 9; no-op limpio si el stack no está: Go/Python/frontend) |
 | `scripts/emit.sh` | scripts/emit.sh | siempre — el bus del harness: lo que ship.sh y /auto DECIDEN. Fail-open, redacta antes de escribir. Sin esto el panel solo ve agentes y tokens (la mitad prestada), nunca las decisiones ni los gates (la nuestra) |
@@ -229,9 +249,12 @@ Reglas de generación:
 - **Constituciones (abogados), constitution.md, specs y map.md son
   DRAFT**: banner "ratificar por humano antes del primer RFC". La ley
   la ratifican humanos.
-- **models.yaml y los agentes deben coincidir**: el frontmatter
-  `model:` de cada agente se estampa desde models.yaml; si el humano
-  cambia la política después, /harness-update re-estampa.
+- **models.yaml y los agentes deben coincidir**: tras generar agentes y
+  models.yaml, corre `bash scripts/stamp-models.sh` — resuelve
+  alias→ID del proveedor y estampa el frontmatter `model:`. Después el
+  humano cambia modelos editando SOLO models.yaml + `make models`
+  (nunca los agentes a mano); `stamp-models.sh check` lo vigila desde
+  doctor.
 - **.mcp.json**: entradas con `wrap: true` en el catálogo se envuelven:
   `command: "scripts/with-secrets.sh"`, `args: [<command>, <args…>]`.
   Engram: fija `--project <slug>` explícito.

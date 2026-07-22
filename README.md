@@ -464,14 +464,14 @@ que las llaves SSH son la auth y cada daemon sigue `127.0.0.1-only`. `make ui`
 prefiere el `harness` instalado por brew (el binario del daemon, versionado por
 su cuenta) sobre cualquier binario vendorizado — ver `templates/ui/panel.sh`.
 
-**Aviso de disponibilidad (honestidad OSS):** lo que este repo genera funciona
-**completo y sin red** con el server vendoreado (`server.py`, stdlib de Python
-+ frontend precompilado): tareas, agentes vivos, costos, ledger. El daemon Go
-(`harness-daemon`) y el cliente fleet (`harness-ui`) viven en repos aparte que
-hoy son **privados** — aportan el multi-máquina y las terminales en vivo, y
-`panel.sh` cae automáticamente a `server.py` cuando no están. Si no tienes
-acceso a esos repos, esa es tu experiencia por defecto y es completa para un
-solo workspace.
+**Disponibilidad:** lo que este repo genera funciona **completo y sin red**
+con el server vendoreado (`server.py`, stdlib de Python + frontend
+precompilado): tareas, agentes vivos, costos, ledger. El daemon Go
+([harness-daemon](https://github.com/andresgarcia29/harness-daemon)) y el
+cliente fleet ([harness-ui](https://github.com/andresgarcia29/harness-ui)) son
+repos aparte, **también open source (MIT)** — aportan el multi-máquina y las
+terminales en vivo, `panel.sh` baja el binario de sus releases públicos y cae
+automáticamente a `server.py` si no está disponible.
 
 ### Las cinco leyes del panel
 

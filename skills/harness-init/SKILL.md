@@ -227,6 +227,9 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `.claude/skills/skill-creator/SKILL.md` | skills/skill-creator/SKILL.md | siempre — la guía para detectar procedimientos repetidos y empaquetarlos como skills bien formadas; el cronjob skill-miner la sigue |
 | `scripts/ship.sh` | scripts/ship.sh.tmpl | siempre |
 | `scripts/worktree-task.sh`, `scripts/quiet.sh`, `scripts/with-secrets.sh` | scripts/ | siempre |
+| `skills.yaml` | skills.yaml.tmpl | si NO existe (es ley local: declara TUS repos de skills; el update jamás lo pisa) |
+| `scripts/skills-sync.sh` | scripts/ | siempre (make skills: instala la capa compartida con marca .managed; la local siempre gana) |
+| `scripts/pull-all.sh` | scripts/ | siempre (make pull: clones canónicos al último main en paralelo, sucios se saltan con aviso, dispara graph-refresh) |
 | `scripts/repo-brief.sh` | scripts/ | siempre — brief determinista por repo (`.cache/briefs/`); arranque en caliente de implementers/reviewers, $0 tokens |
 | `scripts/graph-refresh.sh` | scripts/ | si graphify elegido — el ciclo de vida del grafo: build inicial, `--update` incremental, stamp por HEADs. Sin esto, "usa graphify query" es un consejo vacío. Lo llaman el prefetch de /auto y /rfc, harness-janitor y `make graph` |
 | `scripts/harness-policy.py`, `scripts/evidence.py` | scripts/ | siempre — el policy engine v1 (transiciones por carril, escalate, validate-ship) y evidence v1; ship.sh y /auto los invocan |

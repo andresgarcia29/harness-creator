@@ -554,6 +554,10 @@ overrides:
 
 El harness está orientado a Claude Code (hooks, agentes, comandos nativos), pero **su capa de verdad es agnóstica**: gates, policy engine, worktrees y tickets son shell/Python que cualquier agente puede ejecutar. La instancia genera **`AGENTS.md`** — el estándar que leen Cursor, Kimi Code, Codex, Gemini CLI y compañía — con las leyes, el mapa de la verdad y una clave: los comandos de `.claude/commands/*.md` **son playbooks markdown**; una herramienta sin slash-commands los abre y los sigue tal cual, y los agentes de `.claude/agents/` sirven como system prompts del rol. Una honestidad importante: los hooks que frenan el push directo solo corren en Claude Code — `AGENTS.md` lo advierte y recomienda branch protection en el remoto como red equivalente para las demás herramientas.
 
+### Skills en tres capas (lo custom sobrevive al update)
+
+Una instancia mezcla skills de tres dueños, y la procedencia es **verificable, no de fe**: las **upstream** las trae el plugin (las renueva `harness update`, gobernadas por el manifest del generador); las **compartidas** viven en TUS repos (ej. `corvux-skills`), se declaran en `skills.yaml` y las instala `make skills` con una marca `.managed` (repo + ref + sha exactos); las **locales** (`.claude/skills/<nombre>/` sin marca) no las toca NADIE: ni el update ni el sync. En colisión de nombres la local siempre gana, con error explícito. Y hay promoción, el `/promote` de las skills: una local que probó su valor se muda al repo compartido y todas tus instancias la heredan. El doctor vigila el drift de la capa compartida.
+
 ### Memoria (tres tipos, tres lugares)
 
 | Tipo | Dónde vive | Herramienta |

@@ -12,8 +12,11 @@ cp "$ROOT/templates/scripts/pull-all.sh" "$WS/scripts/"
 git_id() { git -C "$1" -c user.email=t@t -c user.name=t "${@:2}"; }
 
 mk_pair() {  # mk_pair <nombre> → origin bare + clon canónico en repos/
+  # -b main EXPLÍCITO también en el bare: sin él, el HEAD del origin apunta
+  # al init.defaultBranch del HOST (master en CI, main en laptops
+  # configuradas) y el clone nace sin rama. Testing-policy regla 7.
   local n="$1" work="$WS/seed-$1"
-  git init -q --bare "$WS/origins/$n.git"
+  git init -q --bare -b main "$WS/origins/$n.git"
   git init -q -b main "$work" && git_id "$work" commit -q --allow-empty -m base
   git -C "$work" remote add origin "$WS/origins/$n.git"
   git -C "$work" push -q origin main

@@ -4,11 +4,11 @@ Formato: [Keep a Changelog](https://keepachangelog.com/). Este archivo empieza
 en 0.47.0; la historia previa vive en el log de git (100+ commits iterando
 contra una instalación real).
 
-## [0.47.0] — 2026-07-21
+## [0.47.0] · 2026-07-21
 
 ### Added
 - **Carriles por blast radius** (express | standard | full): el pipeline se
-  dimensiona a la tarea — express salta el RFC (2 sesiones LLM) y `gate_lane`
+  dimensiona a la tarea: express salta el RFC (2 sesiones LLM) y `gate_lane`
   en ship.sh verifica que el diff cumpla la promesa del carril; `escalate`
   sube de carril conservando el worktree. Transiciones por carril en el
   policy engine (`harness-policy.py`, `harness-policy.json`).
@@ -16,7 +16,7 @@ contra una instalación real).
   veredicto+evidencia; los rojos se reportan JUNTOS (un solo prompt de fix).
 - **Reviewer ∥ QA** en /review (qa escribe `qa-<repo>.json`, merge mecánico)
   y re-review incremental en rondas ≥2.
-- **Modelos: una perilla** — `models.yaml` con aliases `fast|smart|deep` por
+- **Modelos: una perilla**: `models.yaml` con aliases `fast|smart|deep` por
   proveedor (anthropic/vertex/bedrock/kimi/openrouter), rol→alias, overrides
   por agente; `scripts/stamp-models.sh` (stamp/resolve/check) + `make models`;
   `--model <alias>` por tarea en /auto.
@@ -54,4 +54,4 @@ contra una instalación real).
 - Trap EXIT de subshell bajo `set -e` perdía locals (bash 3.2 y 5.x) en los
   gates paralelos de ship.sh.
 - qa.md escribía el campo `qa` del veredicto (carrera con el reviewer
-  paralelo) — ahora escribe su propio artefacto.
+  paralelo); ahora escribe su propio artefacto.

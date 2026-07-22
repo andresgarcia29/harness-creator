@@ -14,6 +14,8 @@ contradice a `docs/`, gana `docs/` — y repórtalo.
   `docs/index.md` es el catálogo).
 - El harness (agentes, comandos, hooks): `.claude/`.
 - Estado por tarea: `tasks/<id>/` (task.md, plan.md, veredictos, logs).
+- `AGENTS.md`: este mismo mapa en el estándar multi-herramienta
+  (Cursor, Kimi, Codex…). Modelos: `models.yaml` + `make models`.
 
 ## Mapa de la plataforma
 
@@ -72,6 +74,8 @@ Semanal: `/promote` (memoria → ley). Roles: `.claude/agents/`.
   `scripts/quiet.sh <cmd>` — head+tail y dump completo en
   `.cache/quiet/`.
 - Preguntas cross-repo → grafo (`graphify query`), no grep masivo.
+  "¿Dónde está X?" → `semble` (búsqueda semántica local) si está
+  instalado; abrir 20 archivos para ubicar uno es el anti-patrón.
 - Docs de librerías → MCP context7, no web-search repetido.
 - Implementación → edición simbólica (Serena), no leer archivos
   enteros.

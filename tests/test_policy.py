@@ -85,6 +85,41 @@ class PolicyTest(unittest.TestCase):
         self.assertEqual(allowed.returncode, 0, allowed.stderr)
         self.assertEqual(self.run_policy("resume", self.task, "--actor", "human").returncode, 0)
 
+    def test_express_lane_skips_rfc(self):
+        self.assertEqual(self.run_policy("init", self.task, "--lane", "express").returncode, 0)
+        result = self.transition("implement")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_default_lane_still_requires_rfc(self):
+        self.assertEqual(self.run_policy("init", self.task).returncode, 0)
+        result = self.transition("implement")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("POLICY-TRANSITION-001", result.stderr)
+
+    def test_unknown_lane_rejected(self):
+        result = self.run_policy("init", self.task, "--lane", "turbo")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("POLICY-LANE-001", result.stderr)
+
+    def test_escalate_recovers_skipped_rfc(self):
+        self.assertEqual(self.run_policy("init", self.task, "--lane", "express").returncode, 0)
+        self.assertEqual(self.transition("implement").returncode, 0)
+        result = self.run_policy("escalate", self.task, "--to", "standard",
+                                 "--actor", "orchestrator", "--reason", "gate_lane")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state = json.loads((self.task / "state.json").read_text())
+        self.assertEqual(state["lane"], "standard")
+        self.assertEqual(state["phase"], "rfc")
+        # el carril nuevo permite continuar el pipeline completo
+        self.assertEqual(self.transition("implement").returncode, 0)
+
+    def test_escalate_downward_rejected(self):
+        self.assertEqual(self.run_policy("init", self.task).returncode, 0)
+        result = self.run_policy("escalate", self.task, "--to", "express",
+                                 "--actor", "orchestrator")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("POLICY-LANE-002", result.stderr)
+
     def test_dag_rejects_cycles_and_accepts_parallel_branches(self):
         dag = self.task / "dag.json"
         dag.write_text(json.dumps({"schema": 1, "tasks": [

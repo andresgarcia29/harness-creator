@@ -214,6 +214,13 @@ if [ -x "$WS/scripts/stamp-models.sh" ] && [ -f "$WS/models.yaml" ]; then
     fail "frontmatter de agentes desalineado con models.yaml" "make models (re-estampa desde la política)"
   fi
 fi
+if [ -f "$WS/skills.yaml" ] && [ -x "$WS/scripts/skills-sync.sh" ]; then
+  if bash "$WS/scripts/skills-sync.sh" --check >/dev/null 2>&1; then
+    ok "capa compartida de skills en sync (skills.yaml)"
+  else
+    warn "skills compartidas con drift o fuente inaccesible; corre: make skills"
+  fi
+fi
 [ -f "$WS/AGENTS.md" ] && ok "AGENTS.md presente (mapa multi-herramienta)" || warn "sin AGENTS.md — Cursor/Kimi/otros agentes no tienen punto de entrada"
 # Integridad de hooks: TODO hook referenciado en settings.json debe existir y
 # ser ejecutable. Un hook registrado pero ausente spamea "not found" en CADA

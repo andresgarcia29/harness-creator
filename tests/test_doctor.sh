@@ -70,6 +70,21 @@ chmod +x "$WS/.claude/hooks/guard-fantasma.sh"
 out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
 echo "$out" | grep -q "guard-fantasma" && fail "hook OK no debería reportarse" || pass "hook existente y ejecutable: silencio"
 
+echo "── doctor: frescura de clones (la ruta del stat SE EJERCITA)"
+
+# dos clones falsos con FETCH_HEAD viejo: el warn debe salir y el doctor
+# NO debe morir por stat (bug real: GNU interpretaba -f %m como filesystem
+# y set -u abortaba el doctor a mitad de corrida en Linux)
+for rname in alpha beta; do
+  mkdir -p "$WS/repos/$rname/.git"
+  touch -t 202001010000 "$WS/repos/$rname/.git/FETCH_HEAD"
+done
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_contains "$out" "resultado:" "el doctor llega al final (no muere en el stat)"
+assert_contains "$out" "make pull" "clones sin fetch en 48h: warn con remediación"
+echo "$out" | grep -q "unbound" && fail "unbound variable en el doctor" || pass "sin unbound variables"
+rm -rf "$WS/repos/alpha" "$WS/repos/beta"
+
 echo "── doctor: los checks de cadena-completa existen"
 
 # los checks añadidos por la auditoría anti-consejo-vacío deben estar en el

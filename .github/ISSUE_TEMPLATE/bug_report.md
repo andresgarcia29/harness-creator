@@ -20,5 +20,5 @@ labels: bug
 
 **Salida relevante / Relevant output**
 ```
-(pega aquí — recuerda: JAMÁS pegues valores de secretos / never paste secret values)
+(pega aquí; recuerda: JAMÁS pegues valores de secretos / never paste secret values)
 ```

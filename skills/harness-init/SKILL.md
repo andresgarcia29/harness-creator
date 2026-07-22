@@ -229,6 +229,8 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `scripts/worktree-task.sh`, `scripts/quiet.sh`, `scripts/with-secrets.sh` | scripts/ | siempre |
 | `skills.yaml` | skills.yaml.tmpl | si NO existe (es ley local: declara TUS repos de skills; el update jamás lo pisa) |
 | `scripts/skills-sync.sh` | scripts/ | siempre (make skills: instala la capa compartida con marca .managed; la local siempre gana) |
+| `scripts/context-distill.sh` | scripts/ | siempre (patrón MinionS: el reader destila contexto; opt-in via context_distill en answers) |
+| `docs/harness/minions-context-distill.md` | docs/minions-context-distill.md | siempre (capacidad MinionS, PROPUESTA/opt-in) |
 | `scripts/verdict-scaffold.sh` | scripts/ | siempre (esqueleto determinista del veredicto: el reviewer solo pone juicio; campos mecánicos de fuentes verificables) |
 | `scripts/pull-all.sh` | scripts/ | siempre (make pull: clones canónicos al último main en paralelo, sucios se saltan con aviso, dispara graph-refresh) |
 | `scripts/repo-brief.sh` | scripts/ | siempre — brief determinista por repo (`.cache/briefs/`); arranque en caliente de implementers/reviewers, $0 tokens |

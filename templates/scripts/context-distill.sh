@@ -4,7 +4,7 @@
 # pack" citado; después el agente CARO razona sobre el pack, no sobre el
 # volcado crudo (arXiv:2502.15964: el modelo caro gasta sus tokens en JUICIO,
 # no en LECTURA). $0 tokens cuando el pack está fresco (stamp por hash de las
-# entradas). OPT-IN: nada lo llama salvo que context_distill=true (ADR-0011).
+# entradas). OPT-IN: nada lo llama salvo que context_distill=true (docs/harness/minions-context-distill.md).
 #
 # Uso: context-distill.sh <task-id> <slug> "<pregunta>" <archivo|glob>...
 #   Escribe tasks/<task-id>/context/<slug>.md (el pack) y lo imprime en stdout.

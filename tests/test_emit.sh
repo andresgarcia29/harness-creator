@@ -49,6 +49,12 @@ sh -uc ". '$EMIT' && emit phase 'desde sh'" && pass "sourceable desde sh -u" || 
 if command -v zsh >/dev/null; then
   zsh -uc ". '$EMIT' && emit phase 'desde zsh'" && pass "sourceable desde zsh -u" || fail "revienta al sourcearlo desde zsh -u"
 fi
+# dash = el sh real de Debian/Ubuntu. El sh de macOS es bash disfrazado y
+# TOLERA bashisms (${VAR[0]}): sin este caso, un bashism pasa en Mac y
+# revienta en el CI de Linux — nos pasó con ${BASH_SOURCE[0]:-}.
+if command -v dash >/dev/null; then
+  dash -uc ". '$EMIT' && emit phase 'desde dash'" && pass "sourceable desde dash -u (el sh de Ubuntu)" || fail "revienta al sourcearlo desde dash -u"
+fi
 
 # 6. sin kind → no escribe, no falla
 before="$(wc -l < "$WS/.harness/events.jsonl")"

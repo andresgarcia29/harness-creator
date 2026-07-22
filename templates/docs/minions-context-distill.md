@@ -1,4 +1,8 @@
-# ADR-0011 — Destilación de contexto estilo MinionS (el reader lee, el deep razona)
+# MinionS: destilación de contexto (el reader lee, el deep razona)
+
+> Doc de capacidad del plugin (PROPUESTA, opt-in). No es un ADR de tu
+> instancia: vive en docs/harness/ para no colisionar con tu numeración de
+> ADRs. Si lo ratificas, registra TU decisión como el ADR que te toque.
 
 - **Estado**: PROPUESTO (opt-in, default OFF; requiere ratificación humana)
 - **Fecha**: 2026-07-22

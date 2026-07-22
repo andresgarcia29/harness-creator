@@ -38,7 +38,7 @@ watch: ## vigila el deploy: make watch TASK=<id> REPO=<repo>
 usage: ## costo por sesión/tarea (ccusage — la báscula oficial)
 	@ccusage
 
-ui: ## panel en vivo: agentes, fases, tokens, terminales, otras máquinas (solo lectura, solo 127.0.0.1)
-	@bash scripts/ui/panel.sh $(or $(PORT),7717)
+ui: ## panel oficial (harness ui · 7180): agentes, fases, tokens, terminales, otras máquinas — solo lectura, solo 127.0.0.1
+	@harness ui $(if $(PORT),--port $(PORT))
 
 .PHONY: help init doctor secrets wt wt-rm gowork py fe ship watch usage ui

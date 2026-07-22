@@ -90,4 +90,95 @@ assert_contains "$out" "SEC-EVIDENCIA" "el output del grupo rojo aparece"
 assert_contains "$out" "LANG-EVIDENCIA" "el rojo NO esconde el output de los verdes"
 assert_contains "$out" "security" "el resumen nombra el grupo que falló"
 
+
+echo "── gate_tests_untouched v2: neto real, escape que declara"
+
+extract gate_tests_untouched > "$WS/gate_tests.sh"
+grep -q "contabilidad NETA" "$WS/gate_tests.sh" || grep -q "global_na" "$WS/gate_tests.sh" || { echo "no pude extraer gate_tests_untouched"; exit 1; }
+
+run_tests_gate() {  # corre el gate en el repo actual; usa $WS/tasks/T1 para delta
+  ( set -u; WS="$WS"; TASK=T1; REPO=test
+    gate() { :; }; emit() { :; }
+    . "$WS/gate_tests.sh"; gate_tests_untouched )
+}
+mkdir -p "$WS/tasks/T1"
+
+# fixture base: un archivo de test con contenido realista
+mk_test_repo() {  # mk_test_repo <dir>
+  mk_repo "$1"
+  mkdir -p tests
+  cat > tests/auth.test.js <<'FIX'
+import { expect } from 'chai'
+// this behavior is asserted below
+describe('auth', () => {
+  it('valida token', () => {
+    expect(login('tok')).toEqual(true)
+    expect(logout()).toEqual(true)
+  })
+})
+FIX
+  git add . && git commit -qm tests
+  git update-ref refs/remotes/origin/main HEAD
+}
+
+# 1+2. bug de campo EXACTO: import con 'expect' y comentario con 'asserted'
+#      MOVIDOS de lugar (no borrados) → no bloquea
+mk_test_repo "$WS/g1"
+python3 - <<'PY'
+lines = open('tests/auth.test.js').read().split('\n')
+# mueve el import y el comentario al final del archivo
+moved = [l for l in lines if not (l.startswith('import ') or l.startswith('// this'))]
+moved += ['// this behavior is asserted below', "import { expect } from 'chai'"]
+open('tests/auth.test.js','w').write('\n'.join(moved))
+PY
+git add . && git commit -qm move
+rm -f "$WS/tasks/T1/delta-spec.md"
+run_tests_gate >/dev/null 2>&1 && pass "import/comentario movidos: NO bloquea (bug de campo #1)" || fail "import/comentario movidos bloquearon"
+
+# 3. aserción real borrada → bloquea nombrando el archivo
+mk_test_repo "$WS/g2"
+grep -v "logout" tests/auth.test.js > t.tmp && mv t.tmp tests/auth.test.js
+git add . && git commit -qm quita-asercion
+out="$(run_tests_gate 2>&1)"; rc=$?
+assert_eq 3 "$rc" "aserción neta eliminada: bloquea"
+assert_contains "$out" "auth.test.js" "el mensaje nombra el archivo debilitado"
+
+# 4. lo mismo pero DECLARADO en sección MODIFIED con basename → pasa
+cat > "$WS/tasks/T1/delta-spec.md" <<'FIX'
+## MODIFIED Requirements
+- AUTH-2: el logout ya no es parte del flujo; se ajusta auth.test.js
+FIX
+run_tests_gate >/dev/null 2>&1 && pass "declarado en sección con basename: pasa" || fail "declaración legítima bloqueada"
+
+# 5. la palabra REMOVED en PROSA sin nombrar el archivo → sigue bloqueando
+cat > "$WS/tasks/T1/delta-spec.md" <<'FIX'
+Contexto: este cambio no tiene nada REMOVED ni MODIFIED de fondo.
+
+## ADDED Requirements
+- AUTH-9: nueva validación
+FIX
+run_tests_gate >/dev/null 2>&1 && fail "la palabra en prosa abrió el escape (bug de campo #2)" || pass "palabra en prosa sin sección+basename: NO abre (bug de campo #2)"
+rm -f "$WS/tasks/T1/delta-spec.md"
+
+# 6. xit( añadido → bloquea
+mk_test_repo "$WS/g3"
+python3 -c "
+s=open('tests/auth.test.js').read()
+open('tests/auth.test.js','w').write(s.replace(\"it('valida token'\", \"xit('valida token'\"))"
+git add . && git commit -qm skip
+run_tests_gate >/dev/null 2>&1 && fail "xit( no bloqueó" || pass "xit( añadido: bloquea"
+
+# 7. git mv del archivo de test → no bloquea
+mk_test_repo "$WS/g4"
+git mv tests/auth.test.js tests/auth.spec.js && git commit -qm rename
+run_tests_gate >/dev/null 2>&1 && pass "git mv de test: NO bloquea (rename con -M)" || fail "rename bloqueó"
+
+# 8. bare assert de Python borrado → cuenta y bloquea
+mk_test_repo "$WS/g5"
+mkdir -p tests && printf 'def test_x():\n    assert calc() == 4\n    assert calc() != 5\n' > tests/test_calc.py
+git add . && git commit -qm py && git update-ref refs/remotes/origin/main HEAD
+printf 'def test_x():\n    assert calc() == 4\n' > tests/test_calc.py
+git add . && git commit -qm quita-bare
+run_tests_gate >/dev/null 2>&1 && fail "bare assert borrado no bloqueó" || pass "bare assert de Python borrado: bloquea"
+
 t_done

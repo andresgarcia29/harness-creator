@@ -34,7 +34,7 @@ assert_eq "" "$out" "sin binario: silencio total"
 PATH="$WS/bin:$PATH" bash "$WS/scripts/graph-refresh.sh" >/dev/null
 assert_file "$WS/graphify-out/graph.json" "build inicial produce graph.json"
 assert_file "$WS/.cache/graph.stamp" "build inicial escribe el stamp"
-assert_eq "repos" "$(head -1 "$WS/calls.log")" "primera corrida: build completo, sin --update"
+assert_eq "update repos" "$(head -1 "$WS/calls.log")" "primera corrida: build code-only (update repos, sin API key)"
 
 # 3. segunda corrida sin cambios → el stamp la vuelve no-op
 PATH="$WS/bin:$PATH" bash "$WS/scripts/graph-refresh.sh" >/dev/null
@@ -43,7 +43,7 @@ assert_eq 1 "$(wc -l < "$WS/calls.log" | tr -d ' ')" "HEADs sin cambio: cero lla
 # 4. commit nuevo → refresh incremental con --update
 cd "$WS/repos/alpha" && echo b > g.go && git add . && git commit -qm change
 PATH="$WS/bin:$PATH" bash "$WS/scripts/graph-refresh.sh" >/dev/null
-assert_eq "repos --update" "$(tail -1 "$WS/calls.log")" "HEAD nuevo: refresh incremental (--update)"
+assert_eq "update repos" "$(tail -1 "$WS/calls.log")" "HEAD nuevo: refresh incremental (update repos)"
 assert_eq 2 "$(wc -l < "$WS/calls.log" | tr -d ' ')" "exactamente una llamada por cambio real"
 
 t_done

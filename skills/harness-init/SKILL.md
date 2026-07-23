@@ -33,6 +33,9 @@ pones juicio donde hace falta (topología, entrevista, generación).
      aceptan/rechazan juntos** (a medias rompen la instancia; decláralo
      antes de que el humano elija). Los vigentes: **carriles**
      (harness-policy.json + harness-policy.py + auto.md + ship.sh) y
+     **pasos-custom** (auto.md + harness-policy.json + pipeline-steps.sh +
+     doctor.sh: el /auto nuevo llama a pipeline-steps.sh y usa la parada
+     custom_step_failed que solo existe en el policy.json nuevo) y
      **modelos** (models.yaml esquema aliases + stamp-models.sh +
      cron-runner.sh + re-estampado). La lista completa y las migraciones
      de esquema viven en `commands/harness-update.md`.
@@ -230,6 +233,10 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `skills.yaml` | skills.yaml.tmpl | si NO existe (es ley local: declara TUS repos de skills; el update jamás lo pisa) |
 | `scripts/skills-sync.sh` | scripts/ | siempre (make skills: instala la capa compartida con marca .managed; la local siempre gana) |
 | `scripts/minion-probe.sh` | scripts/ | siempre (patrón MinionS: el supervisor descompone, workers responden en paralelo; opt-in via minion_decompose) |
+| `scripts/pipeline-steps.sh` | scripts/ | siempre (el motor de los pasos custom del pipeline: list/gate; /auto lo llama tras cada fase) |
+| `.claude/pipeline/.gitkeep` | inline vacío (Keep) | siempre (dir instance-owned de los pasos custom; el update jamás lo pisa) |
+| `.claude/skills/pipeline-step-creator/SKILL.md` | skills/pipeline-step-creator/SKILL.md | siempre (la skill que guía a crear un paso custom) |
+| `docs/harness/pipeline-steps.md` | docs/pipeline-steps.md.tmpl | siempre (el contrato de los pasos custom) |
 | `docs/harness/minions-decomposition.md` | docs/minions-decomposition.md | siempre (capacidad MinionS, PROPUESTA/opt-in) |
 | `scripts/verdict-scaffold.sh` | scripts/ | siempre (esqueleto determinista del veredicto: el reviewer solo pone juicio; campos mecánicos de fuentes verificables) |
 | `scripts/pull-all.sh` | scripts/ | siempre (make pull: clones canónicos al último main en paralelo, sucios se saltan con aviso, dispara graph-refresh) |

@@ -52,6 +52,9 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
      `.claude/commands/auto.md` + `scripts/ship.sh` (el /auto nuevo hace
      `init --lane`, que el policy engine viejo rechaza; gate_lane y
      escalate viven en los otros dos).
+   - **Pasos-custom**: `auto.md` + `harness-policy.json` + `pipeline-steps.sh`
+     + `doctor.sh` (el /auto nuevo llama a pipeline-steps.sh y usa la parada
+     custom_step_failed que solo existe en el policy.json nuevo).
    - **Modelos**: `models.yaml` (esquema aliases) +
      `scripts/stamp-models.sh` + `scripts/cronjobs/cron-runner.sh` (el
      runner viejo parsea el esquema inline viejo: con el models.yaml

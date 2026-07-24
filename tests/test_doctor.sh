@@ -85,6 +85,37 @@ assert_contains "$out" "make pull" "clones sin fetch en 48h: warn con remediaci�
 echo "$out" | grep -q "unbound" && fail "unbound variable en el doctor" || pass "sin unbound variables"
 rm -rf "$WS/repos/alpha" "$WS/repos/beta"
 
+echo "── doctor: un COMENTARIO no es una declaración (issue #26)"
+
+# El ejemplo comentado del propio template hacía que TODO workspace generado
+# avisara por una ref que nadie declaró, y el aviso era irresoluble sin leer
+# el código del doctor.
+cat > "$WS/harness-answers.yaml" <<'EOF'
+secrets:
+  source: vault
+  refs:
+    - vault://proyecto/harness/argocd
+#    - env://GH_TOKEN
+#    - env://<NOMBRE_DE_LA_VARIABLE>
+EOF
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_not_contains "$out" "GH_TOKEN" "una ref env:// comentada NO produce aviso"
+
+# y una ref REAL sin variable en el entorno sigue avisando (el check sirve)
+cat > "$WS/harness-answers.yaml" <<'EOF'
+secrets:
+  source: env
+  refs:
+    - env://HARNESS_TEST_VAR_QUE_NADIE_EXPORTA
+EOF
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_contains "$out" "HARNESS_TEST_VAR_QUE_NADIE_EXPORTA" "una ref env:// real sin variable sí avisa"
+# el ejemplo del template no puede ser un literal parseable
+grep -qE '^#.*env://[A-Za-z_][A-Za-z0-9_]*$' "$ROOT/templates/harness-answers.yaml.tmpl" \
+  && fail "el template trae un ejemplo env:// que el parser puede confundir con una ref" \
+  || pass "el ejemplo del template no es un literal parseable"
+rm -f "$WS/harness-answers.yaml"
+
 echo "── doctor: los checks de cadena-completa existen"
 
 # los checks añadidos por la auditoría anti-consejo-vacío deben estar en el

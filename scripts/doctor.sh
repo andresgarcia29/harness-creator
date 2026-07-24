@@ -109,8 +109,11 @@ fi
 
 # 7 · Secretos: flujo completo, nunca valores
 if [ -f "$ANSWERS" ]; then
-  # referencias env://: presencia de la variable
-  for var in $(grep -oE 'env://[A-Za-z_][A-Za-z0-9_]*' "$ANSWERS" | sed 's|env://||' | sort -u); do
+  # referencias env://: presencia de la variable. Los COMENTARIOS no cuentan:
+  # el grep sobre el archivo entero cazaba el ejemplo comentado del propio
+  # template y todo workspace generado avisaba por una ref que nadie declaró
+  # (issue #26). Se corta desde el # antes de buscar.
+  for var in $(sed 's/#.*//' "$ANSWERS" | grep -oE 'env://[A-Za-z_][A-Za-z0-9_]*' | sed 's|env://||' | sort -u); do
     [ -n "${!var:-}" ] && ok "secreto presente: \$$var" || warn "secreto no presente en entorno: \$$var"
   done
   # fuente vault/gcp-sm: bootstrap (token) y materialización (.secrets)

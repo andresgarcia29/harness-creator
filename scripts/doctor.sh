@@ -39,7 +39,7 @@ if [ -f "$WS/manifest.yaml" ] && [ -d "$WS/repos" ]; then
 fi
 
 # 2 · Scripts de instancia ejecutables
-for s in ship.sh worktree-task.sh quiet.sh with-secrets.sh emit.sh          build-slot.sh gowork.sh py.sh fe.sh repo-brief.sh          stamp-models.sh graph-refresh.sh pull-all.sh skills-sync.sh          verdict-scaffold.sh minion-probe.sh pipeline-steps.sh plan-lint.sh; do
+for s in ship.sh worktree-task.sh quiet.sh with-secrets.sh emit.sh          build-slot.sh gowork.sh py.sh fe.sh repo-brief.sh          stamp-models.sh graph-refresh.sh pull-all.sh skills-sync.sh          verdict-scaffold.sh minion-probe.sh pipeline-steps.sh plan-lint.sh          harness-bug.sh; do
   if [ -f "$WS/scripts/$s" ]; then
     [ -x "$WS/scripts/$s" ] && ok "scripts/$s ejecutable" || fail "scripts/$s no ejecutable" "chmod +x scripts/$s"
     bash -n "$WS/scripts/$s" 2>/dev/null && ok "scripts/$s sintaxis válida" || fail "scripts/$s con error de sintaxis" "revisa el archivo (bash -n scripts/$s)"
@@ -158,6 +158,29 @@ if [ -f "$WS/scripts/emit.sh" ]; then
     || warn "ship.sh no sourcea emit.sh — los gates no se cuentan y el panel no puede enseñar cuándo el harness frenó a su propio agente"
 else
   warn "falta scripts/emit.sh — el panel solo verá agentes y tokens (lo que presta Claude Code), nunca tus decisiones ni tus gates; corre /harness-init . (modo update)"
+fi
+
+# 8a-ter · El canal de vuelta al plugin (ley 12): un bug del harness que muere
+# en la máquina de un usuario se lo come el siguiente usuario igual. El script
+# es el filtro determinista (propiedad, drift, versión, dedupe, cuota,
+# redacción); la skill es el juicio. Sin gh, el canal no publica.
+upstream_mode="auto"
+[ -f "$ANSWERS" ] && upstream_mode="$(grep -E '^upstream_issues:' "$ANSWERS" | head -1 | awk '{print $2}')"
+[ -n "$upstream_mode" ] || upstream_mode="auto"
+if [ "$upstream_mode" = "off" ]; then
+  ok "reportes upstream deshabilitados por decisión de la instancia (upstream_issues: off)"
+else
+  if [ -f "$WS/.claude/skills/harness-bug-report/SKILL.md" ]; then
+    ok "skill harness-bug-report presente (verifica antes de reportar)"
+  else
+    warn "falta .claude/skills/harness-bug-report/SKILL.md: sin ella los agentes reportan sin verificar (o no reportan); corre /harness-init . (modo update)"
+  fi
+  command -v gh >/dev/null 2>&1 \
+    || warn "gh ausente, harness-bug.sh no puede abrir el issue upstream; el reporte queda solo en --dry-run"
+  if [ -f "$WS/.harness/upstream-issues.jsonl" ]; then
+    nrep=$(wc -l < "$WS/.harness/upstream-issues.jsonl" | tr -d ' ')
+    ok "$nrep reporte(s) upstream desde esta instancia (scripts/harness-bug.sh list)"
+  fi
 fi
 
 # 8b · Presupuesto de contexto SIEMPRE inyectado.

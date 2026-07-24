@@ -65,6 +65,14 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
      instancia tiene planes viejos en vuelo, plan-lint los va a marcar
      rojos (no traen los bloques `### T<n>`); es esperado, se reescriben o
      se terminan con el pipeline viejo.
+   - **Canal-de-vuelta**: `scripts/harness-bug.sh` +
+     `.claude/skills/harness-bug-report/SKILL.md` + `CLAUDE.md`/`AGENTS.md`
+     (ley 12 / ley 9) + `.claude/commands/auto.md` + `doctor.sh` + la clave
+     `upstream_issues:` del answers (migración: si el answers no la trae,
+     agrégala en `auto` DESPUÉS de declararle al humano que el harness va a
+     publicar issues en el repo público del plugin; si no lo quiere, `off`).
+     La ley sin el script manda a los agentes a un comando que no existe, y
+     el script sin la skill reporta sin verificar.
    - **Modelos**: `models.yaml` (esquema aliases) +
      `scripts/stamp-models.sh` + `scripts/cronjobs/cron-runner.sh` (el
      runner viejo parsea el esquema inline viejo: con el models.yaml

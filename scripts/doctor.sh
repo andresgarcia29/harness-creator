@@ -38,6 +38,19 @@ if [ -f "$WS/manifest.yaml" ] && [ -d "$WS/repos" ]; then
   done
 fi
 
+# 1c · .gitignore: las tres trampas caras. graphify-out/ pesa cientos de MB
+# (128 MB medidos con 28 repos) y el propio flujo invita al accidente
+# (`git init` del workspace + `make graph` + `git add -A`); go.work lo genera
+# gowork.sh con rutas absolutas de ESTA máquina; .secrets son valores. Issue #27.
+if [ -f "$WS/.gitignore" ]; then
+  grep -qxF ".secrets" "$WS/.gitignore" \
+    || fail ".gitignore SIN .secrets" "agrégalo YA: un git add -A commitea valores de secretos"
+  for e in "graphify-out/" "go.work"; do
+    grep -qxF "$e" "$WS/.gitignore" \
+      || warn ".gitignore sin '$e': es regenerable/por-máquina y no debe entrar a git; añádelo (o corre /harness-init . en modo update)"
+  done
+fi
+
 # 2 · Scripts de instancia ejecutables
 for s in ship.sh worktree-task.sh quiet.sh with-secrets.sh emit.sh          build-slot.sh gowork.sh py.sh fe.sh repo-brief.sh          stamp-models.sh graph-refresh.sh pull-all.sh skills-sync.sh          verdict-scaffold.sh minion-probe.sh pipeline-steps.sh plan-lint.sh          harness-bug.sh; do
   if [ -f "$WS/scripts/$s" ]; then

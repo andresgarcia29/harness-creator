@@ -23,7 +23,7 @@ grep -q "harness-init-wizard" ../templates/ui/dist/assets/*.js || { echo "dist d
 echo "── frontend: dist del panel vendoreado al día (source + estructura en harness-ui) ✓"
 
 failed=0
-for t in test_emit.sh test_track_read.sh test_docs.sh test_build_slot.sh test_gowork_shims.sh test_ship_gates.sh test_stamp_models.sh test_graph_refresh.sh test_pull_all.sh test_skills_sync.sh test_verdict_scaffold.sh test_minion_probe.sh test_pipeline_steps.sh test_plan_lint.sh test_precheck.sh test_harness_bug.sh test_discover.sh test_doctor.sh; do
+for t in test_emit.sh test_track_read.sh test_docs.sh test_build_slot.sh test_gowork_shims.sh test_ship_gates.sh test_stamp_models.sh test_graph_refresh.sh test_pull_all.sh test_skills_sync.sh test_verdict_scaffold.sh test_minion_probe.sh test_pipeline_steps.sh test_secrets.sh test_plan_lint.sh test_precheck.sh test_harness_bug.sh test_discover.sh test_doctor.sh; do
   echo; bash "$t" || failed=1
 done
 if [ "${1:-}" != "fast" ]; then

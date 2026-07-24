@@ -589,6 +589,24 @@ El ritual **`/promote`** (semanal) cierra el loop: *la memoria propone, git disp
 - **Denials** — `kubectl apply`, `terraform apply`, `argocd app rollback`, `git push --force` y la regeneración ciega de snapshots están denegados a los agentes en `settings.json`. Writes de infra: solo por GitOps.
 - **semgrep/rules.yaml** — sensores custom donde **cada regla incluye su remediación en el mensaje**. Crece solo: el cronjob `rule-miner` mina reglas nuevas de los bugs de cada mes.
 
+### El canal de vuelta: un bug del harness no muere en tu máquina
+
+El harness corre en la máquina de cada usuario, así que sus propias fallas se quedan ahí: el agente pone un workaround local, sigue con su tarea, y el siguiente usuario tropieza con lo mismo. Por eso la instancia trae una **regla automática** (ley 12 del CLAUDE.md, ley 9 del AGENTS.md): si un artefacto **del plugin** falla o contradice lo que su propia cabecera documenta, el agente lo verifica y levanta el issue en este repo, sin que nadie se lo pida.
+
+Lo delicado no es reportar: es no convertir el canal en spam. Por eso el juicio y la verificación están separados. El juicio lo pone la skill `harness-bug-report` (¿el repro se sostiene dos veces en shell limpia? ¿es del plugin o de tu instancia? ¿le pasa a alguien más? ¿vale la pena arreglarlo?) y lo verificable lo hace `scripts/harness-bug.sh`, que es **fail-closed** y no publica nada si algo no cuadra:
+
+| Verificación | Por qué existe |
+|---|---|
+| **Propiedad del artefacto** (plugin vs instancia) | tu spec, tu paso custom o tu abogado no son bugs del plugin, aunque duelan igual |
+| **Drift contra el template** (sha256) | un archivo que parcheaste no lo reproduce upstream: exige `--force` con justificación |
+| **Versión al día** | reportar un bug ya corregido es la falla más común de estos canales |
+| **Repro adjunto y no vacío** | un reporte sin repro es una queja |
+| **Dedupe por fingerprint** (local + búsqueda remota) | el mismo bug en 20 máquinas es un issue, no 20 |
+| **Cuota de 3 issues/24h** | una tormenta automática entierra los reportes reales |
+| **Redacción de secretos** (los mismos patrones del bus, ya testeados) | el repro suele ser la salida de un comando, y sale a un repo público |
+
+Es la única acción del harness que publica algo hacia afuera, así que se declara en la entrevista y se apaga con una línea: `upstream_issues: off` en `harness-answers.yaml` (o `HARNESS_UPSTREAM_ISSUES=off`), y los hallazgos se te reportan a ti. Lo ya reportado: `make bugs`.
+
 ---
 
 ## Self-healing: los cronjobs

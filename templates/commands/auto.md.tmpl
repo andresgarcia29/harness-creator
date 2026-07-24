@@ -313,6 +313,12 @@ no edites el estado. Al cerrar cada fase registra el total monotónico de
 - Crear go.work / config local al worktree si los `replace` relativos lo
   exigen para compilar.
 - Reintentar comandos de red que fallaron por transitorios (curl 56).
+- **Reportar upstream un bug del HARNESS** cuando un artefacto del plugin
+  falle o contradiga su contrato: verificas con la skill
+  `harness-bug-report` y corres `scripts/harness-bug.sh report`. No es una
+  parada y no se pregunta (el script es fail-closed: verifica propiedad,
+  drift, versión, repro, cuota y redacta secretos). Sigue con la tarea: si
+  necesitaste un workaround local, queda comentado con la URL del issue.
 - Continuar al siguiente paso cuando el actual quedó verde.
 - Elegir el umbral concreto de un criterio difuso (déjalo en el ledger).
 

@@ -18,7 +18,29 @@ contra una instalación real).
   implementer lo corre antes de entregar y /review no lanza reviewer ni QA
   en rojo. Un precheck rojo NO consume presupuesto de loop.
 
+- **Canal de vuelta al plugin (regla automática)**: si un agente tropieza con
+  un bug del HARNESS (no del código del usuario), lo verifica y levanta el
+  issue en este repo, en vez de rodearlo con un workaround que condena al
+  siguiente usuario. El juicio lo pone la skill `harness-bug-report` (repro
+  dos veces en shell limpia, mínimo y sin tus repos privados; ¿es del plugin
+  o de tu instancia?; ¿vale la pena arreglarlo?) y lo verificable lo hace
+  `scripts/harness-bug.sh`, fail-closed: propiedad del artefacto, drift
+  sha256 contra el template del plugin, versión al día, repro no vacío,
+  dedupe por fingerprint (local + búsqueda remota), cuota de 3 issues/24h y
+  redacción de secretos (los patrones del bus) antes de publicar. Ley 12 del
+  CLAUDE.md y ley 9 del AGENTS.md, decisión pre-aprobada en `/auto`, check en
+  doctor, `make bug` / `make bugs`. Es la única acción del harness que publica
+  hacia afuera: se declara en la entrevista y se apaga con
+  `upstream_issues: off` (o `HARNESS_UPSTREAM_ISSUES=off`).
+
 ### Changed
+- **El grafo de código se construye en el onboarding** (`bootstrap.sh` /
+  `make init`), antes del doctor y antes de la primera tarea. El build
+  inicial tarda minutos y es de una sola vez: dejarlo para la primera
+  `graphify query` hacía que esa query fallara contra un grafo inexistente y
+  el agente cayera a grep masivo, gastando justo los tokens que el grafo
+  venía a ahorrar, y en medio del trabajo. Fail-open: sin graphify elegido,
+  silencio; con `--check` solo reporta si el grafo existe.
 - **El architect es un hilo fino que piensa hondo**: sus planes se escriben
   en modo `ultrathink` (igual la síntesis del RFC, el mini-plan express y
   los ADRs; el loop de edición NO lo usa), y su contexto son briefs, grafo y

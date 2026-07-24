@@ -81,6 +81,17 @@ resumes with `/auto <task-id>`.
   lands as a PR, never a direct push. Includes rule-miner (monthly: turns
   bugs into semgrep rules) and skill-miner (turns repeated procedures into
   skills).
+- **Upstream bug channel**: when an agent hits a bug in the *harness itself*
+  (not in your code), an automatic rule makes it verify and report it instead
+  of silently working around it. The judgment lives in the
+  `harness-bug-report` skill (reproduce twice in a clean shell, minimal repro,
+  is it worth fixing?); the verifiable part lives in `scripts/harness-bug.sh`
+  and is fail-closed: artifact ownership (plugin vs your instance), sha256
+  drift against the shipped template, instance up to date, non-empty repro,
+  fingerprint dedupe (local + remote), a 3-issues/24h quota, and secret
+  redaction before anything is published. It is the only outward-facing action
+  in the harness: declared during the interview and switched off with
+  `upstream_issues: off`.
 - **Anti-cheating gates**: `gate_tests_untouched` blocks weakened tests
   (deleted assertions, added skips) unless the spec declares the behavior
   change; `gate_evidence` verifies the reviewer actually *opened* the tests

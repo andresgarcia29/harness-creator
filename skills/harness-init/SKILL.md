@@ -183,6 +183,16 @@ harness; cada agente es contexto y mantenimiento.
     (token vs password, api_key vs LINEAR_API_KEY); asumir el campo
     rompe la materialización con el layout real.
 
+15. **Canal de vuelta al plugin** (`upstream_issues`, default `auto`):
+    cuando un agente tropiece con un bug DEL HARNESS (no del código del
+    usuario), lo verifica y levanta un issue en el repo público del
+    plugin. DECLÁRALO, no lo escondas: es la única acción del harness que
+    publica algo hacia afuera. Di qué viaja (artefacto, repro que el
+    agente redujo, versión, OS) y qué no (valores de secretos: el cuerpo
+    pasa por la redacción del bus; hay dedupe por fingerprint y cuota de
+    3 issues/24h). Si el humano prefiere que nada salga de su máquina:
+    `off`, y los hallazgos se le reportan a él. Registra la decisión.
+
 ## Fase 3 — Generación
 
 **Camino preferido (determinista, cero tokens):** si `command -v harness`
@@ -244,12 +254,14 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `scripts/pipeline-steps.sh` | scripts/ | siempre (el motor de los pasos custom del pipeline: list/gate; /auto lo llama tras cada fase) |
 | `.claude/pipeline/.gitkeep` | inline vacío (Keep) | siempre (dir instance-owned de los pasos custom; el update jamás lo pisa) |
 | `.claude/skills/pipeline-step-creator/SKILL.md` | skills/pipeline-step-creator/SKILL.md | siempre (la skill que guía a crear un paso custom) |
+| `.claude/skills/harness-bug-report/SKILL.md` | skills/harness-bug-report/SKILL.md | siempre: el protocolo de verificación de un bug DEL HARNESS (¿es real? ¿es del plugin y no de tu instancia? ¿vale la pena arreglarlo?) antes de levantar el issue upstream |
+| `scripts/harness-bug.sh` | scripts/ | siempre: el filtro determinista del canal de vuelta: propiedad del artefacto (plugin vs instancia), drift contra el template, versión al día, repro no vacío, dedupe por fingerprint (local + remoto), cuota 3/24h y redacción de secretos. Publica con `gh issue create` en el repo del plugin |
 | `docs/harness/pipeline-steps.md` | docs/pipeline-steps.md.tmpl | siempre (el contrato de los pasos custom) |
 | `docs/harness/minions-decomposition.md` | docs/minions-decomposition.md | siempre (capacidad MinionS, PROPUESTA/opt-in) |
 | `scripts/verdict-scaffold.sh` | scripts/ | siempre (esqueleto determinista del veredicto: el reviewer solo pone juicio; campos mecánicos de fuentes verificables) |
 | `scripts/pull-all.sh` | scripts/ | siempre (make pull: clones canónicos al último main en paralelo, sucios se saltan con aviso, dispara graph-refresh) |
 | `scripts/repo-brief.sh` | scripts/ | siempre — brief determinista por repo (`.cache/briefs/`); arranque en caliente de implementers/reviewers, $0 tokens |
-| `scripts/graph-refresh.sh` | scripts/ | si graphify elegido — el ciclo de vida del grafo: build inicial, `--update` incremental, stamp por HEADs. Sin esto, "usa graphify query" es un consejo vacío. Lo llaman el prefetch de /auto y /rfc, harness-janitor y `make graph` |
+| `scripts/graph-refresh.sh` | scripts/ | si graphify elegido — el ciclo de vida del grafo: build inicial, `--update` incremental, stamp por HEADs. Sin esto, "usa graphify query" es un consejo vacío. Lo llama el BOOTSTRAP (build inicial en el onboarding, antes de la primera tarea), el prefetch de /auto y /rfc, harness-janitor y `make graph` |
 | `scripts/harness-policy.py`, `scripts/evidence.py` | scripts/ | siempre — el policy engine v1 (transiciones por carril, escalate, validate-ship) y evidence v1; ship.sh y /auto los invocan |
 | `harness-policy.json` | policy.json | siempre — leyes ejecutables del flujo: transiciones por carril (express\|standard\|full), paradas permitidas, límites |
 | `scripts/build-slot.sh` | scripts/ | siempre (semáforo de builds pesados, Ley 8; universal — perl/flock) |
@@ -316,7 +328,12 @@ la arqueología ligera:
 ## Fase 4 — Bootstrap + Verificación
 
 Primero OFRECE correr el bootstrap (instala lo que falta, guía el
-token, materializa secretos y termina en doctor):
+token, materializa secretos, CONSTRUYE EL GRAFO de código y termina en
+doctor). El orden importa: el grafo se construye antes de que nadie lo
+use. Su build inicial tarda minutos y es de una sola vez; si se deja
+para la primera tarea, la primera `graphify query` falla contra un
+grafo inexistente y el agente cae a grep masivo, que es justo el gasto
+que el grafo venía a evitar. Avísale al humano de esos minutos:
 
 ```
 <workspace>/scripts/bootstrap.sh          # o --check para solo reportar

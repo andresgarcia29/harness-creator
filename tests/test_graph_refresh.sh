@@ -46,4 +46,18 @@ PATH="$WS/bin:$PATH" bash "$WS/scripts/graph-refresh.sh" >/dev/null
 assert_eq "update repos" "$(tail -1 "$WS/calls.log")" "HEAD nuevo: refresh incremental (update repos)"
 assert_eq 2 "$(wc -l < "$WS/calls.log" | tr -d ' ')" "exactamente una llamada por cambio real"
 
+echo "── el grafo se construye en el ONBOARDING, no en la primera tarea"
+
+# El build inicial tarda minutos: si se deja para la primera query, el agente
+# cae a grep masivo justo en medio de una tarea. El bootstrap lo construye
+# ANTES del doctor (que lo verifica) y antes de que nadie lo use.
+boot="$ROOT/templates/scripts/bootstrap.sh.tmpl"
+grep -q "graph-refresh.sh" "$boot" || fail "bootstrap no construye el grafo"
+g_line="$(grep -n "scripts/graph-refresh.sh" "$boot" | head -1 | cut -d: -f1)"
+d_line="$(grep -n "scripts/doctor.sh" "$boot" | head -1 | cut -d: -f1)"
+[ -n "$g_line" ] && [ -n "$d_line" ] && [ "$g_line" -lt "$d_line" ] \
+  && pass "el grafo se construye ANTES del doctor que lo verifica" \
+  || fail "el bootstrap corre el doctor antes de construir el grafo"
+bash -n "$boot" && pass "bootstrap con sintaxis válida" || fail "bootstrap con error de sintaxis"
+
 t_done

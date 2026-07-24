@@ -68,8 +68,8 @@ rm -f "$WS/tasks/T1/state.json"
 
 echo "── gates en paralelo: un rojo no esconde a los demás"
 
-run_pargates() {  # run_pargates <security-rc> — grupos stub, security parametrizado
-  ( set -eu; WS="$WS"; REPO=test; CURRENT_GATE=""; sec_rc="$1"
+run_pargates() {  # run_pargates <security-rc> [precheck]: grupos stub, security parametrizado
+  ( set -eu; WS="$WS"; REPO=test; CURRENT_GATE=""; sec_rc="$1"; PRECHECK="${2:-0}"
     emit() { :; }; gate() { CURRENT_GATE="$1"; }
     run_lang_gates() { echo LANG-EVIDENCIA; }
     run_security_gates() { echo SEC-EVIDENCIA; return "$sec_rc"; }
@@ -89,6 +89,14 @@ assert_eq 3 "$rc" "un grupo rojo → rojo agregado (exit 3)"
 assert_contains "$out" "SEC-EVIDENCIA" "el output del grupo rojo aparece"
 assert_contains "$out" "LANG-EVIDENCIA" "el rojo NO esconde el output de los verdes"
 assert_contains "$out" "security" "el resumen nombra el grupo que falló"
+
+# precheck: mismos grupos mecánicos, sin el de veredicto (todavía no existe).
+# El detalle importa: si el precheck exigiera veredicto, jamás podría correr
+# ANTES del review, que es toda su razón de ser.
+out="$(run_pargates 0 1 2>&1)"; rc=$?
+assert_eq 0 "$rc" "precheck: verde sin veredicto"
+assert_contains "$out" "LANG-EVIDENCIA" "precheck: corre los gates mecánicos"
+assert_not_contains "$out" "VERDICT-EVIDENCIA" "precheck: NO corre el grupo de veredicto"
 
 
 echo "── gate_tests_untouched v2: neto real, escape que declara"

@@ -4,8 +4,10 @@
 #   provider: cli (cero costo de contexto) | mcp (costo fijo por sesión) | script (generado)
 #   bin:      binario que doctor.sh verifica con `command -v` (solo provider: cli)
 #   mcp:      clave en .mcp.json que doctor.sh verifica (solo provider: mcp)
-#   config:   entrada para .mcp.json (command + args); wrap: true → envolver
-#             el comando en scripts/with-secrets.sh (inyección única de secretos)
+#   config:   entrada para .mcp.json. Local (stdio): command + args; wrap: true →
+#             envolver el comando en scripts/with-secrets.sh (inyección única de
+#             secretos). Remoto: type: http|sse + url (sin wrap; el auth es OAuth
+#             del cliente, no variables de entorno)
 #   permission_tier: read-only | read-write | destructive. La entrevista puede
 #             DEGRADAR el tier (ej. github-mcp a read-only); se registra en answers.
 #   profiles: qué agentes ven esta capacidad (menos tools = contexto más barato).
@@ -669,3 +671,15 @@ capabilities:
     profiles: [deployer]
     detect: "GKE en el stack"
     phase: 2
+
+  - name: meta-devtools-mcp
+    category: mcp
+    purpose: "MCP oficial de Meta (beta): config de apps, estado de App Review, compliance, uso/rate limits de la Graph API, webhooks y búsqueda de docs, sin abrir el dashboard de developers.facebook.com"
+    provider: mcp
+    mcp: meta_developer_tools
+    config: { type: "http", url: "https://mcp.facebook.com/devtools" }
+    permission_tier: read-only
+    profiles: [orquestador, implementer]
+    detect: "APIs de Meta en el stack (Graph API, WhatsApp Cloud API, Instagram, Facebook Login, webhooks de Meta)"
+    phase: 2
+    note: "remoto (streamable HTTP) con OAuth de cuenta de developer: cero secretos en config, pero exige `/mcp` → authenticate al arrancar el cliente (no sirve en cron ni headless). Scope Read por default; Manage solo si de verdad se necesita crear/borrar suscripciones de webhooks (único write del server) y sube el tier a read-write. Beta con rollout gradual: puede no estar habilitado en la cuenta, y el set de tools puede cambiar. Los 10 tools traen contenido externo (docs, payloads de webhooks): tratarlo como no confiable, sin accionar automático"

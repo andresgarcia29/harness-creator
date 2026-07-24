@@ -196,13 +196,13 @@ INT -->|"resuelto con evidencia"| LED["<b>assumptions.md</b> · el ledger<br/>SU
 
 LED --> LANE{"<b>②b CARRIL</b> por blast radius<br/>señales deterministas del inventario/grafo<br/>en duda: el carril MAYOR"}:::dec
 LANE -->|"<b>express</b> · 1 repo · 1 dominio · sin contratos<br/>mini-plan del orquestador · SALTA el RFC"| IMP
-LANE -->|"standard · architect sin abogados<br/>full · pipeline completo"| RFC["<b>③ RFC</b> · abogados SOLO de dominios cruzados, en PARALELO<br/>una respuesta JSON c/u · no implementan nunca<br/><b>architect</b> sintetiza → plan.md · DAG · delta-spec · beads<br/><i>prefetch en background: worktrees · briefs · deps ($0)</i>"]:::agent
+LANE -->|"standard · architect sin abogados<br/>full · pipeline completo"| RFC["<b>③ RFC</b> · abogados SOLO de dominios cruzados, en PARALELO<br/>una respuesta JSON c/u · no implementan nunca<br/><b>architect</b> = hilo fino en <b>ultrathink</b>: descompone en probes,<br/>workers responden en paralelo, él sintetiza → plan.md · DAG · delta-spec<br/><b>plan-lint.sh</b> verde o no hay implement · <i>prefetch en background ($0)</i>"]:::agent
 RFC -.-> PARA
 
-RFC --> IMP["<b>④ IMPLEMENT</b> · bd ready manda · arranque en caliente<br/>(worktree+deps+brief ya prefetcheados) · 1 implementer =<br/>1 tarea = 1 worktree = 1 repo · lo paralelo NO se serializa<br/>watchdog por heartbeat (~3 min sin tool calls)"]:::agent
+RFC --> IMP["<b>④ IMPLEMENT</b> · bd ready manda · arranque en caliente<br/>(worktree+deps+brief ya prefetcheados) · 1 implementer =<br/>1 tarea = 1 worktree = 1 repo · lo paralelo NO se serializa<br/>watchdog por heartbeat (~3 min sin tool calls)<br/><b>ship.sh --precheck</b> antes de entregar: rojo NO llega a review"]:::agent
 IMP -.-> PARA
 
-IMP --> REV["<b>⑤ REVIEW</b> · encola al terminar, no al final<br/><b>reviewer ∥ qa</b> EN PARALELO · merge mecánico del campo qa<br/>reviewer: verdict.json + compliance matrix 100%<br/>qa: ejercita los criterios · re-review incremental en rondas ≥2"]:::agent
+IMP --> REV["<b>⑤ REVIEW</b> · encola al terminar, no al final<br/><b>reviewer ∥ qa</b> EN PARALELO · merge mecánico del campo qa<br/>reviewer: verdict.json + compliance matrix 100% · <b>ronda 1 exhaustiva</b><br/>qa: ejercita los criterios · re-review incremental en rondas ≥2"]:::agent
 REV -->|"🔴 fail · el error ES el prompt del fix"| IMP
 REV -.-> PARA
 
@@ -322,6 +322,10 @@ La contraparte exacta: el abogado existe para defender fronteras, así que **si 
 
 Cuando chocan, el desempate **no es consenso ni la opinión del arquitecto**: es evidencia. Contratos → el repo proto es el árbitro. Datos → `docs/architecture/map.md`. Máximo 2 rondas; si no convergen, las posiciones van en limpio a un humano — porque un desacuerdo real entre dos dominios *es* una decisión de negocio, y esas no las toma un modelo.
 
+**El arquitecto es un hilo fino que piensa hondo.** Son dos decisiones opuestas y deliberadas. Piensa hondo: todo artefacto de planeación (el plan, la síntesis del RFC, el mini-plan del carril express, los ADRs) se escribe en modo **ultrathink**, porque es lo único que van a ejecutar N implementers sin poder preguntarle nada; el loop de edición, en cambio, no lo usa nunca (ahí el valor está en el diff y pensar de más es latencia comprada). Y lee poco: en vez de abrirse 20 archivos hasta llenar su ventana, **descompone la incertidumbre en sub-preguntas con scope** (`probes.json`), unos workers baratos las responden EN PARALELO citando `archivo:línea`, y él sintetiza sobre ese pack. Si le falta un hecho, emite otra probe; no abre el archivo. Máximo dos rondas, y lo que siga faltando después de la segunda no es un hueco de contexto: es una decisión que le toca a un humano.
+
+Antes de que salga un solo implementer, el plan pasa por **`plan-lint.sh`** (determinista, $0): cada tarea declara repo, requirement IDs, archivos, criterios binarios, complexity y deps; cero "TBD", "por definir" o "investigar si"; y cada `req` citado existe de verdad en el delta-spec. La razón es de velocidad, no de burocracia: **lo que el plan no decide lo decide un implementer solo y a ciegas, y vuelve como blocking una hora después**. Es la única revisión del plan que no cuesta una ronda.
+
 La parada por **abogado en `DRAFT`** parece burocracia y es lo contrario: la constitución de un abogado la propuso la arqueología leyendo tu código, pero hasta que un humano la ratifica **nadie la firmó**. Litigar citando una ley sin firmar es teatro. Por eso `/auto` para ahí — y es la primera cosa que vas a ratificar después de instalar.
 
 ### ④ Implement — paralelo por defecto, contexto mínimo por diseño
@@ -359,11 +363,15 @@ classDef script fill:#0b3d2e,stroke:#10b981,stroke-width:2px,color:#d1fae5
 
 T1 ya se está shippeando mientras T2 vuelve a implementación por un review rojo. Nadie espera a nadie: **el DAG es la única autoridad sobre el orden**.
 
+Y antes de entregar, cada implementer corre **`ship.sh --precheck <task> <repo>`**: los mismos gates mecánicos del ship (build, tests, lint, gitleaks, tests-no-debilitados) sobre su worktree, sin veredicto y sin push. La aritmética es toda la razón: un test roto detectado por un script cuesta segundos y cero tokens; el mismo test roto detectado por un reviewer cuesta una ronda completa de 10 a 20 minutos. Por eso un precheck rojo **no consume presupuesto de loop** (el reviewer no vio nada) y `/review` simplemente no lanza a nadie hasta que el sello `precheck-<repo>.json` esté verde sobre el HEAD actual.
+
 ### ⑤ Review — contra el "listo" autodeclarado
 
 El modo de fallo #1 de los agentes es declararse terminados. Contra eso, dos capas que no se pisan: el **reviewer** emite el JSON que `ship.sh` exige, con una **compliance matrix** — cada requirement del delta-spec apareado con el test que lo prueba. "El review aprobó" es difuso; "requirements cubiertos: 100%" lo verifica una máquina. Y **qa** no lee código: ejercita tus criterios de aceptación como un usuario, con Playwright si hay frontend, local y en el canary.
 
 Las dos capas corren **en paralelo** — qa ejercita comportamiento y no necesita el veredicto; serializarlas regalaba la fase entera al camino crítico. Cada una escribe su archivo (`verdict-<repo>.json`, `qa-<repo>.json`) y el merge del campo `qa` es mecánico (jq, mismo commit obligatorio). Y el loop fail→fix es **incremental**: el reviewer re-evalúa el diff desde su veredicto anterior más el cierre de cada blocking — no el cambio completo otra vez — aunque el veredicto nuevo siempre ata al HEAD completo.
+
+**La ronda 1 es exhaustiva, y ese es el contrato anti-goteo.** El costo real de un review no es la pasada del reviewer: son las rondas que provoca. Un blocking que aparece en la ronda 3 y ya estaba a la vista en la ronda 1 le costó al proyecto dos ciclos completos de implementer. Por eso el reviewer revisa el diff entero antes de escribir su primer blocking y entrega la lista COMPLETA de una vez; en rondas siguientes solo puede abrir hallazgos nuevos por código que el fix tocó, por regresión, o por algo que el fix hizo observable. Lo que no impide shippear va a `non_blocking` y de ahí a un bead de seguimiento, **nunca a otra ronda**. Y si algo llega tarde igual se reporta (ocultar un defecto real sería peor), pero marcado `[tardío]`: esa cuenta sale en el reporte final junto con `review_rounds`, porque es la métrica que dice si el plan estuvo bien hecho.
 
 Cada tarea encola su review **al terminar**, no al final de todas: T1 puede estar en review mientras T4 se implementa. Es un pipeline, no una barrera.
 
@@ -665,7 +673,7 @@ Los fixes se hacen en ESTE repo y las instancias los reciben por diff:
 /harness-init .                       # en el workspace: modo update
 ```
 
-El modo update **no re-pregunta** lo respondido, migra esquemas sin tocar tus decisiones (`harness-answers.yaml`; y `models.yaml` viejo con IDs crudos → provider + aliases), **reconcilia** (una respuesta nueva propaga diffs a manifest/CLAUDE.md/DAG) y distingue propiedad: los scripts del plugin se actualizan con upstream; tus answers, models, specs y constituciones son ley local y se conservan. Nada se pisa sin confirmación — con una excepción declarada: los **paquetes atados** (carriles: policy+auto+ship · modelos: models.yaml+stamp+cron-runner) se aceptan o rechazan juntos, porque a medias romperían la instancia. Al aplicar, el update re-estampa modelos y re-corre el doctor.
+El modo update **no re-pregunta** lo respondido, migra esquemas sin tocar tus decisiones (`harness-answers.yaml`; y `models.yaml` viejo con IDs crudos → provider + aliases), **reconcilia** (una respuesta nueva propaga diffs a manifest/CLAUDE.md/DAG) y distingue propiedad: los scripts del plugin se actualizan con upstream; tus answers, models, specs y constituciones son ley local y se conservan. Nada se pisa sin confirmación, con una excepción declarada: los **paquetes atados** (carriles: policy+auto+ship · modelos: models.yaml+stamp+cron-runner · plan-hondo/loop-corto: plan-lint+ship --precheck+comandos+agentes) se aceptan o rechazan juntos, porque a medias romperían la instancia. Al aplicar, el update re-estampa modelos y re-corre el doctor.
 
 ## Estructura de este repo
 
@@ -673,7 +681,7 @@ El modo update **no re-pregunta** lo respondido, migra esquemas sin tocar tus de
 .claude-plugin/    manifest del plugin + marketplace
 commands/          /harness-init · /harness-doctor · /harness-update
 skills/            harness-init/SKILL.md — el cerebro: fases, clustering, entrevista, tabla de generación
-catalog/           capabilities.yaml — el menú: 57 capacidades con detect/tier/profiles/install
+catalog/           capabilities.yaml (el menú): 59 capacidades con detect/tier/profiles/install
 scripts/           discover.sh · doctor.sh (deterministas, portables macOS/Linux, bash 3.2)
 tests/             la suite (./tests/run.sh) — ver "Tests" abajo
 templates/         todo lo que se genera:
@@ -682,7 +690,7 @@ templates/         todo lo que se genera:
   ├── commands/    auto (pipeline autónomo: ticket o prompt → prod) · feature · rfc
   │                implement · review · ship · promote · archive
   ├── docs/        constitution · spec (EARS) · pipeline · intake · testing-policy · quality · ADR · cronjobs
-  ├── scripts/     bootstrap · ship · worktree · repo-brief · stamp-models · secrets · with-secrets · quiet · deploy-watch · tickets
+  ├── scripts/     bootstrap · ship (+ --precheck) · plan-lint · worktree · repo-brief · stamp-models · secrets · with-secrets · quiet · deploy-watch · tickets
   ├── skills/      skill-creator (guía para minar/crear skills de instancia)
   ├── hooks/       block-direct-push · guard-canonical (fail-closed: bloquean)
   │                track-read · ui-emit (fail-open: observan)
@@ -710,6 +718,8 @@ La suite prueba **el código real de los templates** — no copias ni mocks del 
 | `test_graph_refresh.sh` | El ciclo de vida del grafo de graphify: fail-open sin binario, build inicial sin `--update`, refresh incremental con `--update`, y cero llamadas cuando ningún HEAD cambió (stamp) |
 | `test_discover.sh` | La Fase 1 contra fixtures reales: cada familia de rol (contracts/service/library/frontend/infra-module/docs) se infiere bien — es la ENTRADA del clustering; y el caso vacío falla con remediación en vez de inventariar mentiras |
 | `test_doctor.sh` | El doctor no miente en ninguna dirección: workspace roto = exit no-cero con remediación por fallo; drift de modelos detectado y su verde tras `make models`; y los checks de cadena-completa (graphify, beads, AGENTS.md) existen |
+| `test_plan_lint.sh` | El plan es ejecutable o no es plan: tarea sin `archivos` o con `complexity` inventada es roja, `req` que el delta-spec no define es rojo, y prosa legítima en español ("todo el diff") NO se confunde con un TODO de código |
+| `test_precheck.sh` | `ship.sh --precheck`: corre los gates mecánicos SIN exigir veredicto (si lo exigiera no podría correr antes del review), deja sello atado al HEAD revisado, y no toca `origin/main` ni el lock de ship |
 | `test_server.py` | El panel: ADR-0004 (modelo sin precio = None, jamás tarifa de Opus), normalización del bus, y todo el plano de operar sin red (validación, frontmatter, dedupe de ids, tokens 0600) |
 | `test_op_http.py` | El plano de operar por HTTP contra el server real: 403 sin token / token malo / Host raro, crear tarea lanza un `claude` de verdad (stub que graba sus args), responder reanuda LA sesión pedida |
 

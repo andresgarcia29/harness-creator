@@ -84,9 +84,9 @@ owner_of() {
 }
 
 # Ruta del template que originó el artefacto, si es una COPIA literal. Los
-# archivos con {{VARIABLES}} (secrets.sh, ship.sh, commands, CLAUDE.md) no
-# tienen contraparte comparable: ahí el drift local es esperado y la
-# comparación no aplica.
+# archivos que el generador instancia con placeholders (secrets.sh, ship.sh,
+# commands, CLAUDE.md) no tienen contraparte comparable: ahí el drift local es
+# esperado y la comparación no aplica.
 tpl_for() {
   local p="$1" base; base="$(basename "$p")"
   case "$p" in

@@ -33,6 +33,32 @@ contra una instalación real).
   hacia afuera: se declara en la entrevista y se apaga con
   `upstream_issues: off` (o `HARNESS_UPSTREAM_ISSUES=off`).
 
+### Fixed
+Los 7 issues de una instalación real con 0.47.0 (#21 a #27), uno por uno:
+- **#21 `secrets.sh` inejecutable** (`pull_pull_vault: command not found` en
+  toda instalación fresca): el despacho ya no interpola un nombre de función,
+  resuelve el VALOR de la fuente.
+- **#22 el bootstrap generado no arrancaba**: `install: "brew install node (o
+  bun)"` metía paréntesis en el script y rompía el parseo del archivo entero.
+  El catálogo deja de admitir prosa en `install:` y el test genera el
+  bootstrap con las 44 capacidades y le pasa `bash -n`.
+- **#23 capacidades que nunca se instalaban**: `install_kind: auto|manual`
+  decide `ensure` vs `require` por dato, no por inferencia sobre el texto
+  (8 de 25 caían a require y el doctor mandaba a correr el bootstrap otra
+  vez). Y `pip install` pasa a `uv tool install` (PEP 668).
+- **#24 kargo apuntaba a una fórmula inexistente** y solo-macOS: fórmula
+  correcta + `install_linux`. terraform pasa a `hashicorp/tap/terraform`
+  (salió de homebrew-core con BUSL).
+- **#25 el grafo vacío que se reportaba sano** (el más serio): build por repo
+  + `merge-graphs`, verificación por NODOS en vez de exit code, salida a
+  `.cache/graph.log` en vez de `/dev/null`, y el doctor cuenta nodos en vez
+  de comprobar que el archivo exista.
+- **#26 el doctor confundía comentarios con declaraciones**: avisaba por una
+  ref `env://` del ejemplo comentado del propio template.
+- **#27 `.gitignore` divergido**: pasa a ser `templates/gitignore.tmpl`
+  (canónico y testeado); faltaban `graphify-out/` (128 MB entrando a git),
+  `go.work` y `go.work.sum`.
+
 ### Changed
 - **El grafo de código se construye en el onboarding** (`bootstrap.sh` /
   `make init`), antes del doctor y antes de la primera tarea. El build

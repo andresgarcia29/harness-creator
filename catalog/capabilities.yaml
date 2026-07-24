@@ -24,6 +24,11 @@
 #             doctor mandando a correr el bootstrap otra vez (issue #23).
 #   install_alt: la alternativa, para el humano (otro package manager, un
 #             self-hosted, una URL). Nadie la ejecuta: por eso aquí sí cabe prosa.
+#   install_linux / install_linux_kind: override para Linux cuando el comando
+#             por defecto es de macOS. El harness corre en las dos, y una
+#             fórmula de brew sin bottle de Linux deja la capacidad en ❌ sin
+#             explicación (issue #24: kargo). Si la entrada lo trae y el
+#             workspace es Linux, el bootstrap usa ESE valor y su kind.
 #   permission_tier: read-only | read-write | destructive. La entrevista puede
 #             DEGRADAR el tier (ej. github-mcp a read-only); se registra en answers.
 #   profiles: qué agentes ven esta capacidad (menos tools = contexto más barato).
@@ -162,8 +167,11 @@ capabilities:
     purpose: "Verificar promociones de freight en el pipeline CD"
     provider: cli
     bin: kargo
-    install: "brew install akuity/tap/kargo-cli"
+    install: "brew install akuity/tap/kargo"
     install_kind: auto
+    install_linux: "https://github.com/akuity/kargo/releases/latest"
+    install_linux_kind: manual
+    note: "la fórmula de brew solo publica binario macOS; en Linux se baja el asset kargo-linux-amd64 del release (install_linux)"
     secrets: [{ key: KARGO_TOKEN, source: "vault://<project>/harness/kargo" }]
     permission_tier: read-only
     profiles: [deployer]
@@ -174,8 +182,10 @@ capabilities:
     purpose: "plan/validate en repos de infra (apply SIEMPRE humano o CI)"
     provider: cli
     bin: terraform
-    install: "brew install terraform"
+    install: "brew install hashicorp/tap/terraform"
     install_kind: auto
+    install_alt: "https://developer.hashicorp.com/terraform/install"
+    note: "salió de homebrew-core con el cambio a BUSL: 'brew install terraform' aborta pidiendo confiar el tap. El path completo lo auto-tapea; confiar un tap sigue siendo decisión del humano"
     permission_tier: read-only
     profiles: [implementer, svc]
     detect: "repos con *.tf"

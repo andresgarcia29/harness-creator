@@ -542,7 +542,7 @@ El formulario de Nueva tarea escribe preferencias que `/auto` **respeta como ley
 
 ### Modelos: una perilla, cinco proveedores
 
-Todo el harness habla en **aliases** (`fast | smart | deep`) y su semántica es de roles, no de precio: **deep piensa** (plan, RFC, litigios, escalación; en Anthropic es Fable), **smart produce** (todo el código, review, QA; en Anthropic es Opus 4.8) y **fast despacha** lo especificísimo sin juicio (digest, triage; Sonnet, y solo ahí). `models.yaml` documenta las reglas de uso de Fable y traduce cada alias al ID real del proveedor activo (Anthropic, Vertex, Bedrock, Kimi, MiniMax, OpenRouter). Tres niveles de control, todos de una línea:
+Todo el harness habla en **aliases** (`fast | smart | deep`) y su semántica es de roles, no de precio: **deep piensa** (plan, RFC, litigios, escalación), **smart produce** (todo el código, review, QA) y **fast despacha** lo especificísimo sin juicio (digest, triage; Sonnet, y solo ahí). En Anthropic deep y smart son el mismo modelo (Opus 5) y lo que los separa es el esfuerzo de razonamiento (`ultrathink`), no el ID; en proveedores con un tier de razonamiento aparte el alias sí cambia de modelo. `models.yaml` documenta las reglas de uso del tier deep y traduce cada alias al ID real del proveedor activo (Anthropic, Vertex, Bedrock, Kimi, MiniMax, OpenRouter). Tres niveles de control, todos de una línea:
 
 ```yaml
 provider: anthropic        # ← cambiar de proveedor entero: ESTA línea

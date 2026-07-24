@@ -131,15 +131,16 @@ harness; cada agente es contexto y mantenimiento.
     contra su catálogo y las env vars del backend). Después el sandwich
     EN ALIASES con esta recomendación default (la semántica vive en
     models.yaml): **deep = el pensador** (orquestador, architect,
-    abogados, escalación; en anthropic es Fable), **smart = el
-    productor** (implementer, reviewer, qa; en anthropic es Opus 4.8),
-    **fast = lo especificísimo** (mechanical y cronjobs cheap; en
-    anthropic es Sonnet, y solo ahí). Las respuestas se estampan como
+    abogados, escalación), **smart = el productor** (implementer,
+    reviewer, qa), **fast = lo especificísimo** (mechanical y cronjobs
+    cheap; en anthropic es Sonnet, y solo ahí). En anthropic deep y
+    smart son el mismo modelo (Opus 5): lo que los separa es el
+    esfuerzo de razonamiento, no el ID. Las respuestas se estampan como
     ALIASES en `models.yaml`; los IDs reales los materializa
     `scripts/stamp-models.sh` en el frontmatter de los agentes.
     `loop_budget` default 3. Si el humano quiere deep en TODO,
-    advierte la latencia comprada donde no hay decisión (las reglas de
-    Fable de models.yaml) y registra la decisión.
+    advierte la latencia comprada donde no hay decisión (las reglas del
+    tier deep de models.yaml) y registra la decisión.
 10a. **Profundidad de planeación** (no preguntes, informa): los planes,
     la síntesis del RFC y los ADRs se escriben en modo **ultrathink**, y
     el architect trabaja como hilo fino descomponiendo en probes

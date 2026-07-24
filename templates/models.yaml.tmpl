@@ -26,15 +26,20 @@ provider: {{MODEL_PROVIDER}}   # anthropic | vertex | bedrock | kimi | openroute
 # fast  = LO ESPECIFICÍSIMO. Solo tareas sin juicio ni fan-out: digest
 #         diario, triage de labels, limpieza mecánica. En duda, smart.
 
-# ── REGLAS DE USO DE FABLE (el tier deep en anthropic) ────────────────
-# 1. Fable piensa, no teclea. Va donde la salida es UN artefacto de
+# ── REGLAS DE USO DEL TIER DEEP ───────────────────────────────────────
+# En anthropic, deep y smart resuelven al MISMO id (Opus 5): ahí la
+# diferencia entre pensar y producir NO la carga el modelo, la carga el
+# esfuerzo de razonamiento (ultrathink, más abajo). En proveedores donde
+# deep sí es otro modelo (kimi-k2-thinking, p.ej.) estas reglas son
+# dinero, y en anthropic siguen describiendo dónde va el ultrathink:
+# 1. Deep piensa, no teclea. Va donde la salida es UN artefacto de
 #    razonamiento que multiplica (plan, RFC, ADR, veredicto de
 #    escalación). Jamás en el loop de edición del implementer: ahí el
-#    valor está en el diff y Opus produce igual con menos latencia.
-# 2. La escalación SUBE a Fable para RE-PENSAR, no para teclear más:
+#    valor está en el diff y smart produce igual con menos latencia.
+# 2. La escalación SUBE a deep para RE-PENSAR, no para teclear más:
 #    un implementer atascado dos veces no necesita más velocidad,
 #    necesita otro enfoque. Al destrabarse, el relevo vuelve a smart.
-# 3. Fable rinde con contexto CURADO: specs, briefs y el grafo, no
+# 3. Deep rinde con contexto CURADO: specs, briefs y el grafo, no
 #    dumps de código (eso ya es ley del harness: repo-brief, graphify).
 # 4. No lo pongas en cronjobs baratos ni en QA: pensar donde no hay
 #    decisión es latencia comprada. El sandwich existe para eso.
@@ -48,22 +53,22 @@ provider: {{MODEL_PROVIDER}}   # anthropic | vertex | bedrock | kimi | openroute
 models.anthropic:
   fast: sonnet
   smart: opus
-  deep: fable
+  deep: opus
 
 models.vertex:
   # Claude vía Google Vertex. Claude Code: export CLAUDE_CODE_USE_VERTEX=1,
   # ANTHROPIC_VERTEX_PROJECT_ID=<proyecto>, CLOUD_ML_REGION=<región>.
   # AGREGA el sufijo @fecha que liste TU catálogo de Vertex (Model Garden).
   fast: claude-sonnet-5
-  smart: claude-opus-4-8
-  deep: claude-fable-5
+  smart: claude-opus-5
+  deep: claude-opus-5
 
 models.bedrock:
   # Claude vía AWS Bedrock. Claude Code: export CLAUDE_CODE_USE_BEDROCK=1.
   # Verifica el ID exacto (región y sufijo de versión) en tu consola.
   fast: us.anthropic.claude-sonnet-5-20250929-v1:0
-  smart: us.anthropic.claude-opus-4-8-20260120-v1:0
-  deep: us.anthropic.claude-fable-5-v1:0
+  smart: us.anthropic.claude-opus-5-v1:0
+  deep: us.anthropic.claude-opus-5-v1:0
 
 models.kimi:
   # Kimi Code / Moonshot (API compatible con Anthropic): thinking piensa,
@@ -81,13 +86,14 @@ models.minimax:
 
 models.openrouter:
   fast: anthropic/claude-sonnet-5
-  smart: anthropic/claude-opus-4.8
-  deep: anthropic/claude-fable-5
+  smart: anthropic/claude-opus-5
+  deep: anthropic/claude-opus-5
 
 # ── rol → alias ───────────────────────────────────────────────────────
-# El sandwich con nombres propios (anthropic): FABLE planea y arbitra,
-# OPUS 4.8 produce todo el código y los veredictos, SONNET despacha lo
-# especificísimo. Aquí van ALIASES, nunca IDs crudos.
+# El sandwich con nombres propios (anthropic): OPUS 5 planea, arbitra y
+# produce todo el código y los veredictos (deep y smart son el mismo id;
+# lo que cambia entre ellos es el esfuerzo de razonamiento), y SONNET
+# despacha lo especificísimo. Aquí van ALIASES, nunca IDs crudos.
 
 roles:
   orquestador: {{MODEL_ARCHITECT}}

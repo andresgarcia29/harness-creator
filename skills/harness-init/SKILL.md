@@ -140,6 +140,13 @@ harness; cada agente es contexto y mantenimiento.
     `loop_budget` default 3. Si el humano quiere deep en TODO,
     advierte la latencia comprada donde no hay decisión (las reglas de
     Fable de models.yaml) y registra la decisión.
+10a. **Profundidad de planeación** (no preguntes, informa): los planes,
+    la síntesis del RFC y los ADRs se escriben en modo **ultrathink**, y
+    el architect trabaja como hilo fino descomponiendo en probes
+    (`minion_decompose: auto` = ON en standard/full, OFF en express).
+    Solo pregunta si el humano quiere apagarlo (`false`), y anota que el
+    intercambio es: más razonamiento en el plan a cambio de menos rondas
+    de review, que es donde se van los minutos.
 10b. **Autonomía de /auto**: full | checkpoint (recomendado para las
     primeras semanas). checkpoint = UNA sola pausa, un resumen antes
     del primer ship a main; full = ninguna pausa, los gates y el canary
@@ -232,7 +239,8 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `scripts/worktree-task.sh`, `scripts/quiet.sh`, `scripts/with-secrets.sh` | scripts/ | siempre |
 | `skills.yaml` | skills.yaml.tmpl | si NO existe (es ley local: declara TUS repos de skills; el update jamás lo pisa) |
 | `scripts/skills-sync.sh` | scripts/ | siempre (make skills: instala la capa compartida con marca .managed; la local siempre gana) |
-| `scripts/minion-probe.sh` | scripts/ | siempre (patrón MinionS: el supervisor descompone, workers responden en paralelo; opt-in via minion_decompose) |
+| `scripts/minion-probe.sh` | scripts/ | siempre (patrón MinionS: el supervisor descompone, workers responden en paralelo; activo por carril via `minion_decompose: auto`) |
+| `scripts/plan-lint.sh` | scripts/ | siempre: el plan es ejecutable o no es plan, por tarea exige repo/req/archivos/criterios/complexity/deps, cero decisiones abiertas y trazabilidad al delta-spec. Lo corren /rfc y /auto ANTES de implement; un hueco aquí se paga en rondas de review |
 | `scripts/pipeline-steps.sh` | scripts/ | siempre (el motor de los pasos custom del pipeline: list/gate; /auto lo llama tras cada fase) |
 | `.claude/pipeline/.gitkeep` | inline vacío (Keep) | siempre (dir instance-owned de los pasos custom; el update jamás lo pisa) |
 | `.claude/skills/pipeline-step-creator/SKILL.md` | skills/pipeline-step-creator/SKILL.md | siempre (la skill que guía a crear un paso custom) |

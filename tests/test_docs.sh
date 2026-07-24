@@ -21,7 +21,7 @@ assert_contains "$index" "harness/policy.md" "índice enlaza policy v1"
 # Al reescribir prosa vieja, baja el número de abajo al nuevo conteo (nunca
 # lo subas: si tu cambio lo sube, reescribe sin el guion largo). Las cajas
 # de terminal "──" (U+2500) son otro carácter y no cuentan.
-EMDASH_MAX=621
+EMDASH_MAX=615
 emdash_now=$(grep -ro "—" --include="*.md" --include="*.tmpl" --include="*.yaml" \
   --include="*.sh" --include="*.py" --include="*.json" "$root" 2>/dev/null \
   | grep -v "/\.git/" | grep -v "templates/ui/dist" | wc -l | tr -d ' ')

@@ -103,8 +103,8 @@ secrets:
   source: {{SECRETS_SOURCE}}   # vault | gcp-secret-manager | env
   refs:
 {{SECRETS_REFS}}
-#    - env://GH_TOKEN
-#    - vault://corvux/harness/argocd
+#    - env://<NOMBRE_DE_LA_VARIABLE>
+#    - vault://<proyecto>/harness/argocd
 
 tickets:
   provider: {{TICKETS_PROVIDER}}   # linear | github | none

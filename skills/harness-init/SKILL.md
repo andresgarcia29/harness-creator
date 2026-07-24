@@ -281,6 +281,12 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `docs/changelog/.gitkeep`, `docs/services/.gitkeep`, `scripts/smoke/.gitkeep` | — | siempre |
 
 Reglas de generación:
+- **Las refs de secretos se reescriben a la fuente ELEGIDA.** El catálogo las
+  declara en el esquema por defecto (`secrets: [{key: GH_TOKEN, source:
+  "env://GH_TOKEN"}]`). Copiarlas tal cual cuando la fuente es Vault (o GCP SM)
+  deja el answers pidiendo una variable de entorno que nadie va a exportar, y
+  el doctor avisa por algo que ya está materializado en `.secrets` (issue #26).
+  Registra `vault://<base>/<item>` (o `gcp-sm://<secret>`) con el layout real.
 - **Todo script generado pasa `bash -n` ANTES de escribirlo (o justo
   después).** Es el cierre barato de una clase entera de bugs: un valor del
   catálogo interpolado con paréntesis o comillas rompe el parseo del archivo

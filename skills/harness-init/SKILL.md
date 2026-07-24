@@ -222,7 +222,7 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `harness-answers.yaml` | harness-answers.yaml.tmpl | siempre (esquema fijo) |
 | `.harness-version` | versión del plugin | siempre |
 | `Makefile` | Makefile.tmpl | siempre |
-| `.gitignore` | inline: `repos/ worktrees/ locks/ .cache/ .secrets .secrets.d/ inventory.json go.work go.work.sum graphify-out/` (go.work lo genera scripts/gowork.sh: derivable y por-máquina; .cache/ cubre el CPython de py.sh, el corepack de fe.sh, los briefs y el stamp del grafo; graphify-out/ es derivable del código) | siempre |
+| `.gitignore` | gitignore.tmpl | siempre: COPIA LITERAL del template, no una lista que reconstruyas de memoria. Cada entrada trae su porqué en el archivo. Cuando esto era prosa dentro de esta tabla, el generado se divergió en los dos sentidos: le faltaban `go.work`, `go.work.sum` y `graphify-out/` (128 MB del grafo entrando a un `git add -A`, con `git init` + `make graph` invitando al accidente) y le sobraban dos que la tabla no mencionaba (issue #27). Si hay que cambiar la lista, se cambia el template |
 | `.claude/settings.json` | settings.json.tmpl | siempre (hooks + denials read-only) |
 | `.claude/hooks/{block-direct-push,guard-canonical}.sh` | hooks/ | siempre (fail-CLOSED: bloquean) |
 | `.claude/hooks/guard-build-slot.sh` | hooks/ | siempre (fail-OPEN: bloquea `docker build/run` pelado, Ley 8; ya registrado en settings.json.tmpl junto a block-direct-push) |

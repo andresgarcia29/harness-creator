@@ -77,6 +77,13 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
      `scripts/stamp-models.sh` + `scripts/cronjobs/cron-runner.sh` (el
      runner viejo parsea el esquema inline viejo: con el models.yaml
      nuevo muere en config-error) + re-estampado de agentes.
+4b. **`.gitignore` de la instancia**: las instalaciones previas a esta
+   versión no ignoran `go.work`, `go.work.sum` ni `graphify-out/`. El grafo
+   pesa cientos de MB (128 medidos con 28 repos) y el flujo invita al
+   accidente (`git init` del workspace, `make graph`, `git add -A`). Propón
+   el diff contra `templates/gitignore.tmpl` CONSERVANDO lo que el humano
+   haya añadido: aquí lo local suma, no compite. El doctor ya avisa de las
+   tres entradas caras (issue #27).
 5. Al aplicar: re-corre el doctor de la instancia y actualiza
    `.harness-version`. Si el update tocó models.yaml o agentes, corre
    `bash scripts/stamp-models.sh` — el frontmatter de los agentes se

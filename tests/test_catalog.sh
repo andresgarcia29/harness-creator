@@ -100,6 +100,30 @@ done
 pips="$(entries | awk -F"\t" '$2 ~ /^pip3? install/ {print $1}' | tr '\n' ' ')"
 assert_eq "" "$pips" "ningún install usa pip del sistema (uv tool install)"
 
+echo "── el catálogo no manda a instalar cosas que no existen (issue #24)"
+
+grep -q "akuity/tap/kargo-cli" "$CAT" \
+  && fail "kargo sigue apuntando a la fórmula inexistente akuity/tap/kargo-cli" \
+  || pass "kargo usa la fórmula real (akuity/tap/kargo)"
+grep -qE '^\s+install: "brew install terraform"' "$CAT" \
+  && fail "terraform con el nombre plano: brew aborta pidiendo confiar el tap (BUSL)" \
+  || pass "terraform usa el path completo del tap (auto-tapea, como vault)"
+
+# el override de Linux, si existe, tiene que declarar su propio kind
+linux_bad=0
+while read -r ln; do
+  [ -n "$ln" ] || continue
+  linux_bad=$((linux_bad+1))
+done <<EOF
+$(awk '
+  /^  - name:/ { name=$3; li=""; lk="" }
+  /^    install_linux:/ { li=$2 }
+  /^    install_linux_kind:/ { lk=$2 }
+  /^$/ { if (li != "" && lk == "") print name; li=""; lk="" }
+' "$CAT")
+EOF
+assert_eq 0 "$linux_bad" "todo install_linux declara su install_linux_kind"
+
 echo "── el bootstrap generado con TODO el catálogo parsea (bash -n)"
 
 # instancia el template exactamente como el generador: una línea por capacidad

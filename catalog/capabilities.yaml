@@ -8,6 +8,15 @@
 #             envolver el comando en scripts/with-secrets.sh (inyección única de
 #             secretos). Remoto: type: http|sse + url (sin wrap; el auth es OAuth
 #             del cliente, no variables de entorno)
+#   install:  UN comando ejecutable, o una URL cuando la instalación es manual.
+#             NUNCA prosa: este campo se interpola dentro del bootstrap.sh
+#             generado, así que un paréntesis, un "|" o unas comillas no son
+#             decoración, son sintaxis de shell que rompe el parseo del ARCHIVO
+#             COMPLETO (issue #22: el bootstrap no arrancaba y ninguna
+#             dependencia se instalaba). tests/test_catalog.sh lo verifica
+#             generando el bootstrap con todo el catálogo y pasándole bash -n.
+#   install_alt: la alternativa, para el humano (otro package manager, un
+#             self-hosted, una URL). Nadie la ejecuta: por eso aquí sí cabe prosa.
 #   permission_tier: read-only | read-write | destructive. La entrevista puede
 #             DEGRADAR el tier (ej. github-mcp a read-only); se registra en answers.
 #   profiles: qué agentes ven esta capacidad (menos tools = contexto más barato).
@@ -26,7 +35,8 @@ capabilities:
     purpose: "Parseo JSON en scripts del harness (obligatorio: hooks y doctor dependen de él)"
     provider: cli
     bin: jq
-    install: "brew install jq | apt-get install -y jq"
+    install: "brew install jq"
+    install_alt: "apt-get install -y jq"
     permission_tier: read-only
     profiles: [all]
     detect: always
@@ -36,7 +46,8 @@ capabilities:
     purpose: "GitHub CLI: estado y logs de Actions (debug de CI), PRs, releases"
     provider: cli
     bin: gh
-    install: "brew install gh | https://cli.github.com"
+    install: "brew install gh"
+    install_alt: "https://cli.github.com"
     secrets: [{ key: GH_TOKEN, source: "env://GH_TOKEN" }]
     permission_tier: read-write
     profiles: [orquestador, deployer, jardinero]
@@ -58,7 +69,8 @@ capabilities:
     purpose: "bun/npm + tsc --noEmit para frontends TS"
     provider: cli
     bin: npm
-    install: "brew install node (o bun)"
+    install: "brew install node"
+    install_alt: "brew install oven-sh/bun/bun"
     permission_tier: read-write
     profiles: [implementer, qa]
     detect: "repos con package.json"
@@ -176,7 +188,8 @@ capabilities:
     purpose: "Reglas custom multi-lenguaje CON mensaje de remediación (menos iteraciones de loop). Gate en ship.sh"
     provider: cli
     bin: semgrep
-    install: "brew install semgrep | pip install semgrep"
+    install: "brew install semgrep"
+    install_alt: "uv tool install semgrep"
     permission_tier: read-only
     profiles: [implementer, qa, reviewer]
     detect: always-recommend
@@ -429,10 +442,10 @@ capabilities:
 
   - name: stryker
     category: testing
-    purpose: "Mutation testing TS incremental (los tests de IA que no protegen, desenmascarados)"
+    purpose: "Mutation testing TS incremental (los tests de IA que no protegen, desenmascarados). Dev-dep POR REPO TS, no global"
     provider: cli
     bin: npx
-    install: "npm i -D @stryker-mutator/core (por repo TS)"
+    install: "npm i -D @stryker-mutator/core"
     permission_tier: read-only
     profiles: []
     detect: "repos con package.json"
@@ -528,7 +541,8 @@ capabilities:
     purpose: "Updates de deps con minimumReleaseAge:14d (defensa supply-chain) + automerge con CI verde. Cubre pub/Flutter"
     provider: cli
     bin: renovate
-    install: "npm i -g renovate (o CronJob oficial self-hosted)"
+    install: "npm i -g renovate"
+    install_alt: "CronJob oficial self-hosted (https://docs.renovatebot.com/self-hosting)"
     secrets: [{ key: RENOVATE_TOKEN, source: "vault://<project>/harness/github" }]
     permission_tier: read-write
     profiles: []
@@ -593,10 +607,10 @@ capabilities:
 
   - name: protovalidate
     category: contracts
-    purpose: "Validación COMO PARTE del contrato proto (una fuente de reglas, interceptores Go/Py/TS). Dart: valida el servidor"
+    purpose: "Validación COMO PARTE del contrato proto (una fuente de reglas, interceptores Go/Py/TS). Dart: valida el servidor. Es DEPENDENCIA del repo proto, no un CLI que se instale aquí"
     provider: cli
     bin: buf
-    install: "buf.build/bufbuild/protovalidate (dep en el repo proto)"
+    install: "https://buf.build/bufbuild/protovalidate"
     permission_tier: read-only
     profiles: [implementer, arquitecto]
     detect: "repos con buf.yaml"
@@ -616,9 +630,9 @@ capabilities:
 
   - name: unleash
     category: deploy
-    purpose: "Feature flags OSS (OpenFeature-compatible, SDK Flutter oficial): deploy≠release en direct-to-prod; webhook de flags stale → PR de limpieza"
+    purpose: "Feature flags OSS (OpenFeature-compatible, SDK Flutter oficial): deploy≠release en direct-to-prod; webhook de flags stale → PR de limpieza. Se despliega self-hosted (helm chart): no hay CLI local que instalar"
     provider: cli
-    install: "self-hosted (helm chart) — no es CLI local"
+    install: "https://docs.getunleash.io/using-unleash/deploy/getting-started"
     permission_tier: read-write
     profiles: [implementer, deployer]
     detect: "elegido en entrevista (direct-to-prod)"

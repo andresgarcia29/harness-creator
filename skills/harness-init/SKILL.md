@@ -281,6 +281,14 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `docs/changelog/.gitkeep`, `docs/services/.gitkeep`, `scripts/smoke/.gitkeep` | — | siempre |
 
 Reglas de generación:
+- **Todo script generado pasa `bash -n` ANTES de escribirlo (o justo
+  después).** Es el cierre barato de una clase entera de bugs: un valor del
+  catálogo interpolado con paréntesis o comillas rompe el parseo del archivo
+  COMPLETO, el script no arranca y el síntoma aparece lejos de la causa (el
+  doctor culpa a los CLIs faltantes). Pasó de verdad con
+  `install: "brew install node (o bun)"`: el bootstrap no instaló nada
+  (issue #22). Lo mismo para los `.py` con `python3 -m py_compile`. Un script
+  generado que no parsea NO se entrega: se arregla el dato de origen.
 - **Constituciones (abogados), constitution.md, specs y map.md son
   DRAFT**: banner "ratificar por humano antes del primer RFC". La ley
   la ratifican humanos.

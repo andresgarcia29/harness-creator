@@ -55,6 +55,16 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
    - **Pasos-custom**: `auto.md` + `harness-policy.json` + `pipeline-steps.sh`
      + `doctor.sh` (el /auto nuevo llama a pipeline-steps.sh y usa la parada
      custom_step_failed que solo existe en el policy.json nuevo).
+   - **Plan-hondo / loop-corto**: `scripts/plan-lint.sh` + `scripts/ship.sh`
+     (modo `--precheck`) + `.claude/commands/{rfc,implement,review,auto}.md`
+     + `.claude/agents/{architect,implementer,reviewer}.md` + `doctor.sh`
+     (que exige plan-lint.sh). Los comandos nuevos llaman a plan-lint y a
+     `ship.sh --precheck`: con el ship viejo, `--precheck` se interpreta
+     como task-id y falla; sin los agentes nuevos, nadie corre el precheck
+     ni escribe el plan en el formato que plan-lint exige. Ojo: si la
+     instancia tiene planes viejos en vuelo, plan-lint los va a marcar
+     rojos (no traen los bloques `### T<n>`); es esperado, se reescriben o
+     se terminan con el pipeline viejo.
    - **Modelos**: `models.yaml` (esquema aliases) +
      `scripts/stamp-models.sh` + `scripts/cronjobs/cron-runner.sh` (el
      runner viejo parsea el esquema inline viejo: con el models.yaml

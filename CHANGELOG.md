@@ -4,6 +4,33 @@ Formato: [Keep a Changelog](https://keepachangelog.com/). Este archivo empieza
 en 0.47.0; la historia previa vive en el log de git (100+ commits iterando
 contra una instalación real).
 
+## [Sin publicar]
+
+### Added
+- **`scripts/plan-lint.sh`**: el plan es ejecutable o no es plan. Por tarea
+  exige repo/req/archivos/criterios/complexity/deps, prohíbe decisiones
+  abiertas (TBD, "por definir", "investigar si") y verifica que cada `req`
+  citado exista en el delta-spec. Lo corren /rfc y /auto ANTES de implement:
+  un hueco del plan se paga después en rondas de review.
+- **`ship.sh --precheck <task> <repo>`**: los mismos gates mecánicos del ship
+  (lenguaje, seguridad, tests-no-debilitados) sobre el worktree, sin
+  veredicto, sin lock y sin push. Deja sello `precheck-<repo>.json`. El
+  implementer lo corre antes de entregar y /review no lanza reviewer ni QA
+  en rojo. Un precheck rojo NO consume presupuesto de loop.
+
+### Changed
+- **El architect es un hilo fino que piensa hondo**: sus planes se escriben
+  en modo `ultrathink` (igual la síntesis del RFC, el mini-plan express y
+  los ADRs; el loop de edición NO lo usa), y su contexto son briefs, grafo y
+  el pack de probes, nunca volcados de código. Si le falta un hecho emite
+  otra probe, no abre el archivo. Máximo 2 rondas de probes.
+- **MinionS pasa a activo por carril**: `minion_decompose: auto` (ON en
+  standard/full, OFF en express). `true`/`false` siguen forzando.
+- **El reviewer entrega la lista de blocking COMPLETA en la ronda 1**: los
+  hallazgos tardíos van marcados `[tardío]` y los `non_blocking` se vuelven
+  beads de seguimiento, nunca otra ronda. El reporte final de /auto cuenta
+  rondas por tarea, prechecks rojos y blocking tardíos.
+
 ## [0.47.0] · 2026-07-21
 
 ### Added

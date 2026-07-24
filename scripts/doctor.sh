@@ -334,11 +334,26 @@ if command -v bd >/dev/null 2>&1; then
     warn "bd instalado pero 'bd ready --json' falla en el workspace — inicializa beads (bd init) o el pipeline no puede ordenar el DAG"
   fi
 fi
+# El mensaje prometía "graphify query responde de verdad" y solo comprobaba
+# que el ARCHIVO existiera: un graph.json de 176 bytes con 0 nodos pasaba como
+# sano mientras los agentes consultaban una fuente vacía (issue #25). Se
+# cuentan nodos: si la afirmación es "responde", que lo compruebe.
 if command -v graphify >/dev/null 2>&1; then
-  if [ -f "$WS/graphify-out/graph.json" ] || [ -f "$WS/repos/graphify-out/graph.json" ]; then
-    ok "grafo de graphify construido (graphify query responde de verdad)"
-  else
+  gfile=""
+  for cand in "$WS/graphify-out/graph.json" "$WS/repos/graphify-out/graph.json"; do
+    [ -f "$cand" ] && { gfile="$cand"; break; }
+  done
+  if [ -z "$gfile" ]; then
     warn "graphify instalado pero SIN grafo — 'graphify query' falla y los agentes caen a grep masivo; corre scripts/graph-refresh.sh (o make graph)"
+  else
+    gnodes="$(jq '.nodes | length' "$gfile" 2>/dev/null)"
+    case "$gnodes" in ''|*[!0-9]*) gnodes=0 ;; esac
+    if [ "$gnodes" -gt 0 ]; then
+      ok "grafo de graphify con $gnodes nodos (graphify query tiene qué responder)"
+    else
+      fail "grafo de graphify VACÍO (0 nodos) pero presente en $(basename "$(dirname "$gfile")")/" \
+           "los agentes creen tener grafo y no lo tienen. Corre: bash scripts/graph-refresh.sh (construye por repo y fusiona) y revisa .cache/graph.log si vuelve a salir vacío"
+    fi
   fi
 fi
 [ -d "$WS/specs" ] && ok "specs/ presente ($(ls "$WS/specs" 2>/dev/null | wc -l | tr -d ' ') capabilities)" || warn "sin specs/ — los abogados litigan sin documento citable"

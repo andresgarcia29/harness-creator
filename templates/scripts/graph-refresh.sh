@@ -50,6 +50,28 @@ if [ -f "$STAMP" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$heads_sum" ] \
 fi
 
 cd "$WS"
+# EL GRAFO ES ESTADO COMPARTIDO Y ESTE SCRIPT LO LANZAN CUATRO SITIOS EN
+# BACKGROUND (el prefetch de /auto, /rfc, pull-all.sh y el janitor), así que
+# la concurrencia es el caso NORMAL, no el raro. Sin lock, dos corridas
+# peleaban por el mismo archivo; sin tmp+mv, un `graphify query` de otra
+# sesión leía JSON a medio escribir y respondía "0 nodos", y el agente caía
+# al grep masivo que el grafo existe para evitar.
+#
+# mkdir es el lock (atómico en todo filesystem que importe). Si otra corrida
+# ya está refrescando, esta se va: el grafo que deje la otra sirve igual, y
+# esperar solo agrega latencia a un prefetch que corre en background.
+LOCKDIR="$WS/.cache/graph.lock.d"
+mkdir -p "$WS/.cache" 2>/dev/null || true
+if ! mkdir "$LOCKDIR" 2>/dev/null; then
+  # Lock huérfano: si nadie lo sostiene hace más de 30 min, se reclama.
+  if [ -n "$(find "$LOCKDIR" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then
+    rm -rf "$LOCKDIR"; mkdir "$LOCKDIR" 2>/dev/null || exit 0
+  else
+    echo "→ otro graph-refresh en curso; no duplico el trabajo" >&2; exit 0
+  fi
+fi
+trap 'rm -rf "$LOCKDIR"' EXIT
+
 : > "$LOG"
 parts=""; built=0; empty=""; total_repos=0
 
@@ -86,9 +108,15 @@ fi
 # un solo repo no necesita merge; varios sí (el grafo es cross-repo)
 # shellcheck disable=SC2086
 if [ "$built" -eq 1 ]; then
-  cp $parts "$GRAPH" 2>/dev/null || true
+  cp $parts "$GRAPH.tmp" 2>/dev/null && mv -f "$GRAPH.tmp" "$GRAPH" || rm -f "$GRAPH.tmp"
 else
-  graphify merge-graphs $parts --out "$GRAPH" >> "$LOG" 2>&1 || true
+  # A un archivo temporal y luego mv: el mv es atómico, así que un lector
+  # concurrente ve el grafo viejo COMPLETO o el nuevo COMPLETO, nunca a medias.
+  if graphify merge-graphs $parts --out "$GRAPH.tmp" >> "$LOG" 2>&1; then
+    mv -f "$GRAPH.tmp" "$GRAPH"
+  else
+    rm -f "$GRAPH.tmp"
+  fi
 fi
 
 nodes="$(nodes_in "$GRAPH")"

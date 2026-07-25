@@ -156,40 +156,40 @@ falta de conocimiento: es que la regla estaba en prosa y no en un test.
 
 ## P2: concurrencia (diez sesiones sobre el mismo workspace)
 
-- [ ] **`graph-refresh.sh` escribe el grafo sin `tmp+mv` y sin lock.** Lo lanzan
+- [x] **`graph-refresh.sh` escribe el grafo sin `tmp+mv` y sin lock.** Lo lanzan
   en background el prefetch de `/auto`, `/rfc`, `pull-all.sh` y el janitor, así
   que la concurrencia es el caso normal. Un lector ve JSON a medio escribir.
   Además `: > "$LOG"` trunca el log mientras otra instancia le escribe.
-- [ ] **`repo-brief.sh` escribe sin `tmp+mv` y se regenera en estampida.**
+- [x] **`repo-brief.sh` escribe sin `tmp+mv` y se regenera en estampida.**
   `minion-probe.sh` lo invoca desde workers en paralelo y luego hace `cat`: un
   brief truncado viaja dentro del prompt del implementer como si fuera verdad.
-- [ ] **`skills-sync.sh` hace `rm -rf` + `cp -R` sobre skills vivas**, y si
+- [x] **`skills-sync.sh` hace `rm -rf` + `cp -R` sobre skills vivas**, y si
   muere entre medio la skill queda instalada sin su marca `.managed`, o sea que
   el próximo sync la trata como local y ya nadie la actualiza jamás.
 - [ ] **El dedupe de `harness-bug.sh` tiene dos llamadas de red entre el chequeo
   y la escritura del ledger.** Diez sesiones tropezando con el mismo bug del
   plugin (que es exactamente el escenario) pasan todas los tres controles antes
   de que la primera escriba: issues duplicados en el repo público.
-- [ ] **`stamp-models.sh` usa un temporal con nombre fijo** al reescribir los
+- [x] **`stamp-models.sh` usa un temporal con nombre fijo** al reescribir los
   agentes. Ventana de milisegundos, pero el costo es un frontmatter corrupto y
   el arreglo es `mktemp`, que otros scripts del repo ya usan.
 
-## P2: acciones destructivas con diagnóstico frágil
+## P2: acciones destructivas con diagnóstico frágil (cerrado)
 
-- [ ] **El prune de `skills-sync.sh` desinstala skills si falla la red.** La
+- [x] **El prune de `skills-sync.sh` desinstala skills si falla la red.** La
   lista de "declaradas" solo se puebla si la fuente se pudo leer; un fetch
   fallido hace `continue` y el prune corre igual, tratando la evidencia ausente
   como evidencia de desinstalación.
-- [ ] **`flake-warden` puede poner en cuarentena el test vecino.** El
+- [x] **`flake-warden` puede poner en cuarentena el test vecino.** El
   `grep -B0 -A2 '<failure'` captura nombres de testcases que pasaron, y el
   prompt ordena cuarentena inmediata del señalado, con un agente headless en
   `--permission-mode dontAsk`.
-- [ ] **El reclamo de locks huérfanos confunde "no pude mirar" con "el dueño
+- [x] **El reclamo de locks huérfanos confunde "no pude mirar" con "el dueño
   murió".** `kill -0` también falla con pid vacío y con EPERM (proceso de otro
   usuario); el `2>/dev/null` borra la diferencia y se libera un lock vivo, o sea
   dos ships concurrentes del mismo repo. `ship.sh.tmpl:108-110`,
   `harness-janitor.sh:22-23`.
-- [ ] **`gh run list --limit 1` puede vigilar el run anterior.** En la ventana
+- [x] **`gh run list --limit 1` puede vigilar el run anterior.** En la ventana
   entre el push y la creación del run, devuelve el run previo; si ese estaba
   rojo, `red()` declara rojo un deploy que ni siquiera arrancó y propone
   revertirlo. `deploy-watch.sh.tmpl:155-158`.

@@ -28,6 +28,46 @@ ROLLBACK_MODE="{{ROLLBACK_MODE}}"   # auto | manual
 
 say() { echo "$1" | tee -a "$LOG"; }
 
+# ── ¿ESTE REPO DESPLIEGA POR AQUÍ? ────────────────────────────────────
+# Este watcher modela UNA forma de desplegar: Actions → Kargo → ArgoCD →
+# smoke, o sea GitOps sobre Kubernetes. Un repo de terraform no despliega
+# así, y hasta ahora nadie se lo preguntaba: se construía APP=<prefijo><repo>
+# y se esperaba una app de ArgoCD que jamás iba a existir. El wait fallaba
+# igual que si la app estuviera enferma, y de ahí salía una propuesta de
+# revertir commits CORRECTOS. Pasó en campo con el primer repo de infra que
+# cruzó el pipeline.
+#
+# El dato ya existía: manifest.yaml declara el kind de cada repo desde el
+# discovery. Solo había que leerlo.
+repo_kind() {  # repo_kind <repo> → kind declarado en manifest.yaml, o vacío
+  [ -f "$WS/manifest.yaml" ] || return 0
+  awk -v r="$1" '
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/ {
+      n=$0; sub(/^[^:]*:[[:space:]]*/,"",n); gsub(/["\047]/,"",n)
+      sub(/[[:space:]]+$/,"",n); cur=(n==r)
+    }
+    cur && /^[[:space:]]*kind:[[:space:]]*/ {
+      k=$0; sub(/^[^:]*:[[:space:]]*/,"",k); gsub(/["\047]/,"",k)
+      sub(/[[:space:]]+$/,"",k); print k; exit
+    }' "$WS/manifest.yaml" 2>/dev/null
+}
+
+KIND="$(repo_kind "$REPO")"
+case "${KIND:-}" in
+  service|frontend|mobile|"")
+    # Despliegan por GitOps, o el manifest no declara kind (instancia vieja):
+    # en ese caso no asumimos nada y el guard de la app de ArgoCD decide.
+    : ;;
+  *)
+    say "ℹ️  $REPO es kind=$KIND: no despliega por el camino GitOps que vigila"
+    say "   este watcher (Actions → Kargo → ArgoCD → smoke)."
+    say "   NO verifico nada aquí, y por lo tanto tampoco propongo revertir nada:"
+    say "   un modelo que no aplica no puede declarar un deploy rojo."
+    emit assumption "deploy de $REPO NO verificado por deploy-watch: kind=$KIND no usa el modelo GitOps de este watcher"
+    exit 0 ;;
+esac
+
 # Jerarquía de rollback (rollback PRIMERO, diagnóstico después):
 #  1. Si el workload usa Argo Rollouts: el AnalysisTemplate ya abortó a
 #     stable SOLO (tráfico, sin mutar git) — el único rollback
@@ -106,10 +146,21 @@ if command -v argocd >/dev/null && [ -z "${ARGOCD_AUTH_TOKEN:-}" ] \
     || say "⚠️ argocd login falló — health check probablemente falle también"
 fi
 if command -v argocd >/dev/null; then
-  say "── argocd: esperando $APP Healthy+Synced (timeout ${TIMEOUT}s) ──"
-  argocd app wait "$APP" --health --sync --timeout "$TIMEOUT" >>"$LOG" 2>&1 \
-    || red "$APP no llegó a Healthy+Synced en ${TIMEOUT}s"
-  say "✅ $APP Healthy + Synced"
+  # "La app no existe" y "la app está enferma" NO son lo mismo, y `app wait`
+  # falla igual en los dos casos. Confundirlos es lo que hacía que un repo sin
+  # app propusiera revertir commits sanos. Se distingue ANTES de esperar.
+  if ! argocd app get "$APP" >/dev/null 2>&1; then
+    say "⚠️ no existe la app de ArgoCD '$APP'."
+    say "   Puede ser que este repo no despliegue por aquí, o que el prefijo de"
+    say "   apps no corresponda. En cualquier caso es un tramo que NO pude"
+    say "   verificar, no un deploy rojo: no propongo revertir nada."
+    emit assumption "deploy de $REPO NO verificado: no existe la app de ArgoCD $APP"
+  else
+    say "── argocd: esperando $APP Healthy+Synced (timeout ${TIMEOUT}s) ──"
+    argocd app wait "$APP" --health --sync --timeout "$TIMEOUT" >>"$LOG" 2>&1 \
+      || red "$APP no llegó a Healthy+Synced en ${TIMEOUT}s"
+    say "✅ $APP Healthy + Synced"
+  fi
 fi
 
 # 4 · Smoke del canary tenant (si existe para el repo)

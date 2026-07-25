@@ -138,8 +138,20 @@ red() { # red <motivo>
     say "⏪ workload con Argo Rollouts: verifica el abort-to-stable automático:"
     say "   kubectl argo rollouts status $APP"
   fi
-  last_sha="$(tail -1 "$WS/tasks/$TASK/ship.log" 2>/dev/null | jq -r '.sha // empty')"
-  if [ "$ROLLBACK_MODE" = "auto" ] && [ -n "$last_sha" ]; then
+  # El sha a revertir es el último ship DE ESTE REPO, no la última línea del
+  # log. ship.log lleva una línea por repo shippeado de la tarea, así que un
+  # `tail -1` en una tarea multi-repo devolvía el sha de OTRO repo: revertirlo
+  # dentro de este falla con "bad object", o peor, si el objeto existe en los
+  # dos, revierte un commit equivocado y el ship del revert lo lleva a main.
+  last_sha="$(jq -r --arg r "$REPO" 'select(.repo == $r) | .sha // empty' \
+    "$WS/tasks/$TASK/ship.log" 2>/dev/null | tail -1)"
+  if [ -z "$last_sha" ]; then
+    # Sin sha no hay revert que proponer, y sugerirlo con el campo vacío es
+    # peor que callarse: manda al agente a improvisar sobre produccion.
+    say "⏪ NO sé qué revertir: no hay ship de $REPO en tasks/$TASK/ship.log."
+    say "   Puede que este deploy no venga de un ship de esta tarea. Diagnostica"
+    say "   primero y decide vos: no propongo una acción destructiva a ciegas."
+  elif [ "$ROLLBACK_MODE" = "auto" ]; then
     say "⏪ preparando revert en git de $last_sha (GitOps-safe; ArgoCD lo sincroniza solo):"
     say "   cd repos/$REPO && git revert --no-edit $last_sha  → luego ship.sh del revert"
   else

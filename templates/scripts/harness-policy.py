@@ -111,6 +111,42 @@ def phase_is_declared(state: dict, policy: dict) -> bool:
     return isinstance(last, dict) and last.get("to") == state.get("phase")
 
 
+def repos_pending_ship(task_dir: Path) -> list:
+    """Repos de la tarea que ya tienen veredicto pero todavía no shippearon.
+
+    ship.sh se corre UNA VEZ POR REPO y exige phase=review. O sea que avanzar
+    la fase antes de que shippee el último repo deja a los que faltan sin
+    camino: allowed_transitions["ship"] es ["deploy"] y no hay vuelta.
+
+    CASO REAL: tarea de dos repos, se hizo review → ship tras shippear el
+    primero, y el segundo quedó con verdict pass, qa pass, 0 blocking, todos
+    los gates mecánicos en verde... y trabado por el número de fase. Lo único
+    rojo era la secuencia.
+
+    /auto ya lo pedía en prosa ("tras todos los repos verdes solicita review →
+    ship"). La prosa no frena a nadie. Las dos fuentes son artefactos que ya
+    existen: verdict-<repo>.json y ship.log (una línea por repo shippeado).
+
+    Límite: un repo de la tarea que todavía no tiene veredicto no se cuenta.
+    Cubre el caso que duele (repo revisado y listo) sin inventar un inventario
+    de repos que el estado de la tarea no guarda."""
+    verdicts = sorted(
+        p.name[len("verdict-"):-len(".json")]
+        for p in task_dir.glob("verdict-*.json")
+    )
+    shipped = set()
+    log = task_dir / "ship.log"
+    if log.exists():
+        for line in log.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                shipped.add(json.loads(line).get("repo"))
+            except json.JSONDecodeError:
+                continue   # una línea corrupta no debe fingir que un repo shippeó
+    return [r for r in verdicts if r not in shipped]
+
+
 def lane_transitions(policy: dict, state: dict) -> dict:
     """Transiciones vigentes para el carril de la tarea.
 
@@ -291,6 +327,14 @@ def cmd_transition(args: argparse.Namespace) -> int:
     if args.phase not in allowed:
         lane = state.get("lane", "full")
         fail("POLICY-TRANSITION-001", f"transición no permitida ({lane}): {current} → {args.phase}")
+    if args.phase == "ship":
+        pending = repos_pending_ship(task_dir)
+        if pending:
+            fail("POLICY-SHIP-004",
+                 f"faltan repos por shippear: {', '.join(pending)}. ship.sh se corre "
+                 "una vez por repo y exige phase=review: si avanzas ahora, esos repos "
+                 "quedan sin camino (desde ship solo se va a deploy). Shippea cada uno "
+                 "con scripts/ship.sh y recién entonces pide review → ship")
     rounds = state.get("review_rounds", 0)
     if args.phase == "review":
         rounds += 1

@@ -223,6 +223,51 @@ class PolicyTest(unittest.TestCase):
                              "--verdict", self.valid_verdict(commit))
         self.assertEqual(ok.returncode, 0, ok.stderr)
 
+    # ── la trampa multi-repo ──
+    # Caso de campo: tarea de 2 repos, se avanzó review → ship tras shippear el
+    # primero, y el segundo quedó listo (verdict pass, qa pass, gates verdes) y
+    # trabado por el número de fase, sin vuelta atrás por CLI.
+
+    def mk_verdict(self, repo):
+        (self.task / f"verdict-{repo}.json").write_text(json.dumps({
+            "schema": 1, "verdict": "pass", "qa": "pass", "reviewer": "rev",
+            "implementation_agents": ["impl"],
+        }))
+
+    def mk_shipped(self, repo):
+        with (self.task / "ship.log").open("a") as log:
+            log.write(json.dumps({"repo": repo, "sha": "abc1234",
+                                  "shipped_at": "2026-07-24T10:00:00Z"}) + "\n")
+
+    def test_ship_phase_refuses_while_a_repo_still_has_to_ship(self):
+        self.reach("rfc", "implement", "review")
+        self.mk_verdict("design-system")
+        self.mk_verdict("videocore")
+        self.mk_shipped("design-system")     # solo el primero llegó a main
+        blocked = self.transition("ship")
+        self.assertEqual(blocked.returncode, 3)
+        self.assertIn("POLICY-SHIP-004", blocked.stderr)
+        self.assertIn("videocore", blocked.stderr)
+        self.assertNotIn("design-system", blocked.stderr.split("faltan repos por shippear")[1][:40])
+        self.assertEqual(self.state()["phase"], "review")   # no se movió
+        # shippeado el segundo, la transición pasa
+        self.mk_shipped("videocore")
+        self.assertEqual(self.transition("ship").returncode, 0)
+        self.assertEqual(self.state()["phase"], "ship")
+
+    def test_ship_phase_allows_a_task_with_no_verdicts_yet(self):
+        # el guard no puede romper el camino de una tarea sin veredictos en disco
+        self.reach("rfc", "implement", "review")
+        self.assertEqual(self.transition("ship").returncode, 0)
+
+    def test_corrupt_ship_log_line_does_not_fake_a_ship(self):
+        self.reach("rfc", "implement", "review")
+        self.mk_verdict("videocore")
+        (self.task / "ship.log").write_text("esto no es json\n")
+        blocked = self.transition("ship")
+        self.assertEqual(blocked.returncode, 3)
+        self.assertIn("POLICY-SHIP-004", blocked.stderr)
+
     # ── exclusión mutua entre sesiones ──
     # Varias sesiones de Claude Code comparten el workspace. La carrera del
     # read-modify-write sobre state.json es estrecha y no se puede disparar

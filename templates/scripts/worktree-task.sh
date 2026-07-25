@@ -22,6 +22,11 @@ if [ "${1:-}" = "--rm" ]; then
   # Si ya no queda ningún worktree de repo, borra el dir de la tarea. rmdir no basta:
   # gowork.sh/py.sh (go.work, shims) dejan debris fuera de los worktrees y el rmdir
   # no-recursivo falla. Sólo rm -rf si no sobrevive un worktree con trabajo sin shippear.
+  # Los reclamos de guard-worktree.sh mueren con su worktree: si no, el
+  # siguiente que cree ese mismo par task/repo arranca bloqueado por una
+  # sesión que ya no existe (caducarían solos, pero tras una hora de espera
+  # que nadie tiene por qué pagar).
+  rm -f "$WS/.harness/claims/${TASK}__"*.json 2>/dev/null || true
   if ! ls -d "$WS/worktrees/$TASK"/*/ >/dev/null 2>&1; then
     rm -rf "$WS/worktrees/$TASK"
   else
@@ -59,6 +64,32 @@ done
 # Loop interno nativo de Go: regenera el go.work de la tarea (worktree ∪ canónico como
 # fallback). Best-effort — no-op limpio si no hay módulos Go (Ley 9).
 bash "$WS/scripts/gowork.sh" "$TASK" >/dev/null 2>&1 || true
+
+# Prepara los worktrees frontend AL CREARLOS. Un worktree nace de origin/main:
+# sin node_modules y sin los tipos de `astro sync`, el gate ts de ship.sh no
+# puede correr y antes escupía errores de tipos fantasma que parecían deuda
+# vieja (caso real: 8 errores, un landing perdido, cero código que tocar).
+# El gate ahora se niega en vez de mentir; esto hace que casi nunca le toque.
+#
+# NO es best-effort silencioso: si la instalación falla, se dice. Un prepare
+# que falla callado reconstruye exactamente la trampa que vino a desarmar.
+for repo in "$@"; do
+  wt="$WS/worktrees/$TASK/$repo"
+  [ -f "$wt/package.json" ] || continue
+  echo "→ preparando toolchain frontend de $repo (el gate ts la necesita)"
+  if bash "$WS/scripts/fe.sh" 'install' "$repo" "$TASK" >/dev/null 2>&1; then
+    if ls "$wt"/astro.config.* >/dev/null 2>&1; then
+      (cd "$wt" && npx astro sync >/dev/null 2>&1) \
+        && echo "  ✅ deps + astro sync" \
+        || echo "  ⚠️  deps instaladas pero 'astro sync' falló, corre: (cd $wt && npx astro sync)"
+    else
+      echo "  ✅ deps instaladas"
+    fi
+  else
+    echo "  ⚠️  no pude instalar las deps de $repo: el gate ts se negará a correr hasta que lo hagas:"
+    echo "     bash scripts/fe.sh 'install' $repo $TASK"
+  fi
+done
 
 mkdir -p "$WS/tasks/$TASK"
 echo "→ artefactos de la tarea (task.md, plan.md, verdict-*.json) en $WS/tasks/$TASK/"

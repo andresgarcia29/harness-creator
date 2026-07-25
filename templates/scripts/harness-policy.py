@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import math
 import os
@@ -45,6 +46,41 @@ def atomic(path: Path, value: dict) -> None:
 
 def state_path(task_dir: Path) -> Path:
     return task_dir / "state.json"
+
+
+_LOCKS_HELD = []   # mantiene vivos los fd: si el GC los cierra, se suelta el lock
+
+
+def lock_state(task_dir: Path) -> None:
+    """Serializa el read-modify-write de state.json ENTRE PROCESOS.
+
+    atomic() garantiza que el archivo nunca queda a medias, pero no que dos
+    procesos no se pisen, y son cosas distintas: entre el load() y el
+    atomic() no hay nada que impida a otra sesión escribir en medio. Dos
+    comandos concurrentes sobre la misma tarea leerían el mismo estado, cada
+    uno agregaría SU entrada a history[] y el último en escribir borraría la
+    del otro, sin que ninguno se entere.
+
+    HONESTIDAD SOBRE LA MEDICIÓN: la ventana es estrecha y no se pudo
+    disparar a propósito (90 rollbacks concurrentes en 3 rondas, cero
+    pérdidas: el arranque del intérprete domina el tiempo y el planificador
+    escalona los procesos). O sea que esto NO tapa un bug observado, cierra
+    una carrera real pero difícil de provocar, en el componente que decide
+    si algo se puede shippear. Cuesta un open() y un flock().
+
+    No se libera a mano A PROPÓSITO: cada invocación de este CLI hace UNA
+    mutación y sale, así que la vida del proceso es la sección crítica. El
+    kernel suelta el flock al cerrar el fd pase lo que pase, incluido el
+    SystemExit de fail() o un kill -9, así que no hay locks huérfanos que
+    reclamar (a diferencia del lock por mkdir de ship.sh, que sí necesita su
+    ronda de reclamo porque un directorio sobrevive a su dueño).
+
+    flock es advisory y local: vale para un workspace en disco. Sobre NFS no
+    es de fiar, pero un workspace de worktrees en red ya sería otro problema."""
+    task_dir.mkdir(parents=True, exist_ok=True)
+    fd = os.open(task_dir / ".state.lock", os.O_CREAT | os.O_RDWR, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    _LOCKS_HELD.append(fd)
 
 
 # Orden canónico de fases. Solo lo usa `rollback` para saber qué es "atrás";
@@ -89,6 +125,7 @@ def lane_transitions(policy: dict, state: dict) -> dict:
 def cmd_init(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     path = state_path(task_dir)
+    lock_state(task_dir)
     if path.exists():
         fail("POLICY-STATE-001", f"la tarea ya tiene estado: {path}")
     policy = load(Path(args.policy), "policy")
@@ -122,6 +159,7 @@ def cmd_escalate(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     policy = load(Path(args.policy), "policy")
     path = state_path(task_dir)
+    lock_state(task_dir)
     state = load(path, "estado")
     order = policy.get("workflow", {}).get("lane_escalation", ["express", "standard", "full"])
     current_lane = state.get("lane", "full")
@@ -149,6 +187,7 @@ def cmd_pause(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     policy = load(Path(args.policy), "policy")
     path = state_path(task_dir)
+    lock_state(task_dir)
     state = load(path, "estado")
     allowed = policy.get("workflow", {}).get("allowed_pause_reasons", [])
     if args.reason not in allowed:
@@ -170,6 +209,7 @@ def cmd_pause(args: argparse.Namespace) -> int:
 def cmd_resume(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     path = state_path(task_dir)
+    lock_state(task_dir)
     state = load(path, "estado")
     if state.get("phase") != "blocked" or not state.get("paused_from"):
         fail("POLICY-PAUSE-003", "la tarea no tiene una pausa reanudable")
@@ -186,6 +226,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
 def cmd_record_cost(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     path = state_path(task_dir)
+    lock_state(task_dir)
     state = load(path, "estado")
     if not math.isfinite(args.total_usd) or args.total_usd < 0:
         fail("POLICY-BUDGET-004", "total_usd debe ser finito y no negativo")
@@ -243,6 +284,7 @@ def cmd_transition(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     policy = load(Path(args.policy), "policy")
     path = state_path(task_dir)
+    lock_state(task_dir)
     state = load(path, "estado")
     current = state.get("phase")
     allowed = lane_transitions(policy, state).get(current, [])
@@ -280,6 +322,7 @@ def cmd_rollback(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     policy = load(Path(args.policy), "policy")
     path = state_path(task_dir)
+    lock_state(task_dir)
     state = load(path, "estado")
     current = state.get("phase")
     destination = args.phase

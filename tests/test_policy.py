@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -221,6 +222,36 @@ class PolicyTest(unittest.TestCase):
         ok = self.run_policy("validate-ship", self.task, "--commit", commit,
                              "--verdict", self.valid_verdict(commit))
         self.assertEqual(ok.returncode, 0, ok.stderr)
+
+    # ── exclusión mutua entre sesiones ──
+    # Varias sesiones de Claude Code comparten el workspace. La carrera del
+    # read-modify-write sobre state.json es estrecha y no se puede disparar
+    # por fuerza bruta (el arranque de Python la tapa), así que en vez de
+    # jugar a la probabilidad se prueba el MECANISMO: con el lock tomado por
+    # otro, el comando tiene que bloquear, no pasar de largo.
+
+    def test_state_mutations_are_mutually_exclusive(self):
+        import fcntl
+        self.reach("rfc", "implement")
+        lock_path = self.task / ".state.lock"
+        holder = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        try:
+            with self.assertRaises(subprocess.TimeoutExpired):
+                subprocess.run(
+                    ["python3", str(SCRIPT), "--policy", str(POLICY),
+                     "transition", str(self.task), "review", "--actor", "otra-sesion"],
+                    capture_output=True, timeout=3,
+                )
+            # el estado no se movió mientras el lock estaba tomado
+            state = json.loads((self.task / "state.json").read_text())
+            self.assertEqual(state["phase"], "implement")
+        finally:
+            fcntl.flock(holder, fcntl.LOCK_UN)
+            os.close(holder)
+        # liberado el lock, el mismo comando pasa
+        self.assertEqual(self.transition("review").returncode, 0)
+        self.assertEqual(self.state()["phase"], "review")
 
     def test_dag_rejects_cycles_and_accepts_parallel_branches(self):
         dag = self.task / "dag.json"

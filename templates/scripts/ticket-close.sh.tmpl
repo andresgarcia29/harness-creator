@@ -17,7 +17,40 @@ esac; done
 [ "$STATUS" = "shipped" ] || [ "$STATUS" = "failed" ] || { echo "❌ --status shipped|failed"; exit 1; }
 WS="$(cd "$(dirname "$0")/.." && pwd)"
 API="https://api.linear.app/graphql"
-[ -n "${LINEAR_API_KEY:-}" ] || { echo "❌ LINEAR_API_KEY no está en el entorno — usa scripts/with-secrets.sh"; exit 4; }
+PROVIDER="{{TICKETS_PROVIDER}}"
+
+close_github() {
+  command -v gh >/dev/null || { echo "❌ gh no está instalado (tickets: github)"; exit 4; }
+  local raw="$ID" repo num
+  case "$raw" in
+    */*\#*) repo="${raw%%#*}"; num="${raw##*#}" ;;
+    \#*)     repo="{{TICKETS_REPO}}"; num="${raw#\#}" ;;
+    *)       repo="{{TICKETS_REPO}}"; num="$raw" ;;
+  esac
+  # $body y $STATUS los armó el bloque común de arriba.
+  gh issue comment "$num" --repo "$repo" --body "$body" >/dev/null 2>&1 \
+    || { echo "❌ no pude comentar en $repo#$num (¿auth?)"; exit 4; }
+  if [ "$STATUS" = "shipped" ]; then
+    gh issue edit "$num" --repo "$repo" --remove-label in-harness \
+      --add-label shipped >/dev/null 2>&1 || echo "⚠️  no pude mover el label a 'shipped'"
+    echo "✅ $repo#$num comentado y etiquetado shipped"
+  else
+    gh issue edit "$num" --repo "$repo" --remove-label in-harness \
+      --add-label agent-ready >/dev/null 2>&1 || echo "⚠️  no pude devolver el label a 'agent-ready'"
+    echo "✅ $repo#$num comentado y devuelto a agent-ready"
+  fi
+  exit 0
+}
+
+case "$PROVIDER" in
+  linear) : ;;   # sigue abajo, es el camino original
+  github) : ;;   # se despacha después de armar la evidencia
+  none|"") echo "❌ sin tracker configurado (tickets.provider: none): nada que cerrar."; exit 0 ;;
+  *) echo "❌ proveedor de tickets desconocido: '$PROVIDER' (implementados: linear, github)"; exit 4 ;;
+esac
+if [ "$PROVIDER" = "linear" ]; then
+  [ -n "${LINEAR_API_KEY:-}" ] || { echo "❌ LINEAR_API_KEY no está en el entorno: usa scripts/with-secrets.sh"; exit 4; }
+fi
 
 gql() {
   curl -sf --retry 3 --retry-delay 2 --retry-all-errors -X POST "$API" -H "Authorization: $LINEAR_API_KEY" -H "Content-Type: application/json" --data "$1" \
@@ -50,7 +83,12 @@ else
   target_label="agent-ready"
 fi
 
-# 2 · Resolver ids y publicar
+# El cuerpo del comentario es del HARNESS, no del proveedor: se arma una vez y
+# cada driver solo lo publica. Así agregar un tracker no puede cambiar qué
+# evidencia se reporta.
+[ "$PROVIDER" = "github" ] && close_github
+
+# 2 · Resolver ids y publicar (linear)
 resp="$(gql "$(jq -n --arg id "$ID" '{query:"query($id:String!){ issue(id:$id){ id team{id} labels{nodes{id name}} } }", variables:{id:$id}}')")"
 issue="$(echo "$resp" | jq '.data.issue')"
 [ "$issue" != "null" ] || { echo "❌ ticket $ID no existe"; exit 2; }

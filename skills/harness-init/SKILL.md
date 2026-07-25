@@ -121,7 +121,14 @@ harness; cada agente es contexto y mantenimiento.
    cuyo ÚNICO consumidor es un cronjob — regístralas comentadas como
    "pendientes de activar cronjobs". Las `phase: 2` se mencionan como
    siguientes pasos, no se instalan.
-6. **Tickets**: linear | github | none.
+6. **Tickets**: `linear` | `github` | `none`. Los TRES están
+   implementados en `ticket-pull.sh` y `ticket-close.sh` (antes solo
+   existía Linear y para github la tabla decía "adapta los contratos", o
+   sea un script improvisado sin template ni test). Si elige github,
+   pregunta también el **repo de los issues** (`owner/repo`) y regístralo
+   en `tickets.repo`: sin eso el script no sabe de qué repo es el issue
+   `123`. En los dos casos el harness solo lee, mueve labels y comenta;
+   nunca edita el cuerpo ni cierra el ticket fuera de `/archive`.
 7. **Memoria**: engram sí/no; perfiles (default: orquestador y
    arquitecto SOLAMENTE).
 8. **Secretos**: vault | gcp-secret-manager | aws-secrets-manager |
@@ -133,6 +140,11 @@ harness; cada agente es contexto y mantenimiento.
    TOKEN nunca se pide por chat: bootstrap.sh lo pide interactivo
    (read -s directo al archivo) y VALIDA su vigencia — un token
    muerto se detecta y se re-pide, no se reporta como presente.
+8b. **Forge** (dónde viven los repos): `github` | `gitlab` | `bitbucket`.
+    Normalmente se DETECTA del remote y no hace falta preguntar; pregunta
+    solo si el remote es un self-hosted con dominio propio, y registra
+    `forge:` en answers para que `scripts/forge.sh` no tenga que adivinar.
+    Los 13 cronjobs entregan sus PRs e issues por esa capa.
 9. **Deploy** (si hay CD): org de GitHub, prefijo de apps ArgoCD,
    proyecto Kargo, tenant canary, y ROLLBACK_MODE auto|manual
    (recomienda auto: rollback primero, diagnóstico después).
@@ -247,6 +259,7 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `.claude/hooks/{track-read,ui-emit}.sh` | hooks/ | siempre (fail-OPEN: observan, `async: true`). track-read alimenta `gate_evidence` de ship.sh; ui-emit alimenta `make ui` |
 | `.claude/hooks/guard-worktree.sh` | hooks/ | siempre (registrado junto a guard-canonical en Edit\|Write\|MultiEdit). Un worktree tiene UN dueño: la primera sesión que escribe lo reclama y otra sesión que intente escribir ahí se bloquea. Es la única guarda del tramo de edición concurrente (el lock de ship.sh es por repo y solo cubre el push; build-slot es por máquina y solo cubre builds). Fail-OPEN a diferencia de los otros guards: coordina, no prohíbe, y una colisión es recuperable con git |
 | `.claude/hooks/session-summary.sh` | hooks/ | siempre (fail-OPEN: observa, registrado en `SessionEnd`). Al cerrar la sesión escribe `.harness/sessions/<id>.md` con lo que el harness decidió, derivado de `.harness/events.jsonl`. Es determinista a propósito: el agente que resume de memoria omite justo el gate rojo y el supuesto sin confirmar |
+| `scripts/forge.sh` | scripts/ | siempre. La capa de forge: `forge_ci_failed`, `forge_issue_create`, `forge_pr_create`, con drivers github (gh) y gitlab (glab). Los 13 cronjobs entregan por aquí; antes tenían `gh` cableado y en cualquier otro forge entregaban a la nada, en silencio |
 | `scripts/ui/{panel.sh,server.py,pricing.json,dist/}` | ui/ | siempre — el panel (`make ui`). `panel.sh` prefiere el **daemon Go `harnessd`** (multi-máquina, terminales en vivo, sonda de MCP, archivar, liveness) y lo baja del release privado si falta; cae a `server.py` (Python stdlib) si no hay binario. El frontend React viaja COMPILADO en dist/ (la fuente vive en el plugin, `templates/ui/web/`) — el usuario jamás necesita Node |
 | `.claude/agents/{architect,implementer,reviewer}.md` | agents/*.tmpl | siempre |
 | `.claude/agents/qa.md` | agents/qa.md.tmpl | si hay frontend/mobile o canary |

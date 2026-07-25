@@ -80,7 +80,7 @@ $(head -c 40000 "$FINDINGS")
 \`\`\`
 
 Reglas duras: trabaja en una rama nueva \`bot/$JOB_NAME-$(date +%Y%m%d)\`;
-entrega PR o issue vía gh; JAMÁS pushees a main; respeta la constitución
+entrega PR o issue vía scripts/forge.sh (forge_pr_create / forge_issue_create); JAMÁS pushees a main; respeta la constitución
 (docs/constitution.md); si el hallazgo es falso positivo, actualiza la
 whitelist del detector en vez de forzar un arreglo."
 

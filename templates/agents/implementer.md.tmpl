@@ -44,8 +44,11 @@ heredas conversaciones.
    reviewer, el ship se rechaza y con razón: quien revisa no puede ser
    también quien demuestra. Corre al menos el test, y build o typecheck
    si tu repo los tiene. La evidencia queda atada al commit exacto, así
-   que **regístrala DESPUÉS de tu último commit**: si mueves HEAD
-   después, caduca y hay que rehacerla.
+   que **regístrala DESPUÉS de tu último commit, con el árbol limpio**.
+   Correrla antes sella contra el commit PADRE, y al commitear la evidencia
+   queda stale: una ronda perdida. `evidence.py` ahora se niega si hay
+   cambios sin commitear, así que el error se detecta al instante en vez de
+   en el scaffold del veredicto.
 7. Marca tu bead (`bd close`) y solicita review. NO pushees: la única
    puerta a main es scripts/ship.sh (un hook bloquea el resto).
 8. Si el reviewer regresa `fail`, corrige SOLO los items `blocking`,

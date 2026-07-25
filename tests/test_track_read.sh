@@ -63,6 +63,21 @@ jq -nc '{tool_name:"Read", tool_input:{file_path:"'"$WS"'/README.md"},
 found=$(grep -rl "README.md" "$WS/tasks" 2>/dev/null | wc -l | tr -d ' ')
 assert_eq "0" "$found" "sesión sin worktree previo: no adopta una tarea ajena"
 
+# 3d. Los artefactos de tasks/<id>/ se derivan de la RUTA, no de la sesión.
+#     Son los más citables por la compliance matrix (sello del precheck,
+#     manifiestos EV-*.json, delta-spec) y antes caían en el caso por defecto
+#     de task_of: citarlos daba SIEMPRE "citado pero NADIE LO LEYÓ" y el ship
+#     quedaba sin salida, con el mensaje del gate empujando a abrir el archivo,
+#     que era justo lo único que no se registraba.
+mkdir -p "$WS/tasks/COR-11/evidence"
+echo '{}' > "$WS/tasks/COR-11/precheck-atlas.json"
+jq -nc '{tool_name:"Read", tool_input:{file_path:"'"$WS"'/tasks/COR-11/precheck-atlas.json"},
+         session_id:"sess-virgen-2", cwd:"'"$WS"'"}' | "$HOOK"
+assert_contains "$(cat "$WS/tasks/COR-11/evidence.log" 2>/dev/null)" "precheck-atlas.json" \
+  "un sello de precheck SÍ se registra, aunque la sesión no haya tocado un worktree"
+assert_not_contains "$(cat "$WS/tasks/COR-11/evidence.log" 2>/dev/null)" "read-ws" \
+  "y se atribuye por RUTA (kind 'read'), no por puntero de sesión"
+
 # 4. id con caracteres raros → no construye rutas con él
 payload Read "{\"file_path\":\"$WS/worktrees/../../../etc/x/repo/f.go\"}" | "$HOOK"
 assert_no_file "$WS/tasks/../../../etc" "id malicioso no crea rutas fuera de tasks/"

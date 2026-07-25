@@ -37,6 +37,19 @@ task_of() {
   case "$1" in
     */worktrees/*) printf '%s' "${1#*/worktrees/}" | cut -d/ -f1 ;;
     worktrees/*)   printf '%s' "${1#worktrees/}"   | cut -d/ -f1 ;;
+    # tasks/<id>/... TAMBIÉN lleva la tarea en la ruta, así que se deriva
+    # igual que un worktree: exacto, y sin depender de que la sesión haya
+    # tocado un worktree antes.
+    #
+    # POR QUÉ IMPORTA: gate_evidence exige que el reviewer haya ABIERTO el
+    # artefacto que cita, y los artefactos más citables viven acá (el sello
+    # del precheck, los manifiestos EV-*.json, el delta-spec). Sin este caso,
+    # citarlos daba SIEMPRE "citado pero NADIE LO LEYÓ" y el ship quedaba sin
+    # salida: el mensaje del gate te empuja a abrir el archivo, y abrirlo era
+    # justo lo único que no se registraba. Costó dos rondas del presupuesto de
+    # autofix y una acusación injusta a un reviewer que sí había verificado.
+    */tasks/*)     printf '%s' "${1#*/tasks/}"     | cut -d/ -f1 ;;
+    tasks/*)       printf '%s' "${1#tasks/}"       | cut -d/ -f1 ;;
     *) : ;;
   esac
 }

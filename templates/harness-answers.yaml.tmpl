@@ -43,8 +43,13 @@ loop_budget: {{LOOP_BUDGET}}
 upstream_issues: {{UPSTREAM_ISSUES}}
 
 # Autonomía de /auto (ticket o prompt → producción, sin intervención):
-#   full       → nunca pausa; gates + canary + rollback son la red
-#   checkpoint → UNA pausa: resumen antes del primer ship a main
+#   full       → no pausa DESPUÉS del enrichment; gates + canary + rollback
+#                son la red
+#   checkpoint → además, UNA pausa: resumen antes del primer ship a main
+# En los dos modos el paso 1 (enrichment) puede hacer UNA ronda de preguntas
+# antes de arrancar: es la única interacción sancionada, y solo ocurre si hay
+# algo que la evidencia del repo no puede responder. Concentrar ahí lo que el
+# humano sabe es lo que permite que el resto corra sin interrupciones.
 # Gradúa cuándo se toca main, NO cuánto piensa el humano: /auto redacta
 # criterios y resuelve ambigüedad solo en ambos modos (ledger de
 # supuestos). Para conducir fase por fase: comandos sueltos, no /auto.

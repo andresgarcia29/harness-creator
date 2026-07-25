@@ -138,9 +138,14 @@ escalación por fail/watchdog sigue subiendo a `roles.escalation`, y
 escalar a humano nunca se sustituye por escalar modelo. Registra el
 override en el ledger y en el reporte final.
 
-## Paso 0.5 — El ledger de supuestos (por qué no necesitas preguntar)
+## Paso 0.5 — El ledger de supuestos (la ambigüedad DESPUÉS del enrichment)
 
-Sin humano en el loop, la ambigüedad no se rebota: **se resuelve, se
+El reparto es: lo que la evidencia puede responder lo resuelves siempre
+tú; lo que solo el humano sabe se pregunta UNA vez, en el enrichment
+(paso 1); y todo lo que aparezca **después** de esa ronda ya no se
+pregunta, porque el humano se fue. Ahí manda este ledger.
+
+Pasado el enrichment, la ambigüedad no se rebota: **se resuelve, se
 declara y se hace barata de revertir**. Por cada punto ambiguo escribe
 en `tasks/<id>/assumptions.md` una línea:
 
@@ -174,11 +179,51 @@ Reglas del ledger, en orden de precedencia:
    según stack). Cuando el implementer arranque, su mesa ya está puesta:
    serializar preparación determinista detrás de razonamiento LLM es la
    forma más tonta de perder minutos.
-1. **Intake**. Valida task.md contra `docs/harness/intake.md`. Rebotar
-   NO es una opción (no hay a quién): un criterio no verificable lo
-   REESCRIBES verificable y lo anotas en el ledger. Solo paras si caes
-   en la lista de abajo. Cuando quede válido: express solicita
-   `intake → implement`; standard/full solicitan `intake → rfc`.
+1. **Enrichment** (fase `intake`). **La ÚNICA interacción con el humano
+   en toda la corrida.** Todo lo que necesites de él se pide acá o no se
+   pide nunca: después de este paso el pipeline corre solo hasta el
+   reporte final, salvo las paradas duras de la lista de abajo.
+
+   1a. **Entiende el terreno ANTES que la tarea.** El prefetch ya te dejó
+   la mesa puesta: `graphify query` sobre el grafo fresco, los briefs de
+   `.cache/briefs/<repo>.md`, el CLAUDE.md de cada repo afectado, el
+   `docs/architecture/map.md` (ownership), los ADR vigentes y la spec
+   maestra. Preguntar algo que el repo ya responde es trabajo tuyo que le
+   estás cobrando al humano.
+
+   1b. **Entiende la tarea.** Valida contra `docs/harness/intake.md`. Un
+   criterio no verificable lo REESCRIBES verificable. Toda ambigüedad que
+   la evidencia pueda resolver (spec > ADR > convención del repo > patrón
+   del código), la resuelves tú y va al ledger de supuestos: eso NO es
+   material de pregunta.
+
+   1c. **Pregunta solo lo que la evidencia no puede responder.** Una
+   pregunta es legítima si cumple LAS DOS: (a) la respuesta cambia lo que
+   se construye, y (b) no está en ninguna de esas cuatro fuentes. Si las
+   dos ramas llevan al mismo trabajo, no preguntes. Reglas duras:
+   - **Máximo 5, todas en UN solo mensaje.** No es una conversación: es
+     una ronda. No hay segunda.
+   - Cada pregunta trae **qué bloquea**, las opciones, y **el default que
+     tomarás si no contestan**. El silencio tiene que ser una respuesta
+     válida, y "usá los defaults" tiene que poder contestarse en una
+     palabra.
+   - **Si nada califica, no preguntes.** Dilo en una línea y sigue.
+     Fabricar preguntas para parecer diligente es la forma más cara de
+     perder el tiempo de alguien, y convierte esta fase en ceremonia.
+   Cuando haya preguntas: `scripts/harness-policy.py pause tasks/<id>
+   --reason enrichment_questions --detail "<n> preguntas"` y emítelas.
+   Al reanudar, incorpora las respuestas.
+
+   1d. **Enriquece.** Reescribe `tasks/<id>/task.md` con lo aprendido:
+   criterios verificables, fuera de scope explícito, y el contexto del
+   terreno que el implementer no va a tener que redescubrir. Deja en
+   `tasks/<id>/enrichment.md` qué preguntaste, qué te respondieron y qué
+   cambió respecto del prompt original. Ese archivo es lo que hace
+   auditable esta fase: sin él, "enriquecí el prompt" es una afirmación
+   sin evidencia.
+
+   Cuando quede válido: express solicita `intake → implement`;
+   standard/full solicitan `intake → rfc`.
 2. **RFC** (solo standard/full). El architect es un **hilo fino que
    piensa hondo**: su prompt de arranque empieza con **ultrathink**, y su
    contexto son briefs, grafo y el pack de probes, nunca volcados de

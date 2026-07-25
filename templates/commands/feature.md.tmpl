@@ -8,6 +8,20 @@ Intake del pipeline para $ARGUMENTS. El contrato de entrada es
 rebotar cuesta centavos; implementar ambigüedad cuesta el pipeline
 entero.
 
+
+> **La fase se mueve con `harness-policy.py`, siempre.** Este comando es un
+> playbook autosuficiente (AGENTS.md lo vende así), pero la máquina de estados
+> no se entera sola: `ship.sh` exige `phase=review` y `validate-ship` comprueba
+> que la fase sea la que dejó el último movimiento registrado. Si nadie pide la
+> transición, el flujo manual muere en policy con `POLICY-SCHEMA-001` (no existe
+> state.json) o `POLICY-TRANSITION-001`, y el mensaje no dice cuál de los
+> comandos anteriores se la saltó.
+
+0. **Abre el estado de la tarea** antes que nada:
+   `scripts/harness-policy.py init tasks/<task-id> --lane <express|standard|full>`.
+   Sin esto no existe `state.json` y todo el resto del pipeline falla al
+   primer gate de policy. El carril sale del blast radius (ver `/auto` paso
+   de carril); en duda, el MAYOR.
 1. **Materializa.** Si es un ID de ticket ({{TICKET_PREFIX}}-N):
    `scripts/with-secrets.sh scripts/ticket-pull.sh <ID>`.
    - exit 3 (sin label agent-ready): lee el ticket igualmente (el

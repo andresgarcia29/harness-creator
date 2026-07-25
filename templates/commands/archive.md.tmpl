@@ -11,6 +11,21 @@ la ejecutan con confianza.
 Precondición: el deploy de TODAS las tareas del ticket está verde
 (ship.log completo + deploy-watch 🟢). Si no, PARA.
 
+
+> **La fase se mueve con `harness-policy.py`, siempre.** Este comando es un
+> playbook autosuficiente (AGENTS.md lo vende así), pero la máquina de estados
+> no se entera sola: `ship.sh` exige `phase=review` y `validate-ship` comprueba
+> que la fase sea la que dejó el último movimiento registrado. Si nadie pide la
+> transición, el flujo manual muere en policy con `POLICY-SCHEMA-001` (no existe
+> state.json) o `POLICY-TRANSITION-001`, y el mensaje no dice cuál de los
+> comandos anteriores se la saltó.
+
+0. **Solicita la transición** `deploy → archive`:
+   `scripts/harness-policy.py transition tasks/<id> archive --actor orchestrator`.
+   Si rebota porque la fase es `ship` y no `deploy`, es que nadie registró el
+   deploy verde: pídela primero (`transition ... deploy`). Sin esto la tarea
+   queda archivada en disco pero viva en la máquina de estados, y un
+   `/auto <id>` posterior la re-entra a revisar algo que ya está en producción.
 1. **Recolecta write-backs**: lee tasks/<id>/delta-spec.md Y las notas
    de desviación que los implementers dejaron durante la ejecución
    (spec bidireccional: lo descubierto en el worktree — "existía un

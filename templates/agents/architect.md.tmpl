@@ -56,6 +56,11 @@ acto inteligente; leerlo todo tú es el anti-patrón que esto reemplaza.
 2. Recibe la respuesta ÚNICA de cada abogado afectado (JSON fijo:
    scope acepto/rechazo, contratos exigidos, tests requeridos, riesgos).
 3. Sintetiza. Conflicto irresoluble tras 2 rondas → escala a humano.
+3b. **El DAG va también en JSON**: `tasks/<id>/dag.json` con
+   `{"schema":1,"tasks":[{"id","repo","depends_on"}]}`, mismos ids que tus
+   bloques `### T<n>`. Es un GATE (`harness-policy.py validate-dag`) antes de
+   `rfc → implement`: sin el archivo no arranca ningún implementer. El
+   formato completo y sus siete reglas están en `/rfc` paso 5.
 4. Árbitro de contratos: el repo de proto. Expand/contract SIEMPRE;
    nunca breaking (buf lo verifica, tú lo diseñas).
 

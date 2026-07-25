@@ -97,6 +97,17 @@ decisión, y un mini-plan flojo se paga igual en rondas de review.
   EARS `## ADDED` (2-6 líneas). Existe para que la compliance matrix del
   reviewer y `gate_evidence` operen IGUAL en todos los carriles: express
   recorta sesiones LLM, jamás artefactos ni gates.
+
+  **Y si el cambio toca el comportamiento de un test que YA existe, no
+  alcanza con ADDED.** `gate_tests_untouched` bloquea toda aserción
+  eliminada o `skip` añadido, y la ÚNICA declaración que acepta es una
+  entrada bajo un encabezado `## MODIFIED Requirements` o `## REMOVED
+  Requirements` que **nombre el archivo de test** (el basename). Escribir la
+  palabra en la prosa no abre nada. Nada impide que una tarea express
+  cambie legítimamente un test (express solo exige 1 repo y cero
+  contratos, migraciones o infra), así que si lo hace, el delta-spec lo
+  declara acá o el precheck se pone rojo y se quema una ronda descubriendo
+  por el mensaje del gate un mecanismo que este paso nunca mencionó.
 - `scripts/plan-lint.sh <id>` antes de pedir `intake → implement`. Rojo se
   arregla ahí: es la revisión más barata del pipeline.
 

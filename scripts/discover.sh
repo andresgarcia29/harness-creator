@@ -120,6 +120,17 @@ scan_repo() {
   grep -rq "argoproj.io" "$dir" --include="*.yaml" 2>/dev/null && signals+=("argocd")
   grep -rq "kargo.akuity.io" "$dir" --include="*.yaml" 2>/dev/null && signals+=("kargo")
   grep -rq 'provider "google"' "$dir" --include="*.tf" 2>/dev/null && signals+=("gcp")
+  # Señales que el CATÁLOGO ya filtraba por prosa y nadie emitía, así que
+  # capacidades correctas nunca se ofrecían aunque la evidencia estuviera en
+  # el repo. Cada una tiene su consumidor en catalog/capabilities.yaml.
+  grep -rq 'google_container_cluster' "$dir" --include="*.tf" 2>/dev/null && signals+=("gke")
+  grep -rqi 'prometheus' "$dir" --include="*.y*ml" --include="*.tf" 2>/dev/null && signals+=("prometheus")
+  grep -rqi 'sentry' "$dir" --include="package.json" --include="go.mod" \
+    --include="pyproject.toml" --include="requirements*.txt" --include="Gemfile" 2>/dev/null \
+    && signals+=("sentry")
+  { grep -rq 'service .*{' "$dir" --include="*.proto" 2>/dev/null \
+    || grep -rqi 'grpc' "$dir" --include="go.mod" --include="package.json" \
+       --include="pyproject.toml" 2>/dev/null; } && signals+=("grpc")
   [ -f "$dir/CLAUDE.md" ] && has_claude_md=true
 
   branch="$(git -C "$dir" symbolic-ref --short HEAD 2>/dev/null || echo unknown)"

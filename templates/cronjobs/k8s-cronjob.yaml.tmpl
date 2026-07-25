@@ -32,10 +32,20 @@ spec:
                     && bash scripts/repos.sh pull --shallow || true \
                     && bash scripts/cronjobs/cron-runner.sh scripts/cronjobs/jobs/{{JOB_NAME}}.sh
               env:
-                - name: CLAUDE_CODE_USE_VERTEX
-                  value: "1"
-                - name: ANTHROPIC_VERTEX_PROJECT_ID
-                  value: "{{GCP_PROJECT}}"
+                # Las env vars del BACKEND las decide el provider elegido en
+                # models.yaml, no este manifiesto. Forzar Vertex aquí
+                # contradecía el único eje del harness que ya despachaba seis
+                # proveedores: quien eligió anthropic o bedrock recibía un pod
+                # que exigía un proyecto GCP inexistente, el agente moría en
+                # auth y a las 3 corridas el circuit breaker se abría.
+                #
+                # El instalador sustituye este bloque por las vars del provider
+                # (vertex: CLAUDE_CODE_USE_VERTEX + ANTHROPIC_VERTEX_PROJECT_ID ·
+                #  bedrock: CLAUDE_CODE_USE_BEDROCK + AWS_REGION ·
+                #  anthropic: ANTHROPIC_API_KEY desde el secret ·
+                #  kimi/minimax/openrouter: su base URL y key).
+                # La tabla completa vive en models.yaml, sección del provider.
+{{MODEL_BACKEND_ENV}}
                 - name: CLAUDE_CODE_ENABLE_TELEMETRY
                   value: "1"
                 - name: OTEL_RESOURCE_ATTRIBUTES

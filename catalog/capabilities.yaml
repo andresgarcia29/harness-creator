@@ -131,8 +131,16 @@ capabilities:
     purpose: "Estado del cluster; diagnóstico en rojo. Write vía GitOps, nunca kubectl apply"
     provider: cli
     bin: kubectl
-    install: "gcloud components install kubectl"
+    # kubectl es NEUTRAL: sirve para EKS, AKS, on-prem y GKE por igual. Tenerlo
+    # instalando por gcloud lo ataba a GCP, y en un workspace sin gcloud la
+    # instalación reventaba con "command not found" (misma clase que el issue
+    # #24 de kargo). El canal de instalación no puede ser más específico que la
+    # herramienta.
+    install: "brew install kubectl"
     install_kind: auto
+    install_linux: "curl -fsSLo /usr/local/bin/kubectl https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl && chmod +x /usr/local/bin/kubectl"
+    install_linux_kind: auto
+    install_alt: "gcloud components install kubectl (GKE) · az aks install-cli (AKS) · el gestor de paquetes de tu distro"
     secrets: [{ key: KUBECONFIG, source: "vault://<project>/harness/kubeconfig" }]
     permission_tier: read-only
     profiles: [deployer, orquestador]
@@ -533,7 +541,7 @@ capabilities:
     install_kind: auto
     permission_tier: read-only
     profiles: [qa]
-    detect: "servicios gRPC/HTTP"
+    detect: "signal:grpc"        # discover.sh: service en .proto, o dep grpc
     phase: 2
 
   # ── Higiene de código (detectores de los cronjobs) ────
@@ -662,7 +670,7 @@ capabilities:
     install_kind: auto
     permission_tier: read-write
     profiles: [implementer]
-    detect: "repos con migraciones SQL"
+    detect: "signal:migrations"  # discover.sh: repos/*/migrations/*.sql
 
   - name: protovalidate
     category: contracts
@@ -686,7 +694,7 @@ capabilities:
     install_kind: auto
     permission_tier: read-only
     profiles: [deployer]
-    detect: "prometheus en el stack"
+    detect: "signal:prometheus"  # discover.sh: prometheus en yaml/tf
     phase: 2
 
   - name: unleash
@@ -735,7 +743,7 @@ capabilities:
     secrets: [{ key: SENTRY_AUTH_TOKEN, source: "vault://<project>/harness/sentry" }]
     permission_tier: read-only
     profiles: [deployer, orquestador]
-    detect: "sentry sdk en repos"
+    detect: "signal:sentry"      # discover.sh: sdk sentry en el manifiesto de deps
     phase: 2
     note: "no dejar que el agente actúe automáticamente sobre stack traces (prompt injection vía contenido de errores)"
 
@@ -747,7 +755,7 @@ capabilities:
     config: { command: "gke-mcp", args: [], wrap: true }
     permission_tier: read-only
     profiles: [deployer]
-    detect: "GKE en el stack"
+    detect: "signal:gke"         # discover.sh: google_container_cluster en .tf
     phase: 2
 
   - name: meta-devtools-mcp

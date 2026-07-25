@@ -31,7 +31,7 @@ mk_repo() {  # mk_repo <dir> — repo con origin/main simulado en el commit inic
 run_gate_lane() {  # run_gate_lane <lane-json> — corre gate_lane en el repo actual
   mkdir -p "$WS/tasks/T1"
   printf '%s' "$1" > "$WS/tasks/T1/state.json"
-  ( set -u; WS="$WS"; TASK=T1; REPO=test
+  ( set -u; WS="$WS"; TASK=T1; REPO=test; BASE_REF=main
     gate() { :; }; emit() { :; }
     . "$WS/gate_lane.sh"; gate_lane )
 }
@@ -62,7 +62,7 @@ run_gate_lane '{"lane":"full"}' \
 # 5. sin state.json → default full, no bloquea (compat con tareas viejas)
 cd "$WS/r2"
 rm -f "$WS/tasks/T1/state.json"
-( set -u; WS="$WS"; TASK=T1; REPO=test; gate(){ :; }; emit(){ :; }
+( set -u; WS="$WS"; TASK=T1; REPO=test; BASE_REF=main; gate(){ :; }; emit(){ :; }
   . "$WS/gate_lane.sh"; gate_lane ) \
   && pass "sin state.json: default full, no bloquea" || fail "sin state.json: bloqueó"
 
@@ -105,7 +105,7 @@ extract gate_tests_untouched > "$WS/gate_tests.sh"
 grep -q "contabilidad NETA" "$WS/gate_tests.sh" || grep -q "global_na" "$WS/gate_tests.sh" || { echo "no pude extraer gate_tests_untouched"; exit 1; }
 
 run_tests_gate() {  # corre el gate en el repo actual; usa $WS/tasks/T1 para delta
-  ( set -u; WS="$WS"; TASK=T1; REPO=test
+  ( set -u; WS="$WS"; TASK=T1; REPO=test; BASE_REF=main
     gate() { :; }; emit() { :; }
     . "$WS/gate_tests.sh"; gate_tests_untouched )
 }
@@ -200,8 +200,8 @@ extract run_lang_gates > "$WS/lang.sh"
 grep -q 'node_modules' "$WS/lang.sh" || { echo "no pude extraer run_lang_gates"; exit 1; }
 
 run_lang() {  # run_lang <dir>: corre run_lang_gates ahí, con la toolchain stubbeada
-  ( set -u; cd "$1"; WT="$1"; REPO=fe; TASK=T1
-    gate() { :; }
+  ( set -u; cd "$1"; WT="$1"; REPO=fe; TASK=T1; BASE_REF=main
+    gate() { :; }; emit() { :; }
     npx() { :; }; npm() { :; }   # la toolchain real no se ejercita aquí
     . "$WS/lang.sh"; run_lang_gates ) 2>&1
 }
@@ -324,8 +324,8 @@ mk_fe "$WS/fe6"; cd "$WS/fe6"
 echo '{"name":"fe","scripts":{"typecheck":"astro check","test":"vitest run"}}' > package.json
 git add -A && git commit -qm scripts; cd "$WS"
 mkdir -p "$WS/fe6/node_modules"
-out="$( ( cd "$WS/fe6"; WT="$WS/fe6"; REPO=fe; TASK=T1
-          gate() { :; }
+out="$( ( cd "$WS/fe6"; WT="$WS/fe6"; REPO=fe; TASK=T1; BASE_REF=main
+          gate() { :; }; emit() { :; }
           npx() { echo "NO-DEBERIA-CORRER-TSC"; }
           npm() { echo "npm $*"; }
           . "$WS/lang.sh"; run_lang_gates ) 2>&1 )"
@@ -356,7 +356,7 @@ mk_stack() {  # mk_stack <dir> <archivo-marcador>
   cd "$WS"
 }
 run_lang_bare() {  # sin stubs de toolchain: mide qué dice cuando no está
-  ( set -u; cd "$1"; WT="$1"; REPO=r; TASK=T1
+  ( set -u; cd "$1"; WT="$1"; REPO=r; TASK=T1; BASE_REF=main
     gate() { :; }; emit() { :; }
     . "$WS/lang.sh"; run_lang_gates ) 2>&1
 }
@@ -366,7 +366,7 @@ run_lang_bare() {  # sin stubs de toolchain: mide qué dice cuando no está
 check_stack() {  # check_stack <dir> <marcador> <bin> <label> [archivo-extra]
   mk_stack "$1" "$2"
   [ -n "${5:-}" ] && ( cd "$1" && : > "$5" )
-  out="$( ( cd "$1"; WT="$1"; REPO=r; TASK=T1
+  out="$( ( cd "$1"; WT="$1"; REPO=r; TASK=T1; BASE_REF=main
             gate() { :; }; emit() { :; }
             eval "$3() { echo RAN-$3; }"
             . "$WS/lang.sh"; run_lang_gates ) 2>&1 )"
@@ -381,7 +381,7 @@ check_stack "$WS/st-php"    composer.json composer PHP        phpunit.xml
 
 # Marcador presente pero toolchain ausente: se dice, no se finge un veredicto.
 mk_stack "$WS/st-sinbin" Cargo.toml
-out="$( ( cd "$WS/st-sinbin"; WT="$WS/st-sinbin"; REPO=r; TASK=T1
+out="$( ( cd "$WS/st-sinbin"; WT="$WS/st-sinbin"; REPO=r; TASK=T1; BASE_REF=main
           gate() { :; }; emit() { :; }
           PATH=/nonexistent
           . "$WS/lang.sh"; run_lang_gates ) 2>&1 )"
@@ -398,7 +398,7 @@ assert_contains "$out" "CONTRIBUTING #8" "y apunta a la regla que lo gobierna"
 
 # Un stack reconocido NO dispara ese aviso.
 mk_stack "$WS/st-go" "go.mod"
-out="$( ( cd "$WS/st-go"; WT="$WS/st-go"; REPO=r; TASK=T1
+out="$( ( cd "$WS/st-go"; WT="$WS/st-go"; REPO=r; TASK=T1; BASE_REF=main
           gate() { :; }; emit() { :; }; go() { :; }
           . "$WS/lang.sh"; run_lang_gates ) 2>&1 )"
 assert_not_contains "$out" "no reconozco el stack" "stack reconocido: sin aviso"
@@ -417,7 +417,7 @@ grep -q 'qa_state' "$WS/check_verdict.sh" || { echo "no pude extraer check_verdi
 run_check_verdict() {  # run_check_verdict <verdict-json> — imprime salida, retorna su exit
   mkdir -p "$WS/tasks/T9"
   printf '%s' "$1" > "$WS/tasks/T9/verdict-svc.json"
-  ( set -u; WS="$WS"; TASK=T9; REPO=svc
+  ( set -u; WS="$WS"; TASK=T9; REPO=svc; BASE_REF=main
     gate() { :; }
     . "$WS/check_verdict.sh"; check_verdict ) 2>&1
 }

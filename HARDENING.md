@@ -131,7 +131,7 @@ falta de conocimiento: es que la regla estaba en prosa y no en un test.
 
 ## P2: ejes cableados a un vendor (regla 8)
 
-- [ ] **La rama trunk se asume `main`.** Catorce ocurrencias en `ship.sh` y seis
+- [x] **La rama trunk se asume `main`.** Catorce ocurrencias en `ship.sh` y seis
   en `worktree-task.sh`, sin `BASE_BRANCH` ni lectura de `origin/HEAD`. Rompe
   cualquier repo con `master`, `trunk` o `develop`, y de paso
   `block-direct-push` tampoco protege esas ramas. *Nota*: `skills-sync.sh:52` ya
@@ -139,20 +139,33 @@ falta de conocimiento: es que la regla estaba en prosa y no en un test.
 - [ ] **Los 13 cronjobs cablean GitHub como forge y como CI.** El prompt
   inyectado ordena "entrega PR o issue vía gh" a todos, y la entrevista nunca
   pregunta cuál es tu forge.
-- [ ] **El CronJob de Kubernetes fuerza Vertex.** `CLAUDE_CODE_USE_VERTEX=1` y
+- [x] **El CronJob de Kubernetes fuerza Vertex.** `CLAUDE_CODE_USE_VERTEX=1` y
   `ANTHROPIC_VERTEX_PROJECT_ID` incondicionales, contradiciendo el eje de
   modelos que sí despacha seis proveedores.
   `templates/cronjobs/k8s-cronjob.yaml.tmpl:35-38`.
-- [ ] **`kubectl` se instala con `gcloud`.** Herramienta neutral con canal de
+- [x] **`kubectl` se instala con `gcloud`.** Herramienta neutral con canal de
   instalación cableado a GCP, sin `install_alt`. En EKS, AKS u on-prem la
   instalación revienta. `catalog/capabilities.yaml:134`.
-- [ ] **El `detect:` del catálogo pide señales que el discovery no emite.**
+- [x] **El `detect:` del catálogo pide señales que el discovery no emite.**
   squawk, goose, sentry, prometheus, k6 y GKE filtran por señales inexistentes,
   así que capacidades correctas nunca se ofrecen aunque la evidencia esté en los
   repos.
 - [ ] **El eje de tickets solo tiene implementación para Linear.** Para
   `tickets: github` la tabla dice "adapta los mismos contratos", o sea un script
   improvisado sin template ni test. Jira y GitLab no son opción.
+
+## Encontrados durante los arreglos
+
+- [x] **Una rama base inválida hacía que TODOS los gates de diff pasaran en
+  verde.** `gate_tests_untouched`, `gate_lane` y el de migraciones envuelven su
+  git en `|| true` para tolerar un repo sin cambios; con una ref inexistente
+  git falla, el `|| true` se lo traga, el diff sale vacío y todos pasan sin
+  mirar nada. El precheck imprimía "✅ precheck verde". Desarmaba justo el gate
+  anti-trampa. Ahora la rama base se valida al arranque, con un fetch de
+  cortesía antes de rendirse.
+- [x] **`[ -n "$X" ] && VAR=...` bajo `set -e` mata el script.** El AND-list
+  devuelve 1 cuando la condición es falsa, y `set -e` lo toma como fallo: el
+  precheck salía con exit 128 sin imprimir una línea. Se usa `if`.
 
 ## P2: concurrencia (diez sesiones sobre el mismo workspace)
 

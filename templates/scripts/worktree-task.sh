@@ -7,6 +7,18 @@
 set -euo pipefail
 WS="$(cd "$(dirname "$0")/.." && pwd)"
 
+# La rama trunk no siempre se llama "main": se resuelve por repo desde
+# origin/HEAD, con override por entorno. Antes, un repo con `master` moría
+# en `worktree add ... origin/main` con "invalid reference".
+base_branch() {  # base_branch <dir-del-repo> → rama trunk, sin prefijo
+  local b
+  # `[ ... ] && cmd` bajo set -e mata el script si la condición es falsa.
+  if [ -n "${HARNESS_BASE_BRANCH:-}" ]; then printf '%s' "$HARNESS_BASE_BRANCH"; return 0; fi
+  b="$(git -C "$1" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
+  [ -n "$b" ] || b=main
+  printf '%s' "$b"
+}
+
 if [ "${1:-}" = "--rm" ]; then
   TASK="${2:?uso: worktree-task.sh --rm <task-id>}"
   for wt in "$WS/worktrees/$TASK"/*/; do
@@ -68,17 +80,18 @@ for repo in "$@"; do
   mkdir -p "$(dirname "$wt")"
   git -C "$base" fetch origin
   # Refresca el clon canónico ANTES de crear el worktree: los worktrees nacen frescos de
-  # origin/main, pero repos/<repo> queda stale y todo lo que compone contra el canónico
+  # la rama trunk, pero repos/<repo> queda stale y todo lo que compone contra el canónico
   # (shims de py.sh, fallback de gowork.sh, verifies) se rompe silencioso. Best-effort:
-  # offline o dirty NO bloquea — el worktree nace de origin/main igual gracias al fetch.
+  # offline o dirty NO bloquea: el worktree nace de la rama trunk igual gracias al fetch.
+  bb="$(base_branch "$base")"
   cur="$(git -C "$base" symbolic-ref --short HEAD 2>/dev/null || true)"
-  if [ "$cur" = "main" ] && [ -z "$(git -C "$base" status --porcelain 2>/dev/null)" ]; then
-    git -C "$base" pull --ff-only origin main >/dev/null 2>&1 \
-      || echo "⚠️  no pude refrescar repos/$repo (offline o divergió) — sigo; el worktree nace de origin/main."
+  if [ "$cur" = "$bb" ] && [ -z "$(git -C "$base" status --porcelain 2>/dev/null)" ]; then
+    git -C "$base" pull --ff-only origin "$bb" >/dev/null 2>&1 \
+      || echo "⚠️  no pude refrescar repos/$repo (offline o divergió) — sigo; el worktree nace de origin/$bb."
   else
-    echo "⚠️  repos/$repo no está limpio en main${cur:+ (rama: $cur)} — no lo refresco (el worktree nace de origin/main igual)."
+    echo "⚠️  repos/$repo no está limpio en $bb${cur:+ (rama: $cur)} — no lo refresco (el worktree nace de origin/$bb igual)."
   fi
-  git -C "$base" worktree add -b "task/$TASK" "$wt" origin/main 2>/dev/null \
+  git -C "$base" worktree add -b "task/$TASK" "$wt" "origin/$bb" 2>/dev/null \
     || git -C "$base" worktree add "$wt" "task/$TASK"
   echo "✅ worktree: $wt (rama task/$TASK)"
 done

@@ -30,10 +30,11 @@ TASK="${1:?uso: ship.sh [--precheck] <task-id> <repo>}"
 REPO="${2:?uso: ship.sh [--precheck] <task-id> <repo>}"
 WS="$(cd "$(dirname "$0")/.." && pwd)"
 WT="$WS/worktrees/$TASK/$REPO"
+
 BASE="$WS/repos/$REPO"
 MAX_RETRY={{LOOP_BUDGET}}
 # El flujo a main que el humano eligió en la entrevista. Este script SOLO
-# implementa trunk direct-to-prod: hace `git push origin HEAD:main`. Las
+# implementa trunk direct-to-prod: hace `git push origin HEAD:$BASE_REF`. Las
 # otras dos respuestas (trunk-staging, prs) se ofrecían, se registraban en
 # harness-answers.yaml, y NADIE las leía, así que quien eligió "prs" por
 # política de su empresa recibía commits directos a main, en silencio.
@@ -66,6 +67,49 @@ mkdir -p "$WS/locks" "$WS/tasks/$TASK"
 
 [ -d "$WT" ] || { echo "❌ no existe el worktree $WT"; echo "   ↳ remediación: scripts/worktree-task.sh $TASK $REPO"; exit 2; }
 [ -d "$BASE/.git" ] || { echo "❌ no existe el clon base $BASE"; exit 2; }
+# ── LA RAMA TRUNK NO SIEMPRE SE LLAMA "main" ──────────────────────────
+# Catorce ocurrencias de origin/$BASE_REF en este archivo y seis en
+# worktree-task.sh daban por hecho el nombre. Cualquier repo con `master`,
+# `trunk` o `develop` (todo GitHub/GitLab pre-2021 sin migrar) moría en la
+# creación del worktree con "invalid reference", y de paso block-direct-push
+# tampoco protegía esas ramas porque solo bloqueaba `main`.
+#
+# La técnica correcta ya estaba en el repo: skills-sync.sh resuelve la rama
+# por defecto con origin/HEAD desde siempre.
+base_branch() {  # base_branch [dir] → la rama trunk del repo, sin prefijo
+  local d="${1:-.}" b
+  # OJO con `[ ... ] && cmd` bajo `set -e`: si la condición es falsa el
+  # AND-list devuelve 1 y MATA el script. Lo aprendimos acá mismo: el
+  # precheck salía con exit 128 sin imprimir una línea. Se usa `if`.
+  if [ -n "${HARNESS_BASE_BRANCH:-}" ]; then printf '%s' "$HARNESS_BASE_BRANCH"; return 0; fi
+  b="$(git -C "$d" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
+  [ -n "$b" ] || b=main
+  printf '%s' "$b"
+}
+BASE_REF="$(base_branch "$WT")"
+
+# LA RAMA BASE SE VALIDA, NO SE SUPONE. Varios gates comparan contra
+# `origin/$BASE_REF` (tests no debilitados, carril, migraciones nuevas) y todos
+# envuelven su git en `|| true` para tolerar un repo sin cambios. Si la ref no
+# existe, git falla, el `|| true` se lo traga, el diff sale VACÍO y los gates
+# pasan en verde SIN HABER MIRADO NADA. Reproducido: con una rama base falsa,
+# el precheck imprimía "✅ precheck verde".
+#
+# Es el mismo patrón que venimos persiguiendo, y aquí desarma justo el gate
+# anti-trampa, así que se comprueba una vez, temprano y fuerte.
+if ! git -C "$WT" rev-parse --verify --quiet "origin/$BASE_REF" >/dev/null 2>&1; then
+  git -C "$WT" fetch origin --quiet 2>/dev/null || true      # worktree stale
+  if ! git -C "$WT" rev-parse --verify --quiet "origin/$BASE_REF" >/dev/null 2>&1; then
+    echo "❌ no existe la rama base 'origin/$BASE_REF' en $WT."
+    echo "   NO puedo correr los gates que comparan contra el trunk: verían un"
+    echo "   diff vacío y pasarían en verde sin mirar nada. Eso sería peor que"
+    echo "   fallar, así que fallo."
+    echo "   ↳ remediación: git -C $WT fetch origin"
+    echo "     o exportá HARNESS_BASE_BRANCH con el nombre correcto"
+    echo "     (detectado: '$BASE_REF'; ramas remotas: $(git -C "$WT" branch -r 2>/dev/null | tr -d ' ' | tr '\n' ' '))"
+    exit 2
+  fi
+fi
 
 # El bus: lo que este gate decide se cuenta. Fail-open — si emit.sh no está,
 # ship.sh funciona igual (el bus es observación, no control).
@@ -192,12 +236,12 @@ acquire_lock() {
 gate_trailer() {
   gate "trailer Task: $TASK"
   local total with_trailer
-  total=$(git rev-list --count origin/main..HEAD)
-  [ "$total" -gt 0 ] || { echo "❌ no hay commits nuevos sobre origin/main"; exit 3; }
-  with_trailer=$(git log origin/main..HEAD --format=%B | grep -cE "^Task: $TASK\$" || true)
+  total=$(git rev-list --count origin/$BASE_REF..HEAD)
+  [ "$total" -gt 0 ] || { echo "❌ no hay commits nuevos sobre origin/$BASE_REF"; exit 3; }
+  with_trailer=$(git log origin/$BASE_REF..HEAD --format=%B | grep -cE "^Task: $TASK\$" || true)
   [ "$with_trailer" -ge "$total" ] || {
     echo "❌ $((total-with_trailer)) de $total commits sin trailer 'Task: $TASK'"
-    echo "   ↳ remediación: git rebase origin/main --exec 'git commit --amend --no-edit --trailer \"Task: $TASK\"'"
+    echo "   ↳ remediación: git rebase origin/$BASE_REF --exec 'git commit --amend --no-edit --trailer \"Task: $TASK\"'"
     exit 3
   }
 }
@@ -216,7 +260,7 @@ gate_lane() {
   [ "$lane" = "express" ] || return 0
   local pat="${LANE_GUARD_PATTERN:-(\.proto\$|(^|/)proto/|(^|/)migrations?/|\.sql\$|(^|/)helm/|(^|/)charts/|(^|/)terraform/|(^|/)openapi\.|(^|/)swagger\.)}"
   local hits
-  hits="$(git diff origin/main..HEAD --name-only | grep -E "$pat" || true)"
+  hits="$(git diff origin/$BASE_REF..HEAD --name-only | grep -E "$pat" || true)"
   if [ -n "$hits" ]; then
     echo "❌ carril express, pero el diff toca contratos/migraciones/infra:"
     echo "$hits" | sed 's/^/   · /'
@@ -257,7 +301,7 @@ run_lang_gates() {
     # y go-arch-lint abajo, que ya la respetan: si falta la herramienta se dice,
     # no se finge un veredicto. Aquí faltaba.
     #
-    # CASO REAL: el worktree nace de origin/main, o sea SIN node_modules y sin
+    # CASO REAL: el worktree nace de origin/$BASE_REF, o sea SIN node_modules y sin
     # los tipos que genera `astro sync`. tsc no ve los ambientes y escupe
     # errores que PARECEN deuda vieja (import.meta.env, astro:assets). Fueron 8
     # errores fantasma, un intento de landing perdido, y CERO líneas de código
@@ -432,7 +476,7 @@ run_lang_gates() {
   # agujero que squawk existe para cerrar. import-linter y go-arch-lint, sus
   # vecinos de arriba, ya avisaban honestamente; este era el único que no.
   local migs
-  migs="$(git diff origin/main..HEAD --name-only --diff-filter=A | grep -E '(^|/)migrations?/.*\.sql$' || true)"
+  migs="$(git diff origin/$BASE_REF..HEAD --name-only --diff-filter=A | grep -E '(^|/)migrations?/.*\.sql$' || true)"
   if [ -n "$migs" ]; then
     if command -v squawk >/dev/null; then
       gate "squawk (migraciones)"; squawk $migs
@@ -448,7 +492,7 @@ run_lang_gates() {
     LANG_SEEN=1
     gate buf
     # breaking: SIEMPRE duro (--against apunta al gitdir del clon base)
-    buf breaking --against "$BASE/.git#branch=origin/main"
+    buf breaking --against "$BASE/.git#branch=origin/$BASE_REF"
     # lint: RATCHET — solo violaciones NUEVAS respecto a main bloquean.
     # La deuda preexistente no secuestra shipping ajeno (la baja el
     # ratchet-keeper con su propio ciclo). Se ignoran números de línea
@@ -489,7 +533,7 @@ run_security_gates() {
   if command -v gitleaks >/dev/null; then
     gate gitleaks
     # detect sobre el rango real a pushear (protect --staged es no-op aquí)
-    gitleaks detect --no-banner --log-opts="origin/main..HEAD"
+    gitleaks detect --no-banner --log-opts="origin/$BASE_REF..HEAD"
   else
     echo "⚠️  gitleaks no instalado: el gate de secretos NO CORRIÓ en $REPO."
     echo "   Esto no es un verde: es un tramo sin verificar. Si elegiste gitleaks,"
@@ -523,17 +567,17 @@ gate_tests_untouched() {
   gate "tests no debilitados"
   local pat="${TEST_PATH_PATTERN:-(test|spec|Test|_test\.|\.test\.|\.spec\.|/tests?/|/spec/)}"
   local touched
-  touched="$(git diff -M origin/main..HEAD --name-status \
+  touched="$(git diff -M origin/$BASE_REF..HEAD --name-status \
     | awk -F'\t' '{ for (i = 2; i <= NF; i++) print $i }' | grep -E "$pat" | sort -u || true)"
   [ -n "$touched" ] || return 0
 
   local deleted
-  deleted="$(git diff -M origin/main..HEAD --diff-filter=D --name-only | grep -E "$pat" || true)"
+  deleted="$(git diff -M origin/$BASE_REF..HEAD --diff-filter=D --name-only | grep -E "$pat" || true)"
 
   # UN pase del diff completo en awk (BSD-safe: sin \b ni \s; gsub cuenta
   # OCURRENCIAS, no líneas). Salida: "<aserciones_netas>\t<skips_netos>\t<archivo>".
   local report
-  report="$(git diff -M origin/main..HEAD | TESTPAT="$pat" awk '
+  report="$(git diff -M origin/$BASE_REF..HEAD | TESTPAT="$pat" awk '
     BEGIN {
       pat  = ENVIRON["TESTPAT"]
       asrt = "assert[A-Za-z_]*[[:space:]]*\\(|assert\\.[A-Za-z_]+[[:space:]]*\\(" \
@@ -782,7 +826,7 @@ run_parallel_gates() {
 # pasaría hoy los gates que no dependen de juicio humano ni de review?
 if [ "$PRECHECK" -eq 1 ]; then
   cd "$WT"
-  git fetch origin --quiet 2>/dev/null || true   # fail-open: sin red, compara contra el origin/main local
+  git fetch origin --quiet 2>/dev/null || true   # fail-open: sin red, compara contra el origin/$BASE_REF local
   echo "══ precheck $REPO (task $TASK) ══"
   run_parallel_gates
   stamp_precheck true
@@ -800,11 +844,11 @@ while [ "$attempt" -lt "$MAX_RETRY" ]; do
   attempt=$((attempt+1))
   echo "══ ship $REPO (task $TASK) intento $attempt/$MAX_RETRY ══"
   git fetch origin
-  git rebase origin/main || { git rebase --abort; echo "❌ conflicto de rebase — resuélvelo en el worktree $WT"; exit 4; }
+  git rebase origin/$BASE_REF || { git rebase --abort; echo "❌ conflicto de rebase — resuélvelo en el worktree $WT"; exit 4; }
   gate_trailer
   gate_lane
   run_parallel_gates
-  if git push origin HEAD:main; then
+  if git push origin HEAD:$BASE_REF; then
     sha="$(git rev-parse --short HEAD)"
     echo "{\"repo\":\"$REPO\",\"sha\":\"$sha\",\"shipped_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" >> "$WS/tasks/$TASK/ship.log"
     # Cierra el último gate ANTES de anunciar el ship: si lo dejara al trap,

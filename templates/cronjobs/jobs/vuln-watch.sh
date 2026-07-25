@@ -9,9 +9,29 @@ detect() {
   command -v osv-scanner >/dev/null || return 3
   command -v jq >/dev/null || return 3
   local today="$FINDINGS.today" prev=".cache/cron/vuln-watch.baseline"
-  osv-scanner scan --recursive repos/ --format json 2>/dev/null \
-    | jq -r '.results[]?.packages[]? | .package.name as $p | .vulnerabilities[]? | "\(.id) \($p)"' \
-    | sort -u > "$today" || true
+  # UN SCAN QUE NO CORRIÓ NO ES "LIMPIO". El `|| true` se tragaba el fallo de
+  # osv-scanner (sin red, rate limit, crash), $today quedaba vacío y el
+  # detector devolvía 0 = limpio. Y peor: más abajo la baseline se
+  # sobreescribía con ese vacío, así que al día siguiente TODAS las
+  # vulnerabilidades preexistentes reaparecían como NUEVAS y el agente abría
+  # una tanda de PRs duplicados.
+  #
+  # osv-scanner: 0 = sin vulns, 1 = encontró vulns. Cualquier otro código es
+  # un fallo del scan, y eso es un error del detector (el runner lo cuenta
+  # para el circuit breaker), no un verde.
+  local raw="$FINDINGS.raw" rc=0
+  osv-scanner scan --recursive repos/ --format json > "$raw" 2>/dev/null || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
+    rm -f "$raw"
+    echo "osv-scanner falló (exit $rc): el scan NO corrió." >&2
+    echo "NO toco la baseline: sobreescribirla con un scan vacío haría que mañana" >&2
+    echo "todas las vulnerabilidades preexistentes reaparezcan como nuevas." >&2
+    return 1
+  fi
+  jq -r '.results[]?.packages[]? | .package.name as $p | .vulnerabilities[]? | "\(.id) \($p)"' \
+    "$raw" 2>/dev/null | sort -u > "$today" || {
+      rm -f "$raw"; echo "salida de osv-scanner ilegible: no toco la baseline" >&2; return 1; }
+  rm -f "$raw"
   # trivy (fail-open): config scan de Dockerfiles/IaC — HIGH/CRITICAL solamente
   if command -v trivy >/dev/null; then
     trivy config --severity HIGH,CRITICAL --format json repos/ 2>/dev/null \

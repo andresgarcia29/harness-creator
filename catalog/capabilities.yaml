@@ -651,7 +651,7 @@ capabilities:
     install_kind: auto
     permission_tier: read-only
     profiles: [implementer, reviewer]
-    detect: "repos con migraciones SQL"
+    detect: "signal:migrations"   # discover.sh lo emite por repos/*/migrations/*.sql
 
   - name: goose
     category: deploy

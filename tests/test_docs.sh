@@ -48,6 +48,24 @@ assert_contains "$(cat "$const")" "ALCANCE" "la constitución separa alcance (§
 assert_contains "$(cat "$root/templates/commands/auto.md.tmpl")" "elimina la causa" \
   "/auto aplica la Ley 13 al ADR que propone al humano"
 
+# ── Enrichment: la única interacción con el humano, al principio.
+# Concentrar ahí lo que solo el humano sabe es lo que permite que el resto
+# corra sin interrupciones. El modo de fallo de esta fase es la CEREMONIA:
+# preguntar por preguntar reintroduce justo el "se para mucho" que vino a
+# resolver, así que la barra de calidad se testea igual que la fase.
+auto_md="$root/templates/commands/auto.md.tmpl"
+assert_contains "$(cat "$auto_md")" "Enrichment" "/auto tiene la fase de enrichment"
+assert_contains "$(cat "$auto_md")" "ÚNICA interacción" "el enrichment se declara como la única interacción"
+assert_contains "$(cat "$auto_md")" "Entiende el terreno ANTES" "primero el terreno, después la tarea"
+assert_contains "$(cat "$auto_md")" "Máximo 5" "la ronda de preguntas tiene techo"
+assert_contains "$(cat "$auto_md")" "el default que" "cada pregunta trae su default (el silencio es respuesta válida)"
+assert_contains "$(cat "$auto_md")" "Si nada califica" "no preguntar es un resultado válido, no una falla"
+assert_contains "$(cat "$auto_md")" "enrichment.md" "la fase deja artefacto auditable"
+assert_contains "$(sed 's/{{LOOP_BUDGET}}/3/' "$root/templates/policy.json.tmpl")" \
+  "enrichment_questions" "la pausa del enrichment es una parada registrada en policy"
+assert_contains "$(cat "$root/templates/docs/intake.md.tmpl")" "enrichment" \
+  "intake.md ya no contradice a /auto sobre rebotar con preguntas"
+
 # ── Ley de estilo (CONTRIBUTING #6): el guion largo "—" delata prosa de IA.
 # RATCHET al estilo ratchet-keeper: el conteo del repo SOLO puede bajar.
 # Al reescribir prosa vieja, baja el número de abajo al nuevo conteo (nunca

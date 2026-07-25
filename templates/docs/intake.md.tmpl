@@ -1,8 +1,16 @@
 # Intake — Contrato de entrada del pipeline
 
-Un ticket que no cumple la plantilla NO entra al harness: se rebota con
-preguntas. Rebotar cuesta centavos; implementar un ticket ambiguo
-cuesta el pipeline completo más el retrabajo.
+Un ticket que no cumple la plantilla NO entra al harness tal cual.
+Rebotar cuesta centavos; implementar un ticket ambiguo cuesta el
+pipeline completo más el retrabajo.
+
+Quién lo rebota depende de por dónde entre. Con un humano en el loop
+(comandos sueltos), se devuelve con preguntas. Con `/auto`, el rebote
+vive en el paso 1 (**enrichment**): el agente entiende primero el
+terreno (grafo, briefs, ADR, ownership), resuelve con evidencia todo lo
+resoluble, y solo pregunta lo que ninguna de esas fuentes contesta, en
+UNA ronda. Después reescribe este ticket verificable y sigue solo. Lo
+que aparezca más tarde ya no se pregunta: va al ledger de supuestos.
 
 ## Plantilla obligatoria de ticket
 

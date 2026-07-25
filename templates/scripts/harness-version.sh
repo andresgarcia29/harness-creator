@@ -18,7 +18,7 @@
 # Uso:
 #   scripts/harness-version.sh            todo: versión + sesión + trabajo
 #   scripts/harness-version.sh --check    solo el veredicto, por exit code
-#   scripts/harness-version.sh --quiet    solo la línea de versión
+#   scripts/harness-version.sh --quiet    solo versión y set de templates
 set -u
 
 WS="$(cd "$(dirname "$0")/.." && pwd)"
@@ -70,6 +70,45 @@ else
 fi
 
 echo "$line"
+
+# ── 1b · el SET de templates que realmente generó esta instancia ──────
+# El número de versión NO alcanza, y esto se aprendió caro: un generador
+# escribió `.harness-version` con la versión nueva habiendo generado desde
+# templates viejos. Los 24 conflictos que produjo no traían ninguno de los
+# arreglos que el número prometía, y nada en la salida lo decía.
+#
+# El digest compara CONTENIDO: es el sha256 del set completo de templates,
+# publicado en templates/MANIFEST.sha256 de upstream. Un generador honesto
+# escribe el suyo en `.harness-templates` al generar. Si no está, no es un
+# detalle cosmético: significa que el generador no puede decir con qué set
+# trabajó, y entonces nadie puede saber qué tiene esta instancia.
+local_tpl="$(tr -d ' \n' < "$WS/.harness-templates" 2>/dev/null || true)"
+up_tpl=""
+if command -v gh >/dev/null 2>&1; then
+  up_tpl="$(gh api "repos/$UPSTREAM_REPO/contents/templates/MANIFEST.sha256" \
+    -H "Accept: application/vnd.github.raw" 2>/dev/null \
+    | sed -n 's/^digest: *//p' | head -1 || true)"
+fi
+
+if [ -z "$local_tpl" ]; then
+  echo "⚠️  esta instancia NO declara con qué set de templates se generó"
+  echo "   (falta .harness-templates). Quien la generó no dejó rastro de su"
+  echo "   fuente, así que el número de versión de arriba no se puede creer:"
+  echo "   puede decir 'al día' y tener templates de hace cinco versiones."
+  echo "   ↳ se arregla regenerando con /harness-init . (deja el rastro)"
+  [ "$verdict" -eq 0 ] && verdict=1
+elif [ -z "$up_tpl" ]; then
+  echo "⚠️  templates $(printf '%.12s' "$local_tpl") · no pude traer el manifiesto de upstream para comparar"
+elif [ "$local_tpl" = "$up_tpl" ]; then
+  echo "✅ templates $(printf '%.12s' "$local_tpl"): idénticos a upstream"
+else
+  echo "⬆️  templates $(printf '%.12s' "$local_tpl") · upstream $(printf '%.12s' "$up_tpl"): DISTINTOS"
+  echo "   El contenido difiere aunque el número de versión coincida. Esto es"
+  echo "   exactamente lo que produce un update que reporta éxito sin traer"
+  echo "   los arreglos: regenerá antes de confiar en esta instancia."
+  verdict=1
+fi
+
 [ "$MODE" = "quiet" ] && exit 0
 if [ "$MODE" = "check" ]; then exit "$verdict"; fi
 

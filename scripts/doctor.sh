@@ -25,6 +25,17 @@ for f in CLAUDE.md manifest.yaml harness-answers.yaml .harness-version inventory
   [ -f "$WS/$f" ] && ok "$f presente" || fail "$f faltante" "corre /harness-init de nuevo"
 done
 
+# 1a · El rastro del generador. Sin esto la instancia es inauditable: el
+# número de `.harness-version` lo escribe quien genera, y ya pasó que lo
+# escribiera con la versión nueva habiendo generado desde templates viejos.
+# El digest del set es lo único que compara CONTENIDO.
+if [ -f "$WS/.harness-templates" ]; then
+  ok ".harness-templates presente (set $(cut -c1-12 < "$WS/.harness-templates"))"
+else
+  fail ".harness-templates faltante: no se puede saber con qué set de templates se generó esta instancia" \
+       "regenera con /harness-init . : el generador que la creó no dejó rastro de su fuente, así que .harness-version no es confiable"
+fi
+
 # 1b · Coherencia manifest ↔ repos/ (fantasmas y faltantes)
 if [ -f "$WS/manifest.yaml" ] && [ -d "$WS/repos" ]; then
   for name in $(grep -E '^[[:space:]]+- name:' "$WS/manifest.yaml" | awk '{print $3}'); do

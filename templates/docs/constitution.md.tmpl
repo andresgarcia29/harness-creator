@@ -21,6 +21,22 @@ de cualquier RFC. Cambiar este archivo = ADR ratificado por humanos.
 - La solución más simple que pasa los criterios de aceptación es la
   correcta.
 
+## 2b. Lo correcto por encima de lo rápido
+
+- §2 habla del ALCANCE: no construyas más de lo pedido. Esto habla de la
+  CLASE de arreglo dentro de ese alcance: se ataca la causa, no el
+  síntoma. Las dos reglas conviven y ninguna cancela a la otra.
+- Un parche que deja el problema para la próxima vez no es "la solución
+  simple": es deuda con otro nombre. Lo simple se mide en el problema
+  que queda resuelto, no en las líneas que escribes hoy.
+- Cuando ofrezcas opciones a un humano, la recomendada es la duradera.
+  El atajo se puede listar, nunca como recomendado, y con su costo
+  declarado. Marcar lo rápido como recomendado le traslada al humano una
+  decisión que él te delegó a vos, y encima sesgada.
+- Si el atajo rompe una ley del workspace, no es una opción: es un bug
+  del harness que hay que reportar (CLAUDE.md Ley 12). Un camino
+  legítimo que no existe es un hueco a llenar, no una regla a saltar.
+
 ## 3. Cambios quirúrgicos
 
 - Cada línea modificada debe trazar directamente a la solicitud

@@ -66,6 +66,20 @@ Dirección de dependencias (ley, referencia del DAG de shipping):
    (redacta secretos, deduplica, cuota 3/24h). Rodearlo con un
    workaround silencioso condena al siguiente usuario. Protocolo
    completo: `.claude/skills/harness-bug-report/SKILL.md`.
+13. **La recomendada es la que elimina la causa, jamás la más rápida.**
+   Cuando presentes alternativas a un humano, la que marques como
+   recomendada es la que deja el problema resuelto para siempre, aunque
+   cueste más trabajo hoy. El atajo se puede listar, NUNCA como
+   recomendado, y siempre con su deuda escrita ("esto vuelve la próxima
+   vez que X"). Si el único camino corto rompe una ley de este archivo,
+   no lo recomiendes: que no exista un camino legítimo significa que al
+   harness le falta uno, y eso es un bug del harness (Ley 12), no un
+   permiso para saltarse la ley. Caso real: un agente recomendó "editar
+   `state.json` a mano" porque no había vuelta atrás por CLI; lo correcto
+   era reportar el hueco, que hoy es `harness-policy.py rollback`.
+   Esto NO afloja el código mínimo (constitución §2): el alcance sigue
+   siendo lo pedido. Habla de CÓMO se arregla lo que ya está en alcance,
+   no de cuánto se construye.
 
 ## Pipeline (detalle: docs/harness/pipeline.md)
 

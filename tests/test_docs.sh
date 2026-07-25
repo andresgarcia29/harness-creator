@@ -81,4 +81,15 @@ else
   fail "ratchet de guion largo: $emdash_now > $EMDASH_MAX; tu cambio AÑADE em dashes. Reescribe con coma/dos puntos/paréntesis (CONTRIBUTING #6)"
 fi
 
+# ── El manifiesto de templates refleja los templates.
+# Un manifiesto viejo es PEOR que ninguno: hace creer que una instancia se
+# generó con un set que no es el que se usó, que es exactamente el fallo
+# que el manifiesto existe para detectar. Por eso se verifica en cada corrida
+# y no "cuando alguien se acuerde".
+if out="$(bash "$root/scripts/templates-manifest.sh" verify 2>&1)"; then
+  pass "templates/MANIFEST.sha256 al día con los templates"
+else
+  fail "$out"
+fi
+
 t_done

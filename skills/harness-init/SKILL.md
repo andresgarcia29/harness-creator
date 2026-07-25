@@ -251,6 +251,7 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `manifest.yaml` | manifest.yaml.tmpl | siempre |
 | `harness-answers.yaml` | harness-answers.yaml.tmpl | siempre (esquema fijo) |
 | `.harness-version` | versión del plugin | siempre |
+| `.harness-templates` | el `digest:` de `templates/MANIFEST.sha256` | **siempre, y esto no es opcional**: es el rastro de CON QUÉ SET se generó esta instancia. El número de versión no alcanza y se aprendió caro: un generador escribió la versión nueva habiendo generado desde templates viejos, produjo 24 conflictos que no traían ninguno de los arreglos que el número prometía, y nada en su salida lo decía. Un generador que no deja este rastro deja una instancia que nadie puede auditar. `make version` lo compara contra upstream y detecta el drift de CONTENIDO, no solo de número |
 | `Makefile` | Makefile.tmpl | siempre |
 | `.gitignore` | gitignore.tmpl | siempre: COPIA LITERAL del template, no una lista que reconstruyas de memoria. Cada entrada trae su porqué en el archivo. Cuando esto era prosa dentro de esta tabla, el generado se divergió en los dos sentidos: le faltaban `go.work`, `go.work.sum` y `graphify-out/` (128 MB del grafo entrando a un `git add -A`, con `git init` + `make graph` invitando al accidente) y le sobraban dos que la tabla no mencionaba (issue #27). Si hay que cambiar la lista, se cambia el template |
 | `.claude/settings.json` | settings.json.tmpl | siempre (hooks + denials read-only) |

@@ -781,6 +781,29 @@ make doctor                           # comprobación final
 
 Y cumple la regla de la casa: si no puede consultar la versión de upstream (sin `gh`, sin red, sin auth), **lo dice** en vez de reportar "al día". Su modo `--check` tiene tres salidas distintas, y la tercera existe precisamente para que un script no confunda "no pude comparar" con "estás al día".
 
+### El número de versión no alcanza: el set de templates
+
+Un número de versión lo escribe quien genera, y por lo tanto puede mentir sin proponérselo. Pasó en la forma más cara posible: un generador escribió `.harness-version` con la versión **nueva** habiendo generado desde templates **viejos**. Reportó "1 actualizado, 24 conflictos" y ninguno de esos 24 archivos traía los arreglos que el número prometía. Nada en la salida lo decía, así que la única forma de enterarse era resolver los 24 diffs a mano y notar que faltaban.
+
+Por eso el repo publica **`templates/MANIFEST.sha256`**: el sha256 de cada uno de los 96 archivos que terminan dentro de una instancia, más un `digest:` que identifica al set completo. Y todo generador **debe** escribir ese digest en `.harness-templates` al generar.
+
+Con eso, `make version` compara **contenido**, no solo números:
+
+```
+✅ instancia 0.47.0 · upstream 0.47.0: al día
+⬆️  templates 200c9fe534c2 · upstream 4a1f88b0d213: DISTINTOS
+```
+
+Ese par de líneas es el caso que antes era invisible: la versión coincide y los archivos no. Hay un tercer estado, y es el más importante de los tres:
+
+```
+⚠️  esta instancia NO declara con qué set de templates se generó
+```
+
+Significa que quien la generó no dejó rastro de su fuente. No es un archivo faltante cualquiera: implica que **el número de versión de arriba no se puede creer**, porque nadie puede verificar qué contiene realmente la instancia. `make doctor` lo reporta igual, con esa misma remediación.
+
+El manifiesto se verifica en cada corrida de la suite (`tests/test_docs.sh`). Un manifiesto desactualizado es peor que ninguno: afirmaría que una instancia se generó con un set que no es el que se usó, que es justo el fallo que existe para impedir. Si tocas un template, `scripts/templates-manifest.sh generate` lo pone al día.
+
 El modo update **no re-pregunta** lo respondido, migra esquemas sin tocar tus decisiones, **reconcilia** (una respuesta nueva propaga diffs a manifest, `CLAUDE.md` y DAG) y distingue propiedad: los scripts del plugin se actualizan con upstream; tus answers, modelos, specs y constituciones son ley local y se conservan. Nada se pisa sin confirmación, con una excepción declarada: los **paquetes atados** (carriles, modelos, plan hondo con loop corto) se aceptan o rechazan juntos, porque a medias romperían la instancia. Al aplicar, el update re-estampa modelos y vuelve a correr el doctor.
 
 > **Nota de migración.** Desde que `validate-ship` comprueba que la fase actual coincida con el último movimiento registrado, una tarea cuyo `state.json` se haya editado a mano fallará con `POLICY-STATE-003` al intentar publicar. Antes de actualizar conviene revisarlo:
@@ -798,9 +821,13 @@ El modo update **no re-pregunta** lo respondido, migra esquemas sin tocar tus de
 commands/          /harness-init · /harness-doctor · /harness-update
 skills/            harness-init/SKILL.md: el cerebro, fases, clustering, entrevista, tabla de generación
 catalog/           capabilities.yaml (el menú): capacidades con detect/tier/profiles/install
-scripts/           discover.sh · doctor.sh (deterministas, portables macOS/Linux, bash 3.2)
+scripts/           discover.sh · doctor.sh · templates-manifest.sh (deterministas, portables macOS/Linux, bash 3.2)
+                   doctor.sh se COPIA a la instancia, así que cuenta como template
 tests/             la suite (./tests/run.sh): ver "Tests" abajo
 templates/         todo lo que se genera:
+  ├── MANIFEST.sha256   la huella del set: sha256 por archivo + digest del conjunto.
+  │                Todo generador escribe ese digest en .harness-templates de la
+  │                instancia; sin ese rastro nadie puede saber qué contiene
   ├── CLAUDE.md, README, manifest, models, answers, settings, Makefile, semgrep
   ├── policy.json.tmpl  las leyes ejecutables del flujo (fases, carriles, límites, paradas)
   ├── agents/      architect · implementer · reviewer · qa · svc-agent (abogado genérico)

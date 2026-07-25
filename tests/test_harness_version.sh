@@ -14,20 +14,37 @@ mkdir -p "$WS/scripts" "$WS/bin" "$WS/tasks/T1" "$WS/tasks/T2" "$WS/.harness/cla
 cp "$R/templates/scripts/harness-version.sh" "$WS/scripts/"
 chmod +x "$WS/scripts/harness-version.sh"
 
-stub_gh() {  # stub_gh <version-upstream|"">  (vacío = gh falla)
+# El stub sirve los DOS endpoints que consulta el script: la versión del
+# plugin y el manifiesto de templates. Son preguntas distintas a propósito:
+# el número puede coincidir mientras el contenido difiere, que es justo el
+# fallo que este script existe para detectar.
+stub_gh() {  # stub_gh <version-upstream|""> [digest-upstream|""]
   if [ -z "$1" ]; then
     printf '#!/usr/bin/env bash\nexit 1\n' > "$WS/bin/gh"
   else
-    printf '#!/usr/bin/env bash\nprintf %s "{\\"version\\":\\"%s\\"}"\n' "'%s'" "$1" > "$WS/bin/gh"
+    cat > "$WS/bin/gh" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+  *MANIFEST*) [ -n "${2:-}" ] || exit 1
+              echo "plugin_version: $1"; echo "digest: ${2:-}" ;;
+  *)          printf '{"version":"$1"}' ;;
+esac
+EOF
   fi
   chmod +x "$WS/bin/gh"
 }
+SET_A=aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888
+SET_B=9999ffff8888eeee7777dddd6666cccc5555bbbb4444aaaa3333999922221111
 run() { ( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/harness-version.sh "$@" ) 2>&1; }
 rc_of() { ( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/harness-version.sh "$@" >/dev/null 2>&1; echo $?); }
 
 echo "── el veredicto de versión, en sus tres formas"
 
-echo "0.40.0" > "$WS/.harness-version"; stub_gh "0.47.0"
+# Los templates se fijan idénticos para que este bloque aísle la VERSIÓN;
+# el set de templates tiene su propio bloque más abajo.
+echo "$SET_A" > "$WS/.harness-templates"
+
+echo "0.40.0" > "$WS/.harness-version"; stub_gh "0.47.0" "$SET_A"
 out="$(run)"
 assert_contains "$out" "HAY UPDATE" "instancia vieja: lo dice"
 assert_contains "$out" "0.40.0" "con la versión local"
@@ -47,6 +64,39 @@ out="$(run)"
 assert_contains "$out" "NO pude comparar" "sin respuesta de upstream: lo dice"
 assert_not_contains "$out" "al día" "y NO reporta al día (sería la mentira más cara de este script)"
 assert_eq 2 "$(rc_of --check)" "--check: exit 2 = no se pudo comparar, distinto de 0 y de 1"
+
+echo
+echo "── el set de templates: el número puede mentir, el contenido no"
+# El fallo real que motivó esto: un generador escribió .harness-version con
+# la versión NUEVA habiendo generado desde templates viejos. La versión
+# coincidía, el contenido no, y la salida no lo decía en ningún lado.
+echo "0.47.0" > "$WS/.harness-version"
+echo "$SET_A" > "$WS/.harness-templates"; stub_gh "0.47.0" "$SET_B"
+out="$(run)"
+assert_contains "$out" "al día" "la VERSIÓN coincide, y eso se reporta tal cual"
+assert_contains "$out" "DISTINTOS" "pero el SET de templates difiere y se dice"
+assert_contains "$out" "aaaa1111bbbb" "con el digest local"
+assert_contains "$out" "9999ffff8888" "y el de upstream"
+assert_eq 1 "$(rc_of --check)" "--check: exit 1 aunque la versión coincida (el contenido manda)"
+
+echo "$SET_B" > "$WS/.harness-templates"
+out="$(run)"
+assert_contains "$out" "idénticos a upstream" "sets iguales: lo dice"
+assert_not_contains "$out" "DISTINTOS" "y no confunde"
+assert_eq 0 "$(rc_of --check)" "--check: exit 0 solo cuando coinciden versión Y contenido"
+
+# Un generador que no deja rastro de su fuente: la instancia es inauditable.
+rm -f "$WS/.harness-templates"
+out="$(run)"
+assert_contains "$out" "NO declara con qué set" "sin rastro del generador: lo dice"
+assert_contains "$out" "no se puede creer" "y avisa que el número de versión no alcanza"
+assert_eq 1 "$(rc_of --check)" "--check: exit 1, porque no se puede afirmar que esté al día"
+
+# Sin manifiesto de upstream: no se inventa un veredicto de contenido.
+echo "$SET_A" > "$WS/.harness-templates"; stub_gh "0.47.0"
+out="$(run)"
+assert_contains "$out" "no pude traer el manifiesto" "sin manifiesto remoto: dice el motivo"
+assert_not_contains "$out" "idénticos a upstream" "y NO afirma que coincidan"
 
 # gh ni siquiera instalado: hay que sacarlo del PATH, no solo borrar el stub
 # (el del sistema seguiría respondiendo y el test probaría otra cosa).

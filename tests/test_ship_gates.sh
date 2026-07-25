@@ -342,6 +342,70 @@ assert_contains "$out" "NO corrió tests" "sin script test: lo dice en vez de ca
 cd "$WS"
 
 echo
+echo "── gate de lenguaje: los stacks que faltaban, y el silencio que quedaba"
+# Bug P0: run_lang_gates solo reconocia go/node/python/dart. Un repo Rust,
+# Java, Ruby, PHP, .NET o Elixir salia VERDE del precheck con el build roto y
+# ship.sh lo pushaba a main. Para un instalador universal era el agujero mas
+# grande: solo cuatro stacks se verificaban de verdad.
+
+mk_stack() {  # mk_stack <dir> <archivo-marcador>
+  rm -rf "$1"; mkdir -p "$1"; cd "$1"
+  git init -q .; git config user.email t@t; git config user.name t
+  : > "$2"; git add -A && git commit -qm init
+  git update-ref refs/remotes/origin/main HEAD
+  cd "$WS"
+}
+run_lang_bare() {  # sin stubs de toolchain: mide qué dice cuando no está
+  ( set -u; cd "$1"; WT="$1"; REPO=r; TASK=T1
+    gate() { :; }; emit() { :; }
+    . "$WS/lang.sh"; run_lang_gates ) 2>&1
+}
+
+# Un stub del binario hace que `command -v` lo encuentre y que la rama corra:
+# si el stub imprime, la rama existe. Sin stub correriamos toolchains reales.
+check_stack() {  # check_stack <dir> <marcador> <bin> <label> [archivo-extra]
+  mk_stack "$1" "$2"
+  [ -n "${5:-}" ] && ( cd "$1" && : > "$5" )
+  out="$( ( cd "$1"; WT="$1"; REPO=r; TASK=T1
+            gate() { :; }; emit() { :; }
+            eval "$3() { echo RAN-$3; }"
+            . "$WS/lang.sh"; run_lang_gates ) 2>&1 )"
+  assert_contains "$out" "RAN-$3" "reconoce $4 por $2 y corre su toolchain"
+  cd "$WS"
+}
+check_stack "$WS/st-rust"   Cargo.toml    cargo   Rust
+check_stack "$WS/st-maven"  pom.xml       mvn     Java-Maven
+check_stack "$WS/st-elixir" mix.exs       mix     Elixir
+check_stack "$WS/st-ruby"   Gemfile       bundle  Ruby        Rakefile
+check_stack "$WS/st-php"    composer.json composer PHP        phpunit.xml
+
+# Marcador presente pero toolchain ausente: se dice, no se finge un veredicto.
+mk_stack "$WS/st-sinbin" Cargo.toml
+out="$( ( cd "$WS/st-sinbin"; WT="$WS/st-sinbin"; REPO=r; TASK=T1
+          gate() { :; }; emit() { :; }
+          PATH=/nonexistent
+          . "$WS/lang.sh"; run_lang_gates ) 2>&1 )"
+assert_contains "$out" "no está instalado" "marcador sin toolchain: lo dice"
+assert_contains "$out" "NO CORRIÓ" "y dice que ese gate no corrió"
+cd "$WS"
+
+# El caso que importa: stack no reconocido ya NO pasa callado.
+mk_stack "$WS/st-raro" "algo.xyz"
+out="$(run_lang_bare "$WS/st-raro")"
+assert_contains "$out" "no reconozco el stack" "stack desconocido: lo DICE"
+assert_contains "$out" "NO compiló ni testeó nada" "y dice exactamente qué no hizo"
+assert_contains "$out" "CONTRIBUTING #8" "y apunta a la regla que lo gobierna"
+
+# Un stack reconocido NO dispara ese aviso.
+mk_stack "$WS/st-go" "go.mod"
+out="$( ( cd "$WS/st-go"; WT="$WS/st-go"; REPO=r; TASK=T1
+          gate() { :; }; emit() { :; }; go() { :; }
+          . "$WS/lang.sh"; run_lang_gates ) 2>&1 )"
+assert_not_contains "$out" "no reconozco el stack" "stack reconocido: sin aviso"
+
+cd "$WS"
+
+echo
 echo "── check_verdict: cada rechazo nombra su causa y su remediación"
 # Bug de campo: verdict:"pass" + qa:"pending" salía como "veredicto no es pass,
 # corrige los items blocking", con blocking vacío. La remediación real era

@@ -169,8 +169,12 @@ gate_lane() {
 }
 
 run_lang_gates() {
+  # ¿Reconocimos el stack de este repo? Si al final sigue en 0, el gate no
+  # verificó NADA, y eso tiene que verse: era el silencio más caro del script.
+  LANG_SEEN=0
   if [ -f go.mod ]; then
     gate go; go vet ./... && go build ./... && go test ./...
+    LANG_SEEN=1
   fi
   # Repo TS cuyo package.json NO está en la raíz (monorepo, apps/, packages/):
   # el bloque entero se saltaba EN SILENCIO, el precheck salía verde y el
@@ -188,6 +192,7 @@ run_lang_gates() {
     exit 3
   fi
   if [ -f package.json ]; then
+    LANG_SEEN=1
     gate ts
     # UN GATE QUE NO PUEDE CORRER NO REPORTA ROJO. Misma regla que import-linter
     # y go-arch-lint abajo, que ya la respetan: si falta la herramienta se dice,
@@ -283,12 +288,72 @@ run_lang_gates() {
     fi
   fi
   if [ -f pyproject.toml ]; then
+    LANG_SEEN=1
     gate python
     ruff check .
     if command -v uv >/dev/null; then uv run pytest -q; else pytest -q; fi
   fi
   if [ -f pubspec.yaml ]; then
     gate flutter; flutter analyze && flutter test
+    LANG_SEEN=1
+  fi
+  # ── Stacks que faltaban ───────────────────────────────────────────────
+  # Hasta aquí el gate solo reconocía Go, Node, Python y Dart. Un repo Rust,
+  # Java, Ruby, PHP, .NET o Elixir no tenía rama: el precheck salía VERDE con
+  # el build roto y ship.sh lo pushaba a main sin compilar ni testear, sin
+  # decir una palabra. Para un instalador que se dice universal, ese era el
+  # agujero más grande (regla 8 de CONTRIBUTING).
+  #
+  # Cada uno sigue la regla de la casa: si el marcador está pero la toolchain
+  # no, se dice, no se finge un veredicto.
+  need() {  # need <bin> <stack>: ¿está la toolchain? si no, avisa honesto
+    command -v "$1" >/dev/null && return 0
+    echo "⚠️  $REPO es $2 pero '$1' no está instalado: ese gate NO CORRIÓ."
+    emit assumption "$REPO ($2) NO compilado ni testeado: falta '$1' en el PATH"
+    return 1
+  }
+  if [ -f Cargo.toml ]; then
+    LANG_SEEN=1
+    if need cargo Rust; then gate rust; cargo build --locked && cargo test; fi
+  fi
+  if [ -f pom.xml ]; then
+    LANG_SEEN=1
+    if need mvn Java-Maven; then gate java-maven; mvn -B -q verify; fi
+  fi
+  if [ -f build.gradle ] || [ -f build.gradle.kts ]; then
+    LANG_SEEN=1
+    if [ -x ./gradlew ]; then gate java-gradle; ./gradlew --quiet build
+    elif need gradle Java-Gradle; then gate java-gradle; gradle --quiet build; fi
+  fi
+  if [ -f Gemfile ]; then
+    LANG_SEEN=1
+    if need bundle Ruby; then
+      gate ruby
+      if [ -f Rakefile ]; then bundle exec rake
+      elif [ -d spec ]; then bundle exec rspec
+      else echo "⚠️  $REPO es Ruby pero no tiene Rakefile ni spec/: no encontré qué correr"
+           emit assumption "$REPO (Ruby) sin suite reconocible: el gate no corrió tests"; fi
+    fi
+  fi
+  if [ -f composer.json ]; then
+    LANG_SEEN=1
+    if need composer PHP; then
+      gate php
+      if [ -f phpunit.xml ] || [ -f phpunit.xml.dist ]; then
+        composer install --no-interaction --quiet && vendor/bin/phpunit
+      else
+        echo "⚠️  $REPO es PHP sin phpunit.xml: no encontré qué correr"
+        emit assumption "$REPO (PHP) sin config de phpunit: el gate no corrió tests"
+      fi
+    fi
+  fi
+  if ls ./*.sln ./*.csproj >/dev/null 2>&1; then
+    LANG_SEEN=1
+    if need dotnet dotNET; then gate dotnet; dotnet build --nologo -v q && dotnet test --nologo -v q; fi
+  fi
+  if [ -f mix.exs ]; then
+    LANG_SEEN=1
+    if need mix Elixir; then gate elixir; mix compile --warnings-as-errors && mix test; fi
   fi
   # Gates de arquitectura y SQL: la CONFIG del repo es el opt-in (sin config,
   # silencio). Con config presente son gates duros — igual que go/ts. Config
@@ -308,6 +373,7 @@ run_lang_gates() {
     if [ -n "$migs" ]; then gate "squawk (migraciones)"; squawk $migs; fi
   fi
   if [ -f buf.yaml ]; then
+    LANG_SEEN=1
     gate buf
     # breaking: SIEMPRE duro (--against apunta al gitdir del clon base)
     buf breaking --against "$BASE/.git#branch=origin/main"
@@ -327,12 +393,37 @@ run_lang_gates() {
     fi
     [ -n "$main_lint" ] && echo "⚠️  buf lint: $(printf '%s\n' "$main_lint" | grep -c .) violaciones PREEXISTENTES en main (no bloquean; candidatas al ratchet-keeper)"
   fi
+
+  # EL SILENCIO MÁS CARO: si ningún marcador matcheó, este gate no compiló ni
+  # testeó NADA y hasta hoy salía verde igual. Un repo docs o de contratos
+  # puede no tener stack legítimamente, así que no se bloquea, pero deja de
+  # pasar callado: queda como supuesto arriba del resumen de sesión.
+  if [ "$LANG_SEEN" -eq 0 ]; then
+    echo "⚠️  no reconozco el stack de $REPO: este gate NO compiló ni testeó nada."
+    echo "   Marcadores que busco: go.mod, package.json, pyproject.toml,"
+    echo "   pubspec.yaml, Cargo.toml, pom.xml, build.gradle, Gemfile,"
+    echo "   composer.json, *.csproj/*.sln, mix.exs, buf.yaml."
+    echo "   Si este repo SÍ se construye, agregá su rama en run_lang_gates:"
+    echo "   un eje sin implementación es un vendor cableado (CONTRIBUTING #8)."
+    emit assumption "$REPO NO compilado ni testeado: run_lang_gates no reconoce su stack"
+  fi
 }
 
 run_security_gates() {
-  gate gitleaks
-  # detect sobre el rango real a pushear (protect --staged es no-op aquí)
-  gitleaks detect --no-banner --log-opts="origin/main..HEAD"
+  # gitleaks es una CAPACIDAD ELEGIBLE en la entrevista, no un supuesto. Sin
+  # guarda, la instancia que no lo palomeó tenía TODO precheck y TODO ship en
+  # rojo con exit 127, y el bootstrap tampoco lo instalaba porque no fue
+  # elegido: un bucle sin salida. Su vecino semgrep ya estaba guardado.
+  if command -v gitleaks >/dev/null; then
+    gate gitleaks
+    # detect sobre el rango real a pushear (protect --staged es no-op aquí)
+    gitleaks detect --no-banner --log-opts="origin/main..HEAD"
+  else
+    echo "⚠️  gitleaks no instalado: el gate de secretos NO CORRIÓ en $REPO."
+    echo "   Esto no es un verde: es un tramo sin verificar. Si elegiste gitleaks,"
+    echo "   instálalo (bash scripts/bootstrap.sh); si no, quítalo de tu política."
+    emit assumption "secretos de $REPO NO escaneados: gitleaks no está instalado"
+  fi
   if [ -f "$WS/semgrep/rules.yaml" ]; then
     gate semgrep
     semgrep scan --config "$WS/semgrep/rules.yaml" --error --quiet .

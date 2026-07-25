@@ -172,4 +172,26 @@ assert_not_contains "$out" "revert manual sugerido" "ni la variante manual"
 assert_not_contains "$out" "🔴" "y no marca el deploy como rojo"
 assert_contains "$(bus)" "ArgoCD sin credenciales" "queda como supuesto en el ledger"
 
+echo
+echo "── el sha a revertir es el de ESTE repo, no la última línea del log"
+# Bug P0: tail -1 sin filtrar. En tarea multi-repo que shippeó A y luego B,
+# el watch de A proponía revertir el sha de B DENTRO de repos/A.
+rev_sha() {  # rev_sha <repo>: el sha que el script elegiría para revertir
+  ( REPO="$1"; WS="$WS"; TASK=T1
+    jq -r --arg r "$REPO" 'select(.repo == $r) | .sha // empty' \
+      "$WS/tasks/T1/ship.log" 2>/dev/null | tail -1 )
+}
+mkdir -p "$WS/tasks/T1"
+cat > "$WS/tasks/T1/ship.log" <<'JSONL'
+{"repo":"design-system","sha":"aaa1111","shipped_at":"2026-07-25T00:00:00Z"}
+{"repo":"videocore","sha":"bbb2222","shipped_at":"2026-07-25T00:01:00Z"}
+JSONL
+assert_eq "aaa1111" "$(rev_sha design-system)" "el repo shippeado primero recupera SU sha"
+assert_eq "bbb2222" "$(rev_sha videocore)" "y el segundo el suyo"
+assert_eq "" "$(rev_sha inexistente)" "un repo sin ship no devuelve el sha de otro"
+
+# Sin sha no se propone una acción destructiva a ciegas.
+dw="$(cat "$ROOT/templates/scripts/deploy-watch.sh.tmpl")"
+assert_contains "$dw" 'NO sé qué revertir' "sin sha: lo dice en vez de sugerir un revert vacío"
+
 t_done

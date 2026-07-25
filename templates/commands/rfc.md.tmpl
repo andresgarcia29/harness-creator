@@ -6,6 +6,12 @@ argument-hint: <task-id>
 Fase RFC para la tarea $ARGUMENTS (ya pasó intake: existe
 tasks/$ARGUMENTS/task.md).
 
+0. **Solicita la transición** `intake → rfc`:
+   `scripts/harness-policy.py transition tasks/$ARGUMENTS rfc --actor orchestrator`.
+   Si rebota, el intake no se registró: corre `/feature` primero. La máquina
+   de estados no se entera sola de que este comando corrió, y `ship.sh` la
+   consulta al final (`validate-ship` compara la fase contra el último
+   movimiento del historial, así que editarla a mano tampoco sirve).
 1. **Determina los clusters afectados** con el task.md y
    `manifest.yaml` (campo cluster/agent por repo). En duda de fronteras
    usa el grafo, no grep masivo. **En cuanto conozcas los repos, lanza
@@ -49,7 +55,24 @@ tasks/$ARGUMENTS/task.md).
 4. **Síntesis del arquitecto**: máx 2 rondas; conflicto irresuelto →
    escala al humano con las posiciones en limpio. Árbitro de
    contratos: el repo proto, expand/contract siempre.
-5. **Plan** → `tasks/$ARGUMENTS/plan.md` + `delta-spec.md` + beads
+5. **DAG** → `tasks/$ARGUMENTS/dag.json`. `harness-policy.py validate-dag`
+   lo exige como gate antes de `rfc → implement`, y su esquema es exacto:
+
+   ```json
+   {"schema": 1,
+    "tasks": [{"id": "T1", "repo": "atlas",  "depends_on": []},
+              {"id": "T2", "repo": "proto",  "depends_on": ["T1"]}]}
+   ```
+
+   Reglas que el validador hace cumplir, con el código que vas a ver si
+   fallan: `schema` es 1 y `tasks[]` no va vacío (`POLICY-DAG-001`); cada
+   entrada es un objeto (`DAG-002`); `id` no vacío y sin repetir
+   (`DAG-003`); `repo` no vacío y sin `/` ni `..` (`DAG-004`); `depends_on`
+   es una lista (`DAG-005`) de ids que existan en el mismo archivo
+   (`DAG-006`); y no puede haber ciclos (`DAG-007`). Los ids son los mismos
+   bloques `### T<n>` del plan: el DAG es su orden de shipping en JSON, no
+   una lista aparte.
+6. **Plan** → `tasks/$ARGUMENTS/plan.md` + `delta-spec.md` + beads
    (`bd create` con deps y ref al ticket), en el formato de bloques
    `### T<n>` que exige `.claude/agents/architect.md`: una entrega es
    **la rebanada más chica shippeable** (lo demás son beads de
@@ -73,7 +96,7 @@ tasks/$ARGUMENTS/task.md).
    no quedaron decisiones abiertas y que cada `req` existe en el
    delta-spec. **Rojo no pasa a implement**: el architect lo corrige
    ahí mismo. Es la única revisión del plan que no cuesta una ronda.
-6. Decisiones que sobreviven el RFC → borrador de ADR en docs/adr/.
-7. Cierra con el resumen al humano y sugiere: `/implement $ARGUMENTS`.
+7. Decisiones que sobreviven el RFC → borrador de ADR en docs/adr/.
+8. Cierra con el resumen al humano y sugiere: `/implement $ARGUMENTS`.
 
 Presupuesto: 1 ronda normal, 2 máximo. Este comando NO implementa.

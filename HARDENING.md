@@ -92,22 +92,22 @@ falta de conocimiento: es que la regla estaba en prosa y no en un test.
   Con MCPs declarados en answers y el archivo ausente, el doctor sale verde y
   los agentes arrancan sin ningún servidor. `scripts/doctor.sh:65-78`.
 
-## P1: el gate exige lo que ningún prompt pidió
+## P1: el gate exige lo que ningún prompt pidió (cerrado)
 
-- [ ] **`dag.json`: `validate-dag` lo exige y nadie manda a crearlo.** Ningún
+- [x] **`dag.json`: `validate-dag` lo exige y nadie manda a crearlo.** Ningún
   prompt lo nombra ni define su esquema; las únicas menciones en todo el repo
   son el validador y la línea de `/auto` que lo invoca. Toda corrida
   standard/full llega al cierre del RFC sin el archivo.
   `harness-policy.py:281-316` contra `architect.md.tmpl` y `rfc.md.tmpl`.
-- [ ] **El flujo manual muere en policy.** `/feature`, `/rfc` e `/implement` no
+- [x] **El flujo manual muere en policy.** `/feature`, `/rfc` e `/implement` no
   mencionan `harness-policy.py` ni una vez, así que `state.json` nunca se crea
   ni avanza, y la transición que `/review` sí pide falla. `AGENTS.md` vende esos
   comandos como playbooks autosuficientes.
-- [ ] **`/ship` y `/archive` nunca solicitan sus transiciones.** Tras un ship y
+- [x] **`/ship` y `/archive` nunca solicitan sus transiciones.** Tras un ship y
   archive manuales, `state.json` queda clavado en `review` con la tarea ya
   archivada, y un `/auto <task-id>` posterior re-entra a revisar algo que ya
   está en producción.
-- [ ] **El delta-spec express solo se escribe con `## ADDED`, pero
+- [x] **El delta-spec express solo se escribe con `## ADDED`, pero
   `gate_tests_untouched` solo acepta declaraciones bajo MODIFIED/REMOVED.** Una
   tarea express que legítimamente cambia un test existente queda roja, y quien
   escribió el delta-spec nunca supo que el mecanismo de declaración existía.

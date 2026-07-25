@@ -5,6 +5,20 @@ argument-hint: <task-id> [repo]
 
 Implementación de $ARGUMENTS según tasks/<task-id>/plan.md.
 
+
+> **La fase se mueve con `harness-policy.py`, siempre.** Este comando es un
+> playbook autosuficiente (AGENTS.md lo vende así), pero la máquina de estados
+> no se entera sola: `ship.sh` exige `phase=review` y `validate-ship` comprueba
+> que la fase sea la que dejó el último movimiento registrado. Si nadie pide la
+> transición, el flujo manual muere en policy con `POLICY-SCHEMA-001` (no existe
+> state.json) o `POLICY-TRANSITION-001`, y el mensaje no dice cuál de los
+> comandos anteriores se la saltó.
+
+0. **Solicita la transición** a la fase de implementación:
+   `scripts/harness-policy.py transition tasks/<task-id> implement --actor orchestrator`.
+   Desde `rfc` en standard/full, desde `intake` en express (el grafo del
+   carril ya lo sabe). Si rebota, la fase anterior no se pidió: arréglala,
+   no edites `state.json` a mano (`POLICY-STATE-003` lo detecta después).
 1. **Orden**: `bd ready --json` te da las tareas desbloqueadas del DAG.
    Si se indicó un repo, limita a ese repo.
 2. **Worktrees**: normalmente ya existen (el prefetch de /rfc o /auto

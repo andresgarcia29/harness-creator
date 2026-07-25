@@ -6,6 +6,15 @@ argument-hint: <task-id> <repo>
 Ship de $ARGUMENTS. Aquí tú NO decides: los gates deciden. Tu trabajo
 es correr los scripts y solo despertar en rojo.
 
+
+> **La fase se mueve con `harness-policy.py`, siempre.** Este comando es un
+> playbook autosuficiente (AGENTS.md lo vende así), pero la máquina de estados
+> no se entera sola: `ship.sh` exige `phase=review` y `validate-ship` comprueba
+> que la fase sea la que dejó el último movimiento registrado. Si nadie pide la
+> transición, el flujo manual muere en policy con `POLICY-SCHEMA-001` (no existe
+> state.json) o `POLICY-TRANSITION-001`, y el mensaje no dice cuál de los
+> comandos anteriores se la saltó.
+
 1. `scripts/ship.sh <task-id> <repo>` — rebase, trailers, gates de
    lenguaje, buf breaking, gitleaks, semgrep, veredicto, lock, push.
    - Falla → el mensaje trae la remediación exacta. Si es de código,
@@ -18,7 +27,12 @@ es correr los scripts y solo despertar en rojo.
      quiet.sh + with-secrets.sh) y propón el fix como nueva tarea.
 3. 🟢 → `scripts/worktree-task.sh --rm <task-id>` si ya no quedan
    tareas del repo, y consulta `bd ready`: ¿siguiente tarea del DAG?
-4. ¿Era la última tarea del ticket? →
+4. ¿Era la última tarea del ticket? → **primero la fase, después el cierre**:
+   `scripts/harness-policy.py transition tasks/<task-id> ship --actor orchestrator`.
+   Va DESPUÉS de que TODOS los repos hayan shippeado, no antes: `ship.sh`
+   exige `phase=review` y se corre una vez por repo, así que adelantarla
+   deja a los repos que faltan sin camino. `POLICY-SHIP-004` lo rechaza y
+   te dice cuáles faltan. Después:
    `scripts/with-secrets.sh scripts/ticket-close.sh <TICKET> --status shipped`,
    luego `/archive <task-id>` (fusiona el delta-spec en las specs
    maestras — NO lo saltes: sin archive hay spec rot), y cierra con

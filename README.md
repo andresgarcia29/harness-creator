@@ -4,11 +4,48 @@
 
 **Instalador universal de harnesses de ingeniería agéntica multi-repo**, como plugin de Claude Code.
 
-Le apuntas a una carpeta con tus repositorios y genera un *harness* completo y adaptado a tu stack: agentes con conocimiento real de tu código, gates deterministas que protegen `main`, un pipeline de trabajo de ticket a producción **dimensionado al blast radius** (una tarea chica corre con 2 sesiones LLM; una migración multi-servicio con el pipeline completo), memoria, secretos, self-healing nocturno y documentación viva. Funciona para cualquier proyecto — un SaaS multi-tenant de 24 repos o un monorepo chico — porque **descubre** tu stack en vez de asumirlo. Está orientado a Claude Code, pero genera `AGENTS.md` (el estándar multi-herramienta): Cursor, Kimi Code, Codex o cualquier otro agente pueden leer y operar el mismo harness.
+Le apuntas a una carpeta con tus repositorios y genera un *harness* completo y adaptado a tu stack: agentes con conocimiento real de tu código, gates deterministas que protegen `main`, un pipeline de trabajo de ticket a producción **dimensionado al blast radius** (una tarea chica corre con 2 sesiones LLM; una migración multi-servicio con el pipeline completo), memoria, secretos, self-healing nocturno y documentación viva. Funciona para cualquier proyecto, un SaaS multi-tenant de 24 repos o un monorepo chico, porque **descubre** tu stack en vez de asumirlo. Está orientado a Claude Code, pero genera `AGENTS.md` (el estándar multi-herramienta): Cursor, Kimi Code, Codex o cualquier otro agente pueden leer y operar el mismo harness.
 
 > **Filosofía (una línea):** *los agentes proponen, los sistemas deterministas verifican.* Todo check que un script pueda hacer, lo hace un script; los modelos solo ponen juicio donde hay juicio. Y las leyes no son prosa: tienen hook o gate.
 >
-> **Corolario de velocidad:** como la seguridad vive en los gates, el canary y el rollback — no en el número de fases LLM — el pipeline recorta deliberación sin recortar verificación: carriles por blast radius, gates en paralelo, reviewer ∥ qa, prefetch determinista y arranques en caliente.
+> **Corolario de velocidad:** como la seguridad vive en los gates, el canary y el rollback, y no en el número de fases LLM, el pipeline recorta deliberación sin recortar verificación: carriles por blast radius, gates en paralelo, reviewer y qa en simultáneo, prefetch determinista y arranques en caliente.
+
+---
+
+## Glosario: las diez palabras que necesitas antes de seguir
+
+Si nunca trabajaste con agentes de código, esta sección te ahorra el resto del documento. Cada término trae qué significa y **por qué existe aquí**.
+
+| Palabra | Qué significa | Por qué importa en este harness |
+|---|---|---|
+| **Harness** | El arnés: todo lo que rodea al modelo para que su trabajo sea confiable. Reglas, verificaciones automáticas, límites y memoria. | Un modelo suelto escribe código. Un modelo con harness escribe código **que alguien verificó**. Este repo no es un agente: es la fábrica que construye ese arnés alrededor de tus repos. |
+| **Determinista** | Un programa que, con la misma entrada, da siempre la misma salida. Un script de shell es determinista; un modelo de lenguaje no. | Es la línea que divide todo el diseño. Lo que se puede comprobar con un script, lo comprueba un script (cuesta $0 y no se equivoca distinto cada vez). El modelo solo interviene donde hace falta criterio. |
+| **Gate** | Una comprobación que **bloquea**. Si sale roja, el trabajo no avanza. Ejemplo: "los tests tienen que pasar antes de tocar `main`". | Es la diferencia entre pedir algo y garantizarlo. Un gate no se puede convencer ni negociar. |
+| **Hook** | Un programa que se dispara **antes o después** de que un agente use una herramienta, y puede cancelarla. | Escribir "no hagas push a `main`" en un documento es una sugerencia que un agente puede racionalizar. Un hook intercepta la llamada y la cancela: la orden nunca llega a ejecutarse. |
+| **Worktree** | Una copia de trabajo independiente del mismo repositorio de git, en otra carpeta y otra rama. | Cada tarea trabaja en el suyo. Dos tareas nunca se pisan los archivos, y el clon original queda intacto. |
+| **Blast radius** | El "radio de explosión": cuánto puede romper un cambio si sale mal. Cambiar un texto tiene radio chico; mover una base de datos entre servicios tiene radio grande. | El pipeline se dimensiona a esto. Una tarea chica no paga el mismo peaje de ceremonia que una migración. |
+| **Carril** (lane) | El tamaño de proceso que se le asigna a una tarea según su blast radius: `express`, `standard` o `full`. | Es el mecanismo concreto de lo anterior. En `express` una tarea usa 2 sesiones de modelo en vez de 6, con los **mismos** gates. |
+| **DAG** | Grafo dirigido sin ciclos. En cristiano: una lista de tareas con sus dependencias, donde nada puede depender de sí mismo. | Dice qué se puede hacer **en paralelo** y qué tiene que esperar. Es la única autoridad sobre el orden de trabajo. |
+| **Canary** | Desplegar el cambio primero a un grupo reducido (un cliente, un entorno) antes que a todos. | Si algo sale mal, sale mal en pequeño. Viene del canario en la mina: se entera antes que vos. |
+| **Fail-open / fail-closed** | Qué hace un componente cuando **él mismo** falla. *Fail-closed* bloquea por precaución. *Fail-open* deja pasar. | No es un detalle: es una decisión de diseño por componente. Un hook de seguridad roto debe bloquear. Un hook de telemetría roto debe dejar pasar, porque tumbar un despliegue por un problema de estadísticas sería absurdo. |
+
+<details>
+<summary><b>Diez términos más, para cuando llegues a las secciones técnicas</b> (click para abrir)</summary>
+
+| Palabra | Qué significa | Por qué importa |
+|---|---|---|
+| **Agente / subagente** | Una sesión de modelo con un rol, instrucciones y herramientas propias. Un subagente es uno que otro agente lanzó. | El harness no usa "una IA": usa varias, cada una con un trabajo y un contexto acotado. |
+| **Idempotente** | Que se puede repetir sin causar daño: correrlo dos veces deja el mismo resultado que correrlo una. | El instalador lo es. Si algo se interrumpe, lo vuelves a correr y retoma, sin duplicar ni romper lo que ya estaba. |
+| **Ledger de supuestos** | Un archivo donde el agente anota cada cosa que **asumió**, con qué evidencia y qué costaría deshacerla. | Es lo primero que lees al final. En 30 segundos ves todas las decisiones que se tomaron sin vos. |
+| **Compliance matrix** | Una tabla que aparea cada requisito con el test que lo demuestra. | "El review aprobó" es una opinión. "Requisitos cubiertos: 100%, y aquí está el test de cada uno" lo verifica una máquina. |
+| **Evidencia** | El registro de que algo se ejecutó de verdad: qué comando, en qué commit exacto, con qué salida. | Impide que un agente diga "los tests pasan" sin haberlos corrido. La prueba queda atada al commit y caduca con él. |
+| **Spec / EARS** | La especificación del comportamiento del sistema. EARS es un formato de frase fija: *CUANDO ocurre X, EL SISTEMA DEBE hacer Y*. | Escrito así, un requisito no se puede interpretar de dos maneras, y se puede apuntar a él en una discusión. |
+| **Spec-rot** | La podredumbre de la especificación: el documento dice una cosa y el código hace otra, porque nadie actualizó el documento. | Es el fracaso clásico de este enfoque. Aquí la fusión de la spec es automática al final de cada tarea, justamente para que no dependa de la disciplina de nadie. |
+| **ADR** | *Architecture Decision Record*: un documento corto que registra una decisión importante, su contexto y sus alternativas. | Es donde vive la ley. Una decisión que no está en un ADR no existe, aunque se haya hablado en un chat. |
+| **Rollback** | Volver a la versión anterior que funcionaba. | Ante un despliegue roto el orden no se negocia: primero se vuelve atrás, después se investiga. Diagnosticar con el incendio encendido es el peor uso posible de 20 minutos. |
+| **Prefetch** | Preparar por adelantado, en segundo plano, lo que hará falta después. | Mientras el arquitecto piensa, los scripts ya clonan, instalan dependencias y arman resúmenes. Cuando arranca quien implementa, la mesa ya está puesta. |
+
+</details>
 
 ---
 
@@ -32,21 +69,16 @@ Le apuntas a una carpeta con tus repositorios y genera un *harness* completo y a
 
 ## Quickstart
 
-**Camino A — el wizard web (recomendado):**
+**Camino A, el wizard web (recomendado):**
 
 ```bash
 brew install andresgarcia29/agm/harness
 harness init          # abre el wizard en http://127.0.0.1:7180/#/init
 ```
 
-El wizard te lleva de cero a harness: carpeta → GitHub (gh o PAT) → clonar
-repos → requisitos → auto-discover → entrevista pre-llenada con evidencia →
-agentes + arqueología → MCPs con secretos certificados → primeras tareas →
-doctor en verde. Todo idempotente y reanudable: si algo muere, `harness init`
-retoma en el paso exacto. Scriptable sin UI: `harness discover` +
-`harness generate --answers answers.json`.
+El wizard te lleva de cero a harness: carpeta, GitHub (`gh` o token), clonar repos, requisitos, auto-discover, entrevista pre-llenada con evidencia, agentes y arqueología, MCPs con secretos certificados, primeras tareas, doctor en verde. Todo idempotente y reanudable: si algo muere, `harness init` retoma en el paso exacto. Scriptable sin interfaz: `harness discover` + `harness generate --answers answers.json`.
 
-**Camino B — el plugin de Claude Code (la entrevista conversacional):**
+**Camino B, el plugin de Claude Code (la entrevista conversacional):**
 
 ```bash
 # 1. Prepara el workspace: tus repos clonados bajo repos/
@@ -72,7 +104,9 @@ Después de eso, el día a día es **una sola línea**:
 /auto COR-123 --model deep                     # misma tarea, modelo elegido por ti
 ```
 
-`/auto` corre el pipeline entero — intake, carril, [RFC], implementación, review, ship, deploy, archive — **sin preguntarte nada** y dimensionado al blast radius: un cambio de 1 repo sin contratos va por el carril express (salta el RFC; `gate_lane` verifica que el diff cumpla la promesa). Si prefieres conducir fase por fase, los comandos sueltos siguen ahí: `/feature` → `/rfc` → `/implement` → `/review` → `/ship` → `/archive`.
+`/auto` corre el pipeline entero (enrichment, carril, RFC si aplica, implementación, review, ship, deploy, archive) dimensionado al blast radius: un cambio de 1 repo sin contratos va por el carril express, que salta el RFC, y `gate_lane` verifica que el diff cumpla esa promesa.
+
+**Tu única intervención ocurre al principio.** El primer paso, el *enrichment*, investiga tu código, entiende la tarea y te hace **una sola ronda de preguntas**, solo si hay algo que tu propio repositorio no puede responder. A partir de ahí corre solo hasta el reporte final. Si prefieres conducir fase por fase, los comandos sueltos siguen ahí: `/feature`, `/rfc`, `/implement`, `/review`, `/ship`, `/archive`.
 
 **Requisitos**: macOS o Linux, `git`, `jq` (`brew install jq`), Claude Code. Todo lo demás lo instala el bootstrap.
 
@@ -90,13 +124,13 @@ flowchart LR
     D --> E["4 · Bootstrap + Doctor<br/><i>script</i><br/>instala deps, pide token,<br/>materializa secretos,<br/>verifica TODO"]
 ```
 
-- **Discovery** (`scripts/discover.sh`): escanea `repos/` y produce `inventory.json` — por repo: lenguajes, señales (buf, helm, argocd, kargo, docker…) y un **rol inferido** (service · frontend · mobile · library · contracts · infra-module · infra-live · ci-library · docs). También detecta tu **fuente de secretos** (`.sops.yaml`, `doppler.yaml`, `op://`, terraform con secret managers, `VAULT_ADDR`…).
-- **Entrevista**: el instalador **recomienda con evidencia** ("detecté buf.yaml en `proto` → gate buf-breaking") y tú decides. Nunca pregunta lo que el inventario ya responde.
-- **Generación**: instancia ~45 archivos desde templates. Idempotente: si algo existe, diff y pregunta.
-- **Arqueología ligera**: un subagente por servicio lee lo denso y barato (README, migraciones, protos) y llena las constituciones de los abogados y las specs con **ownership, invariantes y requirements reales, citando evidencia**. Todo queda `DRAFT`: la arqueología propone, el humano ratifica.
-- **Bootstrap + Doctor**: `make init` instala lo que falte, pide credenciales (interactivo — los valores jamás pasan por el agente), materializa secretos y termina en un reporte de salud donde **cada fallo trae su remediación exacta**.
+- **Discovery** (`scripts/discover.sh`): escanea `repos/` y produce `inventory.json`. Por repo: lenguajes, señales (buf, helm, argocd, kargo, docker) y un **rol inferido** (service, frontend, mobile, library, contracts, infra-module, infra-live, ci-library, docs). También detecta tu **fuente de secretos** (`.sops.yaml`, `doppler.yaml`, `op://`, terraform con secret managers, `VAULT_ADDR`).
+- **Entrevista**: el instalador **recomienda con evidencia** ("detecté `buf.yaml` en `proto`, propongo el gate buf-breaking") y tú decides. Nunca pregunta lo que el inventario ya responde.
+- **Generación**: instancia ~45 archivos desde templates. Idempotente: si algo existe, muestra el diff y pregunta.
+- **Arqueología ligera**: un subagente por servicio lee lo denso y barato (README, migraciones, protos) y llena las constituciones de los abogados y las specs con **ownership, invariantes y requisitos reales, citando evidencia**. Todo queda en estado `DRAFT`: la arqueología propone, el humano ratifica.
+- **Bootstrap + Doctor**: `make init` instala lo que falte, pide credenciales de forma interactiva (los valores jamás pasan por el agente), materializa secretos y termina en un reporte de salud donde **cada fallo trae su remediación exacta**.
 
-**El instalador es idempotente**: `/harness-init .` sobre un workspace ya instalado entra en *modo update* — no re-pregunta nada, migra esquemas, y todo cambio se presenta como diff.
+**El instalador es idempotente**: `/harness-init .` sobre un workspace ya instalado entra en *modo update*. No re-pregunta nada, migra esquemas, y todo cambio se presenta como diff.
 
 ### La decisión clave: clustering dinámico de agentes
 
@@ -105,12 +139,12 @@ El instalador **no** crea un agente por repo. Crea *abogados* por dominio de own
 | Rol detectado | Regla |
 |---|---|
 | `service` (posee datos) | 1 abogado por servicio |
-| `contracts` (proto) | sin abogado — es el árbitro; lo custodian el arquitecto + buf |
+| `contracts` (proto) | sin abogado, es el árbitro; lo custodian el arquitecto y `buf` |
 | `infra-module`, `infra-live`, `ci-library`, helm | **UN** solo abogado `infra` para todos |
-| `frontend`, `mobile` | **UN** abogado `frontends` (no poseen datos; defienden contratos de consumo y UX) |
-| `library` | sin abogado — la defienden sus consumidores |
+| `frontend`, `mobile` | **UN** abogado `frontends` (no poseen datos; defienden contratos de consumo y experiencia) |
+| `library` | sin abogado, la defienden sus consumidores |
 
-Techo ~12 agentes; si hay más servicios, propone agrupar por dominio de negocio. **20 terraform modules = 1 agente, no 20.** Más agentes no es mejor harness: cada agente es contexto y mantenimiento.
+Techo de ~12 agentes; si hay más servicios, propone agrupar por dominio de negocio. **20 módulos de terraform son 1 agente, no 20.** Más agentes no es mejor harness: cada agente es contexto y mantenimiento.
 
 ---
 
@@ -120,32 +154,37 @@ Techo ~12 agentes; si hay más servicios, propone agrupar por dominio de negocio
 mi-workspace/
 ├── README.md                 ← onboarding para HUMANOS (make init, de dónde sale el token)
 ├── CLAUDE.md                 ← mapa para Claude Code (≤110 líneas; las leyes, dónde está la verdad)
-├── AGENTS.md                 ← el MISMO mapa en el estándar multi-herramienta (Cursor, Kimi, Codex…)
+├── AGENTS.md                 ← el MISMO mapa en el estándar multi-herramienta (Cursor, Kimi, Codex)
 ├── manifest.yaml             ← lista canónica de repos + DAG de dependencias
-├── models.yaml               ← LA perilla de modelos: provider + aliases fast|smart|deep + rol→alias + overrides
+├── models.yaml               ← LA perilla de modelos: provider + aliases fast|smart|deep + rol→alias
 ├── harness-answers.yaml      ← TODAS tus decisiones de la entrevista (insumo de updates)
+├── harness-policy.json       ← las leyes ejecutables del flujo (fases, carriles, límites, paradas)
 ├── Makefile                  ← interfaz humana: init, doctor, secrets, wt, ship, watch
 ├── .mcp.json                 ← MCPs elegidos (los autenticados, envueltos en with-secrets)
 ├── .claude/
 │   ├── agents/               ← architect, reviewer, implementer, qa + abogados por cluster
-│   ├── commands/             ← /auto (todo el pipeline, sin intervención)
-│   │                           /feature /rfc /implement /review /ship /promote /archive
-│   ├── hooks/                ← block-direct-push, guard-canonical (leyes con dientes)
-│   │                           track-read, ui-emit (observadores, fail-open)
+│   ├── commands/             ← /auto (todo el pipeline) + /feature /rfc /implement
+│   │                           /review /ship /promote /archive
+│   ├── hooks/                ← block-direct-push, guard-canonical, guard-worktree
+│   │                           (leyes con dientes) + track-read, ui-emit,
+│   │                           session-summary (observadores, fail-open)
 │   ├── skills/               ← skill-creator (la guía) + las skills que el
-│   │                           skill-miner mina de tus procedimientos repetidos
-│   └── settings.json         ← hooks registrados + denials (kubectl apply, terraform apply…)
+│   │                           skill-miner extrae de tus procedimientos repetidos
+│   └── settings.json         ← hooks registrados + denials (kubectl apply, terraform apply)
 ├── docs/
 │   ├── constitution.md       ← principios innegociables, inyectados a TODOS los agentes
 │   ├── architecture/map.md   ← ownership de datos por servicio (la Ley 3)
 │   ├── harness/              ← pipeline.md, intake.md, testing-policy.md, cronjobs.md
 │   ├── adr/                  ← decisiones; nada es oficial fuera de aquí
 │   └── changelog/            ← digest diario generado
-├── specs/<capability>/       ← specs maestras EARS+Gherkin, una por dominio
+├── specs/<capability>/       ← specs maestras EARS + Gherkin, una por dominio
 ├── scripts/
 │   ├── bootstrap.sh          ← onboarding: deps + token + secretos + doctor
 │   ├── doctor.sh             ← salud total, cada fallo con remediación
 │   ├── ship.sh               ← LA única puerta a main (gates)
+│   ├── harness-policy.py     ← el motor de fases: transition, rollback, pause, validate-ship
+│   ├── verdict-scaffold.sh   ← esqueleto determinista del veredicto (+ --rebase)
+│   ├── evidence.py           ← corre y sella evidencia atada a un commit exacto
 │   ├── worktree-task.sh      ← una tarea = un worktree por repo
 │   ├── secrets.sh            ← materializa secretos desde tu fuente
 │   ├── with-secrets.sh       ← único punto de inyección de secretos
@@ -156,18 +195,21 @@ mi-workspace/
 │   └── cronjobs/             ← cron-runner + jobs de self-healing elegidos
 ├── semgrep/rules.yaml        ← sensores custom CON remediación en el mensaje
 ├── repos/                    ← tus clones (regenerables, protegidos por hook)
-├── .harness/events.jsonl     ← bus de eventos del harness (lo lee el panel)
+├── .harness/
+│   ├── events.jsonl          ← bus de eventos del harness (lo lee el panel)
+│   ├── sessions/<id>.md      ← resumen de cada sesión al cerrarse, derivado del bus
+│   └── claims/               ← qué sesión tiene tomado cada worktree
 ├── worktrees/<task>/<repo>   ← donde se trabaja de verdad
-└── tasks/<id>/               ← estado por tarea: task.md, assumptions.md (ledger),
-                                 state.json (fase + carril — lo mueve harness-policy.py),
-                                 plan.md, veredictos, qa-<repo>.json, logs
+└── tasks/<id>/               ← estado por tarea: task.md, enrichment.md, assumptions.md,
+                                 state.json (fase + carril, lo mueve harness-policy.py),
+                                 plan.md, veredictos, evidencia, ship.log, logs
 ```
 
 ---
 
 ## El diagrama maestro: qué pasa cuando corres `/auto`
 
-Primero la **espina dorsal**: las tres entradas, dónde despierta cada agente, qué lo bloquea, y el hecho central — **todas las salidas hacia un humano están enumeradas en `/auto`, y están en un solo nodo rojo**. Cada bloque tiene su zoom en la sección siguiente. Los colores importan; la leyenda está debajo.
+Primero la **espina dorsal**: las tres entradas, dónde despierta cada agente, qué lo bloquea, y el hecho central: **todas las salidas hacia un humano están enumeradas en `/auto`, y están en un solo nodo rojo**. Cada bloque tiene su zoom en la sección siguiente. Los colores importan; la leyenda está debajo.
 
 ```mermaid
 flowchart TD
@@ -188,13 +230,21 @@ P0 -->|"task-id ya existente"| RE(["<b>RETOMA</b> · entra por la 1ª fase<br/>s
 
 TP --> TASK
 PR --> TASK
-TASK["<b>tasks/&lt;id&gt;/task.md</b>"]:::art --> INT
+TASK["<b>tasks/&lt;id&gt;/task.md</b>"]:::art --> ENR
 
-INT{"<b>② INTAKE</b> · ¿cumple el contrato?<br/>sin humano, la ambigüedad NO se rebota"}:::dec
-INT -->|"6 leyes rotas"| PARA(["<b>⛔ LAS 10 PARADAS</b><br/>ADR contradicho · decisión irreversible<br/>abogado DRAFT · bug irreproducible<br/>RFC sin converger · loop agotado<br/>gate rojo x2 · subagente muerto x2<br/>deploy 🔴 · ticket inexistente"]):::stop
-INT -->|"resuelto con evidencia"| LED["<b>assumptions.md</b> · el ledger<br/>SUPUESTO · PORQUE ⟨evidencia⟩ · SI ES FALSO ⟨costo⟩<br/>spec &gt; ADR &gt; CLAUDE.md &gt; código · empate → lo REVERSIBLE"]:::art
+ENR["<b>② ENRICHMENT</b> · la ÚNICA interacción contigo<br/>primero el TERRENO (grafo, briefs, ADR, ownership),<br/>después la tarea · resuelve con evidencia lo resoluble"]:::agent
+ENR --> Q{"¿queda algo que<br/>SOLO tú sabes?"}:::dec
+Q -->|"sí · máx 5 preguntas, UNA ronda,<br/>cada una con su default"| ASK(["🙋 <b>una ronda de preguntas</b><br/>el silencio es respuesta válida"]):::human
+Q -->|"no · lo más común"| LED
+ASK --> LED
 
+LED["<b>task.md enriquecido</b> + <b>enrichment.md</b> (auditable)<br/><b>assumptions.md</b> · el ledger para lo que venga DESPUÉS<br/>SUPUESTO · PORQUE ⟨evidencia⟩ · SI ES FALSO ⟨costo⟩"]:::art
+
+LED --> PARA
 LED --> LANE{"<b>②b CARRIL</b> por blast radius<br/>señales deterministas del inventario/grafo<br/>en duda: el carril MAYOR"}:::dec
+
+PARA(["<b>⛔ LAS 10 PARADAS DE EMERGENCIA</b><br/>ADR contradicho · decisión irreversible<br/>abogado DRAFT · bug irreproducible<br/>RFC sin converger · loop agotado<br/>gate rojo x2 · subagente muerto x2<br/>deploy 🔴 · ticket inexistente"]):::stop
+
 LANE -->|"<b>express</b> · 1 repo · 1 dominio · sin contratos<br/>mini-plan del orquestador · SALTA el RFC"| IMP
 LANE -->|"standard · architect sin abogados<br/>full · pipeline completo"| RFC["<b>③ RFC</b> · abogados SOLO de dominios cruzados, en PARALELO<br/>una respuesta JSON c/u · no implementan nunca<br/><b>architect</b> = hilo fino en <b>ultrathink</b>: descompone en probes,<br/>workers responden en paralelo, él sintetiza → plan.md · DAG · delta-spec<br/><b>plan-lint.sh</b> verde o no hay implement · <i>prefetch en background ($0)</i>"]:::agent
 RFC -.-> PARA
@@ -202,30 +252,30 @@ RFC -.-> PARA
 RFC --> IMP["<b>④ IMPLEMENT</b> · bd ready manda · arranque en caliente<br/>(worktree+deps+brief ya prefetcheados) · 1 implementer =<br/>1 tarea = 1 worktree = 1 repo · lo paralelo NO se serializa<br/>watchdog por heartbeat (~3 min sin tool calls)<br/><b>ship.sh --precheck</b> antes de entregar: rojo NO llega a review"]:::agent
 IMP -.-> PARA
 
-IMP --> REV["<b>⑤ REVIEW</b> · encola al terminar, no al final<br/><b>reviewer ∥ qa</b> EN PARALELO · merge mecánico del campo qa<br/>reviewer: verdict.json + compliance matrix 100% · <b>ronda 1 exhaustiva</b><br/>qa: ejercita los criterios · re-review incremental en rondas ≥2"]:::agent
+IMP --> REV["<b>⑤ REVIEW</b> · encola al terminar, no al final<br/><b>reviewer ∥ qa</b> EN PARALELO · merge mecánico del campo qa<br/>reviewer: verdict.json + compliance matrix 100% · <b>ronda 1 exhaustiva</b><br/>re-review incremental REAL: <b>verdict-scaffold --rebase</b><br/>arrastra el juicio que el delta no tocó"]:::agent
 REV -->|"🔴 fail · el error ES el prompt del fix"| IMP
 REV -.-> PARA
 
 REV --> CHK{"<b>autonomy</b> en harness-answers.yaml"}:::dec
-CHK -->|"checkpoint · UNA pausa en todo el pipeline"| GO(["resumen de 10 líneas → 'go'"]):::human
+CHK -->|"checkpoint · UNA pausa extra antes de main"| GO(["resumen de 10 líneas → 'go'"]):::human
 CHK -->|"full · ninguna"| SHIP
 GO --> SHIP
 
 SHIP(["<b>⑥ ship.sh</b> · LA única puerta a main · $0<br/>serie: rebase → trailer → carril (gate_lane)<br/>EN PARALELO: build/test ∥ buf ∥ gitleaks ∥ semgrep<br/>∥ tests-no-debilitados ∥ veredicto+evidencia · luego lock → push"]):::script
-HOOK{{"<b>🚫 hooks + denials</b> · fail-closed<br/>block-direct-push · guard-canonical<br/>kubectl/terraform apply · push --force"}}:::hook
+HOOK{{"<b>🚫 hooks + denials</b> · fail-closed<br/>block-direct-push · guard-canonical · guard-worktree<br/>kubectl/terraform apply · push --force"}}:::hook
 HOOK -.->|"bloquean a TODO agente"| IMP
 HOOK -.->|"dejan pasar SOLO a"| SHIP
 SHIP -->|"🔴 gate · máx 2 autofixes"| IMP
 SHIP -.-> PARA
 
-SHIP --> DW(["<b>⑦ deploy-watch.sh</b> · $0, solo CPU<br/>Actions → Kargo → ArgoCD health → smoke canary"]):::script
+SHIP --> DW(["<b>⑦ deploy-watch.sh</b> · $0, solo CPU<br/>Actions → Kargo → ArgoCD health → smoke canary<br/>lo que NO pudo verificar se declara como supuesto"]):::script
 DW -->|"🔴"| RB(["<b>ROLLBACK PRIMERO</b> · abort-to-stable o revert<br/>diagnóstico DESPUÉS · nunca argocd app rollback"]):::script
 RB --> PARA
 DW -->|"🟢 · quedan tareas en el DAG"| SHIP
 
 DW -->|"🟢 · DAG completo"| ARCH["<b>⑧ /archive</b> · fusiona el delta-spec en la<br/>spec maestra ← por esto no hay spec-rot<br/>ticket-close.sh · mem_save"]:::agent
 
-ARCH --> REP(["<b>REPORTE FINAL</b> — lo único que lees<br/>qué se shippeó · <b>el ledger completo</b><br/>paradas · costo ccusage"]):::human
+ARCH --> REP(["<b>REPORTE FINAL</b> · lo único que lees<br/>qué se shippeó · <b>el ledger completo</b><br/>paradas · costo ccusage"]):::human
 REP -.->|"<b>/promote</b> semanal · el loop se cierra:<br/>supuesto falso → regla semgrep · decisión madura → ADR"| SHIP
 
 classDef script fill:#0b3d2e,stroke:#10b981,stroke-width:2px,color:#d1fae5
@@ -239,39 +289,50 @@ classDef art fill:#1f2937,stroke:#9ca3af,stroke-width:1px,color:#e5e7eb
 
 ### Leyenda
 
-| Forma / color | Qué es | Cuesta |
+| Forma y color | Qué es | Cuesta |
 |---|---|---|
-| 🟩 **verde, redondeado** | script determinista | **$0** — cero tokens, solo CPU |
+| 🟩 **verde, redondeado** | script determinista | **$0**, cero tokens, solo CPU |
 | 🟦 **azul, rectángulo** | agente (LLM) | tokens, modelo según `models.yaml` |
-| 🟨 **ámbar, rombo** | decisión que el sistema toma **solo** | — |
-| 🟥 **rojo, doble borde** | **gate** de `ship.sh` — bloquea el push | $0 |
-| 🟥 **rojo oscuro, hexágono** | **hook / denial** — bloquea al agente antes de actuar | $0 |
-| 🔴 **⛔ PARA** | las **10 salidas** a un humano. La lista es cerrada | — |
-| 🟪 **morado** | los únicos puntos donde un humano toca el flujo | — |
-| ⬜ **gris** | artefacto en disco (el estado real) | — |
+| 🟨 **ámbar, rombo** | decisión que el sistema toma **solo** | nada |
+| 🟥 **rojo, doble borde** | **gate** de `ship.sh`, bloquea el push | $0 |
+| 🟥 **rojo oscuro, hexágono** | **hook o denial**, bloquea al agente antes de actuar | $0 |
+| 🔴 **⛔ PARA** | las **10 salidas de emergencia** a un humano. La lista es cerrada | nada |
+| 🟪 **morado** | los únicos puntos donde un humano toca el flujo: el enrichment al inicio y el reporte al final | nada |
+| ⬜ **gris** | artefacto en disco (el estado real) | nada |
 
 ---
 
 ## Cómo leer el diagrama
 
-Nueve bloques (los ocho del pipeline + el carril que decide cuánta ceremonia merece cada tarea). Lo que sigue explica **por qué** cada uno es como es — el diagrama dice qué pasa, esto dice por qué.
+Nueve bloques (los ocho del pipeline más el carril, que decide cuánta ceremonia merece cada tarea). Lo que sigue explica **por qué** cada uno es como es. El diagrama dice qué pasa; esto dice por qué.
 
-### ① Entrada — tres formas de empezar, ninguna te hace trabajar
+### ① Entrada: tres formas de empezar, ninguna te hace trabajar
 
-Un ticket de Linear, un prompt literal entre comillas, o el `task-id` de una corrida que se murió. `/auto` decide cuál es sin preguntarte. El tercer caso es el que más vas a agradecer: como **todo el estado vive en `tasks/<id>/` y en los commits del worktree — nunca en la conversación de un agente** — una sesión muerta a mitad del pipeline se retoma con `/auto <task-id>`, y entra por la primera fase cuyo artefacto falte. Un artefacto válido jamás se re-genera.
+Un ticket de Linear, un prompt literal entre comillas, o el `task-id` de una corrida que se murió. `/auto` decide cuál es sin preguntarte. El tercer caso es el que más vas a agradecer: como **todo el estado vive en `tasks/<id>/` y en los commits del worktree, nunca en la conversación de un agente**, una sesión muerta a mitad del pipeline se retoma con `/auto <task-id>`, y entra por la primera fase cuyo artefacto falte. Un artefacto válido jamás se re-genera.
 
-### ② Intake — la pieza nueva, y la que hace posible el resto
+### ② Enrichment: la única vez que el harness te habla
 
-Aquí está el cambio conceptual. Con un ticket, el intake clásico **rebota** lo ambiguo: cuesta centavos rebotar y cuesta el pipeline entero implementar una ambigüedad. Pero cuando la entrada es tu prompt y tú ya te fuiste, **no hay a quién rebotarle**. La ambigüedad no desaparece por eso — así que en vez de rebotarse, se **resuelve, se declara y se hace barata de revertir**:
+Este es el paso que hace posible todo lo demás, y conviene entender el intercambio que propone: **el harness concentra al principio todo lo que necesita de ti, para no tener que interrumpirte después**. La alternativa, que es lo que hacen casi todas las herramientas, es preguntarte a mitad de vuelo, cuando ya perdiste el contexto de lo que pediste y la interrupción cuesta el doble.
 
-- **Se resuelve con evidencia, no con opinión.** Hay una precedencia estricta: *spec maestra > ADR vigente > el CLAUDE.md del repo > el patrón del código*. Un supuesto que no se apoya en ninguna de las cuatro no es un supuesto, es una invención — y las invenciones no se implementan.
-- **Ante empate, gana lo reversible.** Entre dos lecturas de tu prompt, la que sea más fácil de deshacer, aunque haga menos. Esto es lo que vuelve segura la autonomía: no que el agente acierte siempre, sino que equivocarse sea barato.
-- **Se declara en `tasks/<id>/assumptions.md`.** Cada línea dice qué asumió, con qué evidencia, y qué cuesta deshacerlo si era falso. El ledger es lo primero del reporte final: en 30 segundos ves todas las decisiones que se tomaron por ti.
-- **Alimenta al sistema.** Un supuesto que resultó falso es material de `/promote`: se convierte en regla semgrep o en ADR, y el siguiente `/auto` ya no lo repite. Por eso la flecha punteada del reporte vuelve al gate de semgrep — **el loop se cierra**.
+Ocurre en cuatro tiempos:
 
-`/auto` también reescribe lo difuso en binario ("que ande rápido" → "p95 < 300ms en `/x`, medido por el smoke") y divide un prompt que mezcla dos features en dos tareas del DAG. Lo que **no** hace es fingir que un bug irreproducible es arreglable, ni tomar una decisión que la constitución reserva a humanos.
+**1. Entiende el terreno antes que la tarea.** El prefetch ya dejó la mesa puesta, así que el agente arranca por el grafo del código, los resúmenes por repositorio, el `CLAUDE.md` de cada repo afectado, el mapa de ownership y los ADR vigentes. La regla está escrita en el comando: *preguntarte algo que tu propio repositorio ya responde es trabajo suyo que te está cobrando a ti*.
 
-**Zoom: los cinco criterios de rebote, y qué hace `/auto` con cada uno.** Con ticket, los cinco rebotan. Con prompt no se relajan: se transforman.
+**2. Entiende la tarea.** Valida el ticket contra el contrato de entrada. Un criterio que no se puede comprobar ("que ande rápido") lo reescribe binario ("p95 por debajo de 300 ms en `/x`, medido por el smoke"). Toda ambigüedad que la evidencia pueda resolver, la resuelve él: hay una precedencia estricta, *spec maestra > ADR vigente > el `CLAUDE.md` del repo > el patrón del código*, y ante empate gana la lectura más fácil de deshacer.
+
+**3. Pregunta solo lo que la evidencia no puede responder.** Aquí está la barra de calidad, que es lo que separa esta fase de un formulario molesto. Una pregunta es legítima únicamente si cumple **las dos** condiciones: la respuesta **cambia lo que se construye**, y **no está** en ninguna de esas cuatro fuentes. Si las dos respuestas posibles llevan al mismo trabajo, no se pregunta. Y hay tres reglas duras:
+
+- **Máximo cinco preguntas, todas en un solo mensaje.** No es una conversación, es una ronda. No hay segunda.
+- **Cada pregunta trae el default** que el agente tomará si no contestas. El silencio es una respuesta válida y "usá los defaults" se contesta en una palabra. El pipeline nunca se queda trabado esperándote.
+- **Si nada califica, no pregunta.** Lo dice en una línea y sigue. Fabricar preguntas para parecer diligente convierte esta fase en ceremonia, que es exactamente lo que vino a evitar.
+
+**4. Enriquece.** Reescribe `tasks/<id>/task.md` con lo aprendido y deja en `tasks/<id>/enrichment.md` qué preguntó, qué le respondiste y qué cambió respecto de tu prompt original. Ese archivo es lo que hace auditable la fase: sin él, "enriquecí el prompt" sería una afirmación sin evidencia, y este harness no acepta afirmaciones sin evidencia en ningún otro lado.
+
+Desde aquí y hasta el reporte final, el harness no te vuelve a hablar salvo que caiga en una de las diez paradas de emergencia.
+
+**Lo que aparece después ya no se pregunta**, porque tú ya te fuiste. Va al **ledger de supuestos** (`tasks/<id>/assumptions.md`), una línea por decisión: qué asumió, con qué evidencia, y qué costaría deshacerlo si era falso. Es lo primero del reporte final. Y alimenta al sistema: un supuesto que resultó falso es material de `/promote`, que lo convierte en regla de semgrep o en ADR, para que el siguiente `/auto` ya no lo repita. Por eso la flecha punteada del reporte vuelve hacia los gates: **el loop se cierra**.
+
+**Zoom: los cinco criterios de rebote, y qué hace `/auto` con cada uno.**
 
 ```mermaid
 flowchart LR
@@ -283,7 +344,7 @@ flowchart LR
   D2 -->|"no"| S1(["⛔ PARA<br/>no hay bug demostrable<br/>que arreglar"]):::stop
   V -->|"3 · decisión de arquitectura"| D3{"¿reversible <b>Y</b> dentro de<br/>un ownership existente?"}:::dec
   D3 -->|"sí"| A4["decide lo mínimo<br/>y lo anota"]:::agent
-  D3 -->|"no: servicio nuevo · dep externa<br/>· breaking · mueve ownership"| A5["escribe ADR-N<br/>status: PROPOSED<br/>+ su recomendación"]:::agent
+  D3 -->|"no: servicio nuevo · dep externa<br/>· breaking · mueve ownership"| A5["escribe ADR-N<br/>status: PROPOSED<br/>+ su recomendación (Ley 13:<br/>la que elimina la causa)"]:::agent
   A5 --> S2(["⛔ PARA<br/>la ley la ratifican humanos"]):::stop
   V -->|"4 · contradice un ADR vigente"| S3(["⛔ PARA · lo cita<br/>no lo re-litiga"]):::stop
   A1 --> L
@@ -302,45 +363,47 @@ classDef art fill:#1f2937,stroke:#9ca3af,stroke-width:1px,color:#e5e7eb
 classDef script fill:#0b3d2e,stroke:#10b981,stroke-width:2px,color:#d1fae5
 ```
 
-### ②b Carriles — el pipeline se dimensiona al blast radius
+### ②b Carriles: el pipeline se dimensiona al blast radius
 
-La seguridad de este harness vive en los gates deterministas, el canary y el rollback — **no en el número de fases LLM**. De ahí el cambio estructural de velocidad: un typo-fix no paga el mismo peaje que una migración multi-servicio.
+La seguridad de este harness vive en los gates deterministas, el canary y el rollback, **no en el número de fases LLM**. De ahí el cambio estructural de velocidad: arreglar un typo no paga el mismo peaje que una migración multi-servicio.
 
-| Carril | Señales (deterministas: inventario + grafo + manifest) | Qué salta |
+| Carril | Señales (deterministas: inventario, grafo, manifest) | Qué salta |
 |---|---|---|
-| **express** | 1 repo · 1 dominio · sin contratos/migraciones/infra | el RFC entero: el orquestador escribe mini-plan + delta-spec mínimo → implementer → reviewer. **2 sesiones LLM** |
-| **standard** | 2-3 repos · dominios no cruzados · sin breaking | los abogados (no hay frontera que defender) |
-| **full** | cruza ownership · breaking · servicio nuevo · migración | nada |
+| **express** | 1 repo, 1 dominio, sin contratos ni migraciones ni infra | el RFC entero: el orquestador escribe mini-plan y delta-spec mínimo, luego implementer y reviewer. **2 sesiones LLM** |
+| **standard** | 2 a 3 repos, dominios no cruzados, sin breaking | los abogados (no hay frontera que defender) |
+| **full** | cruza ownership, breaking, servicio nuevo, migración | nada |
 
-Tres redes lo hacen seguro. En duda entre dos carriles, gana el mayor. La clasificación es una *propuesta* que `ship.sh` verifica: **`gate_lane`** compara el diff real contra el carril declarado en `state.json` — un express que tocó un `.proto` o una migración no pasa. Y escalar es barato y pre-aprobado: `harness-policy.py escalate` sube el carril y re-encauza por `/rfc` conservando el worktree. **Equivocarse de carril cuesta una re-entrada, jamás un ship sin la deliberación que tocaba.** Los gates, la compliance matrix, la evidencia, el canary y el rollback son idénticos en los tres carriles: el carril recorta deliberación, nunca verificación.
+Tres redes lo hacen seguro. En duda entre dos carriles, gana el mayor. La clasificación es una *propuesta* que `ship.sh` verifica: **`gate_lane`** compara el diff real contra el carril declarado en `state.json`, y un express que tocó un `.proto` o una migración no pasa. Y escalar es barato y está pre-aprobado: `harness-policy.py escalate` sube el carril y re-encauza por `/rfc` conservando el worktree. **Equivocarse de carril cuesta una re-entrada, jamás un ship sin la deliberación que tocaba.** Los gates, la compliance matrix, la evidencia, el canary y el rollback son idénticos en los tres carriles: el carril recorta deliberación, nunca verificación.
 
-### ③ RFC — por qué existen los abogados (y cuándo NO)
+### ③ RFC: por qué existen los abogados, y cuándo no
 
-Un solo agente implementando una feature cruza fronteras de datos sin que nadie objete: no tiene con quién discutir. Los **abogados** (`svc-*`, `infra`, `frontends`) son un tech lead por dominio de ownership que **defiende invariantes en el RFC y nunca implementa**. Responden **una vez, en paralelo, en JSON** — no es una conversación, es un alegato.
+Un solo agente implementando una feature cruza fronteras de datos sin que nadie objete: no tiene con quién discutir. Los **abogados** (`svc-*`, `infra`, `frontends`) son un tech lead por dominio de ownership que **defiende invariantes en el RFC y nunca implementa**. Responden **una vez, en paralelo, en JSON**. No es una conversación, es un alegato.
 
-La contraparte exacta: el abogado existe para defender fronteras, así que **si la tarea no cruza ninguna, no se convoca a ninguno** (carril standard). Un abogado leyendo 10 minutos de contexto para responder "sin objeción" sobre un dominio que nadie tocó es puro costo — en tokens y en camino crítico. Mientras el architect redacta, el orquestador ya corre el **prefetch** en background ($0): worktrees, briefs por repo y warmup de dependencias, para que los implementers arranquen con la mesa puesta.
+La contraparte exacta: el abogado existe para defender fronteras, así que **si la tarea no cruza ninguna, no se convoca a ninguno** (carril standard). Un abogado leyendo diez minutos de contexto para responder "sin objeción" sobre un dominio que nadie tocó es puro costo, en tokens y en camino crítico. Mientras el architect redacta, el orquestador ya corre el **prefetch** en segundo plano ($0): worktrees, resúmenes por repo y warmup de dependencias, para que los implementers arranquen con la mesa puesta.
 
-Cuando chocan, el desempate **no es consenso ni la opinión del arquitecto**: es evidencia. Contratos → el repo proto es el árbitro. Datos → `docs/architecture/map.md`. Máximo 2 rondas; si no convergen, las posiciones van en limpio a un humano — porque un desacuerdo real entre dos dominios *es* una decisión de negocio, y esas no las toma un modelo.
+Cuando chocan, el desempate **no es el consenso ni la opinión del arquitecto**: es evidencia. Contratos, el repo proto es el árbitro. Datos, `docs/architecture/map.md`. Máximo 2 rondas; si no convergen, las posiciones van en limpio a un humano, porque un desacuerdo real entre dos dominios *es* una decisión de negocio, y esas no las toma un modelo.
 
-**El arquitecto es un hilo fino que piensa hondo.** Son dos decisiones opuestas y deliberadas. Piensa hondo: todo artefacto de planeación (el plan, la síntesis del RFC, el mini-plan del carril express, los ADRs) se escribe en modo **ultrathink**, porque es lo único que van a ejecutar N implementers sin poder preguntarle nada; el loop de edición, en cambio, no lo usa nunca (ahí el valor está en el diff y pensar de más es latencia comprada). Y lee poco: en vez de abrirse 20 archivos hasta llenar su ventana, **descompone la incertidumbre en sub-preguntas con scope** (`probes.json`), unos workers baratos las responden EN PARALELO citando `archivo:línea`, y él sintetiza sobre ese pack. Si le falta un hecho, emite otra probe; no abre el archivo. Máximo dos rondas, y lo que siga faltando después de la segunda no es un hueco de contexto: es una decisión que le toca a un humano.
+**El arquitecto es un hilo fino que piensa hondo.** Son dos decisiones opuestas y deliberadas. Piensa hondo: todo artefacto de planeación (el plan, la síntesis del RFC, el mini-plan del carril express, los ADRs) se escribe en modo **ultrathink**, porque es lo único que van a ejecutar N implementers sin poder preguntarle nada; el loop de edición, en cambio, no lo usa nunca, porque ahí el valor está en el diff y pensar de más es latencia comprada. Y lee poco: en vez de abrir 20 archivos hasta llenar su ventana, **descompone la incertidumbre en sub-preguntas con alcance** (`probes.json`), unos workers baratos las responden en paralelo citando `archivo:línea`, y él sintetiza sobre ese paquete. Si le falta un dato, emite otra sonda; no abre el archivo. Máximo dos rondas, y lo que siga faltando después de la segunda no es un hueco de contexto: es una decisión que le toca a un humano.
 
-Antes de que salga un solo implementer, el plan pasa por **`plan-lint.sh`** (determinista, $0): cada tarea declara repo, requirement IDs, archivos, criterios binarios, complexity y deps; cero "TBD", "por definir" o "investigar si"; y cada `req` citado existe de verdad en el delta-spec. La razón es de velocidad, no de burocracia: **lo que el plan no decide lo decide un implementer solo y a ciegas, y vuelve como blocking una hora después**. Es la única revisión del plan que no cuesta una ronda.
+Antes de que salga un solo implementer, el plan pasa por **`plan-lint.sh`** (determinista, $0): cada tarea declara repo, IDs de requisitos, archivos, criterios binarios, complejidad y dependencias; cero "TBD", "por definir" o "investigar si"; y cada requisito citado existe de verdad en el delta-spec. La razón es de velocidad, no de burocracia: **lo que el plan no decide lo decide un implementer solo y a ciegas, y vuelve como blocking una hora después**. Es la única revisión del plan que no cuesta una ronda.
 
-La parada por **abogado en `DRAFT`** parece burocracia y es lo contrario: la constitución de un abogado la propuso la arqueología leyendo tu código, pero hasta que un humano la ratifica **nadie la firmó**. Litigar citando una ley sin firmar es teatro. Por eso `/auto` para ahí — y es la primera cosa que vas a ratificar después de instalar.
+La parada por **abogado en `DRAFT`** parece burocracia y es lo contrario: la constitución de un abogado la propuso la arqueología leyendo tu código, pero hasta que un humano la ratifica **nadie la firmó**. Litigar citando una ley sin firmar es teatro. Por eso `/auto` para ahí, y es la primera cosa que vas a ratificar después de instalar.
 
-### ④ Implement — paralelo por defecto, contexto mínimo por diseño
+### ④ Implement: paralelo por defecto, contexto mínimo por diseño
 
-Un implementer = una tarea = un worktree = un repo. Sesiones cortas y desechables que **nunca llegan a compactación de contexto**, y aislamiento que hace imposible el scope creep. `bd ready --json` (beads) dice qué tareas no tienen dependencias entre sí, y **todas esas arrancan a la vez**: serializar lo paralelizable es la forma más cara de perder tiempo.
+Un implementer es una tarea, en un worktree, de un repo. Sesiones cortas y desechables que **nunca llegan a compactación de contexto**, y aislamiento que hace imposible el scope creep. `bd ready --json` (beads) dice qué tareas no tienen dependencias entre sí, y **todas esas arrancan a la vez**: serializar lo paralelizable es la forma más cara de perder tiempo.
 
-El arranque es **en caliente**: el prefetch ya dejó el worktree, las deps y el brief (`repo-brief.sh` destila estructura, comandos de test y convenciones a `.cache/briefs/<repo>.md`, cacheado por HEAD, $0 tokens). El implementer recibe su entrada del plan + criterios + brief y **no explora el repo desde cero** — sus primeros minutos son de edición, no de arqueología; Serena cubre el nivel símbolo.
+El arranque es **en caliente**: el prefetch ya dejó el worktree, las dependencias instaladas y el resumen (`repo-brief.sh` destila estructura, comandos de test y convenciones a `.cache/briefs/<repo>.md`, cacheado por HEAD, $0 tokens). El implementer recibe su entrada del plan, sus criterios y el resumen, y **no explora el repo desde cero**: sus primeros minutos son de edición, no de arqueología. Serena cubre el nivel de símbolo.
 
-El **watchdog** es la lección de una crisis real, ahora por **heartbeat**: un agente sano llama herramientas constantemente, así que ~3 minutos sin una sola tool call = atascado — se interrumpe y se relanza **ya con el modelo de escalación** (repetir el mismo experimento con el mismo modelo es repetir el mismo atasco). Límite duro de 10 min como respaldo. Es seguro *precisamente* porque su conversación no era el estado — el estado son los commits. Dos muertes del mismo rol en la misma tarea sí escalan a un humano.
+Como en el mismo workspace suelen correr varias sesiones a la vez, **`guard-worktree` reclama el worktree para quien escribe primero**. Otra sesión que intente escribir en el mismo árbol se bloquea con el aviso de quién lo tiene. Sin esa guarda, dos implementers en la misma carpeta se pisan archivos e índice de git, y el síntoma que ves después son "cambios que se deshacen solos", cuando ya es imposible saber cuál de las dos sesiones los perdió.
+
+El **watchdog** es la lección de una crisis real, ahora por **heartbeat**: un agente sano llama herramientas constantemente, así que unos tres minutos sin una sola llamada significan atasco. Se interrumpe y se relanza **ya con el modelo de escalación**, porque repetir el mismo experimento con el mismo modelo es repetir el mismo atasco. Hay un límite duro de 10 minutos como respaldo. Es seguro *precisamente* porque su conversación no era el estado: el estado son los commits. Dos muertes del mismo rol en la misma tarea sí escalan a un humano.
 
 **Zoom: el fan-out real, y por qué el review no espera.**
 
 ```mermaid
 flowchart LR
-  WT(["worktree-task.sh<br/>un worktree por repo · $0"]):::script --> BD(["<b>bd ready --json</b><br/>¿qué tareas no tienen deps?"]):::script
+  WT(["worktree-task.sh<br/>un worktree por repo · $0<br/>+ prepara la toolchain frontend"]):::script --> BD(["<b>bd ready --json</b><br/>¿qué tareas no tienen deps?"]):::script
   BD --> T1["implementer <b>T1</b> · proto<br/>Serena: edición por símbolo"]:::agent
   BD --> T2["implementer <b>T2</b> · atlas"]:::agent
   BD --> T3["implementer <b>T3</b> · hermes"]:::agent
@@ -351,7 +414,7 @@ flowchart LR
   R2 -->|"🔴 fail"| T2
   R3 --> S3(["ship T3"]):::script
   T1 -.-> W{"watchdog heartbeat:<br/>¿tool calls en los últimos 3 min?"}:::dec
-  W -->|"no · 1ª vez"| RL["relanza YA ESCALADO de modelo — el estado vive<br/>en tasks/&lt;id&gt;/ y en los commits, NO en su conversación"]:::agent
+  W -->|"no · 1ª vez"| RL["relanza YA ESCALADO de modelo: el estado vive<br/>en tasks/&lt;id&gt;/ y en los commits, NO en su conversación"]:::agent
   RL -.-> T1
   W -->|"no · 2ª muerte del mismo rol"| ST(["⛔ PARA<br/>último estado al humano"]):::stop
 
@@ -363,30 +426,36 @@ classDef script fill:#0b3d2e,stroke:#10b981,stroke-width:2px,color:#d1fae5
 
 T1 ya se está shippeando mientras T2 vuelve a implementación por un review rojo. Nadie espera a nadie: **el DAG es la única autoridad sobre el orden**.
 
-Y antes de entregar, cada implementer corre **`ship.sh --precheck <task> <repo>`**: los mismos gates mecánicos del ship (build, tests, lint, gitleaks, tests-no-debilitados) sobre su worktree, sin veredicto y sin push. La aritmética es toda la razón: un test roto detectado por un script cuesta segundos y cero tokens; el mismo test roto detectado por un reviewer cuesta una ronda completa de 10 a 20 minutos. Por eso un precheck rojo **no consume presupuesto de loop** (el reviewer no vio nada) y `/review` simplemente no lanza a nadie hasta que el sello `precheck-<repo>.json` esté verde sobre el HEAD actual.
+Y antes de entregar, cada implementer corre **`ship.sh --precheck <task> <repo>`**: los mismos gates mecánicos del ship (build, tests, lint, gitleaks, tests no debilitados) sobre su worktree, sin veredicto y sin push. La aritmética es toda la razón: un test roto detectado por un script cuesta segundos y cero tokens; el mismo test roto detectado por un reviewer cuesta una ronda completa de 10 a 20 minutos. Por eso un precheck rojo **no consume presupuesto de loop** (el reviewer no vio nada) y `/review` simplemente no lanza a nadie hasta que el sello `precheck-<repo>.json` esté verde sobre el HEAD actual.
 
-### ⑤ Review — contra el "listo" autodeclarado
+### ⑤ Review: contra el "listo" autodeclarado
 
-El modo de fallo #1 de los agentes es declararse terminados. Contra eso, dos capas que no se pisan: el **reviewer** emite el JSON que `ship.sh` exige, con una **compliance matrix** — cada requirement del delta-spec apareado con el test que lo prueba. "El review aprobó" es difuso; "requirements cubiertos: 100%" lo verifica una máquina. Y **qa** no lee código: ejercita tus criterios de aceptación como un usuario, con Playwright si hay frontend, local y en el canary.
+El modo de fallo número uno de los agentes es declararse terminados. Contra eso, dos capas que no se pisan: el **reviewer** emite el JSON que `ship.sh` exige, con una **compliance matrix**, cada requisito del delta-spec apareado con el test que lo prueba. "El review aprobó" es difuso; "requisitos cubiertos: 100%" lo verifica una máquina. Y **qa** no lee código: ejercita tus criterios de aceptación como un usuario, con Playwright si hay frontend, local y en el canary.
 
-Las dos capas corren **en paralelo** — qa ejercita comportamiento y no necesita el veredicto; serializarlas regalaba la fase entera al camino crítico. Cada una escribe su archivo (`verdict-<repo>.json`, `qa-<repo>.json`) y el merge del campo `qa` es mecánico (jq, mismo commit obligatorio). Y el loop fail→fix es **incremental**: el reviewer re-evalúa el diff desde su veredicto anterior más el cierre de cada blocking — no el cambio completo otra vez — aunque el veredicto nuevo siempre ata al HEAD completo.
+Las dos capas corren **en paralelo**, porque qa ejercita comportamiento y no necesita el veredicto; serializarlas regalaba la fase entera al camino crítico. Cada una escribe su archivo (`verdict-<repo>.json`, `qa-<repo>.json`) y el merge del campo `qa` es mecánico (con `jq`, mismo commit obligatorio).
 
-**La ronda 1 es exhaustiva, y ese es el contrato anti-goteo.** El costo real de un review no es la pasada del reviewer: son las rondas que provoca. Un blocking que aparece en la ronda 3 y ya estaba a la vista en la ronda 1 le costó al proyecto dos ciclos completos de implementer. Por eso el reviewer revisa el diff entero antes de escribir su primer blocking y entrega la lista COMPLETA de una vez; en rondas siguientes solo puede abrir hallazgos nuevos por código que el fix tocó, por regresión, o por algo que el fix hizo observable. Lo que no impide shippear va a `non_blocking` y de ahí a un bead de seguimiento, **nunca a otra ronda**. Y si algo llega tarde igual se reporta (ocultar un defecto real sería peor), pero marcado `[tardío]`: esa cuenta sale en el reporte final junto con `review_rounds`, porque es la métrica que dice si el plan estuvo bien hecho.
+**El re-review incremental es un mecanismo, no una intención.** Cuando el implementer corrige y commitea, la evidencia caduca: está atada a un commit exacto, y cualquier commit nuevo la invalida entera. Eso está bien, es la prueba y caduca. Lo que no estaba bien era que el único camino de vuelta borraba también el **juicio**: la matriz de compliance completa, incluidos los requisitos que el arreglo ni rozó. Un blocking de una línea costaba un re-review entero. Ahora `verdict-scaffold.sh --rebase` separa las dos cosas: **regenera la evidencia** contra el HEAD nuevo y **arrastra el juicio** que el delta no tocó, marcado con `carried_from` para que sea auditable. Solo vuelve a pendiente lo que el cambio realmente afectó. El sesgo es deliberadamente conservador: si no se puede demostrar que una entrada es ajena al delta, se re-juzga, porque arrastrar de más sería un falso verde y arrastrar de menos solo cuesta una re-lectura.
+
+**La ronda 1 es exhaustiva, y ese es el contrato anti-goteo.** El costo real de un review no es la pasada del reviewer: son las rondas que provoca. Un blocking que aparece en la ronda 3 y ya estaba a la vista en la ronda 1 le costó al proyecto dos ciclos completos de implementer. Por eso el reviewer revisa el diff entero antes de escribir su primer blocking y entrega la lista completa de una vez; en rondas siguientes solo puede abrir hallazgos nuevos por código que el arreglo tocó, por regresión, o por algo que el arreglo hizo observable. Lo que no impide shippear va a `non_blocking` y de ahí a un bead de seguimiento, **nunca a otra ronda**. Y si algo llega tarde igual se reporta (ocultar un defecto real sería peor), pero marcado `[tardío]`: esa cuenta sale en el reporte final junto con `review_rounds`, porque es la métrica que dice si el plan estuvo bien hecho.
 
 Cada tarea encola su review **al terminar**, no al final de todas: T1 puede estar en review mientras T4 se implementa. Es un pipeline, no una barrera.
 
-### ⑥ Ship — las leyes con dientes
+### ⑥ Ship: las leyes con dientes
 
-`ship.sh` es la **única** puerta a main. En serie corre solo lo que tiene orden real (rebase → trailer → carril); **todo gate independiente corre en paralelo** — build/test, buf, gitleaks, semgrep, tests-no-debilitados, veredicto+evidencia — y los rojos se reportan **juntos**: el implementer recibe un solo prompt de fix con todos los errores, en vez de descubrirlos gate por gate en rondas sucesivas. Lo importante sigue siendo que **el mensaje de error de cada gate es el prompt del fix** — trae su remediación exacta, para que el agente corrija en una iteración. Presupuesto: 2 rondas de autofix; la tercera es tuya, con el error completo y sin resumir.
+`ship.sh` es la **única** puerta a main. En serie corre solo lo que tiene orden real (rebase, trailer, carril); **todo gate independiente corre en paralelo** (build y test, buf, gitleaks, semgrep, tests no debilitados, veredicto y evidencia) y los rojos se reportan **juntos**: el implementer recibe un solo prompt de arreglo con todos los errores, en vez de descubrirlos gate por gate en rondas sucesivas. Lo importante sigue siendo que **el mensaje de error de cada gate es el prompt del arreglo**: trae su remediación exacta, para que el agente corrija en una iteración.
+
+Un gate que **no puede correr no reporta rojo**, y esa distinción cuesta rondas cuando falta. Ejemplo real y medido: un worktree recién creado nace sin `node_modules` ni los tipos que genera `astro sync`, así que el typecheck escupía ocho errores que parecían deuda vieja y eran fantasma. Con las dependencias instaladas el gate pasaba sin tocar una línea de código. Un rojo falso no cuesta una ronda nada más: enseña al agente a desconfiar de los gates, que es el activo que sostiene todo lo demás. Hoy el gate **prepara la toolchain él mismo** y sigue, y mantiene la frontera con una prueba en vez de una promesa: compara el árbol versionado antes y después, y si preparar movió un archivo bajo control de git (un lockfile desincronizado, por ejemplo), se detiene y te dice cuál. Preparar no es verificar; instalar dependencias no toca el artefacto que se publica, es la condición para poder mirarlo.
 
 ```mermaid
 flowchart TD
   A["cualquier agente<br/>implementer · reviewer · qa · /auto"]:::agent -->|"git push origin main"| H1{{"🚫 <b>block-direct-push</b><br/>hook PreToolUse · <b>fail-closed</b><br/>sin jq → bloquea por precaución"}}:::hook
   A -->|"edita repos/atlas"| H2{{"🚫 <b>guard-canonical</b><br/>el clon base es intocable"}}:::hook
+  A -->|"escribe en un worktree<br/>que otra sesión tiene tomado"| H4{{"🚫 <b>guard-worktree</b><br/>un worktree, un dueño"}}:::hook
   A -->|"kubectl apply · terraform apply<br/>argocd app rollback · push --force"| H3{{"🚫 <b>denials</b> de settings.json"}}:::hook
   H1 --> X(["⛔ la llamada NUNCA ocurre"]):::stop
   H2 --> X
   H3 --> X
+  H4 --> X
 
   SH(["<b>ship.sh</b>"]):::script --> G1[["1 · rebase sobre origin/main"]]:::gate
   G1 --> G2[["2 · trailer Task: &lt;id&gt; en TODO commit"]]:::gate
@@ -399,7 +468,7 @@ flowchart TD
   G5 --> J
   GT --> J
   G7 --> J
-  J -->|"TODOS verdes — los rojos se reportan JUNTOS,<br/>un solo prompt de fix con todo"| G8[["lock por repo · un ship a la vez"]]:::gate
+  J -->|"TODOS verdes · los rojos se reportan JUNTOS,<br/>un solo prompt de fix con todo"| G8[["lock por repo · un ship a la vez"]]:::gate
   G8 --> P(["git push origin main"]):::script
   H1 -.->|"<b>deja pasar SOLO a</b>"| P
   J -.->|"🔴 el mensaje de CADA gate rojo ES el prompt del fix"| F{"¿3er intento?"}:::dec
@@ -414,29 +483,42 @@ classDef stop fill:#450a0a,stroke:#f87171,stroke-width:2px,color:#fee2e2
 classDef script fill:#0b3d2e,stroke:#10b981,stroke-width:2px,color:#d1fae5
 ```
 
-Los **hooks** son la diferencia entre una regla y una ley. "No pushees a main" en un CLAUDE.md es una sugerencia que un agente puede racionalizar a las 3am. `block-direct-push` es un hook PreToolUse que intercepta la llamada **antes de que ocurra**, y es *fail-closed*: si falta `jq`, bloquea por precaución. Mismo caso con `guard-canonical` (el clon de `repos/` es intocable; se trabaja en worktrees) y con los denials de `settings.json`.
+Los **hooks** son la diferencia entre una regla y una ley. "No hagas push a main" en un `CLAUDE.md` es una sugerencia que un agente puede racionalizar a las 3 de la mañana. `block-direct-push` es un hook PreToolUse que intercepta la llamada **antes de que ocurra**, y es *fail-closed*: si falta `jq`, bloquea por precaución. Mismo caso con `guard-canonical` (el clon de `repos/` es intocable; se trabaja en worktrees).
 
-Fíjate en la asimetría del diagrama, porque es **todo** el diseño: el mismo hook que bloquea a *cualquier* agente es el que **deja pasar a `ship.sh`**. No hay dos caminos a main con distinta severidad — hay uno solo, y está pavimentado de gates.
+Fíjate en la asimetría del diagrama, porque es **todo** el diseño: el mismo hook que bloquea a *cualquier* agente es el que **deja pasar a `ship.sh`**. No hay dos caminos a main con distinta severidad. Hay uno solo, y está pavimentado de gates.
 
-### ⑦ Deploy — rollback primero, diagnóstico después
+**El estado de la tarea también tiene ley.** `harness-policy.py` es el único que mueve las fases, y desde hace poco lo hace bajo un lock exclusivo, porque con varias sesiones abiertas dos comandos concurrentes sobre la misma tarea podían leer el mismo estado y pisarse el registro. Además, cada movimiento queda en `history[]`, y `validate-ship` comprueba que la fase actual sea la que dejó el último movimiento registrado. Editar `state.json` a mano deja de ser un atajo silencioso: falla con `POLICY-STATE-003` y te dice cómo reconstruir el movimiento. Para el caso legítimo de haberse adelantado existe `harness-policy.py rollback`, que solo va hacia atrás, exige un motivo, deja registro y **no cobra una ronda de review** que nunca ocurrió.
 
-`deploy-watch.sh` sigue la cadena Actions → Kargo → ArgoCD health → smoke del canary, y es un script: **el camino verde no gasta un solo token**. En rojo, el orden no se negocia: **rollback primero** (Argo Rollouts abort-to-stable o revert en git — nunca `argocd app rollback`, que es un cañón), y el diagnóstico después, con producción ya sana. Un agente diagnosticando con el incendio encendido es el peor lugar posible para gastar 20 minutos.
+En tareas de varios repositorios hay una trampa que el harness ahora cierra: `ship.sh` se corre una vez por repo y exige estar en fase `review`, así que avanzar la fase antes de que el último repo haya publicado dejaba a los que faltaban sin camino de vuelta. `POLICY-SHIP-004` rechaza ese avance mientras quede algún repo con veredicto y sin entrada en `ship.log`, y te dice cuáles faltan.
 
-### ⑧ Archive — la pieza que evita el spec-rot
+### ⑦ Deploy: rollback primero, diagnóstico después
 
-Cuando el canary queda verde, `/archive` **fusiona el delta-spec en la spec maestra automáticamente**. Esta es la razón por la que el SDD de este harness no muere: si esa fusión dependiera de disciplina humana, en un trimestre las specs mentirían — y una spec podrida es peor que ninguna, porque los agentes la ejecutan con confianza.
+`deploy-watch.sh` sigue la cadena Actions, Kargo, salud de ArgoCD y smoke del canary, y es un script: **el camino verde no gasta un solo token**. En rojo, el orden no se negocia: **rollback primero** (Argo Rollouts abort-to-stable o revert en git, nunca `argocd app rollback`, que es un cañón) y el diagnóstico después, con producción ya sana. Un agente diagnosticando con el incendio encendido es el peor lugar posible para gastar 20 minutos.
 
-### Las 10 paradas — la lista es cerrada, y ese es el punto
+Y cuando un tramo **no se puede verificar**, el watcher lo dice en vez de callarse. Si Kargo no responde (por ejemplo, por un token vencido), el despliegue sigue apoyado en la salud de ArgoCD, pero se emite un **supuesto** al ledger: *la promoción no se verificó*. Aparece arriba del resumen de sesión, bajo "audita esto primero". El silencio de un verificador ciego se lee igual que un verde, y esa confusión es cara.
 
-`/auto` sólo para en la lista cerrada que vive en su comando, y **cada caso es una ley del harness, no una preferencia**. Esa plantilla es la fuente de verdad: añadir o retirar una parada exige cambiar el contrato y sus pruebas, no corregir un número repetido en prosa.
+### ⑧ Archive: la pieza que evita el spec-rot
 
-La regla que lo hace funcionar es negativa: **si la razón para parar no está en esa lista, no es una razón — decide.** Preguntarte es un fallo de diseño, no prudencia. La red que sostiene esto no eres tú: son los gates deterministas, el canary y el rollback. Y `autonomy: checkpoint` en `harness-answers.yaml` te da **una** pausa —un resumen de 10 líneas antes del primer ship a main— para las primeras semanas, mientras le agarras confianza. Gradúa *cuándo se toca main*, no *cuánto piensa el agente*.
+Cuando el canary queda verde, `/archive` **fusiona el delta-spec en la spec maestra automáticamente**. Esta es la razón por la que el SDD de este harness no muere: si esa fusión dependiera de la disciplina humana, en un trimestre las specs mentirían, y una spec podrida es peor que ninguna, porque los agentes la ejecutan con confianza.
+
+### Las 10 paradas de emergencia: la lista es cerrada, y ese es el punto
+
+Conviene separar dos cosas que se parecen y no son iguales:
+
+- **El enrichment** es la interacción **planificada**: ocurre al principio, es una sola ronda, y muchas veces ni siquiera hace falta.
+- **Las diez paradas** son salidas de **emergencia**: algo que el harness no tiene autoridad para decidir, o un presupuesto agotado.
+
+`/auto` solo para en la lista cerrada que vive en su comando, y **cada caso es una ley del harness, no una preferencia**. Esa plantilla es la fuente de verdad: añadir o retirar una parada exige cambiar el contrato y sus pruebas, no corregir un número repetido en prosa.
+
+La regla que lo hace funcionar es negativa: **si la razón para parar no está en esa lista, no es una razón, decide.** Interrumpirte a mitad de vuelo es un fallo de diseño, no prudencia. La red que sostiene esto no eres tú: son los gates deterministas, el canary y el rollback. Y `autonomy: checkpoint` en `harness-answers.yaml` te da **una** pausa extra, un resumen de diez líneas antes del primer ship a main, para las primeras semanas mientras le agarras confianza. Gradúa *cuándo se toca main*, no *cuánto piensa el agente*.
+
+**Los presupuestos son tuyos y ahora sí se respetan.** `loop_budget` en `harness-answers.yaml` gobierna las iteraciones del loop implementer y reviewer. Hasta hace poco había un número distinto escondido en la política (un `3` fijo) que ganaba en silencio, así que subir el presupuesto no servía de nada y el pipeline paraba antes de lo pactado sin explicar por qué. Hoy el límite de la política se deriva de tu configuración.
 
 ---
 
 ## El panel: `make ui`
 
-`/auto` corre solo — pero "solo" no debería significar "a ciegas". `make ui` abre el panel local (por defecto `127.0.0.1:7180`) que te deja ver, mientras el harness trabaja: **qué agentes están vivos ahora mismo** y en paralelo, en qué fase va cada tarea, el texto que van produciendo, tokens y costo por agente, el grafo de quién lanzó a quién, y **el ledger de supuestos** de cada tarea.
+`/auto` corre solo, pero "solo" no debería significar "a ciegas". `make ui` abre el panel local (por defecto `127.0.0.1:7180`) que te deja ver, mientras el harness trabaja: **qué agentes están vivos ahora mismo** y en paralelo, en qué fase va cada tarea, el texto que van produciendo, tokens y costo por agente, el grafo de quién lanzó a quién, y **el ledger de supuestos** de cada tarea.
 
 ```
 make ui          # o: make ui PORT=8080
@@ -444,65 +526,49 @@ make ui          # o: make ui PORT=8080
 
 Dos zonas en la barra lateral, y la distinción es la arquitectura entera:
 
-- **OBSERVAR** — Resumen (qué te espera, la curva de concurrencia, las últimas decisiones), Tareas (pipeline + ledger de supuestos + la historia paso a paso que escriben `ship.sh` y `/auto`), Sesiones (cada terminal con su gantt de agentes, árbol de spawns y el texto por turno), Gastos (día × modelo, por sesión, tabla de precios).
-- **OPERAR** — Nueva tarea (un formulario que escribe `tasks/<id>/task.md` y lanza `claude -p "/auto <id>"` headless con `--session-id` conocido: la tarea aparece sola en Sesiones), responder a un agente que te espera (reanuda SU sesión con `claude --resume`), Conexiones (Linear/OpenRouter: el token se **valida contra el proveedor antes de guardarse**, va a `~/.config/harness/` con chmod 600, y jamás se muestra ni pasa por un agente), y sincronizar precios reales desde OpenRouter para los modelos observados sin precio.
+- **OBSERVAR**: Resumen (qué te espera, la curva de concurrencia, las últimas decisiones), Tareas (pipeline, ledger de supuestos y la historia paso a paso que escriben `ship.sh` y `/auto`), Sesiones (cada terminal con su gantt de agentes, árbol de spawns y el texto por turno), Gastos (día por modelo, por sesión, tabla de precios).
+- **OPERAR**: Nueva tarea (un formulario que escribe `tasks/<id>/task.md` y lanza `claude -p "/auto <id>"` headless con `--session-id` conocido, así la tarea aparece sola en Sesiones), responder a un agente que te espera (reanuda **su** sesión con `claude --resume`), Conexiones (Linear u OpenRouter: el token se **valida contra el proveedor antes de guardarse**, va a `~/.config/harness/` con `chmod 600`, y jamás se muestra ni pasa por un agente) y sincronizar precios reales desde OpenRouter para los modelos observados sin precio.
+
+Además, al cerrarse cada sesión, el hook `session-summary.sh` deja en `.harness/sessions/<id>.md` un resumen legible de **lo que el harness decidió**: supuestos sin confirmar primero, luego paradas, gates en rojo, decisiones y cambios de fase. Es determinista a propósito, se deriva del bus de eventos y no de la memoria del agente, porque quien resume es el mismo que decidió y tiende a omitir justo lo que hay que auditar. Como el bus es compartido entre todas las sesiones del workspace, la atribución se hace por identificador de sesión para los eventos de Claude Code y por tarea para los del harness, y el propio resumen declara ese límite al pie.
 
 ### De dónde sale el panel: tres repos (ADR-0003)
 
-El panel NO vive en este repo. Es un stack de tres repositorios con una
-dependencia estrictamente unidireccional — el mismo DAG `infra → service →
-frontend` que el harness le impone a la plataforma del usuario:
+El panel no vive en este repo. Es un stack de tres repositorios con una dependencia estrictamente unidireccional, el mismo DAG `infra → service → frontend` que el harness le impone a la plataforma del usuario:
 
 | Repo | Rol |
 |---|---|
-| **harness-creator** (este) | Genera la *policy* (agentes, pipeline, gates, hooks, docs) y su salida en disco. NO contiene el panel. |
-| **harness-daemon** | Observador **por-máquina**. Sirve el panel en `127.0.0.1` y es **dueño del contrato de API**. |
-| **harness-ui** | Cliente **fleet** (Vite/React). Se conecta a N daemons por SSH/herdr; consume el contrato por codegen. |
+| **harness-creator** (este) | Genera la *policy* (agentes, pipeline, gates, hooks, docs) y su salida en disco. No contiene el panel. |
+| **harness-daemon** | Observador **por máquina**. Sirve el panel en `127.0.0.1` y es **dueño del contrato de API**. |
+| **harness-ui** | Cliente **fleet** (Vite y React). Se conecta a N daemons por SSH; consume el contrato por codegen. |
 
-**La ley de la dependencia:** el daemon *no contiene las reglas del harness* — las
-**lee como datos**. Su entrada es el **contrato de estado en disco** que este
-repo produce en cada workspace: `tasks/<id>/` (task.md, plan, veredictos,
-supuestos), `.beads/` (issues), `.harness/runs.jsonl` (procedencia sesión→tarea)
-y los transcripts de los agentes. El daemon observa ese estado y lo reporta; la
-UI lo muestra. Cambiar la *forma* de ese estado en disco es un cambio de contrato
-que impacta al daemon — no un detalle interno de harness-creator.
+**La ley de la dependencia:** el daemon *no contiene las reglas del harness*, las **lee como datos**. Su entrada es el **contrato de estado en disco** que este repo produce en cada workspace: `tasks/<id>/` (task.md, plan, veredictos, supuestos), `.beads/` (issues), `.harness/runs.jsonl` (procedencia de sesión a tarea) y los transcripts de los agentes. El daemon observa ese estado y lo reporta; la interfaz lo muestra. Cambiar la *forma* de ese estado en disco es un cambio de contrato que impacta al daemon, no un detalle interno de harness-creator.
 
-**Auth:** ninguna a nivel app. El multi-máquina va por túneles SSH (herdr), así
-que las llaves SSH son la auth y cada daemon sigue `127.0.0.1-only`. `make ui`
-prefiere el `harness` instalado por brew (el binario del daemon, versionado por
-su cuenta) sobre cualquier binario vendorizado — ver `templates/ui/panel.sh`.
+**Auth:** ninguna a nivel de aplicación. El multi-máquina va por túneles SSH, así que las llaves SSH son la autenticación y cada daemon sigue siendo `127.0.0.1-only`. `make ui` prefiere el `harness` instalado por brew (el binario del daemon, versionado por su cuenta) sobre cualquier binario vendorizado; ver `templates/ui/panel.sh`.
 
-**Disponibilidad:** lo que este repo genera funciona **completo y sin red**
-con el server vendoreado (`server.py`, stdlib de Python + frontend
-precompilado): tareas, agentes vivos, costos, ledger. El daemon Go
-([harness-daemon](https://github.com/andresgarcia29/harness-daemon)) y el
-cliente fleet ([harness-ui](https://github.com/andresgarcia29/harness-ui)) son
-repos aparte, **también open source (MIT)** — aportan el multi-máquina y las
-terminales en vivo, `panel.sh` baja el binario de sus releases públicos y cae
-automáticamente a `server.py` si no está disponible.
+**Disponibilidad:** lo que este repo genera funciona **completo y sin red** con el server vendorizado (`server.py`, stdlib de Python más frontend precompilado): tareas, agentes vivos, costos, ledger. El daemon en Go ([harness-daemon](https://github.com/andresgarcia29/harness-daemon)) y el cliente fleet ([harness-ui](https://github.com/andresgarcia29/harness-ui)) son repos aparte, **también open source (MIT)**, y aportan el multi-máquina y las terminales en vivo. `panel.sh` baja el binario de sus releases públicos y cae automáticamente a `server.py` si no está disponible.
 
 ### Las cinco leyes del panel
 
 Un panel en un sistema cuya filosofía es "los agentes proponen, los sistemas deterministas verifican" tiene que ganarse su lugar. Estas son sus reglas, y explican casi todo su diseño:
 
-1. **OPERAR CREA TRABAJO, JAMÁS MERGES** (ADR-0010 del daemon). El panel puede *crear* una tarea y *pasarle contexto* a un agente — exactamente lo que ya podías hacer desde una terminal — pero todo lo que lanza pasa por los mismos gates: a main solo se llega por `ship.sh`. No hay botón de aprobar, ni de mergear, ni de saltarse un gate; el operador tampoco puede editar `ship.sh`, hooks ni `settings.json` desde aquí. Crear trabajo ≠ publicar trabajo.
-2. **Solo `127.0.0.1`.** Nunca `0.0.0.0`. Y como ahora hay endpoints que actúan: cada arranque genera un token anti-CSRF que viaja en el HTML y debe volver en el header `X-Corvux-Token` (un `<form>` de otra página no puede poner headers custom), y se verifica el header `Host` contra DNS rebinding. Los tres controles tienen test.
-3. **Jamás muestra valores de secretos.** No lee `.secrets`, `connections` expone presencia (`true`/`false`), nunca el valor, y todo texto pasa por redacción (GitHub, Vault, JWT, AWS, Slack, Linear…) antes de salir. La ley de secretos también aplica a los píxeles. *(La suite mete un token de cada familia y verifica que sale `[REDACTADO]` — y ya cachó un bug real: el `\b` de sed no existe en macOS y cuatro familias viajaban sin redactar.)*
-4. **Cero dependencias en runtime.** El frontend es React + shadcn/ui (los mismos componentes que Agora) pero viaja **compilado y vendoreado** en `dist/`: el server es stdlib de Python sirviendo estáticos y el usuario jamás corre `npm install`. Node existe solo para construir el panel (repo `harness-ui`; el installer lo trae con `scripts/sync-ui.sh`).
-5. **Degrada, no explota.** Lee dos fuentes con dos niveles de confianza: `.harness/events.jsonl` + `tasks/` son **nuestros** (estables); los transcripts de Claude Code son **prestados** (formato interno, cambia entre versiones). Si el parseo falla, el panel sigue vivo con lo que el harness sí controla y te lo dice arriba en rojo.
+1. **Operar crea trabajo, jamás merges** (ADR-0010 del daemon). El panel puede *crear* una tarea y *pasarle contexto* a un agente, exactamente lo que ya podías hacer desde una terminal, pero todo lo que lanza pasa por los mismos gates: a main solo se llega por `ship.sh`. No hay botón de aprobar, ni de mergear, ni de saltarse un gate; el operador tampoco puede editar `ship.sh`, hooks ni `settings.json` desde aquí. Crear trabajo no es publicar trabajo.
+2. **Solo `127.0.0.1`.** Nunca `0.0.0.0`. Y como ahora hay endpoints que actúan: cada arranque genera un token anti-CSRF que viaja en el HTML y debe volver en el header `X-Corvux-Token` (un formulario de otra página no puede poner headers propios), y se verifica el header `Host` contra ataques de DNS rebinding. Los tres controles tienen test.
+3. **Jamás muestra valores de secretos.** No lee `.secrets`, `connections` expone presencia (`true` o `false`) y nunca el valor, y todo texto pasa por redacción (GitHub, Vault, JWT, AWS, Slack, Linear) antes de salir. La ley de secretos también aplica a los píxeles. *(La suite mete un token de cada familia y verifica que sale `[REDACTADO]`, y ya cazó un bug real: el `\b` de `sed` no existe en macOS y cuatro familias viajaban sin redactar.)*
+4. **Cero dependencias en tiempo de ejecución.** El frontend es React con shadcn/ui pero viaja **compilado y vendorizado** en `dist/`: el server es stdlib de Python sirviendo estáticos y el usuario jamás corre `npm install`. Node existe solo para construir el panel (repo `harness-ui`; el instalador lo trae con `scripts/sync-ui.sh`).
+5. **Degrada, no explota.** Lee dos fuentes con dos niveles de confianza: `.harness/events.jsonl` y `tasks/` son **nuestros** (estables); los transcripts de Claude Code son **prestados** (formato interno, cambia entre versiones). Si el parseo falla, el panel sigue vivo con lo que el harness sí controla y te lo dice arriba en rojo.
 
 El formulario de Nueva tarea escribe preferencias que `/auto` **respeta como ley**: `review_before_ship: true` fuerza una pausa antes del primer ship, `assumptions_ok: false` convierte cada ambigüedad en una parada en vez de un supuesto, `max_parallel` acota los implementers y `budget_usd` convierte pasarse de presupuesto en una parada.
 
-### Lo que el panel NO hace, y por qué
+### Lo que el panel no hace, y por qué
 
-**No hay streaming token por token.** Lo medimos: el transcript de un agente vivo se quedó quieto 36 segundos y luego saltó 52 KB de golpe — Claude Code escribe los mensajes al **cerrarlos**. El panel muestra el texto por turno, que es lo más en vivo que existe sin mentir. Poner un typewriter falso encima sería teatro, en la única herramienta cuyo trabajo es observar con honestidad.
+**No hay streaming token por token.** Lo medimos: el transcript de un agente vivo se quedó quieto 36 segundos y luego saltó 52 KB de golpe, porque Claude Code escribe los mensajes al **cerrarlos**. El panel muestra el texto por turno, que es lo más en vivo que existe sin mentir. Poner un efecto de máquina de escribir encima sería teatro, en la única herramienta cuyo trabajo es observar con honestidad.
 
-**El costo es un estimado.** La báscula oficial sigue siendo `ccusage`; el panel calcula con `scripts/ui/pricing.json` (editable, se relee sola) para que veas la tendencia sin salir. Dos cosas que aprendimos construyéndolo, contra datos reales:
+**El costo es un estimado.** La báscula oficial sigue siendo `ccusage`; el panel calcula con `scripts/ui/pricing.json` (editable, se relee solo) para que veas la tendencia sin salir. Dos cosas que aprendimos construyéndolo, contra datos reales:
 
-- Una respuesta de la API se escribe en **varios records que repiten el mismo `usage`**. Sumarlos ingenuamente infla la cuenta. Se deduplica por `message.id`. *(Se cita por ahí un 4× de inflado; nosotros medimos 1.01× en transcripts reales — el error existe, la magnitud que circula no.)*
-- El desglose `ephemeral_5m` / `ephemeral_1h` gana sobre el campo plano: la caché de 5 min se escribe a 1.25× y la de 1 h a 2×, y el campo plano no los distingue.
+- Una respuesta de la API se escribe en **varios registros que repiten el mismo `usage`**. Sumarlos ingenuamente infla la cuenta. Se deduplica por `message.id`. *(Se cita por ahí un 4x de inflado; nosotros medimos 1.01x en transcripts reales: el error existe, la magnitud que circula no.)*
+- El desglose `ephemeral_5m` y `ephemeral_1h` gana sobre el campo plano: la caché de 5 minutos se escribe a 1.25x y la de 1 hora a 2x, y el campo plano no los distingue.
 
-**Y un aviso honesto:** el panel lee un formato que Anthropic documenta como **interno y sujeto a cambio entre versiones** (verificado contra Claude Code 2.1.211). Por eso los transcripts son la capa de *enriquecimiento*, nunca la de verdad: si un día cambian, pierdes las tarjetas de agentes y los tokens — no las fases, ni los gates, ni las tareas.
+**Y un aviso honesto:** el panel lee un formato que Anthropic documenta como **interno y sujeto a cambio entre versiones** (verificado contra Claude Code 2.1.211). Por eso los transcripts son la capa de *enriquecimiento*, nunca la de verdad: si un día cambian, pierdes las tarjetas de agentes y los tokens, no las fases, ni los gates, ni las tareas.
 
 ---
 
@@ -512,37 +578,37 @@ El formulario de Nueva tarea escribe preferencias que `/auto` **respeta como ley
 
 | Agente | Qué es | Por qué existe |
 |---|---|---|
-| **abogados** (`svc-*`, `infra`, `frontends`) | Un "tech lead" por dominio que **defiende ownership e invariantes en los RFCs**. No implementa nunca. Su constitución la llenó la arqueología con datos reales de tu código y tú la ratificaste. **Se convocan SOLO cuando la tarea cruza fronteras de ownership** (carril full) — sin frontera cruzada no hay litigio que valga sus tokens. | Sin abogados, un agente que implementa una feature cruza fronteras de datos sin que nadie objete. Con ellos, cada cambio multi-servicio se *litiga* citando specs, no opiniones. |
-| **architect** | Convierte el RFC en un plan ejecutable: tareas por repo con dependencias (beads), orden de shipping, criterios por tarea. | Alguien tiene que sintetizar el debate y trazar el DAG. Modelo caro porque su output lo consumen N agentes aguas abajo. |
-| **implementer** | Ejecuta UNA tarea, en UN worktree, de UN repo. Contexto mínimo: el plan y el CLAUDE.md del repo. | Sesiones cortas y desechables = nunca llegar a compactación de contexto. El aislamiento evita scope creep. |
-| **reviewer** | Emite el veredicto JSON que ship.sh exige: correctness + **compliance matrix** (cada requirement del delta-spec ↔ el test que lo prueba). | "El review aprobó" es difuso; "requirements cubiertos: 100%" es verificable por máquina. |
-| **qa** | Ejercita los criterios de aceptación **como usuario real** (Playwright en frontends), local y en el canary post-deploy. | El modo de fallo #1 de agentes es el "completado" autodeclarado. QA no opina de código: comprueba comportamiento. |
+| **abogados** (`svc-*`, `infra`, `frontends`) | Un "tech lead" por dominio que **defiende ownership e invariantes en los RFCs**. No implementa nunca. Su constitución la llenó la arqueología con datos reales de tu código y tú la ratificaste. **Se convocan solo cuando la tarea cruza fronteras de ownership** (carril full): sin frontera cruzada no hay litigio que valga sus tokens. | Sin abogados, un agente que implementa una feature cruza fronteras de datos sin que nadie objete. Con ellos, cada cambio multi-servicio se *litiga* citando specs, no opiniones. |
+| **architect** | Convierte el RFC en un plan ejecutable: tareas por repo con dependencias (beads), orden de publicación, criterios por tarea. | Alguien tiene que sintetizar el debate y trazar el DAG. Modelo caro porque su salida la consumen N agentes aguas abajo. |
+| **implementer** | Ejecuta una tarea, en un worktree, de un repo. Contexto mínimo: el plan y el `CLAUDE.md` del repo. | Sesiones cortas y desechables significan no llegar nunca a compactación de contexto. El aislamiento evita el scope creep. |
+| **reviewer** | Emite el veredicto JSON que `ship.sh` exige: correctitud más **compliance matrix** (cada requisito del delta-spec con el test que lo prueba). | "El review aprobó" es difuso; "requisitos cubiertos: 100%" es verificable por máquina. |
+| **qa** | Ejercita los criterios de aceptación **como usuario real** (Playwright en frontends), local y en el canary tras el despliegue. | El modo de fallo número uno de los agentes es el "completado" autodeclarado. QA no opina de código: comprueba comportamiento. |
 
 ### La capa SDD (Spec-Driven Development)
 
-- **`docs/constitution.md`** — principios innegociables inyectados a *todos* los agentes: no asumas, código mínimo, cambios quirúrgicos (cada línea traza a la solicitud), ejecución verificable. Es el desempate de cualquier RFC.
-- **`specs/<capability>/spec.md`** — el comportamiento ACTUAL del sistema en notación EARS (`WHEN <evento> THE SYSTEM SHALL <resultado>`) + escenarios Given/When/Then, cada requirement enlazado a su test. Es lo que los abogados **citan** ("esto viola AUTH-3").
-- **Delta-specs** — cada RFC produce sus cambios como secciones ADDED/MODIFIED/REMOVED contra la spec maestra. El delta ES la definición formal del blast radius. *(En el carril express lo redacta el orquestador — 2-6 líneas EARS desde los criterios: express recorta sesiones LLM, jamás artefactos; la compliance matrix y `gate_evidence` operan igual en los tres carriles.)*
-- **`/archive`** — cuando el deploy queda verde, fusiona el delta en la spec maestra automáticamente. **Esta pieza es la razón por la que el SDD de este harness no muere de spec-rot**: si la fusión dependiera de disciplina humana, en un trimestre las specs mentirían — y una spec podrida es peor que ninguna, porque los agentes la ejecutan con confianza.
+- **`docs/constitution.md`**: principios innegociables inyectados a *todos* los agentes: no asumas, código mínimo, cambios quirúrgicos (cada línea traza a la solicitud), ejecución verificable. Es el desempate de cualquier RFC. Incluye la regla de que **lo correcto va por encima de lo rápido**, con una aclaración que importa: el código mínimo habla del *alcance* (no construyas más de lo pedido) y esta regla habla de la *clase de arreglo* dentro de ese alcance (ataca la causa, no el síntoma). Ninguna cancela a la otra.
+- **`specs/<capability>/spec.md`**: el comportamiento actual del sistema en notación EARS (`CUANDO <evento> EL SISTEMA DEBE <resultado>`) más escenarios Given/When/Then, cada requisito enlazado a su test. Es lo que los abogados **citan** ("esto viola AUTH-3").
+- **Delta-specs**: cada RFC produce sus cambios como secciones ADDED, MODIFIED o REMOVED contra la spec maestra. El delta **es** la definición formal del blast radius. *(En el carril express lo redacta el orquestador, de 2 a 6 líneas EARS desde los criterios: express recorta sesiones LLM, jamás artefactos; la compliance matrix y `gate_evidence` operan igual en los tres carriles.)*
+- **`/archive`**: cuando el despliegue queda verde, fusiona el delta en la spec maestra automáticamente. **Esta pieza es la razón por la que el SDD de este harness no muere de spec-rot.**
 
 ### Economía de tokens (el contexto es el recurso escaso)
 
 | Herramienta | Qué es | Para qué sirve aquí |
 |---|---|---|
-| **Serena** (MCP) | Servidor que expone **LSP** (Language Server Protocol — el mismo motor de "ir a definición / encontrar referencias" de tu IDE) como herramientas del agente. | El implementer navega y edita **por símbolo** (`find_symbol`, `find_referencing_symbols`) en vez de leer archivos completos o grepear texto. Es el ahorro de tokens más grande en implementación. En multi-repo se activa **por worktree**. |
-| **Graphify** (CLI) | Knowledge graph del código cross-repo (Tree-sitter + detección de comunidades). | Preguntas de *comprensión* ("¿quién consume este servicio?", "¿qué camino conecta A con B?") se responden con el grafo (~71× menos tokens, [cifra reportada por Graphify](https://github.com/Graphify-Labs/graphify)) en vez de grep masivo. Lo usan arquitecto y orquestador; los implementers no lo necesitan (Serena cubre el nivel símbolo). **El grafo se mantiene solo**: `graph-refresh.sh` (build inicial, `--update` incremental, stamp por HEADs) corre en el prefetch de /auto, en harness-janitor y en `make graph`; el doctor avisa si graphify está instalado sin grafo construido. |
-| **context7** (MCP) | Documentación de librerías bajo demanda, versionada. | El agente no alucina APIs ni repite web-searches de la misma librería. |
-| **quiet.sh** | Wrapper para CLIs ruidosos (`kubectl logs`, `gh run view`, `gcloud`). | Si el output pasa ~120 líneas: muestra head+tail y guarda el dump completo en `.cache/quiet/` para leer bajo demanda. |
-| **repo-brief.sh** | Brief determinista por repo (`.cache/briefs/<repo>.md`, cacheado por HEAD): stack, comandos de test, estructura, convenciones. | El arranque frío de cada implementer/reviewer re-descubría lo mismo en cada tarea — minutos y miles de tokens de exploración. El brief se genera UNA vez con $0 tokens y viaja en el prompt: el agente arranca editando, no explorando. |
-| **Carriles** (express/standard/full) | El pipeline dimensionado al blast radius (ver ②b). | El ahorro más grande de todos: una tarea chica pasa de ~6 sesiones LLM a 2. Menos sesiones = menos arranques fríos = menos tokens Y menos minutos, con los mismos gates. |
-| **ccusage** | La báscula: costo por sesión/tarea. | No optimizas lo que no mides. |
-| **models.yaml + stamp-models.sh** | LA perilla de modelos: aliases `fast\|smart\|deep` por proveedor (anthropic, vertex, bedrock, kimi, openrouter), rol→alias, overrides por agente. `make models` estampa; `resolve` traduce. | Cambiar un modelo, un agente o el proveedor entero es UNA línea + un comando — nadie edita frontmatter a mano y el doctor detecta el drift. El sandwich sigue: caro donde el output tiene fan-out (planes, veredictos), medio en implementación, barato en lo mecánico; reglas de escalación y presupuestos USD por cronjob incluidos. Por tarea: `/auto <id> --model deep`. |
+| **Serena** (MCP) | Servidor que expone **LSP** (Language Server Protocol, el mismo motor de "ir a definición" o "encontrar referencias" de tu editor) como herramientas del agente. | El implementer navega y edita **por símbolo** (`find_symbol`, `find_referencing_symbols`) en vez de leer archivos completos o buscar texto. Es el ahorro de tokens más grande en implementación. En multi-repo se activa **por worktree**. |
+| **Graphify** (CLI) | Knowledge graph del código cross-repo (Tree-sitter y detección de comunidades). | Las preguntas de *comprensión* ("¿quién consume este servicio?", "¿qué camino conecta A con B?") se responden con el grafo (~71 veces menos tokens, [cifra reportada por Graphify](https://github.com/Graphify-Labs/graphify)) en vez de con búsquedas masivas. Lo usan arquitecto y orquestador; los implementers no lo necesitan porque Serena cubre el nivel de símbolo. **El grafo se mantiene solo**: `graph-refresh.sh` corre en el prefetch de `/auto`, en harness-janitor y en `make graph`; el doctor avisa si graphify está instalado sin grafo construido. |
+| **context7** (MCP) | Documentación de librerías bajo demanda, versionada. | El agente no inventa APIs ni repite búsquedas web de la misma librería. |
+| **quiet.sh** | Envoltorio para CLIs ruidosos (`kubectl logs`, `gh run view`, `gcloud`). | Si la salida pasa de unas 120 líneas, muestra principio y final y guarda el volcado completo en `.cache/quiet/` para leerlo bajo demanda. |
+| **repo-brief.sh** | Resumen determinista por repo (`.cache/briefs/<repo>.md`, cacheado por HEAD): stack, comandos de test, estructura, convenciones. | El arranque en frío de cada implementer o reviewer re-descubría lo mismo en cada tarea, y eso son minutos y miles de tokens de exploración. El resumen se genera una vez con $0 tokens y viaja en el prompt: el agente arranca editando, no explorando. |
+| **Carriles** (express, standard, full) | El pipeline dimensionado al blast radius (ver ②b). | El ahorro más grande de todos: una tarea chica pasa de unas 6 sesiones LLM a 2. Menos sesiones son menos arranques en frío, o sea menos tokens **y** menos minutos, con los mismos gates. |
+| **ccusage** | La báscula: costo por sesión y por tarea. | No optimizas lo que no mides. |
+| **models.yaml + stamp-models.sh** | La perilla de modelos: aliases `fast`, `smart` y `deep` por proveedor (anthropic, vertex, bedrock, kimi, openrouter), rol a alias, overrides por agente. `make models` estampa; `resolve` traduce. | Cambiar un modelo, un agente o el proveedor entero es una línea y un comando. Nadie edita frontmatter a mano y el doctor detecta el drift. |
 
-**La regla del catálogo (anti-consejo-vacío):** toda herramienta que un prompt cite debe tener su cadena completa — *quién la instala* (bootstrap, desde el catálogo) → *quién la alimenta* (índices/configs con ciclo de vida propio, como `graph-refresh.sh`) → *quién la vigila* (doctor, con remediación) → *quién la ejecuta de verdad* (gate, cronjob o agente). Una herramienta citada sin esa cadena es un consejo vacío: la query falla y el agente cae al camino caro que la herramienta existía para evitar. Las capacidades sin consumidor automático (cosign, sloth, jscpd…) lo declaran en su entrada del catálogo — no se vende lo que nadie corre.
+**La regla del catálogo (anti-consejo-vacío):** toda herramienta que un prompt cite debe tener su cadena completa: *quién la instala* (bootstrap, desde el catálogo), *quién la alimenta* (índices y configuraciones con ciclo de vida propio, como `graph-refresh.sh`), *quién la vigila* (el doctor, con remediación) y *quién la ejecuta de verdad* (un gate, un cronjob o un agente). Una herramienta citada sin esa cadena es un consejo vacío: la consulta falla y el agente cae al camino caro que la herramienta existía para evitar. Las capacidades sin consumidor automático (cosign, sloth, jscpd) lo declaran en su entrada del catálogo: no se vende lo que nadie corre.
 
 ### Modelos: una perilla, cinco proveedores
 
-Todo el harness habla en **aliases** (`fast | smart | deep`) y su semántica es de roles, no de precio: **deep piensa** (plan, RFC, litigios, escalación), **smart produce** (todo el código, review, QA) y **fast despacha** lo especificísimo sin juicio (digest, triage; Sonnet, y solo ahí). En Anthropic deep y smart son el mismo modelo (Opus 5) y lo que los separa es el esfuerzo de razonamiento (`ultrathink`), no el ID; en proveedores con un tier de razonamiento aparte el alias sí cambia de modelo. `models.yaml` documenta las reglas de uso del tier deep y traduce cada alias al ID real del proveedor activo (Anthropic, Vertex, Bedrock, Kimi, MiniMax, OpenRouter). Tres niveles de control, todos de una línea:
+Todo el harness habla en **aliases** (`fast`, `smart`, `deep`) y su semántica es de roles, no de precio: **deep piensa** (plan, RFC, litigios, escalación), **smart produce** (todo el código, review, QA) y **fast despacha** lo muy específico y sin juicio (digest, triage). En Anthropic, deep y smart son el mismo modelo y lo que los separa es el esfuerzo de razonamiento (`ultrathink`), no el identificador; en proveedores con un tier de razonamiento aparte, el alias sí cambia de modelo. `models.yaml` documenta las reglas de uso del tier deep y traduce cada alias al identificador real del proveedor activo (Anthropic, Vertex, Bedrock, Kimi, MiniMax, OpenRouter). Tres niveles de control, todos de una línea:
 
 ```yaml
 provider: anthropic        # ← cambiar de proveedor entero: ESTA línea
@@ -556,89 +622,91 @@ overrides:
 /auto COR-123 --model deep       # ← una sola tarea, sin tocar nada
 ```
 
-`scripts/stamp-models.sh` materializa la política en el frontmatter de los agentes (determinista, $0 tokens), `resolve <alias|rol>` la traduce para headless/cronjobs, y `check` (lo corre el doctor) detecta si alguien editó un agente a mano. Las tablas `models.vertex`, `models.bedrock`, `models.kimi` y `models.openrouter` traen el formato de ID de cada proveedor (verifica el ID exacto contra tu catálogo) y las env vars que Claude Code necesita para cada backend (`CLAUDE_CODE_USE_VERTEX=1`, `CLAUDE_CODE_USE_BEDROCK=1`…).
+`scripts/stamp-models.sh` materializa la política en el frontmatter de los agentes (determinista, $0 tokens), `resolve <alias|rol>` la traduce para headless y cronjobs, y `check` (lo corre el doctor) detecta si alguien editó un agente a mano.
 
 ### Multi-herramienta: Claude Code primero, nadie afuera
 
-El harness está orientado a Claude Code (hooks, agentes, comandos nativos), pero **su capa de verdad es agnóstica**: gates, policy engine, worktrees y tickets son shell/Python que cualquier agente puede ejecutar. La instancia genera **`AGENTS.md`** — el estándar que leen Cursor, Kimi Code, Codex, Gemini CLI y compañía — con las leyes, el mapa de la verdad y una clave: los comandos de `.claude/commands/*.md` **son playbooks markdown**; una herramienta sin slash-commands los abre y los sigue tal cual, y los agentes de `.claude/agents/` sirven como system prompts del rol. Una honestidad importante: los hooks que frenan el push directo solo corren en Claude Code — `AGENTS.md` lo advierte y recomienda branch protection en el remoto como red equivalente para las demás herramientas.
+El harness está orientado a Claude Code (hooks, agentes, comandos nativos), pero **su capa de verdad es agnóstica**: gates, motor de política, worktrees y tickets son shell y Python que cualquier agente puede ejecutar. La instancia genera **`AGENTS.md`**, el estándar que leen Cursor, Kimi Code, Codex, Gemini CLI y compañía, con las leyes, el mapa de la verdad y una clave: los comandos de `.claude/commands/*.md` **son playbooks en markdown**, así que una herramienta sin slash-commands los abre y los sigue tal cual, y los agentes de `.claude/agents/` sirven como system prompts del rol. Una honestidad importante: los hooks que frenan el push directo solo corren en Claude Code. `AGENTS.md` lo advierte y recomienda protección de rama en el remoto como red equivalente para las demás herramientas.
 
 ### Skills en tres capas (lo custom sobrevive al update)
 
-Una instancia mezcla skills de tres dueños, y la procedencia es **verificable, no de fe**: las **upstream** las trae el plugin (las renueva `harness update`, gobernadas por el manifest del generador); las **compartidas** viven en TUS repos (ej. `corvux-skills`), se declaran en `skills.yaml` y las instala `make skills` con una marca `.managed` (repo + ref + sha exactos); las **locales** (`.claude/skills/<nombre>/` sin marca) no las toca NADIE: ni el update ni el sync. En colisión de nombres la local siempre gana, con error explícito. Y hay promoción, el `/promote` de las skills: una local que probó su valor se muda al repo compartido y todas tus instancias la heredan. El doctor vigila el drift de la capa compartida.
+Una instancia mezcla skills de tres dueños, y la procedencia es **verificable, no de fe**: las **upstream** las trae el plugin (las renueva `harness update`); las **compartidas** viven en tus repos, se declaran en `skills.yaml` y las instala `make skills` con una marca `.managed` (repo, ref y sha exactos); las **locales** (`.claude/skills/<nombre>/` sin marca) no las toca nadie, ni el update ni el sync. En colisión de nombres la local siempre gana, con error explícito. Y hay promoción, el `/promote` de las skills: una local que probó su valor se muda al repo compartido y todas tus instancias la heredan. El doctor vigila el drift de la capa compartida.
 
 ### Memoria (tres tipos, tres lugares)
 
 | Tipo | Dónde vive | Herramienta |
 |---|---|---|
-| **Semántica** (decisiones) | `docs/adr/` — git es la única verdad duradera | ADRs |
-| **Estado del trabajo** (qué va cómo) | DAG de tareas git-backed | **beads** (`bd ready --json`) — el plan del arquitecto son beads con dependencias |
-| **Episódica** (qué aprendimos) | Base local con búsqueda FTS | **engram** (MCP): `mem_search` al iniciar tarea, `mem_save` al cerrar. SOLO en perfiles orquestador/arquitecto — nunca en implementers (costo de contexto). |
+| **Semántica** (decisiones) | `docs/adr/`, git es la única verdad duradera | ADRs |
+| **Estado del trabajo** (qué va cómo) | DAG de tareas respaldado en git | **beads** (`bd ready --json`): el plan del arquitecto son beads con dependencias |
+| **Episódica** (qué aprendimos) | Base local con búsqueda de texto completo | **engram** (MCP): `mem_search` al iniciar la tarea, `mem_save` al cerrarla. Solo en perfiles de orquestador y arquitecto, nunca en implementers, por costo de contexto |
 
-El ritual **`/promote`** (semanal) cierra el loop: *la memoria propone, git dispone* — decisión madura → ADR; error repetido → regla semgrep o gate; ruido → expira.
+El ritual **`/promote`** (semanal) cierra el loop: *la memoria propone, git dispone*. Decisión madura, ADR; error repetido, regla de semgrep o gate; ruido, expira.
 
 ### Gates y hooks (las leyes con dientes)
 
-- **`ship.sh`** — la única puerta a main. En serie lo que tiene orden real: rebase → trailer `Task:` → **carril** (`gate_lane`: el diff respeta lo que el intake declaró). Después, **en paralelo**: build/test por lenguaje + `buf breaking` ∥ `gitleaks` + `semgrep` ∥ **tests-no-debilitados** ∥ veredicto+compliance+**evidencia**+policy. Al final: lock por repo → push. Los rojos se reportan juntos y **el error de cada gate es un prompt**: incluye su remediación, para que el agente corrija TODO en una iteración (máx 2 rondas de autofix).
-- **Gates activados por config** — la config del repo es el opt-in; con ella presente son gates duros, sin ella silencio: `import-linter` (fronteras de capas Python, `.importlinter`), `go-arch-lint` (grafo de dependencias Go, `.go-arch-lint.yml`) y `squawk` (lint de migraciones SQL nuevas del diff — las viejas no se re-litigan). Config presente sin herramienta instalada = warning honesto, jamás un gate fingido.
+- **`ship.sh`**: la única puerta a main. En serie lo que tiene orden real: rebase, trailer `Task:`, **carril** (`gate_lane`, el diff respeta lo que el intake declaró). Después, **en paralelo**: build y test por lenguaje más `buf breaking`, `gitleaks` y `semgrep`, **tests no debilitados**, y veredicto con compliance, **evidencia** y policy. Al final: lock por repo y push. Los rojos se reportan juntos y **el error de cada gate es un prompt**: incluye su remediación, para que el agente corrija todo en una iteración (máximo 2 rondas de autofix).
+- **Gates activados por config**: la configuración del repo es el opt-in; con ella presente son gates duros, sin ella hay silencio. Son `import-linter` (fronteras de capas en Python, `.importlinter`), `go-arch-lint` (grafo de dependencias en Go, `.go-arch-lint.yml`) y `squawk` (lint de migraciones SQL nuevas del diff; las viejas no se re-litigan). Config presente sin herramienta instalada es un aviso honesto, jamás un gate fingido.
 
-  Los dos gates nuevos existen porque nos hicieron una pregunta incómoda: *nuestros gates confían en cosas que el agente puede editar.*
+  Los dos gates de integridad existen porque nos hicieron una pregunta incómoda: *nuestros gates confían en cosas que el agente puede editar.*
 
-  - **`gate_tests_untouched`** — el gate de test confía en el test suite, y el test suite es un archivo. La forma más barata de pasar a verde no es arreglar el código: es borrar la aserción. Está medido en la literatura (en [SWE-Bench+](https://arxiv.org/abs/2410.06992), ~31% de los parches "exitosos" pasaban gracias a tests débiles) y los harnesses que solo escriben *"no borres tests"* en prosa lo escriben porque no tienen gate. Este bloquea aserciones eliminadas, `skip`s añadidos y tests borrados — **salvo** que el delta-spec declare el cambio como `MODIFIED`/`REMOVED`, porque entonces no es trampa: es cumplir la spec. Los tests son el contrato; cambiar uno es un RFC.
-  - **`gate_evidence`** — la compliance matrix la escribe un agente. Nada comprobaba que hubiera *abierto* el test que cita. O sea: **el verificador estaba proponiendo**, justo lo que nuestra filosofía prohíbe. Ahora el hook `track-read.sh` registra qué artefactos se leyeron de verdad y el gate intersecta lo citado con lo leído: si un requirement dice `covered: true` citando un archivo que nadie abrió (o que no existe), no pasa. Cero LLM, cero opinión — es una intersección de conjuntos.
-- **Hooks, en dos familias con leyes opuestas.** Los que **bloquean** son *fail-closed*: `block-direct-push` (ningún `git push` a main sobrevive) y `guard-canonical` (el clon base es intocable **y ahora también `ship.sh`, los hooks y `settings.json`** — un agente atascado en un gate que "arregla" ship.sh no está pasando el gate: lo está borrando, y con él todos los demás para siempre). Sin `jq`, bloquean por precaución. Los que **observan** son *fail-open* y `async`: `track-read.sh` (el libro de a bordo de la evidencia) y `ui-emit.sh` (el bus del panel). Salen 0 siempre: un hook de telemetría que puede tumbar el pipeline es un bug, no una feature.
-- **Denials** — `kubectl apply`, `terraform apply`, `argocd app rollback`, `git push --force` y la regeneración ciega de snapshots están denegados a los agentes en `settings.json`. Writes de infra: solo por GitOps.
-- **semgrep/rules.yaml** — sensores custom donde **cada regla incluye su remediación en el mensaje**. Crece solo: el cronjob `rule-miner` mina reglas nuevas de los bugs de cada mes.
+  - **`gate_tests_untouched`**: el gate de test confía en la suite de tests, y la suite es un archivo. La forma más barata de pasar a verde no es arreglar el código: es borrar la aserción. Está medido en la literatura (en [SWE-Bench+](https://arxiv.org/abs/2410.06992), cerca del 31% de los parches "exitosos" pasaban gracias a tests débiles) y los harnesses que solo escriben *"no borres tests"* en prosa lo escriben porque no tienen gate. Este bloquea aserciones eliminadas, `skip`s añadidos y tests borrados, **salvo** que el delta-spec declare el cambio como `MODIFIED` o `REMOVED`, porque entonces no es trampa: es cumplir la spec. Los tests son el contrato; cambiar uno es un RFC.
+  - **`gate_evidence`**: la compliance matrix la escribe un agente. Nada comprobaba que hubiera *abierto* el test que cita. O sea: **el verificador estaba proponiendo**, justo lo que la filosofía prohíbe. El hook `track-read.sh` registra qué artefactos se leyeron de verdad y el gate intersecta lo citado con lo leído: si un requisito dice `covered: true` citando un archivo que nadie abrió (o que no existe), no pasa. Cero LLM, cero opinión, es una intersección de conjuntos. Ese registro cubre tanto los archivos del worktree como los del workspace, para que un script o un ADR también puedan sustentar un requisito.
+- **Hooks, en dos familias con leyes opuestas.** Los que **bloquean** son *fail-closed*: `block-direct-push` (ningún `git push` a main sobrevive) y `guard-canonical` (el clon base es intocable, **y también `ship.sh`, los hooks y `settings.json`**, porque un agente atascado en un gate que "arregla" `ship.sh` no está pasando el gate: lo está borrando, y con él todos los demás para siempre). Sin `jq`, bloquean por precaución. Un tercero, `guard-worktree`, bloquea a una segunda sesión que intente escribir en un worktree ya reclamado, pero es *fail-open* ante sus propios problemas: coordina en vez de prohibir, y una colisión se recupera con git, así que frenar todas las escrituras por falta de `jq` sería peor que el problema. Los que **observan** son *fail-open* y asíncronos: `track-read.sh` (el libro de a bordo de la evidencia), `ui-emit.sh` (el bus del panel) y `session-summary.sh` (el resumen al cerrar). Salen 0 siempre: un hook de telemetría que puede tumbar el pipeline es un bug, no una feature.
+- **Denials**: `kubectl apply`, `terraform apply`, `argocd app rollback`, `git push --force` y la regeneración ciega de snapshots están denegados a los agentes en `settings.json`. Escrituras de infraestructura, solo por GitOps.
+- **semgrep/rules.yaml**: sensores propios donde **cada regla incluye su remediación en el mensaje**. Crece solo: el cronjob `rule-miner` extrae reglas nuevas de los bugs de cada mes.
 
 ### El canal de vuelta: un bug del harness no muere en tu máquina
 
-El harness corre en la máquina de cada usuario, así que sus propias fallas se quedan ahí: el agente pone un workaround local, sigue con su tarea, y el siguiente usuario tropieza con lo mismo. Por eso la instancia trae una **regla automática** (ley 12 del CLAUDE.md, ley 9 del AGENTS.md): si un artefacto **del plugin** falla o contradice lo que su propia cabecera documenta, el agente lo verifica y levanta el issue en este repo, sin que nadie se lo pida.
+El harness corre en la máquina de cada usuario, así que sus propias fallas se quedan ahí: el agente pone un parche local, sigue con su tarea, y el siguiente usuario tropieza con lo mismo. Por eso la instancia trae una **regla automática** (ley 12 del `CLAUDE.md`): si un artefacto **del plugin** falla o contradice lo que su propia cabecera documenta, el agente lo verifica y levanta el issue en este repo, sin que nadie se lo pida.
 
-Lo delicado no es reportar: es no convertir el canal en spam. Por eso el juicio y la verificación están separados. El juicio lo pone la skill `harness-bug-report` (¿el repro se sostiene dos veces en shell limpia? ¿es del plugin o de tu instancia? ¿le pasa a alguien más? ¿vale la pena arreglarlo?) y lo verificable lo hace `scripts/harness-bug.sh`, que es **fail-closed** y no publica nada si algo no cuadra:
+Esta regla tiene una compañera que conviene leer junto a ella. La **ley 13** dice que, cuando un agente te presente opciones, la que marque como recomendada debe ser **la que elimina la causa**, aunque cueste más trabajo, y nunca la más rápida. El atajo puede listarse, jamás como recomendado, y siempre con su deuda escrita. Y si el único camino corto rompe una ley del workspace, eso no es permiso para saltársela: significa que al harness le falta un camino, o sea que hay un bug del harness que reportar. Vienen de un caso real: ante una fase avanzada por error, un agente recomendó editar el estado a mano porque no existía vuelta atrás por línea de comandos. Hoy esa vuelta existe (`harness-policy.py rollback`) precisamente porque el hueco se reportó.
+
+Lo delicado no es reportar: es no convertir el canal en spam. Por eso el juicio y la verificación están separados. El juicio lo pone la skill `harness-bug-report` (¿el repro se sostiene dos veces en una shell limpia? ¿es del plugin o de tu instancia? ¿le pasa a alguien más? ¿vale la pena arreglarlo?) y lo verificable lo hace `scripts/harness-bug.sh`, que es **fail-closed** y no publica nada si algo no cuadra:
 
 | Verificación | Por qué existe |
 |---|---|
-| **Propiedad del artefacto** (plugin vs instancia) | tu spec, tu paso custom o tu abogado no son bugs del plugin, aunque duelan igual |
+| **Propiedad del artefacto** (plugin o instancia) | tu spec, tu paso custom o tu abogado no son bugs del plugin, aunque duelan igual |
 | **Drift contra el template** (sha256) | un archivo que parcheaste no lo reproduce upstream: exige `--force` con justificación |
 | **Versión al día** | reportar un bug ya corregido es la falla más común de estos canales |
 | **Repro adjunto y no vacío** | un reporte sin repro es una queja |
-| **Dedupe por fingerprint** (local + búsqueda remota) | el mismo bug en 20 máquinas es un issue, no 20 |
-| **Cuota de 3 issues/24h** | una tormenta automática entierra los reportes reales |
-| **Redacción de secretos** (los mismos patrones del bus, ya testeados) | el repro suele ser la salida de un comando, y sale a un repo público |
+| **Dedupe por huella** (local y búsqueda remota) | el mismo bug en 20 máquinas es un issue, no 20 |
+| **Cuota de 3 issues cada 24 h** | una tormenta automática entierra los reportes reales |
+| **Redacción de secretos** (los mismos patrones del bus, ya probados) | el repro suele ser la salida de un comando, y sale a un repo público |
 
-Es la única acción del harness que publica algo hacia afuera, así que se declara en la entrevista y se apaga con una línea: `upstream_issues: off` en `harness-answers.yaml` (o `HARNESS_UPSTREAM_ISSUES=off`), y los hallazgos se te reportan a ti. Lo ya reportado: `make bugs`.
+Es la única acción del harness que publica algo hacia afuera, así que se declara en la entrevista y se apaga con una línea: `upstream_issues: off` en `harness-answers.yaml` (o `HARNESS_UPSTREAM_ISSUES=off`), y los hallazgos se te reportan a ti. Lo ya reportado se ve con `make bugs`.
 
 ---
 
 ## Self-healing: los cronjobs
 
-Arquitectura innegociable: **un detector determinista (script, cero LLM) produce hallazgos; el agente solo despierta si hay algo que arreglar**, con modelo y presupuesto USD de `models.yaml`, y todo aterriza como PR o issue — jamás push directo. El `cron-runner.sh` trae circuit breaker (3 fallos → se apaga y avisa) y un ledger de gasto que el digest reporta: **el harness se auto-audita**.
+Arquitectura innegociable: **un detector determinista (script, cero LLM) produce hallazgos; el agente solo despierta si hay algo que arreglar**, con modelo y presupuesto en dólares definidos en `models.yaml`, y todo aterriza como PR o issue, jamás como push directo. El `cron-runner.sh` trae circuit breaker (3 fallos y se apaga avisando) y un registro de gasto que el digest reporta: **el harness se auto-audita**.
 
 ```mermaid
 flowchart LR
     C["⏰ cron / webhook"] --> DET["detector determinista<br/>(script, $0)"]
-    DET -->|"limpio"| Z["fin — cero tokens"]
+    DET -->|"limpio"| Z["fin · cero tokens"]
     DET -->|"hallazgos"| AG["claude -p<br/>modelo/presupuesto de models.yaml<br/>--permission-mode dontAsk"]
     AG --> PR["PR o issue<br/>(nunca push a main)"]
     AG --> L["ledger de gasto<br/>+ circuit breaker"]
 ```
 
-| Job | Detecta | El agente… |
+| Job | Detecta | El agente |
 |---|---|---|
-| **ci-doctor** | runs rojos en main | fix quirúrgico o PR de revert |
-| **dep-shepherd** | PRs de Renovate sin automerge | matriz de riesgo, grep de imports reales, merge o fix |
-| **vuln-watch** | vulns nuevas (osv-scanner + trivy) | PR de bump con tests |
-| **flake-warden** | tests que pasan Y fallan en el mismo commit | cuarentena inmediata + root-cause |
-| **daily-digest** | (siempre) | changelog del día + gasto de la noche → Slack |
-| **dead-code-reaper** | código muerto (knip/vulture/deadcode) | borra en lotes con tests; FP → whitelist |
-| **ratchet-keeper** | métricas que solo pueden mejorar | sube el piso o issue de regresión |
+| **ci-doctor** | runs rojos en main | arreglo quirúrgico o PR de revert |
+| **dep-shepherd** | PRs de Renovate sin automerge | matriz de riesgo, búsqueda de imports reales, merge o arreglo |
+| **vuln-watch** | vulnerabilidades nuevas (osv-scanner y trivy) | PR de actualización con tests |
+| **flake-warden** | tests que pasan **y** fallan en el mismo commit | cuarentena inmediata y análisis de causa raíz |
+| **daily-digest** | (siempre) | changelog del día y gasto de la noche a Slack |
+| **dead-code-reaper** | código muerto (knip, vulture, deadcode) | borra en lotes con tests; falsos positivos a whitelist |
+| **ratchet-keeper** | métricas que solo pueden mejorar | sube el piso o abre issue de regresión |
 | **mutation-sentinel** | mutantes que ningún test mata | escribe el test que falta |
-| **doc-gardener** | links rotos, símbolos perdidos, diagramas drifteados | PR de jardinería |
-| **slo-watchdog** | burn-rate de SLOs (webhook) | diagnóstico read-only + PR de revert |
-| **harness-janitor** | worktrees/ramas/locks huérfanos, memoria inflada | destila la memoria |
-| **rule-miner** | los bugs del mes (commits fix/revert) | **mina reglas semgrep que los habrían atrapado** — el sistema mejora solo cada mes |
-| **skill-miner** | supuestos idénticos en ≥3 tareas · decisiones/paradas repetidas en el bus | **empaqueta el procedimiento repetido como skill** (`.claude/skills/`), siguiendo la guía de skill-creator; PR = ratificación humana |
+| **doc-gardener** | enlaces rotos, símbolos perdidos, diagramas desactualizados | PR de jardinería |
+| **slo-watchdog** | burn-rate de SLOs (webhook) | diagnóstico de solo lectura y PR de revert |
+| **harness-janitor** | worktrees, ramas y locks huérfanos, memoria inflada | destila la memoria |
+| **rule-miner** | los bugs del mes (commits de fix o revert) | **extrae reglas de semgrep que los habrían atrapado**: el sistema mejora solo cada mes |
+| **skill-miner** | supuestos idénticos en 3 o más tareas, decisiones y paradas repetidas en el bus | **empaqueta el procedimiento repetido como skill**, siguiendo la guía de skill-creator; el PR es la ratificación humana |
 
-Corren donde elijas: crontab local, K8s CronJobs (manifiesto incluido, auth keyless por Workload Identity) o GitHub Actions schedule. Son opcionales y se activan después con un update.
+Corren donde elijas: crontab local, CronJobs de Kubernetes (manifiesto incluido, autenticación keyless por Workload Identity) o schedule de GitHub Actions. Son opcionales y se activan después con un update.
 
 ---
 
@@ -649,99 +717,115 @@ Reglas: **los valores jamás tocan el repo, el chat ni los logs**. Solo referenc
 ```mermaid
 flowchart LR
     V["🔐 Fuente<br/>(Vault · GCP SM · AWS SM<br/>· doppler · sops · 1Password · env)"] -->|"secrets.sh pull"| S[".secrets<br/>(gitignoreado, chmod 600)"]
-    T["~/.config/harness/vault-token<br/>(lo tecleas TÚ — read -s,<br/>nunca pasa por el agente)"] --> V
+    T["~/.config/harness/vault-token<br/>(lo tecleas TÚ · read -s,<br/>nunca pasa por el agente)"] --> V
     S -->|"with-secrets.sh <cmd><br/>(ÚNICO punto de inyección)"| U["MCPs autenticados<br/>CLIs (kubectl, kargo…)<br/>deploy-watch, tickets"]
 ```
 
 - El **discovery detecta** tu fuente (señales: `.sops.yaml`, `doppler.yaml`, `op://`, secret managers en terraform, `VAULT_ADDR`) y la entrevista recomienda con evidencia.
-- El generador **verifica el layout real** de tu Vault (nombres de paths y campos — nunca valores) antes de escribir los mapeos.
-- `make init` detecta token **faltante o expirado** (lo valida con `vault token lookup`, no solo su existencia), te enseña cómo conseguir uno, te lo pide interactivo y lo valida al guardarlo.
-- La materialización es **honesta**: si una clave no se pudo leer, falla con el detalle, no dice "✅".
+- El generador **verifica el layout real** de tu Vault (nombres de rutas y campos, nunca valores) antes de escribir los mapeos.
+- `make init` detecta el token **faltante o expirado** (lo valida con `vault token lookup`, no solo su existencia), te enseña cómo conseguir uno, te lo pide de forma interactiva y lo valida al guardarlo.
+- La materialización es **honesta**: si una clave no se pudo leer, falla con el detalle, no dice "listo".
 
 ---
 
 ## Qué tan flexible es
 
-El flujo es fijo (discovery → entrevista → generación → verificación); **todo lo demás es dato, no código**:
+El flujo es fijo (discovery, entrevista, generación, verificación); **todo lo demás es dato, no código**:
 
-| Quieres… | Tocas… |
+| Quieres | Tocas |
 |---|---|
-| Soportar una herramienta nueva (CLI o MCP) | agrega una entrada a `catalog/capabilities.yaml` (provider, bin/mcp, tier, profiles, detect, install) — la entrevista la ofrecerá cuando su señal aparezca |
-| Otro lenguaje/stack | agrega la detección de rol en `discover.sh` + el gate de lenguaje en `ship.sh.tmpl` |
-| Otro tracker de tickets | los contratos de `ticket-pull/close` están especificados; se adaptan a `gh issue` o a cualquier API |
+| Soportar una herramienta nueva (CLI o MCP) | agrega una entrada a `catalog/capabilities.yaml` (provider, bin/mcp, tier, profiles, detect, install); la entrevista la ofrecerá cuando su señal aparezca |
+| Otro lenguaje o stack | agrega la detección de rol en `discover.sh` y el gate de lenguaje en `ship.sh.tmpl` |
+| Otro gestor de tickets | los contratos de `ticket-pull` y `ticket-close` están especificados; se adaptan a `gh issue` o a cualquier API |
 | Otra fuente de secretos | `secrets.sh` ya trae 7; una nueva es una función `pull_*` más |
-| Cambiar el modelo de un rol, un agente o TODO | UNA línea en `models.yaml` (roles/overrides, en aliases fast\|smart\|deep) + `make models` |
-| Cambiar de proveedor (Anthropic ↔ Vertex ↔ Bedrock ↔ Kimi ↔ OpenRouter) | la línea `provider:` de `models.yaml` + `make models` — roles y comandos no se tocan |
-| Modelo para UNA tarea puntual | `/auto <id> --model deep` (o `model:` en el frontmatter de task.md) |
-| Usar el harness desde Cursor, Kimi Code u otro agente | ya está: `AGENTS.md` (estándar multi-herramienta) es el punto de entrada; los comandos de `.claude/commands/` son playbooks markdown legibles por cualquiera |
-| Otro cronjob de self-healing | un archivo en `cronjobs/jobs/`: metadata + `detect()` + prompt. El runner hace el resto |
-| Más/menos agentes | el clustering se decide en la entrevista y se corrige en `harness-answers.yaml` |
-| Que `/auto` te pida un "go" antes de tocar main (o que no lo pida) | `autonomy: checkpoint \| full` en `harness-answers.yaml` |
-| Endurecer/relajar qué bloquea el carril express | `LANE_GUARD_PATTERN` (env de ship.sh) + las señales del paso 0.1 de `/auto`; las transiciones por carril viven en `harness-policy.json` |
-| Endurecer/relajar leyes | hooks y denials en `settings.json.tmpl`; gates en `ship.sh.tmpl` |
+| Cambiar el modelo de un rol, un agente o todo | una línea en `models.yaml` (roles u overrides, en aliases) más `make models` |
+| Cambiar de proveedor | la línea `provider:` de `models.yaml` más `make models`; roles y comandos no se tocan |
+| Modelo para una tarea puntual | `/auto <id> --model deep` (o `model:` en el frontmatter de `task.md`) |
+| Usar el harness desde Cursor, Kimi Code u otro agente | ya está: `AGENTS.md` es el punto de entrada, y los comandos de `.claude/commands/` son playbooks legibles por cualquiera |
+| Otro cronjob de self-healing | un archivo en `cronjobs/jobs/`: metadata, `detect()` y prompt. El runner hace el resto |
+| Más o menos agentes | el clustering se decide en la entrevista y se corrige en `harness-answers.yaml` |
+| Cuántas vueltas puede dar el loop antes de escalarte | `loop_budget` en `harness-answers.yaml`; de ahí sale también el límite que aplica el motor de política |
+| Que `/auto` te pida un "go" antes de tocar main | `autonomy: checkpoint` o `full` en `harness-answers.yaml` |
+| Endurecer o relajar qué bloquea el carril express | `LANE_GUARD_PATTERN` (variable de entorno de `ship.sh`) y las señales del paso de carril de `/auto`; las transiciones viven en `harness-policy.json` |
+| Endurecer o relajar leyes | hooks y denials en `settings.json.tmpl`; gates en `ship.sh.tmpl` |
 
-Lo **no** negociable (a propósito): push a main solo por gates, worktrees, valores de secretos fuera del chat, rollback seguro (nunca `argocd app rollback` automático — Argo Rollouts abort-to-stable o revert en git), y que la ley la ratifiquen humanos.
+Lo **no** negociable, a propósito: push a main solo por gates, worktrees, valores de secretos fuera del chat, rollback seguro (nunca `argocd app rollback` automático, sino Argo Rollouts abort-to-stable o revert en git), y que la ley la ratifiquen humanos.
 
 ## Actualizaciones
 
-Los fixes se hacen en ESTE repo y las instancias los reciben por diff:
+Los arreglos se hacen en **este** repo y las instancias los reciben por diff:
 
 ```bash
 /plugin marketplace update harness    # refresca el plugin
 /harness-init .                       # en el workspace: modo update
 ```
 
-El modo update **no re-pregunta** lo respondido, migra esquemas sin tocar tus decisiones (`harness-answers.yaml`; y `models.yaml` viejo con IDs crudos → provider + aliases), **reconcilia** (una respuesta nueva propaga diffs a manifest/CLAUDE.md/DAG) y distingue propiedad: los scripts del plugin se actualizan con upstream; tus answers, models, specs y constituciones son ley local y se conservan. Nada se pisa sin confirmación, con una excepción declarada: los **paquetes atados** (carriles: policy+auto+ship · modelos: models.yaml+stamp+cron-runner · plan-hondo/loop-corto: plan-lint+ship --precheck+comandos+agentes) se aceptan o rechazan juntos, porque a medias romperían la instancia. Al aplicar, el update re-estampa modelos y re-corre el doctor.
+El modo update **no re-pregunta** lo respondido, migra esquemas sin tocar tus decisiones, **reconcilia** (una respuesta nueva propaga diffs a manifest, `CLAUDE.md` y DAG) y distingue propiedad: los scripts del plugin se actualizan con upstream; tus answers, modelos, specs y constituciones son ley local y se conservan. Nada se pisa sin confirmación, con una excepción declarada: los **paquetes atados** (carriles, modelos, plan hondo con loop corto) se aceptan o rechazan juntos, porque a medias romperían la instancia. Al aplicar, el update re-estampa modelos y vuelve a correr el doctor.
+
+> **Nota de migración.** Desde que `validate-ship` comprueba que la fase actual coincida con el último movimiento registrado, una tarea cuyo `state.json` se haya editado a mano fallará con `POLICY-STATE-003` al intentar publicar. Antes de actualizar conviene revisarlo:
+>
+> ```bash
+> jq -r '"phase=\(.phase)  history[-1].to=\(.history[-1].to)"' tasks/<id>/state.json
+> ```
+>
+> Si los dos valores difieren, devuelve `phase` al que declara el historial y rehaz el movimiento con `harness-policy.py rollback`, que sí deja registro.
 
 ## Estructura de este repo
 
 ```
 .claude-plugin/    manifest del plugin + marketplace
 commands/          /harness-init · /harness-doctor · /harness-update
-skills/            harness-init/SKILL.md — el cerebro: fases, clustering, entrevista, tabla de generación
-catalog/           capabilities.yaml (el menú): 59 capacidades con detect/tier/profiles/install
+skills/            harness-init/SKILL.md: el cerebro, fases, clustering, entrevista, tabla de generación
+catalog/           capabilities.yaml (el menú): capacidades con detect/tier/profiles/install
 scripts/           discover.sh · doctor.sh (deterministas, portables macOS/Linux, bash 3.2)
-tests/             la suite (./tests/run.sh) — ver "Tests" abajo
+tests/             la suite (./tests/run.sh): ver "Tests" abajo
 templates/         todo lo que se genera:
   ├── CLAUDE.md, README, manifest, models, answers, settings, Makefile, semgrep
+  ├── policy.json.tmpl  las leyes ejecutables del flujo (fases, carriles, límites, paradas)
   ├── agents/      architect · implementer · reviewer · qa · svc-agent (abogado genérico)
   ├── commands/    auto (pipeline autónomo: ticket o prompt → prod) · feature · rfc
   │                implement · review · ship · promote · archive
   ├── docs/        constitution · spec (EARS) · pipeline · intake · testing-policy · quality · ADR · cronjobs
-  ├── scripts/     bootstrap · ship (+ --precheck) · plan-lint · worktree · repo-brief · stamp-models · secrets · with-secrets · quiet · deploy-watch · tickets
-  ├── skills/      skill-creator (guía para minar/crear skills de instancia)
-  ├── hooks/       block-direct-push · guard-canonical (fail-closed: bloquean)
-  │                track-read · ui-emit (fail-open: observan)
-  ├── ui/          server.py · pricing.json · web/ (fuente React+shadcn) · dist/ (build vendoreado)
-  └── cronjobs/    cron-runner + 13 jobs + manifiesto K8s
+  ├── scripts/     bootstrap · ship (+ --precheck) · harness-policy · verdict-scaffold · evidence
+  │                plan-lint · worktree · repo-brief · stamp-models · secrets · with-secrets
+  │                quiet · deploy-watch · tickets
+  ├── skills/      skill-creator (guía para extraer y crear skills de instancia)
+  ├── hooks/       block-direct-push · guard-canonical · guard-worktree (fail-closed: bloquean)
+  │                track-read · ui-emit · session-summary (fail-open: observan)
+  ├── ui/          server.py · pricing.json · web/ (fuente React) · dist/ (build vendorizado)
+  └── cronjobs/    cron-runner + 13 jobs + manifiesto de Kubernetes
 ```
 
 ## Tests
 
 ```
-./tests/run.sh        # todo (~40s: el lock prueba su gracia de 15s en tiempo real)
+./tests/run.sh        # todo (~40 s: el lock prueba su gracia de 15 s en tiempo real)
 ./tests/run.sh fast   # salta el test lento del lock
 ```
 
-La suite prueba **el código real de los templates** — no copias ni mocks del sistema bajo prueba — y cada test crea su workspace temporal y lo borra: nada toca tu workspace ni la red.
+La suite prueba **el código real de los templates**, no copias ni mocks del sistema bajo prueba, y cada test crea su workspace temporal y lo borra: nada toca tu workspace ni la red.
 
 | Test | Qué protege |
 |---|---|
-| `test_emit.sh` | El bus: shape del evento, `ok` booleano, **redacción de las 7 familias de secretos**, fail-open, sourceable desde sh/zsh con `set -u` |
-| `test_track_read.sh` | La evidencia: la tarea se deriva de la ruta (jamás de estado compartido), cero contaminación entre tareas, ids maliciosos no construyen rutas |
+| `test_emit.sh` | El bus: forma del evento, `ok` booleano, **redacción de las 7 familias de secretos**, fail-open, y que se pueda cargar desde `sh` o `zsh` con `set -u` |
+| `test_track_read.sh` | La evidencia: dentro de un worktree la tarea se deriva de la ruta y nunca de estado global, los archivos del workspace se atribuyen a la tarea de la sesión (con puntero por sesión, no compartido), fuera del workspace no hay evidencia, y los identificadores maliciosos no construyen rutas |
+| `test_session_summary.sh` | El resumen de fin de sesión: sale del ledger y no de la memoria del agente, **no reclama el trabajo de las otras sesiones** del workspace, sobrevive a la rotación del bus, y es fail-open ante un bus vacío, corrupto o ausente |
+| `test_guard_worktree.sh` | Un worktree, un dueño: el segundo que escribe se bloquea con el aviso de quién lo tiene, el reclamo caduca si su dueño deja de trabajar, y fuera del worktree el hook no opina |
 | `test_ship_lock.sh` | El lock de ship: las dos ventanas de muerte que costaron un lock inmortal, y que un dueño vivo jamás pierde su lock |
-| `test_ship_gates.sh` | Los añadidos de velocidad de ship.sh: `gate_lane` (un express que toca contratos/migraciones NO pasa; full no se ve afectado) y los gates paralelos (un rojo no esconde a los demás; verde agregado exige todos verdes) — extraídos del template real, como el lock |
-| `test_policy.py` (carriles) | La máquina de estados por carril: express salta rfc, el default no; carril desconocido rechazado; `escalate` solo sube, recupera la fase rfc y conserva el resto del estado |
-| `test_stamp_models.sh` | La perilla de modelos: rol→alias→ID, overrides por agente, cambio de proveedor en una línea, `resolve`, `check` detecta drift con remediación, alias inexistente falla en vez de estampar basura |
-| `test_graph_refresh.sh` | El ciclo de vida del grafo de graphify: fail-open sin binario, build inicial sin `--update`, refresh incremental con `--update`, y cero llamadas cuando ningún HEAD cambió (stamp) |
-| `test_discover.sh` | La Fase 1 contra fixtures reales: cada familia de rol (contracts/service/library/frontend/infra-module/docs) se infiere bien — es la ENTRADA del clustering; y el caso vacío falla con remediación en vez de inventariar mentiras |
-| `test_doctor.sh` | El doctor no miente en ninguna dirección: workspace roto = exit no-cero con remediación por fallo; drift de modelos detectado y su verde tras `make models`; y los checks de cadena-completa (graphify, beads, AGENTS.md) existen |
-| `test_plan_lint.sh` | El plan es ejecutable o no es plan: tarea sin `archivos` o con `complexity` inventada es roja, `req` que el delta-spec no define es rojo, y prosa legítima en español ("todo el diff") NO se confunde con un TODO de código |
-| `test_precheck.sh` | `ship.sh --precheck`: corre los gates mecánicos SIN exigir veredicto (si lo exigiera no podría correr antes del review), deja sello atado al HEAD revisado, y no toca `origin/main` ni el lock de ship |
-| `test_server.py` | El panel: ADR-0004 (modelo sin precio = None, jamás tarifa de Opus), normalización del bus, y todo el plano de operar sin red (validación, frontmatter, dedupe de ids, tokens 0600) |
-| `test_op_http.py` | El plano de operar por HTTP contra el server real: 403 sin token / token malo / Host raro, crear tarea lanza un `claude` de verdad (stub que graba sus args), responder reanuda LA sesión pedida |
+| `test_ship_gates.sh` | Los gates de `ship.sh` extraídos del template real: `gate_lane` (un express que toca contratos o migraciones no pasa), los gates paralelos (un rojo no esconde a los demás), el gate de tipos (se prepara la toolchain solo, pero se detiene si preparar tocó un archivo versionado; y se niega si no encuentra qué verificar) y `check_verdict` (cada rechazo nombra su causa) |
+| `test_verdict_scaffold.sh` | El esqueleto del veredicto: el reviewer solo pone juicio, los campos mecánicos salen de fuentes verificables, y **`--rebase` conserva el juicio ajeno al delta** y re-juzga solo lo que el cambio tocó |
+| `test_policy.py` | El motor de fases: carriles y transiciones, presupuesto de review derivado de `loop_budget`, `rollback` solo hacia atrás y con motivo, `POLICY-SHIP-004` (no avanzar con repos sin publicar), `POLICY-STATE-003` (una fase que nadie declaró no publica) y exclusión mutua entre sesiones |
+| `test_deploy_watch.sh` | El tramo de Kargo: cuando no se puede verificar, se declara como supuesto en el ledger en vez de enterrarse en un log |
+| `test_stamp_models.sh` | La perilla de modelos: rol a alias a identificador, overrides por agente, cambio de proveedor en una línea, `resolve`, `check` detecta drift con remediación, y un alias inexistente falla en vez de estampar basura |
+| `test_graph_refresh.sh` | El ciclo de vida del grafo: fail-open sin binario, build inicial, refresco incremental, y cero llamadas cuando ningún HEAD cambió |
+| `test_discover.sh` | La fase 1 contra fixtures reales: cada familia de rol se infiere bien (es la entrada del clustering) y el caso vacío falla con remediación en vez de inventariar mentiras |
+| `test_doctor.sh` | El doctor no miente en ninguna dirección: workspace roto es salida distinta de cero con remediación por fallo, drift de modelos detectado, y existen los checks de cadena completa |
+| `test_plan_lint.sh` | El plan es ejecutable o no es plan: una tarea sin archivos o con complejidad inventada es roja, un requisito que el delta-spec no define es rojo, y la prosa legítima en español no se confunde con un TODO de código |
+| `test_precheck.sh` | `ship.sh --precheck`: corre los gates mecánicos sin exigir veredicto, deja sello atado al HEAD revisado, y no toca `origin/main` ni el lock de ship |
+| `test_docs.sh` | Que las leyes existan y no se caigan en una reescritura: la ley 13, la fase de enrichment con su barra de calidad, el `.gitignore` de la instancia como template verificable, y el ratchet de guion largo |
+| `test_server.py` y `test_op_http.py` | El panel: modelo sin precio nunca hereda tarifa ajena, normalización del bus, y todo el plano de operar (validación, dedupe, tokens con permisos 600, rechazo por token, Host y CSRF) |
 
-La suite ya se pagó el primer día: cachó que el `\b` de sed no existe en macOS (cuatro familias de secretos viajaban sin redactar), seis templates sin bit de ejecución, y un `_record_run` que dependía en silencio del orden de llamadas.
+La suite ya se pagó el primer día: cazó que el `\b` de `sed` no existe en macOS (cuatro familias de secretos viajaban sin redactar), seis templates sin bit de ejecución, y un `_record_run` que dependía en silencio del orden de llamadas.
 
 ## Canon de referencia
 

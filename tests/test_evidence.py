@@ -83,5 +83,53 @@ class EvidenceTest(unittest.TestCase):
         self.assertIn("otro commit", result.stderr)
 
 
+
+    def test_refuses_to_seal_a_dirty_tree(self):
+        """El contrato de la evidencia es "este resultado pertenece a ESTE
+        commit". before == after solo prueba que HEAD no se movió mientras
+        corría; con cambios sin commitear, lo que se ejecuta es el commit MÁS
+        el working tree, y el sello diría solo el commit.
+
+        Caso de campo, tres rondas perdidas: el implementer corrió evidence.py
+        antes de commitear, selló contra el padre, y al commitear la evidencia
+        quedó stale. La variante cara es la otra: si nadie commitea después, el
+        scaffold la acepta y queda certificando código que no corrió."""
+        repo = Path(self.tmp.name) / "wt"
+        repo.mkdir()
+        run = lambda *a: subprocess.run(["git", "-C", str(repo), *a],
+                                        capture_output=True, text=True)
+        run("init", "-q", "."); run("config", "user.email", "t@t"); run("config", "user.name", "t")
+        (repo / "app.txt").write_text("v1")
+        run("add", "-A"); run("commit", "-qm", "init")
+
+        # árbol limpio: sella
+        ok = self.run_ev_in(repo)
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertIn("EVIDENCE_ID=", ok.stdout)
+
+        # cambios sin commitear: se niega, y explica por qué
+        (repo / "app.txt").write_text("v2")
+        dirty = self.run_ev_in(repo)
+        self.assertEqual(dirty.returncode, 3)
+        self.assertIn("SIN COMMITEAR", dirty.stderr)
+        self.assertIn("app.txt", dirty.stderr)
+        self.assertIn("commitea primero", dirty.stderr)
+
+        # tras commitear vuelve a andar, y el manifiesto anota el estado
+        run("add", "-A"); run("commit", "-qm", "fix")
+        after = self.run_ev_in(repo)
+        self.assertEqual(after.returncode, 0, after.stderr)
+        manifests = sorted((Path(self.tmp.name) / "T1" / "evidence").glob("EV-*.json"))
+        data = json.loads(manifests[-1].read_text())
+        self.assertTrue(data["tree_clean"])
+
+    def run_ev_in(self, repo):
+        return subprocess.run(
+            ["python3", str(SCRIPT), "run", "--task-dir", str(Path(self.tmp.name) / "T1"),
+             "--repo", "r", "--runner", "implementer", "--kind", "test",
+             "--cwd", str(repo), "--", "true"],
+            capture_output=True, text=True)
+
+
 if __name__ == "__main__":
     unittest.main()

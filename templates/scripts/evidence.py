@@ -81,6 +81,45 @@ def command_run(args: argparse.Namespace) -> int:
         die(f"cwd inexistente: {cwd}")
     task_dir.mkdir(parents=True, exist_ok=True)
     before = git(cwd, "rev-parse", "HEAD")
+
+    # EL ÁRBOL TIENE QUE ESTAR LIMPIO, Y ESTO NO ES CEREMONIA.
+    #
+    # Todo el contrato de la evidencia es "este resultado pertenece a ESTE
+    # commit". `before == after` solo prueba que HEAD no se movió mientras
+    # corría; NO prueba que lo que corrió sea lo que está commiteado. Con
+    # cambios sin commitear, el sello dice "commit P" y lo que se probó fue
+    # P más el working tree, que es otra cosa.
+    #
+    # Caso de campo, tres rondas perdidas por la misma causa: el implementer
+    # corrió evidence.py ANTES de commitear, así que selló contra el commit
+    # padre; al commitear, HEAD se movió y la evidencia quedó stale. Esa es la
+    # variante barata. La cara es la otra: si NADIE commitea después, el
+    # scaffold acepta esa evidencia como válida y queda certificando un commit
+    # cuyo código no es el que se ejecutó. Un sello que miente sobre qué probó
+    # es peor que no tener sello.
+    #
+    # Se miran los archivos VERSIONADOS (-uno): los sin trackear no cambian lo
+    # que el commit contiene, y refusar por un artefacto de build sería
+    # inservible. Si los hay, se avisan y quedan anotados en el manifiesto.
+    tracked_dirty = git(cwd, "status", "--porcelain", "-uno")
+    if tracked_dirty:
+        print("EVIDENCE: el árbol tiene cambios SIN COMMITEAR:", file=sys.stderr)
+        for line in tracked_dirty.splitlines()[:10]:
+            print(f"  {line}", file=sys.stderr)
+        print(
+            "\nNo puedo sellar esto contra un commit: lo que se ejecutaría es el\n"
+            "commit MÁS estos cambios, y el sello diría solo el commit. La\n"
+            "evidencia quedaría certificando código que no es el que corrió.\n"
+            "  ↳ remediación: commitea primero (con el trailer Task: <id>) y\n"
+            "    corre esto DESPUÉS, sobre el árbol limpio.",
+            file=sys.stderr)
+        return 3
+    untracked = git(cwd, "status", "--porcelain", "--untracked-files=normal")
+    untracked_n = len([x for x in untracked.splitlines() if x.startswith("??")])
+    if untracked_n:
+        print(f"EVIDENCE: {untracked_n} archivo(s) sin trackear en el árbol; "
+              "no bloquean, pero quedan anotados en el manifiesto.", file=sys.stderr)
+
     evidence_id = f"EV-{args.kind.upper()}-{uuid.uuid4().hex[:12]}"
     evidence_dir = task_dir / "evidence"
     evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -120,6 +159,11 @@ def command_run(args: argparse.Namespace) -> int:
         "started_at": started,
         "finished_at": utc_now(),
         "exit_code": return_code,
+        # Informativo, NO parte de lo que verify exige: sumarlo al contrato
+        # invalidaría de golpe toda la evidencia ya emitida. Sirve para que un
+        # humano o un reviewer vean en qué condiciones se selló.
+        "tree_clean": True,
+        "untracked_files": untracked_n,
         "output": f"evidence/{evidence_id}.log",
         "output_sha256": sha256(log_path),
     }

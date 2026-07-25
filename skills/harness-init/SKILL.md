@@ -94,8 +94,11 @@ harness; cada agente es contexto y mantenimiento.
 ### 2b. Resto de preguntas obligatorias
 
 1. **Nombre del proyecto** y prefijo de tickets.
-2. **Flujo a main**: trunk direct-to-prod | trunk+staging | PRs
-   (direct-to-prod → gates estrictos + gitleaks obligatorio).
+2. **Flujo a main**: `trunk-direct-to-prod` | `trunk-staging` | `prs`.
+   Usa EXACTAMENTE esas tres cadenas en el answers: `ship.sh` las lee y solo
+   implementa la primera; con las otras dos se niega a pushear en vez de
+   contradecir la política elegida (antes las registraba y pusheaba a main
+   igual). Direct-to-prod → gates estrictos + gitleaks obligatorio.
 3. **DAG**: propón el orden inferido (contracts → shared → services →
    frontends) y pide corrección.
 4. **Ownership por abogado**: qué posee / no posee / invariantes.
@@ -103,8 +106,16 @@ harness; cada agente es contexto y mantenimiento.
 5. **Capacidades**: presenta el catálogo
    (`${CLAUDE_PLUGIN_ROOT}/catalog/capabilities.yaml`) FILTRADO por
    detect, agrupado por categoría, con tu recomendación marcada. Por
-   cada una el humano puede DEGRADAR el tier (ej. github-mcp a
-   read-only). Registra nombre + bin/mcp + tier + `scope:` (core |
+   cada una el humano puede DEGRADAR el tier, PERO solo es real si la
+   capacidad declara `config_read_only:` en el catálogo. Degradar el tier
+   NO cambia por sí solo lo que el servidor puede hacer: el `.mcp.json` se
+   genera del campo `config`, y nadie lee `tier:`. Si la capacidad no
+   declara `config_read_only`, dilo en la entrevista con estas palabras:
+   *"puedo registrar la preferencia, pero la restricción real la da el
+   alcance del TOKEN que le pases, no esta configuración"*, y ofrécele
+   emitir un token de menos permisos o no instalarla. Prometer un
+   read-only que no se aplica es peor que no ofrecerlo: el humano cree
+   que revocó escritura. Registra nombre + bin/mcp + tier + `scope:` (core |
    cronjob, según el campo `cronjob:` del catálogo). REGLA: si los
    cronjobs quedaron deshabilitados (#12), NO palomees capacidades
    cuyo ÚNICO consumidor es un cronjob — regístralas comentadas como
@@ -138,6 +149,12 @@ harness; cada agente es contexto y mantenimiento.
     esfuerzo de razonamiento, no el ID. Las respuestas se estampan como
     ALIASES en `models.yaml`; los IDs reales los materializa
     `scripts/stamp-models.sh` en el frontmatter de los agentes.
+    **Pregunta también el alias de ESCALACIÓN** (default: deep): es el que
+    usa /auto al relanzar un agente atascado y el tier `expensive` de los
+    cronjobs. `models.yaml` lo referencia en dos lugares, así que sin
+    respuesta el placeholder `{{MODEL_ESCALATION}}` queda literal,
+    `stamp-models.sh resolve escalation` falla y cron-runner le pasa la
+    cadena cruda a claude. Va a `models.escalation` del answers.
     `loop_budget` default 3. Si el humano quiere deep en TODO,
     advierte la latencia comprada donde no hay decisión (las reglas del
     tier deep de models.yaml) y registra la decisión.

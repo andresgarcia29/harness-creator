@@ -4,20 +4,48 @@ JOB_NAME=ci-doctor
 JOB_TIER=medium
 JOB_TOOLS="Read,Grep,Glob,Bash(gh *),Bash(git *),Edit,Write"
 
+# "NO PUDE CONSULTAR" NO ES "CI LIMPIO". Este job solo sabe leer GitHub
+# Actions, y el 2>/dev/null se tragaba todo: con un remote de GitLab,
+# Bitbucket o Gitea (o con gh sin auth), el comando fallaba, la salida
+# quedaba vacía, found seguía en 0 y el detector devolvía 0 = limpio.
+# Resultado: CI rojo invisible, todas las noches, sin una sola pista.
+#
+# El soporte real de otros forges es otra cosa y está pendiente (regla 8 de
+# CONTRIBUTING: un eje que varía se detecta y se despacha). Lo que se
+# arregla acá es la mentira: lo que no se pudo mirar se dice.
 detect() {
   command -v gh >/dev/null || return 3
   command -v jq >/dev/null || return 3
-  local found=0
+  local found=0 queried=0 blind=""
   while read -r repo; do
     [ -d "repos/$repo/.git" ] || continue
-    local slug; slug="$(git -C "repos/$repo" remote get-url origin 2>/dev/null | sed -E 's#.*[:/]([^/]+/[^/.]+)(\.git)?$#\1#')"
-    [ -n "$slug" ] || continue
-    gh run list --repo "$slug" --branch main --status failure \
+    local url; url="$(git -C "repos/$repo" remote get-url origin 2>/dev/null)"
+    [ -n "$url" ] || { blind="$blind $repo(sin-remote)"; continue; }
+    case "$url" in
+      *github.com*) : ;;
+      *) blind="$blind $repo(forge-no-github)"; continue ;;
+    esac
+    local slug; slug="$(printf '%s' "$url" | sed -E 's#.*[:/]([^/]+/[^/.]+)(\.git)?$#\1#')"
+    [ -n "$slug" ] || { blind="$blind $repo(slug-ilegible)"; continue; }
+    local out
+    if ! out="$(gh run list --repo "$slug" --branch main --status failure \
       --created "$(date -u -v-2H +%Y-%m-%dT%H:%M 2>/dev/null || date -u -d '2 hours ago' +%Y-%m-%dT%H:%M)" \
       --json databaseId,displayTitle,workflowName --jq \
-      '.[] | "'"$repo"' run=\(.databaseId) [\(.workflowName)] \(.displayTitle)"' 2>/dev/null \
-      | tee -a "$FINDINGS" | grep -q . && found=1
+      '.[] | "'"$repo"' run=\(.databaseId) [\(.workflowName)] \(.displayTitle)"' 2>&1)"; then
+      blind="$blind $repo(gh:$(printf '%s' "$out" | head -1 | cut -c1-30))"
+      continue
+    fi
+    queried=$((queried+1))
+    if [ -n "$out" ]; then printf '%s\n' "$out" >> "$FINDINGS"; found=1; fi
   done < <(ls repos/ 2>/dev/null)
+
+  # Los ciegos se nombran SIEMPRE: así un "limpio" nunca se lee como "todo
+  # limpio" cuando en realidad cubría solo una parte del workspace.
+  [ -n "$blind" ] && log "⚠️ CI NO consultado en:$blind (este job solo lee GitHub Actions)"
+  if [ "$queried" -eq 0 ]; then
+    log "   no pude consultar el CI de NINGÚN repo: esto no es un verde"
+    return 3
+  fi
   [ "$found" -eq 1 ] && return 10 || return 0
 }
 

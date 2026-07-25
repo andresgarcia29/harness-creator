@@ -30,7 +30,7 @@ Si nunca trabajaste con agentes de código, esta sección te ahorra el resto del
 | **Fail-open / fail-closed** | Qué hace un componente cuando **él mismo** falla. *Fail-closed* bloquea por precaución. *Fail-open* deja pasar. | No es un detalle: es una decisión de diseño por componente. Un hook de seguridad roto debe bloquear. Un hook de telemetría roto debe dejar pasar, porque tumbar un despliegue por un problema de estadísticas sería absurdo. |
 
 <details>
-<summary><b>Diez términos más, para cuando llegues a las secciones técnicas</b> (click para abrir)</summary>
+<summary><b>Once términos más, para cuando llegues a las secciones técnicas</b> (click para abrir)</summary>
 
 | Palabra | Qué significa | Por qué importa |
 |---|---|---|
@@ -43,6 +43,7 @@ Si nunca trabajaste con agentes de código, esta sección te ahorra el resto del
 | **Spec-rot** | La podredumbre de la especificación: el documento dice una cosa y el código hace otra, porque nadie actualizó el documento. | Es el fracaso clásico de este enfoque. Aquí la fusión de la spec es automática al final de cada tarea, justamente para que no dependa de la disciplina de nadie. |
 | **ADR** | *Architecture Decision Record*: un documento corto que registra una decisión importante, su contexto y sus alternativas. | Es donde vive la ley. Una decisión que no está en un ADR no existe, aunque se haya hablado en un chat. |
 | **Rollback** | Volver a la versión anterior que funcionaba. | Ante un despliegue roto el orden no se negocia: primero se vuelve atrás, después se investiga. Diagnosticar con el incendio encendido es el peor uso posible de 20 minutos. |
+| **Forge** | Dónde viven tus repositorios y su CI: GitHub, GitLab, Bitbucket. No es lo mismo que git, que es la herramienta. | El harness entrega su trabajo ahí (PRs, issues) y le pregunta por el estado del CI, así que tiene que saber con cuál habla. Se detecta del remote. |
 | **Prefetch** | Preparar por adelantado, en segundo plano, lo que hará falta después. | Mientras el arquitecto piensa, los scripts ya clonan, instalan dependencias y arman resúmenes. Cuando arranca quien implementa, la mesa ya está puesta. |
 
 </details>
@@ -185,6 +186,7 @@ mi-workspace/
 │   ├── harness-policy.py     ← el motor de fases: transition, rollback, pause, validate-ship
 │   ├── verdict-scaffold.sh   ← esqueleto determinista del veredicto (+ --rebase)
 │   ├── evidence.py           ← corre y sella evidencia atada a un commit exacto
+│   ├── forge.sh              ← capa de forge: CI, issues y PRs (github · gitlab)
 │   ├── worktree-task.sh      ← una tarea = un worktree por repo
 │   ├── secrets.sh            ← materializa secretos desde tu fuente
 │   ├── with-secrets.sh       ← único punto de inyección de secretos
@@ -395,9 +397,13 @@ Un implementer es una tarea, en un worktree, de un repo. Sesiones cortas y desec
 
 El arranque es **en caliente**: el prefetch ya dejó el worktree, las dependencias instaladas y el resumen (`repo-brief.sh` destila estructura, comandos de test y convenciones a `.cache/briefs/<repo>.md`, cacheado por HEAD, $0 tokens). El implementer recibe su entrada del plan, sus criterios y el resumen, y **no explora el repo desde cero**: sus primeros minutos son de edición, no de arqueología. Serena cubre el nivel de símbolo.
 
+Antes de entregar, el implementer **registra su propia evidencia** con `evidence.py --runner implementer` sobre el commit final. No es burocracia y no lo puede hacer otro por él: `ship.sh` exige que al menos un runner de implementación aparezca en el veredicto, porque quien revisa no puede ser también quien demuestra. La evidencia queda atada al commit exacto, así que va después del último commit o caduca.
+
 Como en el mismo workspace suelen correr varias sesiones a la vez, **`guard-worktree` reclama el worktree para quien escribe primero**. Otra sesión que intente escribir en el mismo árbol se bloquea con el aviso de quién lo tiene. Sin esa guarda, dos implementers en la misma carpeta se pisan archivos e índice de git, y el síntoma que ves después son "cambios que se deshacen solos", cuando ya es imposible saber cuál de las dos sesiones los perdió.
 
-El **watchdog** es la lección de una crisis real, ahora por **heartbeat**: un agente sano llama herramientas constantemente, así que unos tres minutos sin una sola llamada significan atasco. Se interrumpe y se relanza **ya con el modelo de escalación**, porque repetir el mismo experimento con el mismo modelo es repetir el mismo atasco. Hay un límite duro de 10 minutos como respaldo. Es seguro *precisamente* porque su conversación no era el estado: el estado son los commits. Dos muertes del mismo rol en la misma tarea sí escalan a un humano.
+El **watchdog** es la lección de una crisis real, ahora por **heartbeat**: un agente sano llama herramientas constantemente, así que unos tres minutos sin una sola llamada significan atasco. Se interrumpe y se relanza **ya con el modelo de escalación**, porque repetir el mismo experimento con el mismo modelo es repetir el mismo atasco. Hay un límite duro de 10 minutos como respaldo.
+
+**Antes de matar, comprueba si hay una llamada en vuelo.** "Sin tool calls nuevas" y "sin trabajar" no son lo mismo: un gate de navegador es UNA llamada bloqueante de nueve o diez minutos que, por definición, no produce eventos mientras corre. El bus emite el arranque de cada Bash, así que la comprobación es determinista, y el reloj se cuenta desde ahí. Matar a un agente sano cuesta doble: se pierde su trabajo en vuelo y se relanza con el modelo caro. Es seguro *precisamente* porque su conversación no era el estado: el estado son los commits. Dos muertes del mismo rol en la misma tarea sí escalan a un humano.
 
 **Zoom: el fan-out real, y por qué el review no espera.**
 
@@ -457,7 +463,7 @@ flowchart TD
   H3 --> X
   H4 --> X
 
-  SH(["<b>ship.sh</b>"]):::script --> G1[["1 · rebase sobre origin/main"]]:::gate
+  SH(["<b>ship.sh</b>"]):::script --> G1[["1 · rebase sobre la rama trunk<br/>(origin/HEAD, no siempre main)"]]:::gate
   G1 --> G2[["2 · trailer Task: &lt;id&gt; en TODO commit"]]:::gate
   G2 --> GL[["3 · carril · gate_lane verifica que el diff<br/>respete lo que el intake declaró"]]:::gate
   GL --> G3[["build + test + buf breaking<br/>autodetectado por lenguaje"]]:::gate
@@ -493,9 +499,11 @@ En tareas de varios repositorios hay una trampa que el harness ahora cierra: `sh
 
 ### ⑦ Deploy: rollback primero, diagnóstico después
 
-`deploy-watch.sh` sigue la cadena Actions, Kargo, salud de ArgoCD y smoke del canary, y es un script: **el camino verde no gasta un solo token**. En rojo, el orden no se negocia: **rollback primero** (Argo Rollouts abort-to-stable o revert en git, nunca `argocd app rollback`, que es un cañón) y el diagnóstico después, con producción ya sana. Un agente diagnosticando con el incendio encendido es el peor lugar posible para gastar 20 minutos.
+`deploy-watch.sh` es un script, así que **el camino verde no gasta un solo token**. Y no asume una sola forma de desplegar: **despacha por driver**. `gitops` sigue la cadena Actions, Kargo, salud de ArgoCD y smoke del canary; `actions` se queda en la conclusión del workflow, que es lo más universal y sirve sin Kubernetes de por medio; y `none` declara que este repo no se verifica por aquí. El driver sale de lo que declaraste en `harness-answers.yaml`, y si no, del `kind` del repo en el manifest. Un repo de terraform ya no recibe un modelo de Kubernetes: antes se le esperaba una app de ArgoCD que nunca iba a existir, y de ahí salía una propuesta de revertir commits correctos. En rojo, el orden no se negocia: **rollback primero** (Argo Rollouts abort-to-stable o revert en git, nunca `argocd app rollback`, que es un cañón) y el diagnóstico después, con producción ya sana. Un agente diagnosticando con el incendio encendido es el peor lugar posible para gastar 20 minutos.
 
-Y cuando un tramo **no se puede verificar**, el watcher lo dice en vez de callarse. Si Kargo no responde (por ejemplo, por un token vencido), el despliegue sigue apoyado en la salud de ArgoCD, pero se emite un **supuesto** al ledger: *la promoción no se verificó*. Aparece arriba del resumen de sesión, bajo "audita esto primero". El silencio de un verificador ciego se lee igual que un verde, y esa confusión es cara.
+**Y "no pude mirar" no es "está roto".** El tramo de ArgoCD distingue tres casos que antes daban el mismo rojo: no hay credenciales (ceguera), la app no existe (ceguera, probablemente el prefijo mal configurado), o la app existe y no llega a Healthy. Solo el tercero justifica proponer un rollback. Los dos primeros se declaran como supuesto y el watcher no propone nada destructivo, porque una acción irreversible colgada de un diagnóstico que el sistema no pudo hacer es el error más caro que puede cometer.
+
+Cuando un tramo **no se puede verificar**, el watcher lo dice en vez de callarse. Si Kargo no responde (por ejemplo, por un token vencido), el despliegue sigue apoyado en la salud de ArgoCD, pero se emite un **supuesto** al ledger: *la promoción no se verificó*. Aparece arriba del resumen de sesión, bajo "audita esto primero". El silencio de un verificador ciego se lee igual que un verde, y esa confusión es cara.
 
 ### ⑧ Archive: la pieza que evita el spec-rot
 
@@ -644,14 +652,14 @@ El ritual **`/promote`** (semanal) cierra el loop: *la memoria propone, git disp
 
 ### Gates y hooks (las leyes con dientes)
 
-- **`ship.sh`**: la única puerta a main. En serie lo que tiene orden real: rebase, trailer `Task:`, **carril** (`gate_lane`, el diff respeta lo que el intake declaró). Después, **en paralelo**: build y test por lenguaje más `buf breaking`, `gitleaks` y `semgrep`, **tests no debilitados**, y veredicto con compliance, **evidencia** y policy. Al final: lock por repo y push. Los rojos se reportan juntos y **el error de cada gate es un prompt**: incluye su remediación, para que el agente corrija todo en una iteración (máximo 2 rondas de autofix).
+- **`ship.sh`**: la única puerta a main. En serie lo que tiene orden real: rebase, trailer `Task:`, **carril** (`gate_lane`, el diff respeta lo que el intake declaró). Después, **en paralelo**: build y test por lenguaje más `buf breaking`, `gitleaks` y `semgrep`, **tests no debilitados**, y veredicto con compliance, **evidencia** y policy. Los gates de lenguaje cubren Go, Node/TS, Python, Dart, Rust, Java, Ruby, PHP, .NET y Elixir, y si no reconocen el stack **lo dicen**: un gate que no compiló ni testeó nada no puede salir en verde callado. Al final: lock por repo y push. Los rojos se reportan juntos y **el error de cada gate es un prompt**: incluye su remediación, para que el agente corrija todo en una iteración (máximo 2 rondas de autofix).
 - **Gates activados por config**: la configuración del repo es el opt-in; con ella presente son gates duros, sin ella hay silencio. Son `import-linter` (fronteras de capas en Python, `.importlinter`), `go-arch-lint` (grafo de dependencias en Go, `.go-arch-lint.yml`) y `squawk` (lint de migraciones SQL nuevas del diff; las viejas no se re-litigan). Config presente sin herramienta instalada es un aviso honesto, jamás un gate fingido.
 
   Los dos gates de integridad existen porque nos hicieron una pregunta incómoda: *nuestros gates confían en cosas que el agente puede editar.*
 
   - **`gate_tests_untouched`**: el gate de test confía en la suite de tests, y la suite es un archivo. La forma más barata de pasar a verde no es arreglar el código: es borrar la aserción. Está medido en la literatura (en [SWE-Bench+](https://arxiv.org/abs/2410.06992), cerca del 31% de los parches "exitosos" pasaban gracias a tests débiles) y los harnesses que solo escriben *"no borres tests"* en prosa lo escriben porque no tienen gate. Este bloquea aserciones eliminadas, `skip`s añadidos y tests borrados, **salvo** que el delta-spec declare el cambio como `MODIFIED` o `REMOVED`, porque entonces no es trampa: es cumplir la spec. Los tests son el contrato; cambiar uno es un RFC.
   - **`gate_evidence`**: la compliance matrix la escribe un agente. Nada comprobaba que hubiera *abierto* el test que cita. O sea: **el verificador estaba proponiendo**, justo lo que la filosofía prohíbe. El hook `track-read.sh` registra qué artefactos se leyeron de verdad y el gate intersecta lo citado con lo leído: si un requisito dice `covered: true` citando un archivo que nadie abrió (o que no existe), no pasa. Cero LLM, cero opinión, es una intersección de conjuntos. Ese registro cubre tanto los archivos del worktree como los del workspace, para que un script o un ADR también puedan sustentar un requisito.
-- **Hooks, en dos familias con leyes opuestas.** Los que **bloquean** son *fail-closed*: `block-direct-push` (ningún `git push` a main sobrevive) y `guard-canonical` (el clon base es intocable, **y también `ship.sh`, los hooks y `settings.json`**, porque un agente atascado en un gate que "arregla" `ship.sh` no está pasando el gate: lo está borrando, y con él todos los demás para siempre). Sin `jq`, bloquean por precaución. Un tercero, `guard-worktree`, bloquea a una segunda sesión que intente escribir en un worktree ya reclamado, pero es *fail-open* ante sus propios problemas: coordina en vez de prohibir, y una colisión se recupera con git, así que frenar todas las escrituras por falta de `jq` sería peor que el problema. Los que **observan** son *fail-open* y asíncronos: `track-read.sh` (el libro de a bordo de la evidencia), `ui-emit.sh` (el bus del panel) y `session-summary.sh` (el resumen al cerrar). Salen 0 siempre: un hook de telemetría que puede tumbar el pipeline es un bug, no una feature.
+- **Hooks, en dos familias con leyes opuestas.** Los que **bloquean** son *fail-closed*: `block-direct-push` (ningún `git push` a la rama trunk sobrevive, y la rama trunk se resuelve de `origin/HEAD`: en un repo con `master` la ley aplica igual, cosa que antes no pasaba) y `guard-canonical` (el clon base es intocable, **y también `ship.sh`, los hooks y `settings.json`**, porque un agente atascado en un gate que "arregla" `ship.sh` no está pasando el gate: lo está borrando, y con él todos los demás para siempre). Sin `jq`, bloquean por precaución. Un tercero, `guard-worktree`, bloquea a una segunda sesión que intente escribir en un worktree ya reclamado, pero es *fail-open* ante sus propios problemas: coordina en vez de prohibir, y una colisión se recupera con git, así que frenar todas las escrituras por falta de `jq` sería peor que el problema. Los que **observan** son *fail-open* y asíncronos: `track-read.sh` (el libro de a bordo de la evidencia), `ui-emit.sh` (el bus del panel) y `session-summary.sh` (el resumen al cerrar). Salen 0 siempre: un hook de telemetría que puede tumbar el pipeline es un bug, no una feature.
 - **Denials**: `kubectl apply`, `terraform apply`, `argocd app rollback`, `git push --force` y la regeneración ciega de snapshots están denegados a los agentes en `settings.json`. Escrituras de infraestructura, solo por GitOps.
 - **semgrep/rules.yaml**: sensores propios donde **cada regla incluye su remediación en el mensaje**. Crece solo: el cronjob `rule-miner` extrae reglas nuevas de los bugs de cada mes.
 
@@ -692,10 +700,10 @@ flowchart LR
 
 | Job | Detecta | El agente |
 |---|---|---|
-| **ci-doctor** | runs rojos en main | arreglo quirúrgico o PR de revert |
+| **ci-doctor** | runs rojos en la rama trunk, vía la capa de forge (GitHub y GitLab). Los repos que no puede consultar los NOMBRA: un CI invisible no se reporta como limpio | arreglo quirúrgico o PR de revert |
 | **dep-shepherd** | PRs de Renovate sin automerge | matriz de riesgo, búsqueda de imports reales, merge o arreglo |
-| **vuln-watch** | vulnerabilidades nuevas (osv-scanner y trivy) | PR de actualización con tests |
-| **flake-warden** | tests que pasan **y** fallan en el mismo commit | cuarentena inmediata y análisis de causa raíz |
+| **vuln-watch** | vulnerabilidades nuevas (osv-scanner y trivy). Un scan que no pudo correr es un error, no un "limpio": la baseline no se toca, porque pisarla con un scan vacío haría que al día siguiente todo lo viejo reapareciera como nuevo | PR de actualización con tests |
+| **flake-warden** | tests que pasan **y** fallan en el mismo commit, leyendo el JUnit XML con un parser (no con `grep`, que atribuía el fallo al test vecino y ponía en cuarentena a uno sano) | cuarentena inmediata y análisis de causa raíz |
 | **daily-digest** | (siempre) | changelog del día y gasto de la noche a Slack |
 | **dead-code-reaper** | código muerto (knip, vulture, deadcode) | borra en lotes con tests; falsos positivos a whitelist |
 | **ratchet-keeper** | métricas que solo pueden mejorar | sube el piso o abre issue de regresión |
@@ -735,8 +743,10 @@ El flujo es fijo (discovery, entrevista, generación, verificación); **todo lo 
 | Quieres | Tocas |
 |---|---|
 | Soportar una herramienta nueva (CLI o MCP) | agrega una entrada a `catalog/capabilities.yaml` (provider, bin/mcp, tier, profiles, detect, install); la entrevista la ofrecerá cuando su señal aparezca |
-| Otro lenguaje o stack | agrega la detección de rol en `discover.sh` y el gate de lenguaje en `ship.sh.tmpl` |
-| Otro gestor de tickets | los contratos de `ticket-pull` y `ticket-close` están especificados; se adaptan a `gh issue` o a cualquier API |
+| Otro lenguaje o stack | el gate cubre Go, Node/TS, Python, Dart, Rust, Java (Maven y Gradle), Ruby, PHP, .NET y Elixir. Uno nuevo es una rama más en `run_lang_gates` (`ship.sh.tmpl`) y su marcador en `discover.sh` |
+| Otro gestor de tickets | ya está: `linear` y `github` vienen implementados en `ticket-pull` y `ticket-close`, y se eligen en la entrevista. Agregar Jira o GitLab es una función más en esos dos scripts, con el mismo contrato de exits |
+| Otro forge (GitLab, Bitbucket) | `scripts/forge.sh` despacha por forge: `github` (gh) y `gitlab` (glab) vienen implementados, y el forge se detecta del remote. Los 13 cronjobs entregan por esa capa |
+| Que la rama trunk no se llame `main` | nada: se resuelve de `origin/HEAD` en cada repo. `HARNESS_BASE_BRANCH` fuerza otro nombre si tu remote no lo declara |
 | Otra fuente de secretos | `secrets.sh` ya trae 7; una nueva es una función `pull_*` más |
 | Cambiar el modelo de un rol, un agente o todo | una línea en `models.yaml` (roles u overrides, en aliases) más `make models` |
 | Cambiar de proveedor | la línea `provider:` de `models.yaml` más `make models`; roles y comandos no se tocan |
@@ -787,6 +797,7 @@ templates/         todo lo que se genera:
   │                implement · review · ship · promote · archive
   ├── docs/        constitution · spec (EARS) · pipeline · intake · testing-policy · quality · ADR · cronjobs
   ├── scripts/     bootstrap · ship (+ --precheck) · harness-policy · verdict-scaffold · evidence
+  │                forge (github|gitlab) · tickets (linear|github)
   │                plan-lint · worktree · repo-brief · stamp-models · secrets · with-secrets
   │                quiet · deploy-watch · tickets
   ├── skills/      skill-creator (guía para extraer y crear skills de instancia)
@@ -805,10 +816,12 @@ templates/         todo lo que se genera:
 
 La suite prueba **el código real de los templates**, no copias ni mocks del sistema bajo prueba, y cada test crea su workspace temporal y lo borra: nada toca tu workspace ni la red.
 
+La tabla de abajo no los lista todos (son 37 archivos): están los que explican mejor qué se protege y por qué.
+
 | Test | Qué protege |
 |---|---|
 | `test_emit.sh` | El bus: forma del evento, `ok` booleano, **redacción de las 7 familias de secretos**, fail-open, y que se pueda cargar desde `sh` o `zsh` con `set -u` |
-| `test_track_read.sh` | La evidencia: dentro de un worktree la tarea se deriva de la ruta y nunca de estado global, los archivos del workspace se atribuyen a la tarea de la sesión (con puntero por sesión, no compartido), fuera del workspace no hay evidencia, y los identificadores maliciosos no construyen rutas |
+| `test_track_read.sh` | La evidencia: la tarea se deriva de la RUTA tanto en `worktrees/<id>/` como en `tasks/<id>/` (ahí viven los artefactos más citables: el sello del precheck, los manifiestos de evidencia, el delta-spec), los archivos sueltos del workspace se atribuyen por sesión, fuera del workspace no hay evidencia, y los identificadores maliciosos no construyen rutas |
 | `test_session_summary.sh` | El resumen de fin de sesión: sale del ledger y no de la memoria del agente, **no reclama el trabajo de las otras sesiones** del workspace, sobrevive a la rotación del bus, y es fail-open ante un bus vacío, corrupto o ausente |
 | `test_guard_worktree.sh` | Un worktree, un dueño: el segundo que escribe se bloquea con el aviso de quién lo tiene, el reclamo caduca si su dueño deja de trabajar, y fuera del worktree el hook no opina |
 | `test_ship_lock.sh` | El lock de ship: las dos ventanas de muerte que costaron un lock inmortal, y que un dueño vivo jamás pierde su lock |
@@ -821,7 +834,16 @@ La suite prueba **el código real de los templates**, no copias ni mocks del sis
 | `test_discover.sh` | La fase 1 contra fixtures reales: cada familia de rol se infiere bien (es la entrada del clustering) y el caso vacío falla con remediación en vez de inventariar mentiras |
 | `test_doctor.sh` | El doctor no miente en ninguna dirección: workspace roto es salida distinta de cero con remediación por fallo, drift de modelos detectado, y existen los checks de cadena completa |
 | `test_plan_lint.sh` | El plan es ejecutable o no es plan: una tarea sin archivos o con complejidad inventada es roja, un requisito que el delta-spec no define es rojo, y la prosa legítima en español no se confunde con un TODO de código |
-| `test_precheck.sh` | `ship.sh --precheck`: corre los gates mecánicos sin exigir veredicto, deja sello atado al HEAD revisado, y no toca `origin/main` ni el lock de ship |
+| `test_precheck.sh` | `ship.sh --precheck`: corre los gates mecánicos sin exigir veredicto, deja sello atado al HEAD revisado, y no toca la rama trunk ni el lock de ship |
+| `test_silent_green.sh` | Lo que no se pudo verificar NO sale verde: el materializador de secretos que decía "listo" con todas las claves fallidas, el scan de vulnerabilidades que sin red reportaba "limpio" **y destruía su baseline**, el lint de migraciones que se saltaba en silencio, y el doctor que nunca podía validar la vigencia del token |
+| `test_prompt_gate_contract.sh` | Que ningún gate exija algo que el prompt del responsable no pide: el esquema del DAG se corre CONTRA el validador real, y cada comando del flujo manual mueve la fase que le toca |
+| `test_vendor_neutrality.sh` | Que esto siga siendo un instalador universal: ratchet de nombre de cliente, y cada eje que varía entre proyectos (secretos, package managers, lenguajes, modelos, deploy) con al menos dos implementaciones. Un eje cableado a un vendor no pasa |
+| `test_forge_tickets.sh` | Los dos ejes que faltaban: tickets en Linear y GitHub con el mismo contrato (incluido que el sobre de contenido no confiable sobreviva al driver nuevo), y la capa de forge con drivers de GitHub y GitLab |
+| `test_base_branch.sh` | Que la rama trunk no se llame `main` por decreto: el pipeline completo sobre un repo con `master`, y que una rama base inválida FALLE en vez de dejar pasar todos los gates de diff en verde |
+| `test_concurrency.sh` | Diez sesiones sobre el mismo workspace: escrituras atómicas donde otras sesiones están leyendo, el lock del grafo, y que un fetch fallido no desinstale skills |
+| `test_worktree_task.sh` | Que `--rm` no destruya trabajo sin publicar, incluido el caso multi-repo donde shippear un repo se llevaba la rama lista del otro |
+| `test_dead_knobs.sh` | Que una opción que se pregunta haga algo: el flujo a main, el tier de un MCP, los perfiles de memoria y el alias de escalación |
+| `test_ui_emit.sh` | El par arranque/cierre de cada llamada, que es lo que le permite al watchdog distinguir "atascado" de "trabajando en algo lento" |
 | `test_docs.sh` | Que las leyes existan y no se caigan en una reescritura: la ley 13, la fase de enrichment con su barra de calidad, el `.gitignore` de la instancia como template verificable, y el ratchet de guion largo |
 | `test_server.py` y `test_op_http.py` | El panel: modelo sin precio nunca hereda tarifa ajena, normalización del bus, y todo el plano de operar (validación, dedupe, tokens con permisos 600, rechazo por token, Host y CSRF) |
 

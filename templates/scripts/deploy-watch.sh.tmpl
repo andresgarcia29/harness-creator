@@ -22,20 +22,44 @@ WS="$(cd "$(dirname "$0")/.." && pwd)"
 [ -f "$WS/scripts/emit.sh" ] && . "$WS/scripts/emit.sh" || emit() { :; }
 LOG="$WS/tasks/$TASK/deploy-$REPO.log"; mkdir -p "$WS/tasks/$TASK"
 ORG="{{GITHUB_ORG}}"
-# Un prefijo es un PREFIJO, no una concatenación ciega. Dos trampas reales:
-#  · sin separador, prefijo "acme" + repo "acme-landing" daba
-#    "acmeacme-landing": una app que no existe en ningún cluster, y el
-#    watcher esperaba 900 s por ella y proponía revertir un deploy sano.
-#  · si el repo YA empieza con el prefijo, el prefijo sobra.
-app_name() {  # app_name <repo> → nombre de la app de ArgoCD
+# ── EL NOMBRE DE LA APP SE RESUELVE, NO SE COMPONE ────────────────────
+# Componerlo del prefijo era el enfoque equivocado, no solo una
+# concatenación mal hecha. Medido en un cluster real de 17 apps: el nombre
+# coincide con el del REPO en 16, y el prefijo configurado no acertaba en
+# NINGUNO. `argocd app wait` esperaba 900 s por una app inexistente y de ahí
+# salía la propuesta de revertir un deploy sano.
+#
+# La fuente de verdad es el cluster: la app cuyo spec.source.repoURL apunta a
+# este repo. Se lee con kubectl, que no necesita login del CLI de argocd.
+# Precedencia, de más explícita a más inferida, y sin inventar nunca:
+#   1. ARGOCD_APP           lo que el humano dijo
+#   2. el cluster           quién apunta de verdad a este repo
+#   3. prefijo + repo       si esta instancia configuró un prefijo
+#   4. el nombre del repo   el caso mayoritario
+app_name() {  # app_name <repo> → prefijo + repo, respetando el separador
   local pre="{{ARGO_APP_PREFIX}}" repo="$1"
   [ -n "$pre" ] || { printf '%s' "$repo"; return 0; }
+  case "$pre" in '{{'*) printf '%s' "$repo"; return 0 ;; esac
   case "$repo" in
     "$pre"|"${pre%[-_]}"-*|"${pre%[-_]}"_*) printf '%s' "$repo"; return 0 ;;
   esac
   printf '%s-%s' "${pre%[-_]}" "$repo"
 }
-APP="$(app_name "$REPO")"
+
+resolve_argocd_app() {  # resolve_argocd_app <repo> → nombre de la app
+  local repo="$1" found=""
+  [ -n "${ARGOCD_APP:-}" ] && { printf '%s' "$ARGOCD_APP"; return 0; }
+  if command -v kubectl >/dev/null 2>&1; then
+    found="$(kubectl get applications -n "${ARGOCD_NAMESPACE:-argocd}" \
+      -o jsonpath='{range .items[*]}{.metadata.name} {.spec.source.repoURL}{"\n"}{end}' 2>/dev/null \
+      | awk -v r="$repo" '$2 ~ ("/" r "(\\.git)?$") { print $1; exit }')"
+    [ -n "$found" ] && { printf '%s' "$found"; return 0; }
+  fi
+  # Sin cluster no se inventa: el prefijo configurado es la mejor conjetura
+  # que tenemos, y si no hay prefijo, el nombre del repo.
+  app_name "$repo"
+}
+APP="$(resolve_argocd_app "$REPO")"
 TIMEOUT="${DEPLOY_TIMEOUT:-900}"
 ROLLBACK_MODE="{{ROLLBACK_MODE}}"   # auto | manual
 
@@ -109,6 +133,12 @@ if [ -z "$DRIVER" ]; then
   esac
 fi
 say "── driver de deploy: $DRIVER${KIND:+ (kind=$KIND)} ──"
+# Lo que de verdad se pudo observar. El mensaje final se arma de acá, no de
+# una lista fija por driver: un tramo inconcluso no puede aparecer como
+# verificado. Es el mismo error que este script vino a arreglar, y lo cometí
+# yo mismo en la primera versión del arreglo.
+VERIFIED_PARTS=""
+verified() { VERIFIED_PARTS="${VERIFIED_PARTS:+$VERIFIED_PARTS + }$1"; }
 
 if [ "$DRIVER" = "none" ]; then
   say "ℹ️  $REPO no se verifica con este watcher."
@@ -190,6 +220,7 @@ if command -v gh >/dev/null; then
     gh run watch --repo "$ORG/$REPO" "$run_id" --exit-status >>"$LOG" 2>&1 \
       || red "Actions falló (run $run_id). Logs: gh run view --repo $ORG/$REPO $run_id --log-failed"
     say "✅ actions verde (run $run_id)"
+    verified "actions"
   fi
 fi
 
@@ -224,65 +255,70 @@ if command -v kargo >/dev/null; then
   fi
 fi
 
-# ¿Podemos siquiera hablar con ArgoCD? Se responde ANTES de esperar, no
-# después: 900 segundos para descubrir que faltaba un token es tiempo
-# regalado, y el rojo que sale al final parece un deploy enfermo.
-argocd_configured() {
-  [ -n "${ARGOCD_AUTH_TOKEN:-}" ] && return 0
+# ── SALUD DE ARGOCD: TRES ESTADOS, NO DOS ────────────────────────────
+# "No pude verificar" no es "está roto", y confundirlos costaba un rollback
+# sobre un deploy sano. Caso medido: el CLI de argocd instalado pero SIN
+# servidor configurado falla en milisegundos con "server address
+# unspecified", y el script lo reportaba como "no llegó a Healthy+Synced en
+# 900s": falso dos veces, porque ni esperó 900 s ni supo nada del health.
+#
+#   0 = observé y está SANO
+#   1 = observé y NO está sano   → rojo de verdad, con rollback
+#   2 = NO pude observar         → aviso y supuesto, sin tocar nada
+#
+# Se prefiere kubectl: lee el Application directo del cluster y no necesita
+# el login del CLI. El CLI es el respaldo, y solo si tiene con qué hablar.
+argocd_cli_ready() {
+  [ -n "${ARGOCD_AUTH_TOKEN:-}" ] && [ -n "${ARGOCD_URL:-}" ] && return 0
   [ -n "${ARGOCD_USERNAME:-}" ] && [ -n "${ARGOCD_PASSWORD:-}" ] \
     && [ -n "${ARGOCD_URL:-}" ] && return 0
-  [ -f "$HOME/.config/argocd/config" ] && return 0   # sesión previa de argocd login
   return 1
 }
 
-# 3 · Health de ArgoCD con timeout
-# Auth: ARGOCD_AUTH_TOKEN (ideal) o fallback user/pass si el Vault del
-# proyecto guarda credenciales así — con login previo. Recomendado:
-# migrar a token de cuenta (`argocd account generate-token`).
-if command -v argocd >/dev/null && [ -z "${ARGOCD_AUTH_TOKEN:-}" ] \
-   && [ -n "${ARGOCD_USERNAME:-}" ] && [ -n "${ARGOCD_PASSWORD:-}" ]; then
-  srv="${ARGOCD_URL:-}"; srv="${srv#https://}"; srv="${srv#http://}"
-  argocd login "$srv" --username "$ARGOCD_USERNAME" --password "$ARGOCD_PASSWORD" --grpc-web >/dev/null 2>&1 \
-    && say "argocd: sesión iniciada con usuario (considera migrar a ARGOCD_AUTH_TOKEN)" \
-    || say "⚠️ argocd login falló — health check probablemente falle también"
-fi
-if command -v argocd >/dev/null; then
-  # "La app no existe" y "la app está enferma" NO son lo mismo, y `app wait`
-  # falla igual en los dos casos. Confundirlos es lo que hacía que un repo sin
-  # app propusiera revertir commits sanos. Se distingue ANTES de esperar.
-  # TRIAGE DE TRES CASOS, porque son tres cosas distintas y antes eran una.
-  # "No pude conectarme", "la app no existe" y "la app está enferma" daban
-  # todas el mismo rojo, y solo la tercera justifica proponer un rollback.
-  # Caso real: sin token ni servidor, y ni siquiera bajo with-secrets.sh, el
-  # watcher esperó 900 s y propuso revertir un deploy que estaba sano.
-  if ! argocd_configured; then
-    say "⚠️ ArgoCD sin credenciales ni servidor: no hay ARGOCD_AUTH_TOKEN, ni"
-    say "   usuario/clave con ARGOCD_URL, ni sesión previa de 'argocd login'."
-    say "   NO espero $TIMEOUT s por algo que no puedo consultar, y NO propongo"
-    say "   revertir nada: esto es ceguera, no un deploy rojo."
-    say "   ↳ remediación: scripts/with-secrets.sh scripts/deploy-watch.sh $TASK $REPO"
-    emit assumption "deploy de $REPO NO verificado: ArgoCD sin credenciales (el watcher corrió sin with-secrets.sh)"
-  elif ! argocd app get "$APP" >/dev/null 2>&1; then
-    say "⚠️ conecté a ArgoCD pero no existe la app '$APP'."
-    say "   Suele ser el prefijo de apps mal configurado, o que este repo no"
-    say "   despliega por aquí. Es un tramo que NO pude verificar, no un deploy"
-    say "   rojo: no propongo revertir nada."
-    say "   ↳ revisa ARGO_APP_PREFIX en harness-answers.yaml, o declara"
-    say "     deploy.$REPO.driver si este repo usa otro camino."
-    emit assumption "deploy de $REPO NO verificado: no existe la app de ArgoCD $APP"
-  else
-    say "── argocd: esperando $APP Healthy+Synced (timeout ${TIMEOUT}s) ──"
-    argocd app wait "$APP" --health --sync --timeout "$TIMEOUT" >>"$LOG" 2>&1 \
-      || red "$APP no llegó a Healthy+Synced en ${TIMEOUT}s"
-    say "✅ $APP Healthy + Synced"
+check_argocd_health() {  # → 0 sano · 1 no sano · 2 no concluyente
+  local sync health out
+  if command -v kubectl >/dev/null 2>&1; then
+    out="$(kubectl get application "$APP" -n "${ARGOCD_NAMESPACE:-argocd}" \
+      -o jsonpath='{.status.sync.status} {.status.health.status}' 2>/dev/null)" || out=""
+    if [ -n "$out" ]; then
+      sync="${out%% *}"; health="${out##* }"
+      say "   estado observado: sync=$sync health=$health"
+      [ "$sync" = "Synced" ] && [ "$health" = "Healthy" ] && return 0
+      return 1
+    fi
   fi
-fi
+  if command -v argocd >/dev/null 2>&1 && argocd_cli_ready; then
+    if argocd app wait "$APP" --health --sync --timeout "$TIMEOUT" >>"$LOG" 2>&1; then
+      return 0
+    fi
+    # El CLI falla igual por app enferma, app inexistente y servidor caído.
+    # Solo se declara rojo si además la app EXISTE.
+    argocd app get "$APP" >/dev/null 2>&1 && return 1
+    return 2
+  fi
+  return 2
+}
+
+# 3 · Health de ArgoCD
+say "── argocd: verificando $APP (timeout ${TIMEOUT}s) ──"
+check_argocd_health; health_rc=$?
+case "$health_rc" in
+  0) say "✅ $APP Healthy + Synced"; verified "health de argocd" ;;
+  1) red "$APP existe y NO está Healthy+Synced" ;;
+  2) say "⚠️  no pude verificar el health de '$APP'."
+     say "   Puede faltar kubectl, faltar credenciales de ArgoCD, o que la app"
+     say "   no exista con ese nombre. Es CEGUERA, no un deploy rojo: no"
+     say "   propongo revertir nada."
+     say "   ↳ remediación: corré esto bajo scripts/with-secrets.sh, o fijá el"
+     say "     nombre exacto con ARGOCD_APP=<app> si el cluster usa otro."
+     emit assumption "health de $REPO NO verificado: no pude observar la app $APP" ;;
+esac
 
 # 4 · Smoke del canary tenant (si existe para el repo)
 if [ -x "$WS/scripts/smoke/$REPO.sh" ]; then
   say "── smoke: $REPO ──"
   "$WS/scripts/smoke/$REPO.sh" >>"$LOG" 2>&1 || red "smoke del canary falló"
-  say "✅ smoke verde"
+  say "✅ smoke verde"; verified "smoke del canary"
 else
   say "⚠️ sin smoke para $REPO (scripts/smoke/$REPO.sh) — agrégalo; el canary es la última defensa"
 fi
@@ -291,10 +327,16 @@ fi   # ← fin de las etapas exclusivas de gitops
 
 # El mensaje final dice QUÉ se verificó, no una lista fija: con driver
 # `actions` no hubo argocd ni smoke, y afirmarlo seria mentir en el bus.
-case "$DRIVER" in
-  gitops)  VERIFIED="actions + argocd + smoke" ;;
-  actions) VERIFIED="conclusión del workflow de Actions" ;;
-  *)       VERIFIED="$DRIVER" ;;
-esac
-emit deploy "$REPO verificado ($DRIVER): $VERIFIED" true
-say "🟢 deploy de $REPO verificado por driver=$DRIVER: $VERIFIED"
+if [ -z "$VERIFIED_PARTS" ]; then
+  # Ningún tramo se pudo observar. Eso NO es un deploy verde: es un deploy
+  # del que no sabemos nada, y decirlo verde sería la mentira más cara que
+  # puede contar este script.
+  say "⚠️  deploy de $REPO SIN VERIFICAR: ningún tramo se pudo observar."
+  say "   No hay evidencia de que esté sano NI de que esté roto. Mirá los"
+  say "   avisos de arriba: cada uno dice qué le faltó."
+  emit assumption "deploy de $REPO sin verificar: ningún tramo observable (driver=$DRIVER)"
+  say "→ siguiente: resolvé lo que falta y volvé a correr, o verificá a mano"
+else
+  emit deploy "$REPO verificado ($DRIVER): $VERIFIED_PARTS" true
+  say "🟢 deploy de $REPO verificado por driver=$DRIVER: $VERIFIED_PARTS"
+fi

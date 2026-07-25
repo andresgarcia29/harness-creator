@@ -88,7 +88,7 @@ assert_contains "$dw" "repo_kind" "y si no lo declaró, se infiere del kind del 
 assert_contains "$dw" '"$DRIVER" = "gitops"' "las etapas de Kubernetes están acotadas a su driver"
 assert_contains "$dw" "driver=none" "un repo sin driver lo DICE en vez de inventar un rojo"
 # El mensaje final no puede prometer verificaciones que ese driver no hizo.
-assert_contains "$dw" 'VERIFIED=' "el mensaje final declara qué se verificó de verdad"
+assert_contains "$dw" "VERIFIED_PARTS" "el mensaje final se arma de los tramos REALMENTE observados"
 assert_not_contains "$dw" 'emit deploy "$REPO verificado: actions + argocd + smoke en verde"' \
   "el mensaje final ya no afirma una lista fija de verificaciones"
 

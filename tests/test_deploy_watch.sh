@@ -162,15 +162,15 @@ out="$( cd "$WS" && CLAUDE_PROJECT_DIR="$WS" PATH="$WS/bin:$PATH" \
 elapsed=$(( $(date +%s) - start ))
 [ "$elapsed" -lt 30 ] && pass "no se cuelga esperando (tardó ${elapsed}s, no 900)" \
   || fail "esperó ${elapsed}s: sigue consultando sin credenciales"
-assert_contains "$out" "sin credenciales" "dice que el problema son las credenciales"
-assert_contains "$out" "ceguera, no un deploy rojo" "distingue ceguera de deploy enfermo"
+assert_contains "$out" "no pude verificar el health" "dice que no pudo verificar"
+assert_contains "$out" "CEGUERA, no un deploy rojo" "distingue ceguera de deploy enfermo"
 assert_contains "$out" "with-secrets.sh" "da la remediación exacta"
 # Ojo con el matcheo ingenuo: el propio mensaje dice "NO propongo revertir
 # nada". Lo que no puede aparecer es la PROPUESTA destructiva concreta.
 assert_not_contains "$out" "git revert" "NO propone el revert destructivo"
 assert_not_contains "$out" "revert manual sugerido" "ni la variante manual"
 assert_not_contains "$out" "🔴" "y no marca el deploy como rojo"
-assert_contains "$(bus)" "ArgoCD sin credenciales" "queda como supuesto en el ledger"
+assert_contains "$(bus)" "NO verificado" "queda como supuesto en el ledger"
 
 echo
 echo "── el sha a revertir es el de ESTE repo, no la última línea del log"
@@ -193,5 +193,60 @@ assert_eq "" "$(rev_sha inexistente)" "un repo sin ship no devuelve el sha de ot
 # Sin sha no se propone una acción destructiva a ciegas.
 dw="$(cat "$ROOT/templates/scripts/deploy-watch.sh.tmpl")"
 assert_contains "$dw" 'NO sé qué revertir' "sin sha: lo dice en vez de sugerir un revert vacío"
+
+echo
+echo "── issue #28: el nombre de la app se RESUELVE contra el cluster"
+# Medido en un cluster real de 17 apps: el nombre coincide con el del repo en
+# 16, y el prefijo configurado no acertaba en NINGUNO. `argocd app wait`
+# esperaba 900 s por una app inexistente y de ahí salía la propuesta de
+# revertir un deploy sano.
+mkdir -p "$WS/bin" "$WS/tasks/T1"
+sed -e "s|{{KARGO_PROJECT}}|p|g" -e "s|{{GITHUB_ORG}}|org|g" \
+    -e "s|{{ARGO_APP_PREFIX}}|harness-workspace|g" -e "s|{{ROLLBACK_MODE}}|auto|g" \
+    "$ROOT/templates/scripts/deploy-watch.sh.tmpl" > "$WS/scripts/dw28.sh"
+printf 'repos:\n  - name: corvux-end-to-end\n    kind: service\n' > "$WS/manifest.yaml"
+
+cat > "$WS/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"get applications"*) printf 'atlas https://github.com/org/atlas.git\ne2e https://github.com/org/corvux-end-to-end.git\n' ;;
+  *"get application e2e"*) printf 'Synced Healthy' ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "$WS/bin/kubectl"
+: > "$WS/.harness/events.jsonl"
+out="$( cd "$WS" && CLAUDE_PROJECT_DIR="$WS" PATH="$WS/bin:$PATH" \
+        bash scripts/dw28.sh T1 corvux-end-to-end 2>&1 )"
+assert_contains "$out" "verificando e2e" "resuelve el nombre real del cluster, no el prefijo compuesto"
+assert_not_contains "$out" "harness-workspace-corvux" "y NO usa la concatenación que no existe en ningún cluster"
+assert_contains "$out" "sync=Synced health=Healthy" "reporta el estado observado, con sus valores"
+assert_contains "$out" "✅ e2e Healthy" "y lo declara sano"
+
+echo
+echo "── issue #28: el fallo del verificador no acusa al deploy"
+# El CLI de argocd instalado pero SIN servidor falla en milisegundos con
+# "server address unspecified", y el script lo reportaba como "no llegó a
+# Healthy+Synced en 900s": falso dos veces, porque ni esperó ni supo nada.
+rm -f "$WS/bin/kubectl"
+printf '#!/usr/bin/env bash\necho "{\\"level\\":\\"fatal\\",\\"msg\\":\\"Argo CD server address unspecified\\"}" >&2\nexit 1\n' > "$WS/bin/argocd"
+chmod +x "$WS/bin/argocd"
+: > "$WS/.harness/events.jsonl"
+out="$( cd "$WS" && CLAUDE_PROJECT_DIR="$WS" PATH="$WS/bin:/usr/bin:/bin" \
+        env -u ARGOCD_AUTH_TOKEN -u ARGOCD_URL bash scripts/dw28.sh T1 corvux-end-to-end 2>&1 )"
+assert_contains "$out" "no pude verificar el health" "verificador ciego: lo dice"
+assert_contains "$out" "CEGUERA, no un deploy rojo" "y lo distingue de un deploy roto"
+assert_not_contains "$out" "🔴" "no marca rojo lo que no observó"
+assert_not_contains "$out" "git revert" "y no propone revertir un deploy sano"
+assert_contains "$(bus)" "NO verificado" "queda como supuesto en el ledger"
+
+echo
+echo "── y el mensaje final no promete lo que no verificó"
+# Bug encontrado probando el arreglo de este issue: con argocd inconcluso y
+# sin smoke, el cierre igual decía "verificado: actions + argocd + smoke".
+assert_contains "$out" "SIN VERIFICAR: ningún tramo se pudo observar" \
+  "sin nada observable, no se declara verde"
+assert_not_contains "$out" "actions + argocd + smoke" \
+  "el cierre ya no recita una lista fija por driver"
 
 t_done

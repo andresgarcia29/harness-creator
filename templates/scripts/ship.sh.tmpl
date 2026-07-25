@@ -172,6 +172,21 @@ run_lang_gates() {
   if [ -f go.mod ]; then
     gate go; go vet ./... && go build ./... && go test ./...
   fi
+  # Repo TS cuyo package.json NO está en la raíz (monorepo, apps/, packages/):
+  # el bloque entero se saltaba EN SILENCIO, el precheck salía verde y el
+  # commit roto viajaba hasta el gate de ship. Un gate que no encuentra qué
+  # verificar tiene que decirlo, no ausentarse.
+  if [ ! -f package.json ] && git ls-files '*/package.json' 2>/dev/null | grep -q .; then
+    gate ts
+    echo "⛔ el gate ts NO PUEDE CORRER: $REPO no tiene package.json en la raíz,"
+    echo "   pero sí en subdirectorios:"
+    git ls-files '*/package.json' 2>/dev/null | head -5 | sed 's/^/     · /'
+    echo "   Hasta ahora esto se saltaba en silencio: ni typecheck ni tests, y el"
+    echo "   precheck salía verde igual."
+    echo "   ↳ remediación: declara un package.json en la raíz con scripts typecheck"
+    echo "     y test que deleguen a los paquetes (npm -w, pnpm -r, turbo, lo que use)."
+    exit 3
+  fi
   if [ -f package.json ]; then
     gate ts
     # UN GATE QUE NO PUEDE CORRER NO REPORTA ROJO. Misma regla que import-linter
@@ -199,8 +214,37 @@ run_lang_gates() {
       echo "   ↳ remediación: (cd $WT && npx astro sync)"
       exit 3
     fi
-    if [ -f tsconfig.json ]; then npx tsc --noEmit; fi   # gate DURO: sin || true
-    npm test --if-present
+    # EL TYPECHECK DEL REPO MANDA SOBRE EL NUESTRO. `tsc --noEmit` no es el
+    # typecheck de todo proyecto TS: uno de Astro se chequea con `astro check`
+    # (tsc solo ve una parte y no mira los .astro), y un monorepo con `tsc -b`.
+    # Si el repo declara cómo se chequea, se usa eso.
+    checked=0
+    if   jq -e '.scripts.typecheck'     package.json >/dev/null 2>&1; then npm run typecheck; checked=1
+    elif jq -e '.scripts["check:types"]' package.json >/dev/null 2>&1; then npm run check:types; checked=1
+    elif jq -e '.scripts.check'         package.json >/dev/null 2>&1; then npm run check; checked=1
+    elif [ -f tsconfig.json ]; then npx tsc --noEmit; checked=1          # gate DURO: sin || true
+    fi
+    # Es TypeScript y no encontramos cómo chequearlo. Eso NO es un verde: es
+    # justo el agujero por el que llegó un commit roto hasta el gate de ship.
+    if [ "$checked" -eq 0 ] \
+       && jq -e '.devDependencies.typescript // .dependencies.typescript' package.json >/dev/null 2>&1; then
+      echo "⛔ $REPO trae typescript como dependencia pero el gate no encontró cómo typechequearlo:"
+      echo "   sin tsconfig.json en la raíz y sin script typecheck / check:types / check."
+      echo "   Hasta ahora esto pasaba EN SILENCIO y el precheck salía verde."
+      echo "   ↳ remediación: declara en package.json el script que ya usás para chequear"
+      echo "     tipos (\"typecheck\": \"astro check\" / \"tsc --noEmit\" / \"tsc -b\")."
+      exit 3
+    fi
+    # `npm test --if-present` se callaba cuando NO había script test: un repo
+    # sin tests salía verde sin decir una palabra. El silencio de un
+    # verificador se lee igual que un verde.
+    if jq -e '.scripts.test' package.json >/dev/null 2>&1; then
+      npm test
+    else
+      echo "⚠️  $REPO no declara script 'test' en package.json: el gate ts NO corrió tests."
+      echo "   No lo bloqueo (puede ser legítimo), pero que quede dicho: este gate"
+      echo "   verificó tipos y nada más."
+    fi
   fi
   if [ -f pyproject.toml ]; then
     gate python

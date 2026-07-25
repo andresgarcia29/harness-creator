@@ -241,6 +241,54 @@ mk_fe "$WS/fe3"; mkdir -p "$WS/fe3/node_modules"
 run_lang "$WS/fe3" >/dev/null 2>&1 \
   && pass "node con deps: el gate corre" || fail "node preparado: el gate no debió negarse"
 
+echo
+echo "── gate ts: lo que no encuentra qué verificar, lo dice"
+# Bug de campo: --precheck no corría ni typecheck ni tests en repos TS, y por
+# eso un commit roto llegó hasta el gate de ship. Dos agujeros, los dos
+# silenciosos: package.json fuera de la raíz, y TS sin forma declarada de
+# chequear. Un gate ausente se lee igual que un gate verde.
+
+# 5. package.json solo en subdirectorios → se niega en vez de ausentarse
+mk_fe "$WS/fe4"; cd "$WS/fe4"
+rm -f package.json tsconfig.json
+mkdir -p apps/web && echo '{"name":"web"}' > apps/web/package.json
+git add -A && git commit -qm monorepo; cd "$WS"
+out="$(run_lang "$WS/fe4")"; rc=$?
+assert_eq 3 "$rc" "package.json solo en subdirs: el gate se niega"
+assert_contains "$out" "no tiene package.json en la raíz" "monorepo: nombra la causa"
+assert_contains "$out" "apps/web/package.json" "monorepo: muestra dónde sí lo encontró"
+assert_contains "$out" "en silencio" "monorepo: dice que antes se saltaba callado"
+
+# 6. TS sin tsconfig y sin script de typecheck → se niega
+mk_fe "$WS/fe5"; cd "$WS/fe5"; rm -f tsconfig.json
+echo '{"name":"fe","devDependencies":{"typescript":"^5"}}' > package.json
+git add -A && git commit -qm ts-sin-config; cd "$WS"
+mkdir -p "$WS/fe5/node_modules"
+out="$(run_lang "$WS/fe5")"; rc=$?
+assert_eq 3 "$rc" "TS sin forma de chequear: el gate se niega"
+assert_contains "$out" "no encontró cómo typechequearlo" "TS: nombra la causa exacta"
+assert_contains "$out" "typecheck" "TS: la remediación pide declarar el script"
+
+# 7. el script del repo manda sobre tsc (Astro se chequea con astro check)
+mk_fe "$WS/fe6"; cd "$WS/fe6"
+echo '{"name":"fe","scripts":{"typecheck":"astro check","test":"vitest run"}}' > package.json
+git add -A && git commit -qm scripts; cd "$WS"
+mkdir -p "$WS/fe6/node_modules"
+out="$( ( cd "$WS/fe6"; WT="$WS/fe6"; REPO=fe; TASK=T1
+          gate() { :; }
+          npx() { echo "NO-DEBERIA-CORRER-TSC"; }
+          npm() { echo "npm $*"; }
+          . "$WS/lang.sh"; run_lang_gates ) 2>&1 )"
+assert_contains "$out" "npm run typecheck" "usa el typecheck declarado por el repo"
+assert_not_contains "$out" "NO-DEBERIA-CORRER-TSC" "y NO cae a tsc --noEmit cuando el repo ya dijo cómo"
+assert_contains "$out" "npm test" "corre los tests declarados"
+
+# 8. sin script test → avisa en vez de callarse (antes: --if-present mudo)
+mk_fe "$WS/fe7"; cd "$WS/fe7"; cd "$WS"
+mkdir -p "$WS/fe7/node_modules"
+out="$(run_lang "$WS/fe7")"
+assert_contains "$out" "NO corrió tests" "sin script test: lo dice en vez de callarse"
+
 cd "$WS"
 
 echo

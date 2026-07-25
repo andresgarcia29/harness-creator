@@ -47,7 +47,7 @@ falta de conocimiento: es que la regla estaba en prosa y no en un test.
 - [x] **`deploy-watch` revertía el sha del repo equivocado.** `tail -1` de
   `ship.log` sin filtrar por repo. Commit `98fdd56`.
 
-## P1: mienten sobre haber verificado (cerrado, commit `9ddf69e`)
+## P1: mienten sobre haber verificado (7 de 8 cerrados, commit `3ee63ce`)
 
 - [x] **`secrets.sh` con GCP Secret Manager reportaba `✅` con todas las claves
   fallidas.** `dump_sm` no incrementa `MISSED` y `pull_gcp_sm` cierra con un

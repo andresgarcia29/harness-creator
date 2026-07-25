@@ -12,12 +12,34 @@ if [ "${1:-}" = "--rm" ]; then
   for wt in "$WS/worktrees/$TASK"/*/; do
     [ -d "$wt" ] || continue
     repo="$(basename "$wt")"
-    if [ -n "$(git -C "$wt" status --porcelain 2>/dev/null)" ]; then
+    # "No pude mirar" NO es "está limpio". Con 2>/dev/null, un git que falla
+    # devolvía cadena vacía y el worktree se borraba igual.
+    if ! st="$(git -C "$wt" status --porcelain 2>&1)"; then
+      echo "⚠️  no pude inspeccionar $wt, NO lo quito. Motivo: $(printf '%s' "$st" | head -1)"
+      continue
+    fi
+    if [ -n "$st" ]; then
       echo "⚠️  $wt tiene cambios sin commitear — NO lo quito. Shippea o descarta primero."
       continue
     fi
     git -C "$WS/repos/$repo" worktree remove "$wt" && echo "🧹 removido: $wt"
-    git -C "$WS/repos/$repo" branch -D "task/$TASK" 2>/dev/null || true
+    # UN ÁRBOL LIMPIO NO SIGNIFICA TRABAJO PUBLICADO. Los commits sin shippear
+    # también dejan el worktree limpio, y `branch -D` los borraba sin
+    # preguntar: solo recuperables por reflog, cosa que ningún agente hace.
+    # Caso real: en una tarea multi-repo, el --rm que corre /ship tras shippear
+    # el repo A destruía la rama del repo B, que estaba lista y sin publicar.
+    #
+    # `branch -d` (minúscula) YA implementa exactamente el chequeo que hacía
+    # falta: se niega si la rama tiene commits sin mergear. El bug era estar
+    # pisándolo con la mayúscula.
+    if git -C "$WS/repos/$repo" branch -d "task/$TASK" 2>/dev/null; then
+      echo "   🧹 rama task/$TASK borrada (su trabajo ya está publicado)"
+    elif git -C "$WS/repos/$repo" show-ref --verify --quiet "refs/heads/task/$TASK"; then
+      n="$(git -C "$WS/repos/$repo" rev-list --count "task/$TASK" --not --remotes 2>/dev/null || echo "?")"
+      echo "   ⚠️  CONSERVO la rama task/$TASK de $repo: tiene $n commit(s) sin publicar."
+      echo "      Si de verdad querés descartar ese trabajo, es tu decisión y es explícita:"
+      echo "      git -C repos/$repo branch -D task/$TASK"
+    fi
   done
   # Si ya no queda ningún worktree de repo, borra el dir de la tarea. rmdir no basta:
   # gowork.sh/py.sh (go.work, shims) dejan debris fuera de los worktrees y el rmdir

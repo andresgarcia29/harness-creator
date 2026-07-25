@@ -94,7 +94,9 @@ mkdir -p "$WS/tasks/T1"
 out="$(run_watch terraform-core)"; rc=$?
 assert_eq 0 "$rc" "repo de infra: sale 0 (no es un fallo, es que no aplica)"
 assert_contains "$out" "kind=infra-module" "nombra el kind que leyó del manifest"
-assert_contains "$out" "no despliega por el camino GitOps" "explica por qué no aplica"
+assert_contains "$out" "driver de deploy: none" "resuelve el driver y lo declara"
+assert_contains "$out" "no se verifica con este watcher" "explica por qué no aplica"
+assert_contains "$out" "driver: actions" "y dice cómo declararlo si SÍ despliega"
 assert_contains "$out" "tampoco propongo revertir" "y dice explícitamente que no propone rollback"
 assert_contains "$(bus)" '"kind":"assumption"' "declara el tramo no verificado como supuesto"
 assert_not_contains "$out" "🔴" "NO reporta rojo"
@@ -102,12 +104,29 @@ assert_not_contains "$out" "🔴" "NO reporta rojo"
 # El repo de servicio sí entra al camino GitOps (y muere donde toque, no aquí).
 : > "$WS/.harness/events.jsonl"
 out="$(run_watch atlas)"
-assert_not_contains "$out" "no despliega por el camino GitOps" "kind=service sí entra al camino GitOps"
+assert_contains "$out" "driver de deploy: gitops" "kind=service resuelve a gitops"
 
 # Instancia vieja sin kind en el manifest: no se asume nada, sigue el flujo.
 : > "$WS/.harness/events.jsonl"
 printf 'repos:\n  - name: sinkind\n    agent: x\n' > "$WS/manifest.yaml"
 out="$(run_watch sinkind)"
-assert_not_contains "$out" "no despliega por el camino GitOps" "sin kind declarado: no asume, deja decidir al guard de la app"
+assert_contains "$out" "driver de deploy: gitops" "sin kind declarado: cae a gitops (compat), no a none"
+
+echo
+echo "── lo que el humano declara le gana a lo que el harness infiere"
+cat > "$WS/harness-answers.yaml" <<'YAML'
+project: demo
+deploy:
+  terraform-core:
+    driver: actions
+YAML
+cat > "$WS/manifest.yaml" <<'YAML'
+repos:
+  - name: terraform-core
+    kind: infra-module
+YAML
+out="$(run_watch terraform-core)"
+assert_contains "$out" "driver de deploy: actions" "answers gana sobre el kind inferido"
+assert_not_contains "$out" "no se verifica con este watcher" "y por lo tanto SÍ se verifica"
 
 t_done

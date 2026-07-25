@@ -53,20 +53,61 @@ repo_kind() {  # repo_kind <repo> → kind declarado en manifest.yaml, o vacío
     }' "$WS/manifest.yaml" 2>/dev/null
 }
 
+# ── DRIVERS DE DEPLOY ─────────────────────────────────────────────────
+# Un driver contesta tres preguntas, y son las mismas para CUALQUIER
+# tecnología: ¿llegó el cambio?, ¿está sano?, ¿cómo se revierte?
+#
+#   gitops   Actions → Kargo → health de ArgoCD → smoke del canary.
+#   actions  solo la conclusión del workflow. El más universal: sirve para
+#            cualquiera que despliegue desde CI, sin Kubernetes de por medio.
+#   none     este repo no se verifica por aquí, y se DICE.
+#
+# POR QUÉ ESTO ES UN DISPATCH Y NO UN if: el harness ya resuelve así todos
+# sus otros ejes que varían entre proyectos (secretos con pull_*, package
+# manager por lockfile, gates por marcador de lenguaje, proveedor de
+# modelos). Deploy era el único cableado a un solo vendor, y eso convierte
+# a un instalador universal en el instalador de quien lo escribió. Agregar
+# fly, vercel, terraform o lo que sea es una función más, no un fork.
+#
+# Resolución, de más explícita a más inferida:
+#   1. deploy.<repo>.driver en harness-answers.yaml (lo que el humano dijo)
+#   2. el kind del repo en manifest.yaml
+#   3. gitops, por compatibilidad con instancias previas a esta regla
+answers_driver() {  # answers_driver <repo> → driver declarado, o vacío
+  [ -f "$WS/harness-answers.yaml" ] || return 0
+  awk -v r="$1" '
+    /^[[:space:]]*#/ { next }
+    /^deploy:/ { ind=1; next }
+    ind && /^[^[:space:]]/ { ind=0 }
+    ind && $0 ~ "^[[:space:]]+" r ":" { cur=1; next }
+    ind && cur && /^[[:space:]]+driver:[[:space:]]*/ {
+      d=$0; sub(/^[^:]*:[[:space:]]*/,"",d); gsub(/["\047]/,"",d)
+      sub(/[[:space:]]+$/,"",d); print d; exit }
+    ind && cur && /^[[:space:]]{2}[a-zA-Z0-9_-]+:/ { cur=0 }
+  ' "$WS/harness-answers.yaml" 2>/dev/null
+}
+
 KIND="$(repo_kind "$REPO")"
-case "${KIND:-}" in
-  service|frontend|mobile|"")
-    # Despliegan por GitOps, o el manifest no declara kind (instancia vieja):
-    # en ese caso no asumimos nada y el guard de la app de ArgoCD decide.
-    : ;;
-  *)
-    say "ℹ️  $REPO es kind=$KIND: no despliega por el camino GitOps que vigila"
-    say "   este watcher (Actions → Kargo → ArgoCD → smoke)."
-    say "   NO verifico nada aquí, y por lo tanto tampoco propongo revertir nada:"
-    say "   un modelo que no aplica no puede declarar un deploy rojo."
-    emit assumption "deploy de $REPO NO verificado por deploy-watch: kind=$KIND no usa el modelo GitOps de este watcher"
-    exit 0 ;;
-esac
+DRIVER="$(answers_driver "$REPO")"
+if [ -z "$DRIVER" ]; then
+  case "${KIND:-}" in
+    service|frontend|mobile|"") DRIVER=gitops ;;
+    *)                          DRIVER=none ;;
+  esac
+fi
+say "── driver de deploy: $DRIVER${KIND:+ (kind=$KIND)} ──"
+
+if [ "$DRIVER" = "none" ]; then
+  say "ℹ️  $REPO no se verifica con este watcher."
+  say "   NO reviso nada, y por lo tanto tampoco propongo revertir nada:"
+  say "   un modelo que no aplica no puede declarar un deploy rojo."
+  say "   Si este repo SÍ despliega, declaralo en harness-answers.yaml:"
+  say "     deploy:"
+  say "       $REPO:"
+  say "         driver: actions   # o gitops"
+  emit assumption "deploy de $REPO NO verificado: driver=none${KIND:+ (kind=$KIND)}"
+  exit 0
+fi
 
 # Jerarquía de rollback (rollback PRIMERO, diagnóstico después):
 #  1. Si el workload usa Argo Rollouts: el AnalysisTemplate ya abortó a
@@ -107,6 +148,11 @@ if command -v gh >/dev/null; then
     say "⚠️ no encontré runs — ¿el repo tiene workflows?"
   fi
 fi
+
+# ── Etapas 2 a 4: exclusivas del driver gitops ────────────────────────
+# El driver `actions` termina en la etapa 1: la conclusión del workflow es
+# toda la señal que tiene, y fingir más sería inventar.
+if [ "$DRIVER" = "gitops" ]; then
 
 # 2 · Kargo: promoción del freight (si el pipeline lo usa)
 if command -v kargo >/dev/null; then
@@ -172,5 +218,14 @@ else
   say "⚠️ sin smoke para $REPO (scripts/smoke/$REPO.sh) — agrégalo; el canary es la última defensa"
 fi
 
-emit deploy "$REPO verificado: actions + argocd + smoke en verde" true
-say "🟢 deploy de $REPO verificado — siguiente tarea del DAG"
+fi   # ← fin de las etapas exclusivas de gitops
+
+# El mensaje final dice QUÉ se verificó, no una lista fija: con driver
+# `actions` no hubo argocd ni smoke, y afirmarlo seria mentir en el bus.
+case "$DRIVER" in
+  gitops)  VERIFIED="actions + argocd + smoke" ;;
+  actions) VERIFIED="conclusión del workflow de Actions" ;;
+  *)       VERIFIED="$DRIVER" ;;
+esac
+emit deploy "$REPO verificado ($DRIVER): $VERIFIED" true
+say "🟢 deploy de $REPO verificado por driver=$DRIVER: $VERIFIED"

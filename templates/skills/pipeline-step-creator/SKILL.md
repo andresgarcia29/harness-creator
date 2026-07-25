@@ -30,7 +30,7 @@ Crea `.claude/pipeline/<nombre-kebab>.md`:
 ---
 after: ship             # OBLIGATORIO: tras qué fase corre
 gate: true              # true = rojo PARA el pipeline; false = solo avisa
-needs_mcp: corvux-e2e   # opcional; el doctor exige esa clave en .mcp.json
+needs_mcp: acme-e2e     # opcional; el doctor exige esa clave en .mcp.json
 run: scripts/mi.sh      # opcional; PRESENTE = determinista; AUSENTE = agéntico
 order: 20               # opcional (default 100); empate → alfabético
 repo: primary           # opcional; primary|<repo>|workspace (default workspace)

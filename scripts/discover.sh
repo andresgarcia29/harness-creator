@@ -31,7 +31,7 @@ guess_role() { # guess_role <dir> <name> — imprime el rol en stdout
 
   # infra terraform: module (reutilizable) vs live (raíz aplicable).
   # maxdepth 4: los monorepos de infra viven en envs/prod/… y modules/x/… —
-  # a profundidad 2 no se veían y caían a ci-library (bug real de corvux).
+  # a profundidad 2 no se veían y caían a ci-library (bug real de campo).
   if ls "$dir"/*.tf >/dev/null 2>&1 || find "$dir" -maxdepth 4 -name "*.tf" -not -path "*/.git/*" -print -quit 2>/dev/null | grep -q .; then
     if [ -f "$dir/variables.tf" ] || [ -f "$dir/outputs.tf" ] || echo "$name" | grep -qi "module"; then
       echo "infra-module"

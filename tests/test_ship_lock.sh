@@ -10,8 +10,13 @@ t_ws
 TMPL="$ROOT/templates/scripts/ship.sh.tmpl"
 
 # extraer SOLO acquire_lock (de 'acquire_lock() {' a su '}' de primer nivel)
-awk '/^acquire_lock\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$TMPL" > "$WS/lock.sh"
+# pid_alive va junto: acquire_lock la usa para distinguir "el dueño murió" de
+# "no pude saberlo" (pid ilegible, o EPERM porque el proceso es de otro
+# usuario). Leer los tres casos como "muerto" liberaba locks VIVOS.
+{ awk '/^pid_alive\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$TMPL"
+  awk '/^acquire_lock\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$TMPL"; } > "$WS/lock.sh"
 grep -q 'LOCK_HELD=1' "$WS/lock.sh" || { echo "no pude extraer acquire_lock del template"; exit 1; }
+grep -q 'pid_alive' "$WS/lock.sh" || { echo "no pude extraer pid_alive del template"; exit 1; }
 
 run_acquire() {  # run_acquire <lockdir> [timeout]  (timeout portable: macOS no trae coreutils)
   bash -c "
@@ -49,5 +54,25 @@ else
   [ -d "$L" ] && [ "$(cat "$L/pid")" = "$$" ] \
     && pass "dueño vivo: esperó sin robar" || fail "dueño vivo: el lock quedó tocado"
 fi
+
+echo
+echo "── 'no pude mirar' no libera un lock"
+# kill -0 falla en tres casos y antes se leían todos como "muerto": proceso
+# inexistente (muerto de verdad), pid ilegible, y EPERM (existe pero es de
+# otro usuario, o sea VIVO). Robarle el lock a un vivo mete dos ships
+# concurrentes en el mismo repo.
+LOCKDIR="$WS/ilegible.lock.d"; mkdir -p "$LOCKDIR"; printf 'no-soy-un-pid' > "$LOCKDIR/pid"
+out="$( ( set -u; LOCKDIR="$LOCKDIR"; . "$WS/lock.sh"
+          pid_alive "$(cat "$LOCKDIR/pid")"; echo "rc=$?" ) 2>&1 )"
+assert_contains "$out" "rc=2" "pid ilegible: 'no se pudo saber', no 'muerto'"
+
+out="$( ( set -u; . "$WS/lock.sh"; pid_alive ""; echo "rc=$?" ) 2>&1 )"
+assert_contains "$out" "rc=2" "pid vacío: tampoco se lee como muerto"
+
+out="$( ( set -u; . "$WS/lock.sh"; pid_alive 1; echo "rc=$?" ) 2>&1 )"
+assert_contains "$out" "rc=0" "pid 1 (init, de root): VIVO aunque kill -0 dé EPERM"
+
+out="$( ( set -u; . "$WS/lock.sh"; pid_alive 99999999; echo "rc=$?" ) 2>&1 )"
+assert_contains "$out" "rc=1" "pid inexistente: muerto de verdad, ese sí se reclama"
 
 t_done

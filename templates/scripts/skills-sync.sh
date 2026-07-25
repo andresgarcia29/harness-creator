@@ -80,16 +80,39 @@ while IFS= read -r line; do
       echo "△ $sk: desactualizada (instalada: ${cur:-nada}; fuente: $stamp)"
       continue
     fi
-    rm -rf "$tgt"
-    cp -R "$src/$sk" "$tgt"
-    printf '%s\nmanaged-by: skills-sync (NO editar aquí: edita en el repo fuente)\n' "$stamp" > "$tgt/.managed"
+    # ATÓMICO: antes era `rm -rf` seguido de `cp -R`, y una sesión que
+    # cargaba la skill en ese intervalo la veía ausente o sin SKILL.md. Peor:
+    # si el copiado moría entre el rm y el .managed, la skill quedaba
+    # instalada SIN marca, y el próximo sync la trataba como local y ya nadie
+    # la actualizaba nunca más. Se arma completa a un lado y se publica con
+    # un solo mv.
+    stage="$tgt.$$.new"
+    rm -rf "$stage"
+    cp -R "$src/$sk" "$stage" || { rm -rf "$stage"; echo "✗ $sk: copia falló"; fails=$((fails+1)); continue; }
+    printf '%s\nmanaged-by: skills-sync (NO editar aquí: edita en el repo fuente)\n' "$stamp" > "$stage/.managed"
+    rm -rf "$tgt.$$.old"
+    [ -d "$tgt" ] && mv "$tgt" "$tgt.$$.old"
+    mv "$stage" "$tgt"
+    rm -rf "$tgt.$$.old"
     echo "⇊ $sk: instalada @ $sha (de $(basename "$repo" .git))"
   done
 done <<EOF
 $(awk '/^sources:/{f=1;next} /^[^ #]/{f=0} f && /^  - /' "$CONF")
 EOF
 
-# prune: compartidas (.managed) que ya nadie declara
+# prune: compartidas (.managed) que ya nadie declara.
+#
+# UNA FUENTE QUE NO SE PUDO LEER NO ES UNA SKILL DESINSTALADA. $WANTED solo
+# se puebla con las skills de las fuentes que respondieron; un fetch fallido,
+# un clone fallido o un ref inexistente hacen `continue` y sus skills nunca
+# entran a la lista. El prune corría igual, así que una corrida con la red
+# caída o un token vencido BORRABA skills que skills.yaml seguía declarando.
+# La evidencia ausente no es evidencia de desinstalación.
+if [ "$fails" -gt 0 ]; then
+  echo "⚠️  $fails fuente(s) no se pudieron leer: NO desinstalo nada en esta corrida."
+  echo "   Desinstalar por una red caída es indistinguible de desinstalar por"
+  echo "   una decisión, y solo una de las dos es reversible sola."
+else
 for d in "$DEST"/*/; do
   [ -f "$d/.managed" ] || continue
   name="$(basename "$d")"
@@ -103,6 +126,7 @@ for d in "$DEST"/*/; do
     fi
   fi
 done
+fi   # ← fin del guard: sin fuentes ilegibles, el prune corre normal
 rm -f "$WANTED"
 
 if [ "$CHECK" -eq 1 ] && [ "$changes" -gt 0 ]; then

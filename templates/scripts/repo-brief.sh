@@ -70,6 +70,13 @@ capped() { [ -f "$1" ] && sed -n "1,${2}p" "$1"; }
       ! -path './.git*' ! -path './node_modules*' ! -path './vendor*' \
       | sort | head -10 | sed 's|^\./||; s|^|  |')
   (cd "$SRC" && find . -maxdepth 2 -name '*_test.go' -o -maxdepth 2 -name '*.test.ts' -o -maxdepth 2 -name 'test_*.py' 2>/dev/null | head -5 | sed 's|^\./||; s|^|  |')
-} > "$OUT" 2>/dev/null || { rm -f "$OUT"; echo "⚠️  brief de $REPO falló; fail-open" >&2; exit 0; }
+# tmp + mv: cuando un HEAD se mueve, TODAS las sesiones que hacen prefetch
+# regeneran a la vez, y minion-probe.sh lo invoca desde workers EN PARALELO y
+# después hace cat. Sin esto, un lector recibía un brief truncado o con dos
+# escrituras intercaladas, y ese texto viaja DENTRO del prompt del implementer
+# como si fuera verdad. El mv es atómico: se lee el viejo entero o el nuevo
+# entero.
+} > "$OUT.$$.tmp" 2>/dev/null && mv -f "$OUT.$$.tmp" "$OUT" \
+  || { rm -f "$OUT.$$.tmp"; echo "⚠️  brief de $REPO falló; fail-open" >&2; exit 0; }
 
 echo "$OUT"

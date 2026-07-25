@@ -129,14 +129,44 @@ trap on_exit EXIT
 #      un humano hiciera rm -rf. Reproducido antes de arreglarlo.
 #   2. mkdir OK → fallo → el trap corría con LOCK_HELD vacío y no limpiaba.
 #      LOCK_HELD se marca AHORA justo después del mkdir, no después del pid.
+pid_alive() {  # pid_alive <pid> → 0 vivo · 1 muerto · 2 no se pudo saber
+  # `kill -0` falla en TRES casos y antes se leían todos como "muerto":
+  #   · el proceso no existe          → muerto de verdad
+  #   · el pid está vacío o corrupto  → NO se pudo saber
+  #   · EPERM: existe pero es de otro usuario → está VIVO, y liberar su lock
+  #     mete dos ships concurrentes en el mismo repo
+  # Ante la duda se conserva el lock: esperar de más cuesta minutos, robarlo
+  # cuesta una carrera de rebase contra main.
+  case "${1:-}" in ''|*[!0-9]*) return 2 ;; esac
+  if kill -0 "$1" 2>/dev/null; then return 0; fi
+  # EPERM: el proceso EXISTE pero es de otro usuario, o sea que está VIVO. El
+  # texto varía por shell e idioma ("Operation not permitted", "permission
+  # denied", "no permitido"), así que se normaliza a minúsculas y se cubren
+  # las formas conocidas. Ante un mensaje que no reconocemos, se devuelve
+  # "no se pudo saber" (2), no "muerto": el sesgo va siempre a conservar.
+  err="$(kill -0 "$1" 2>&1 || true)"
+  low="$(printf '%s' "$err" | tr 'A-Z' 'a-z')"
+  case "$low" in
+    *"not permitted"*|*permission*|*permitida*|*permitido*|*permiso*) return 0 ;;
+    *"no such process"*|*"no existe"*|*"proceso"*) return 1 ;;
+    "") return 1 ;;
+    *) return 2 ;;
+  esac
+}
 acquire_lock() {
   local waited=0 nopid=0
   until mkdir "$LOCKDIR" 2>/dev/null; do
     if [ -f "$LOCKDIR/pid" ]; then
       # lock huérfano: el proceso dueño ya no existe
-      if ! kill -0 "$(cat "$LOCKDIR/pid" 2>/dev/null)" 2>/dev/null; then
-        echo "⚠️  lock huérfano de pid $(cat "$LOCKDIR/pid" 2>/dev/null); lo reclamo"
+      lpid="$(cat "$LOCKDIR/pid" 2>/dev/null)"
+      pid_alive "$lpid"; alive_rc=$?
+      if [ "$alive_rc" -eq 1 ]; then
+        echo "⚠️  lock huérfano de pid $lpid (proceso inexistente); lo reclamo"
         rm -rf "$LOCKDIR"; nopid=0; continue
+      elif [ "$alive_rc" -eq 2 ]; then
+        echo "⚠️  el pid del lock es ilegible ('$lpid'): NO lo reclamo. 'No pude"
+        echo "   mirar' no es 'está muerto'. Si el dueño de verdad murió:"
+        echo "   rm -rf $LOCKDIR"
       fi
       nopid=0
     else

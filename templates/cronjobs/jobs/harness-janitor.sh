@@ -19,9 +19,25 @@ detect() {
   # locks huérfanos de ship.sh
   for l in locks/*.lock.d; do
     [ -d "$l" ] || continue
-    if [ -f "$l/pid" ] && ! kill -0 "$(cat "$l/pid")" 2>/dev/null; then
-      rm -rf "$l" && echo "limpiado: lock huérfano $l" >> "$FINDINGS.log"
-    fi
+    # `kill -0` falla también con pid ilegible y con EPERM (el proceso EXISTE
+    # pero es de otro usuario). Leer los tres casos como "muerto" hacía que
+    # este job borrara locks VIVOS, y un lock de ship vivo que desaparece son
+    # dos ships concurrentes peleando el push al mismo repo. Ante la duda no
+    # se toca: un lock de más lo limpia el humano; un lock de menos corrompe
+    # main.
+    lpid="$(cat "$l/pid" 2>/dev/null)"
+    case "$lpid" in
+      ''|*[!0-9]*)
+        echo "conservado: $l tiene pid ilegible ('$lpid'), no puedo saber si vive" >> "$FINDINGS.log" ;;
+      *)
+        if kill -0 "$lpid" 2>/dev/null; then
+          : # vivo, no se toca
+        elif kill -0 "$lpid" 2>&1 | grep -qiE 'permission|permitido|permiso'; then
+          echo "conservado: $l lo sostiene el pid $lpid de otro usuario (vivo)" >> "$FINDINGS.log"
+        else
+          rm -rf "$l" && echo "limpiado: lock huérfano $l (pid $lpid inexistente)" >> "$FINDINGS.log"
+        fi ;;
+    esac
   done
   # dumps de quiet.sh >7 días
   find .cache/quiet -name "*.log" -mtime +7 -delete 2>/dev/null || true

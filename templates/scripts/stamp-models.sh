@@ -81,7 +81,9 @@ case "$cmd" in
         drift=1
       else
         awk -v m="$want" '{ if (!done && $0 ~ /^model:/) { $0 = "model: " m; done = 1 } print }' \
-          "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+          "$f" > "$f.$$.tmp" && mv "$f.$$.tmp" "$f"   # $$ : dos make models simultáneos
+                                                       # compartían "$f.tmp" y el mv
+                                                       # publicaba el intercalado
         echo "✓ $base → $want"
         changed=1
       fi

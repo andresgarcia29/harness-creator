@@ -67,6 +67,91 @@ out="$(bash "$WS/scripts/verdict-scaffold.sh" T1 atlas revisor-1 2>&1)"; rc=$?
 assert_eq 3 "$rc" "solo qa como runner: exit 3"
 assert_contains "$out" "roles" "explica la política de roles"
 
+echo
+echo "── --rebase: el re-review incremental conserva el juicio ajeno al delta"
+# El caso de campo: un blocking estrecho obligaba a --force, y --force borraba
+# la matriz de compliance ENTERA, incluidos los requirements que el fix ni rozó.
+
+WT="$WS/worktrees/T1/atlas"
+gitc() { git -C "$WT" -c user.email=t@t -c user.name=t "$@"; }
+mkdir -p "$WT/tests"
+printf 'auth\n' > "$WT/tests/auth.test.js"
+printf 'billing\n' > "$WT/tests/billing.test.js"
+gitc add -A && gitc commit -q -m "dos suites"
+BASE="$(gitc rev-parse HEAD)"
+
+rm -f "$WS"/tasks/T1/evidence/EV-*.json
+mk_ev EV-TEST-eeeeeeeeeeee impl-atlas test "$BASE"
+bash "$WS/scripts/verdict-scaffold.sh" T1 atlas revisor-1 >/dev/null 2>&1 \
+  && pass "rebase: scaffold base verde" || fail "scaffold base falló"
+
+# el reviewer pone su juicio: dos requirements cubiertos, cada uno con su test
+jq '.verdict="pass" | .qa="pass" | .requirements_uncovered=0
+    | .docs_updated=true | .non_blocking=["nombre de variable pobre"]
+    | .compliance=[{id:"AUTH-1",covered:true,tests:["tests/auth.test.js"],note:"cubierto"},
+                   {id:"BILL-7",covered:true,tests:["tests/billing.test.js"],note:"cubierto"}]' \
+  "$V" > "$V.tmp" && mv "$V.tmp" "$V"
+
+# el implementer corrige SOLO auth y commitea: billing no se tocó
+printf 'auth v2\n' > "$WT/tests/auth.test.js"
+gitc add -A && gitc commit -q -m "fix del blocking de auth"
+NEW="$(gitc rev-parse HEAD)"
+mk_ev EV-TEST-ffffffffffff impl-atlas test "$NEW"
+
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --rebase T1 atlas revisor-1 2>&1)"; rc=$?
+assert_eq 0 "$rc" "rebase: exit 0"
+assert_eq "$NEW" "$(jq -r .commit "$V")" "rebase: commit = HEAD nuevo"
+assert_eq "$BASE" "$(jq -r .rebased_from "$V")" "rebase: deja registro del commit base"
+
+bill="$(jq -c '.compliance[] | select(.id=="BILL-7")' "$V")"
+assert_contains "$bill" '"covered":true' "el requirement AJENO al delta conserva covered:true"
+assert_contains "$bill" "$BASE" "el arrastrado trae carried_from (auditable)"
+assert_not_contains "$bill" "rejudge" "el ajeno al delta NO se manda a re-juzgar"
+
+auth="$(jq -c '.compliance[] | select(.id=="AUTH-1")' "$V")"
+assert_contains "$auth" '"covered":false' "el requirement TOCADO por el delta vuelve a pendiente"
+assert_contains "$auth" "rejudge" "el tocado dice por qué hay que re-juzgarlo"
+
+assert_eq "PENDING_REVIEWER" "$(jq -r .verdict "$V")" "rebase: el veredicto se re-emite siempre"
+assert_eq "pending" "$(jq -r .qa "$V")" "rebase: QA se re-emite siempre (el comportamiento cambió)"
+assert_eq "-1" "$(jq -r .requirements_uncovered "$V")" "rebase: requirements_uncovered vuelve al placeholder"
+assert_eq "0" "$(jq '.blocking | length' "$V")" "rebase: los blocking se limpian (se están corrigiendo)"
+assert_eq "1" "$(jq '.non_blocking | length' "$V")" "rebase: los non_blocking se conservan (son notas)"
+assert_eq "true" "$(jq -r .docs_updated "$V")" "rebase: conserva los flags del reviewer"
+assert_eq "1" "$(jq '.evidence | length' "$V")" "rebase: la evidencia se REGENERA en el HEAD nuevo"
+assert_contains "$out" "1 arrastrada" "rebase: dice cuánto arrastró"
+
+# una entrada sin artefacto citado no se puede probar ajena al delta: re-juzgar
+jq '.compliance=[{id:"X-9",covered:true,note:"sin test citado"}]' "$V" > "$V.tmp" && mv "$V.tmp" "$V"
+printf 'otra cosa\n' > "$WT/tests/billing.test.js"
+gitc add -A && gitc commit -q -m "otro fix"
+THIRD="$(gitc rev-parse HEAD)"
+mk_ev EV-TEST-999999999999 impl-atlas test "$THIRD"
+bash "$WS/scripts/verdict-scaffold.sh" --rebase T1 atlas revisor-1 >/dev/null 2>&1
+assert_contains "$(jq -c '.compliance[0]' "$V")" "rejudge" "entrada sin artefacto citado: se re-juzga (sesgo a fail-closed)"
+
+echo
+echo "── --rebase: los fail-closed"
+
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --rebase --force T1 atlas 2>&1)"; rc=$?
+assert_eq 1 "$rc" "--force y --rebase juntos: exit 1"
+assert_contains "$out" "opuestos" "explica por qué son incompatibles"
+
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --rebase T1 atlas revisor-1 2>&1)"; rc=$?
+assert_eq 3 "$rc" "rebase sobre el mismo commit: exit 3"
+assert_contains "$out" "no hay delta" "dice que no hay delta que rebasear"
+
+mv "$V" "$WS/tasks/T1/guardado.json"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --rebase T1 atlas revisor-1 2>&1)"; rc=$?
+assert_eq 3 "$rc" "rebase sin veredicto previo: exit 3"
+assert_contains "$out" "no hay veredicto previo" "explica que falta la base"
+
+jq '.commit="0000000000000000000000000000000000000000"' "$WS/tasks/T1/guardado.json" > "$V"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --rebase T1 atlas revisor-1 2>&1)"; rc=$?
+assert_eq 3 "$rc" "rebase con commit base inexistente: exit 3"
+assert_contains "$out" "ya no existe" "no arrastra juicio a ciegas si el commit base desapareció"
+rm -f "$V"
+
 # 7. ids inválidos → exit 1 (sin traversal)
 bash "$WS/scripts/verdict-scaffold.sh" "../evil" atlas >/dev/null 2>&1 && fail "task traversal pasó" || pass "task-id inválido: exit 1"
 bash "$WS/scripts/verdict-scaffold.sh" T1 "re/po" >/dev/null 2>&1 && fail "repo traversal pasó" || pass "repo inválido: exit 1"

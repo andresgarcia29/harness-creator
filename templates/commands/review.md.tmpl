@@ -51,11 +51,16 @@ reporta el código de error.
    el reviewer debe entregar su lista COMPLETA en la ronda 1, y los
    `non_blocking` se convierten en beads de seguimiento, nunca en otra
    ronda. Loop máx {{LOOP_BUDGET}}: implementer corrige SOLO blocking,
-   re-corre el precheck → **re-review INCREMENTAL**: el reviewer
-   re-evalúa `git diff <commit-del-veredicto-anterior>..HEAD` + el
-   cierre de cada blocking, no el cambio completo otra vez; el veredicto
-   nuevo vuelve a atar al HEAD completo. QA solo se repite si el fix
-   tocó comportamiento que QA ejercita. Presupuesto agotado → humano,
+   re-corre el precheck → **re-review INCREMENTAL**, que ya es un
+   mecanismo y no una intención: `scripts/verdict-scaffold.sh --rebase
+   <task-id> <repo>`. Regenera la evidencia contra el HEAD nuevo
+   (fail-closed: la prueba caduca con el commit) y ARRASTRA el
+   `compliance[]` que el delta no tocó, marcado con `carried_from`. El
+   reviewer juzga SOLO las entradas con `.rejudge` más el cierre de cada
+   blocking, no el cambio completo otra vez. **Nunca uses `--force` en el
+   loop de rework**: borra la matriz de compliance entera y te cobra un
+   re-review completo por un fix de una línea. QA solo se repite si el
+   fix tocó comportamiento que QA ejercita. Presupuesto agotado → humano,
    con el historial de veredictos.
 5. Antes de anunciar, comprueba que el veredicto tiene `schema: 1`, task, repo,
    HEAD completo, reviewer, implementation_agents y al menos un ID en

@@ -24,12 +24,22 @@ BUS="$WS/.harness/events.jsonl"
 OUT_DIR="$WS/.harness/sessions"
 
 command -v jq >/dev/null 2>&1 || exit 0
-[ -s "$BUS" ] || exit 0
 
 payload="$(cat 2>/dev/null)"
 [ -n "$payload" ] || exit 0
 session="$(printf '%s' "$payload" | jq -r '.session_id // ""' 2>/dev/null)"
 [ -n "$session" ] || exit 0
+
+# El puntero de tarea que track-read.sh mantiene para ESTA sesión muere con
+# ella: es lo que le permite atribuir las lecturas del workspace, y sin sesión
+# no atribuye nada. Se borra acá, antes de cualquier salida temprana, porque
+# es exacto (sabemos qué sesión terminó) en vez de esperar una caducidad.
+case "$session" in
+  *[!A-Za-z0-9._-]*) : ;;
+  *) rm -f "$WS/.harness/session-task/$session" 2>/dev/null || true ;;
+esac
+
+[ -s "$BUS" ] || exit 0
 
 # EL BUS ES COMPARTIDO. En este workspace corren varias sesiones de Claude
 # Code a la vez sobre el mismo .harness/events.jsonl, así que "lo que pasó en

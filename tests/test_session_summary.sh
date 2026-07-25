@@ -109,6 +109,21 @@ echo "── persistencia y fail-open"
 
 assert_file "$WS/.harness/sessions/sess-actual.md" "escribe .harness/sessions/<id>.md"
 
+# El puntero de tarea de track-read.sh muere con su sesión: si no, se acumula
+# uno por sesión para siempre.
+mkdir -p "$WS/.harness/session-task"
+touch "$WS/.harness/session-task/sess-actual" "$WS/.harness/session-task/sess-otra"
+run_hook sess-actual >/dev/null 2>&1
+assert_no_file "$WS/.harness/session-task/sess-actual" "borra SU puntero de tarea al cerrar"
+assert_file "$WS/.harness/session-task/sess-otra" "no toca el puntero de las otras sesiones"
+
+# Y lo borra aunque no haya resumen que escribir (el bus vacío sale temprano).
+touch "$WS/.harness/session-task/sess-vacia"
+bus_backup="$(cat "$BUS")"; : > "$BUS"
+run_hook sess-vacia >/dev/null 2>&1
+assert_no_file "$WS/.harness/session-task/sess-vacia" "limpia el puntero incluso sin resumen"
+printf '%s\n' "$bus_backup" > "$BUS"
+
 # Sesión desconocida: no hay ventana que acotar, así que no inventa un resumen.
 out="$(run_hook sess-fantasma)"; st=$?
 assert_eq 0 "$st" "sesión sin eventos: sale 0"

@@ -120,6 +120,108 @@ class PolicyTest(unittest.TestCase):
         self.assertEqual(result.returncode, 3)
         self.assertIn("POLICY-LANE-002", result.stderr)
 
+    # ── rollback: el caso de campo que obligó a editar state.json a mano ──
+    # Una transición review → ship adelantada por error dejaba la tarea sin
+    # retorno: allowed_transitions["ship"] es ["deploy"], y el único camino
+    # atrás vive en escalate, que exige subir de carril (imposible en full).
+
+    def reach(self, *phases):
+        self.assertEqual(self.run_policy("init", self.task).returncode, 0)
+        for phase in phases:
+            self.assertEqual(self.transition(phase).returncode, 0)
+
+    def state(self):
+        return json.loads((self.task / "state.json").read_text())
+
+    def test_ship_phase_has_no_forward_path_back(self):
+        self.reach("rfc", "implement", "review", "ship")
+        stuck = self.transition("review")
+        self.assertEqual(stuck.returncode, 3)
+        self.assertIn("POLICY-TRANSITION-001", stuck.stderr)
+        # escalate tampoco: en lane=full ya no hay carril superior
+        escalate = self.run_policy("escalate", self.task, "--to", "full", "--actor", "human")
+        self.assertEqual(escalate.returncode, 3)
+        self.assertIn("POLICY-LANE-002", escalate.stderr)
+
+    def test_rollback_undoes_a_wrong_advance_and_leaves_a_record(self):
+        self.reach("rfc", "implement", "review", "ship")
+        rounds_before = self.state()["review_rounds"]
+        done = self.run_policy("rollback", self.task, "review", "--actor", "human",
+                               "--reason", "transición adelantada por error")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        state = self.state()
+        self.assertEqual(state["phase"], "review")
+        # el rollback deshace, no cobra una ronda de review que nunca ocurrió
+        self.assertEqual(state["review_rounds"], rounds_before)
+        last = state["history"][-1]
+        self.assertEqual(last["kind"], "rollback")
+        self.assertEqual((last["from"], last["to"]), ("ship", "review"))
+        self.assertEqual(last["reason"], "transición adelantada por error")
+
+    def test_rollback_only_goes_backwards_and_demands_a_reason(self):
+        self.reach("rfc", "implement")
+        forward = self.run_policy("rollback", self.task, "review", "--actor", "human",
+                                  "--reason", "quiero saltarme el grafo")
+        self.assertEqual(forward.returncode, 3)
+        self.assertIn("POLICY-ROLLBACK-003", forward.stderr)
+        same = self.run_policy("rollback", self.task, "implement", "--actor", "human",
+                               "--reason", "no-op")
+        self.assertIn("POLICY-ROLLBACK-003", same.stderr)
+        unknown = self.run_policy("rollback", self.task, "produccion", "--actor", "human",
+                                  "--reason", "typo")
+        self.assertIn("POLICY-ROLLBACK-002", unknown.stderr)
+        mute = self.run_policy("rollback", self.task, "rfc", "--actor", "human", "--reason", "   ")
+        self.assertEqual(mute.returncode, 3)
+        self.assertIn("POLICY-ROLLBACK-004", mute.stderr)
+
+    def test_rollback_refuses_a_blocked_task(self):
+        self.reach("rfc", "implement")
+        self.assertEqual(self.run_policy("pause", self.task, "--reason", "adr_conflict",
+                                         "--detail", "ADR-42", "--actor", "human").returncode, 0)
+        blocked = self.run_policy("rollback", self.task, "rfc", "--actor", "human",
+                                  "--reason", "confundí pausa con rollback")
+        self.assertEqual(blocked.returncode, 3)
+        self.assertIn("POLICY-ROLLBACK-001", blocked.stderr)
+
+    # ── history como control, no como prosa ──
+
+    def valid_verdict(self, commit):
+        verdict = self.task / "verdict-atlas.json"
+        verdict.write_text(json.dumps({
+            "schema": 1, "commit": commit, "verdict": "pass", "qa": "pass",
+            "reviewer": "reviewer-atlas", "implementation_agents": ["agent-a"],
+        }))
+        return verdict
+
+    def test_ship_rejects_a_phase_nobody_declared(self):
+        self.reach("rfc", "implement", "review", "ship")
+        commit = "b" * 40
+        verdict = self.valid_verdict(commit)
+        # la edición a mano: phase vuelve a review sin pasar por el motor
+        state = self.state()
+        state["phase"] = "review"
+        (self.task / "state.json").write_text(json.dumps(state))
+        forged = self.run_policy("validate-ship", self.task, "--commit", commit,
+                                 "--verdict", verdict)
+        self.assertEqual(forged.returncode, 3)
+        self.assertIn("POLICY-STATE-003", forged.stderr)
+        # el mismo destino, declarado por rollback, sí pasa
+        state["phase"] = "ship"
+        (self.task / "state.json").write_text(json.dumps(state))
+        self.assertEqual(self.run_policy("rollback", self.task, "review", "--actor", "human",
+                                         "--reason", "transición adelantada").returncode, 0)
+        declared = self.run_policy("validate-ship", self.task, "--commit", commit,
+                                   "--verdict", verdict)
+        self.assertEqual(declared.returncode, 0, declared.stderr)
+
+    def test_untouched_task_still_ships(self):
+        # el invariante no puede romper el camino feliz de siempre
+        self.reach("rfc", "implement", "review")
+        commit = "c" * 40
+        ok = self.run_policy("validate-ship", self.task, "--commit", commit,
+                             "--verdict", self.valid_verdict(commit))
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+
     def test_dag_rejects_cycles_and_accepts_parallel_branches(self):
         dag = self.task / "dag.json"
         dag.write_text(json.dumps({"schema": 1, "tasks": [

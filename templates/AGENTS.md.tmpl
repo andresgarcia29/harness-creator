@@ -18,8 +18,14 @@ Code lee `CLAUDE.md` (mismo mapa, más los hooks/comandos nativos).
 4. **Los valores de secretos jamás tocan chat, commits ni logs.** Solo
    `scripts/with-secrets.sh <cmd>` inyecta; `.secrets` no se lee.
 5. **Las fases de una tarea las mueve `scripts/harness-policy.py`**
-   (`transition`, `pause`, `escalate`); el estado es
-   `tasks/<id>/state.json` y no se edita a mano.
+   (`transition`, `pause`, `escalate`, `rollback`); el estado es
+   `tasks/<id>/state.json` y no se edita a mano. Si avanzaste una fase por
+   error, el camino de vuelta es
+   `harness-policy.py rollback <task-dir> <fase> --actor <quien> --reason <por qué>`:
+   solo va hacia atrás, no cobra una ronda de review y deja registro en
+   `history[]`. Editar el archivo a mano ya no es "lo mismo pero rápido":
+   `validate-ship` compara `phase` contra el último movimiento registrado y
+   una fase que nadie declaró muere en `POLICY-STATE-003`.
 6. **Contratos proto: expand/contract siempre** (buf breaking es gate).
 7. Decisiones de arquitectura irreversibles → ADR `PROPOSED` en
    `docs/adr/` y esperar ratificación humana.

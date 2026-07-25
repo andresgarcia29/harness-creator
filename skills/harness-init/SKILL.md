@@ -228,6 +228,7 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `.claude/hooks/{block-direct-push,guard-canonical}.sh` | hooks/ | siempre (fail-CLOSED: bloquean) |
 | `.claude/hooks/guard-build-slot.sh` | hooks/ | siempre (fail-OPEN: bloquea `docker build/run` pelado, Ley 8; ya registrado en settings.json.tmpl junto a block-direct-push) |
 | `.claude/hooks/{track-read,ui-emit}.sh` | hooks/ | siempre (fail-OPEN: observan, `async: true`). track-read alimenta `gate_evidence` de ship.sh; ui-emit alimenta `make ui` |
+| `.claude/hooks/session-summary.sh` | hooks/ | siempre (fail-OPEN: observa, registrado en `SessionEnd`). Al cerrar la sesión escribe `.harness/sessions/<id>.md` con lo que el harness decidió, derivado de `.harness/events.jsonl`. Es determinista a propósito: el agente que resume de memoria omite justo el gate rojo y el supuesto sin confirmar |
 | `scripts/ui/{panel.sh,server.py,pricing.json,dist/}` | ui/ | siempre — el panel (`make ui`). `panel.sh` prefiere el **daemon Go `harnessd`** (multi-máquina, terminales en vivo, sonda de MCP, archivar, liveness) y lo baja del release privado si falta; cae a `server.py` (Python stdlib) si no hay binario. El frontend React viaja COMPILADO en dist/ (la fuente vive en el plugin, `templates/ui/web/`) — el usuario jamás necesita Node |
 | `.claude/agents/{architect,implementer,reviewer}.md` | agents/*.tmpl | siempre |
 | `.claude/agents/qa.md` | agents/qa.md.tmpl | si hay frontend/mobile o canary |

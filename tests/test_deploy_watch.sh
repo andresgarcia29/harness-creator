@@ -129,4 +129,47 @@ out="$(run_watch terraform-core)"
 assert_contains "$out" "driver de deploy: actions" "answers gana sobre el kind inferido"
 assert_not_contains "$out" "no se verifica con este watcher" "y por lo tanto SÍ se verifica"
 
+echo
+echo "── el prefijo es un prefijo, no una concatenación ciega"
+# Bug de campo P1: prefijo "acme" + repo "acme-landing" daba "acmeacme-landing",
+# una app que no existe en ningún cluster. El watcher esperó 900 s por ella y
+# propuso revertir un deploy que estaba SANO.
+app_of() {  # app_of <prefijo> <repo> → el APP que construye el script
+  sed -e "s|{{ARGO_APP_PREFIX}}|$1|g" "$ROOT/templates/scripts/deploy-watch.sh.tmpl" \
+    | awk '/^app_name\(\)/{f=1} f{print} f&&/^\}/{exit}' > "$WS/app.sh"
+  ( . "$WS/app.sh"; app_name "$2" )
+}
+assert_eq "acme-landing"  "$(app_of acme acme-landing)"  "repo que YA trae el prefijo: no se duplica"
+assert_eq "acme-landing"  "$(app_of acme- acme-landing)" "prefijo con guion y repo que lo trae: tampoco"
+assert_eq "acme-landing"  "$(app_of acme landing)"       "prefijo sin guion: lo agrega"
+assert_eq "acme-landing"  "$(app_of acme- landing)"      "prefijo con guion: no lo duplica"
+assert_eq "landing"       "$(app_of '' landing)"         "sin prefijo: el nombre del repo tal cual"
+
+echo
+echo "── sin credenciales de ArgoCD no se espera 900s ni se propone revertir"
+: > "$WS/.harness/events.jsonl"
+rm -f "$WS/harness-answers.yaml"
+printf 'repos:\n  - name: atlas\n    kind: service\n' > "$WS/manifest.yaml"
+cat > "$WS/bin/argocd" <<'STUB'
+#!/usr/bin/env bash
+sleep 900   # si el script llega hasta aquí, el bug sigue vivo
+STUB
+chmod +x "$WS/bin/argocd"
+start=$(date +%s)
+out="$( cd "$WS" && CLAUDE_PROJECT_DIR="$WS" PATH="$WS/bin:$PATH" \
+        HOME="$WS/nohome" ARGOCD_AUTH_TOKEN="" ARGOCD_URL="" \
+        bash scripts/deploy-watch.sh T1 atlas 2>&1 )"
+elapsed=$(( $(date +%s) - start ))
+[ "$elapsed" -lt 30 ] && pass "no se cuelga esperando (tardó ${elapsed}s, no 900)" \
+  || fail "esperó ${elapsed}s: sigue consultando sin credenciales"
+assert_contains "$out" "sin credenciales" "dice que el problema son las credenciales"
+assert_contains "$out" "ceguera, no un deploy rojo" "distingue ceguera de deploy enfermo"
+assert_contains "$out" "with-secrets.sh" "da la remediación exacta"
+# Ojo con el matcheo ingenuo: el propio mensaje dice "NO propongo revertir
+# nada". Lo que no puede aparecer es la PROPUESTA destructiva concreta.
+assert_not_contains "$out" "git revert" "NO propone el revert destructivo"
+assert_not_contains "$out" "revert manual sugerido" "ni la variante manual"
+assert_not_contains "$out" "🔴" "y no marca el deploy como rojo"
+assert_contains "$(bus)" "ArgoCD sin credenciales" "queda como supuesto en el ledger"
+
 t_done

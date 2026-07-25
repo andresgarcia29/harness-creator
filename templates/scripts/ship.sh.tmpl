@@ -199,20 +199,56 @@ run_lang_gates() {
     # errores fantasma, un intento de landing perdido, y CERO líneas de código
     # que tocar: con las deps instaladas el gate pasó solo. Un rojo falso no
     # cuesta una ronda nada más, enseña al agente a desconfiar de los gates.
-    if [ ! -d node_modules ]; then
-      echo "⛔ el gate ts NO PUEDE CORRER: este worktree no tiene node_modules."
-      echo "   No reporto rojo porque no tengo nada que juzgar: los errores de"
-      echo "   tipos que verías serían fantasma (faltan los .d.ts de las deps),"
-      echo "   no deuda real del cambio."
-      echo "   ↳ remediación: bash scripts/fe.sh 'install' $REPO $TASK"
-      exit 3
-    fi
-    if ls astro.config.* >/dev/null 2>&1 && [ ! -f .astro/types.d.ts ]; then
-      echo "⛔ el gate ts NO PUEDE CORRER: proyecto Astro sin .astro/types.d.ts."
-      echo "   Ese archivo lo genera 'astro sync' y es el que declara astro:assets"
-      echo "   e import.meta.env. Sin él, tsc los reporta como errores fantasma."
-      echo "   ↳ remediación: (cd $WT && npx astro sync)"
-      exit 3
+    # PREPARAR NO ES VERIFICAR, y por eso esto se puede hacer solo.
+    #
+    # ship.sh verifica y no actúa: un gate que "arregla" el código que juzga
+    # deja de ser un gate. Pero instalar dependencias no toca el artefacto que
+    # se shippea, es la condición para poder mirarlo. La frontera se sostiene
+    # con una PRUEBA, no con una promesa: después de preparar, el árbol
+    # VERSIONADO tiene que estar idéntico. Si el install movió el lockfile o
+    # cualquier archivo trackeado, eso ya no fue preparar y el gate se niega.
+    #
+    # Antes esto era una negativa que te devolvía el trabajo a vos. La
+    # remediación era mecánica y siempre la misma, así que pedirla era una
+    # parada de ceremonia: el humano corría dos comandos y el gate pasaba sin
+    # tocar una línea de código.
+    if [ ! -d node_modules ] || { ls astro.config.* >/dev/null 2>&1 && [ ! -f .astro/types.d.ts ]; }; then
+      before="$(git status --porcelain -uno -- . | sort)"
+      if [ ! -d node_modules ]; then
+        echo "→ preparo la toolchain: faltan node_modules (worktree recién creado)"
+        bash "$WS/scripts/fe.sh" 'install' "$REPO" "$TASK" >/dev/null 2>&1 || true
+        # Verifico que la preparación FUNCIONÓ. Dar por hecho que un comando
+        # hizo lo suyo es la misma fe ciega que este gate existe para evitar.
+        if [ ! -d node_modules ]; then
+          echo "⛔ el gate ts NO PUEDE CORRER: no pude instalar las dependencias de $REPO."
+          echo "   Sin ellas los errores de tipos serían fantasma (faltan los .d.ts"
+          echo "   de las deps), no deuda real del cambio."
+          echo "   ↳ remediación: bash scripts/fe.sh 'install' $REPO $TASK"
+          exit 3
+        fi
+      fi
+      if ls astro.config.* >/dev/null 2>&1 && [ ! -f .astro/types.d.ts ]; then
+        echo "→ preparo la toolchain: falta .astro/types.d.ts (lo genera astro sync)"
+        npx astro sync >/dev/null 2>&1 || true
+        if [ ! -f .astro/types.d.ts ]; then
+          echo "⛔ el gate ts NO PUEDE CORRER: 'astro sync' no generó .astro/types.d.ts."
+          echo "   Ese archivo declara astro:assets e import.meta.env; sin él, tsc los"
+          echo "   reporta como errores fantasma."
+          echo "   ↳ remediación: (cd $WT && npx astro sync) y mirá qué dice"
+          exit 3
+        fi
+      fi
+      after="$(git status --porcelain -uno -- . | sort)"
+      if [ "$before" != "$after" ]; then
+        echo "⛔ preparar la toolchain modificó archivos VERSIONADOS de $REPO:"
+        printf '%s\n' "$after" | head -5 | sed 's/^/     · /'
+        echo "   Eso ya no es preparar: es cambiar el artefacto que este gate juzga,"
+        echo "   y ahí me detengo. Suele ser un lockfile desincronizado del package.json."
+        echo "   ↳ remediación: corre el install en el worktree, revisá el diff y"
+        echo "     commiteálo como parte del cambio si corresponde."
+        exit 3
+      fi
+      echo "  ✅ toolchain lista (sin tocar archivos versionados), sigo con el gate"
     fi
     # EL TYPECHECK DEL REPO MANDA SOBRE EL NUESTRO. `tsc --noEmit` no es el
     # typecheck de todo proyecto TS: uno de Astro se chequea con `astro check`

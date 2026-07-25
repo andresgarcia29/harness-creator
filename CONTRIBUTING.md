@@ -30,6 +30,30 @@ hay juicio. De ahí se derivan las reglas de este repo:
    coma, dos puntos o paréntesis. Hay un ratchet en la suite: el
    conteo existente solo puede BAJAR, y un PR que lo sube no pasa.
    (El "──" de las cajas de terminal es otro carácter y se permite.)
+7. **Este repo no es de ningún cliente.** `harness-creator` es un
+   instalador universal, y el proyecto donde nació es solo el primero
+   que lo usó. Ningún nombre de empresa, cliente, tenant, dominio,
+   organización de GitHub ni recurso concreto puede aparecer en lo que
+   se genera ni en la lógica del instalador. Los ejemplos usan nombres
+   neutros (`acme`, `example-org`, `svc-pagos`), y la procedencia de un
+   bug se cita como "caso de campo", nunca con el nombre de quien lo
+   sufrió. Hay ratchet en la suite: el conteo solo BAJA.
+8. **Un eje que varía entre proyectos se DETECTA y se DESPACHA, jamás
+   se cablea a un vendor.** Si el harness soporta algo que cambia de un
+   proyecto a otro (secretos, lenguajes, package managers, tickets,
+   modelos, **deploy**), la forma es siempre la misma: el discovery
+   tiene que poder VER las alternativas, la entrevista pregunta CUÁL es
+   la tuya en vez de pedir los valores de una, y el script despacha a
+   una función por implementación más un `none` explícito.
+
+   No es teoría: `secrets.sh` tiene siete funciones `pull_*`, `fe.sh`
+   detecta el package manager por lockfile y `ship.sh` elige el gate por
+   marcador de lenguaje. El único eje que se saltó la regla fue deploy,
+   cableado a ArgoCD y Kargo, y el resultado fue que a un repo de
+   terraform se le aplicó un modelo de Kubernetes y se propuso revertir
+   commits correctos. **Cablear un vendor convierte un instalador
+   universal en el instalador de quien lo escribió.** La suite verifica
+   que cada eje declarado tenga al menos dos implementaciones.
 
 ## Desarrollo
 

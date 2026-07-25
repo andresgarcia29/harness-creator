@@ -167,7 +167,7 @@ harness; cada agente es contexto y mantenimiento.
     deshabilita, respeta la regla de #5 (sin capacidades cronjob-only).
 13. **Versionado de la instancia**: ¿el workspace se versiona en sí
     mismo (git init aquí) o existe un repo destino (ej.
-    corvux-harness)? Registra `instance.repo` en answers. Si un repo
+    `acme-harness`)? Registra `instance.repo` en answers. Si un repo
     clonado en repos/ ES ese destino, EXCLÚYELO del clustering, del
     DAG y del manifest — no es un repo de producto.
 14. **Bootstrap de secretos** (si source ≠ env): explica el flujo y

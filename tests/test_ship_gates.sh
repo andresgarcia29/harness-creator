@@ -242,6 +242,56 @@ run_lang "$WS/fe3" >/dev/null 2>&1 \
   && pass "node con deps: el gate corre" || fail "node preparado: el gate no debió negarse"
 
 echo
+echo "── gate ts: se cura solo, pero sin tocar el artefacto que juzga"
+# Preparar no es verificar: instalar deps no cambia lo que se shippea, es la
+# condición para poder mirarlo. La frontera se sostiene con una prueba, no con
+# una promesa: si preparar movió un archivo VERSIONADO, el gate se detiene.
+
+mkdir -p "$WS/scripts"
+mk_fe_stub() {  # mk_fe_stub <cuerpo> : instala el fe.sh que verá el gate
+  printf '#!/usr/bin/env bash\ncd "%s" || exit 1\n%s\n' "$1" "$2" > "$WS/scripts/fe.sh"
+}
+
+# 9. la preparación funciona → el gate sigue, y lo dice
+mk_fe "$WS/fe8"
+mk_fe_stub "$WS/fe8" 'mkdir -p node_modules'
+out="$(run_lang "$WS/fe8")"; rc=$?
+assert_eq 0 "$rc" "prep exitosa: el gate continúa en vez de devolverte el trabajo"
+assert_contains "$out" "preparo la toolchain" "dice que preparó (no lo hace a escondidas)"
+assert_contains "$out" "sin tocar archivos versionados" "declara que respetó la frontera"
+
+# 10. astro sync que sí genera los tipos → sigue
+mk_fe "$WS/fe9"; touch "$WS/fe9/astro.config.mjs"
+cd "$WS/fe9" && git add -A && git commit -qm astro && cd "$WS"
+mk_fe_stub "$WS/fe9" 'mkdir -p node_modules'
+out="$( ( cd "$WS/fe9"; WT="$WS/fe9"; REPO=fe; TASK=T1; WS="$WS"
+          gate() { :; }; npm() { :; }
+          npx() { if [ "$*" = "astro sync" ]; then mkdir -p .astro && touch .astro/types.d.ts; fi; }
+          . "$WS/lang.sh"; run_lang_gates ) 2>&1 )"; rc=$?
+assert_eq 0 "$rc" "astro sync exitoso: el gate continúa"
+assert_contains "$out" "types.d.ts" "nombra lo que le faltaba"
+
+# 11. LA FRONTERA: si preparar ensucia un archivo versionado, se detiene
+mk_fe "$WS/fe10"; cd "$WS/fe10"
+echo '{"lockfileVersion":1}' > package-lock.json
+git add -A && git commit -qm lock; cd "$WS"
+mk_fe_stub "$WS/fe10" 'mkdir -p node_modules; echo "{\"lockfileVersion\":2}" > package-lock.json'
+out="$(run_lang "$WS/fe10")"; rc=$?
+assert_eq 3 "$rc" "prep que toca un archivo versionado: el gate se detiene"
+assert_contains "$out" "archivos VERSIONADOS" "nombra la frontera cruzada"
+assert_contains "$out" "package-lock.json" "muestra qué archivo se movió"
+assert_contains "$out" "artefacto que este gate juzga" "explica por qué eso ya no es preparar"
+
+# 12. un install que dice OK pero no deja node_modules no cuela
+mk_fe "$WS/fe11"
+mk_fe_stub "$WS/fe11" 'exit 0'
+out="$(run_lang "$WS/fe11")"; rc=$?
+assert_eq 3 "$rc" "prep que miente (exit 0 sin instalar): el gate no le cree"
+assert_contains "$out" "no pude instalar" "verifica el resultado, no el exit code"
+
+cd "$WS"
+
+echo
 echo "── gate ts: lo que no encuentra qué verificar, lo dice"
 # Bug de campo: --precheck no corría ni typecheck ni tests en repos TS, y por
 # eso un commit roto llegó hasta el gate de ship. Dos agujeros, los dos

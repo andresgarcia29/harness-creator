@@ -113,6 +113,10 @@ scan_repo() {
   find "$dir" -maxdepth 2 -name "Dockerfile*" -print -quit 2>/dev/null | grep -q . && signals+=("docker")
   find "$dir" -maxdepth 3 -name "*.proto" -print -quit 2>/dev/null | grep -q . && signals+=("proto")
   find "$dir" -maxdepth 2 -name "docker-compose*.y*ml" -print -quit 2>/dev/null | grep -q . && signals+=("compose")
+  # migrations: el catálogo filtra squawk y goose por "repos con migraciones
+  # SQL", una señal que nadie emitía, así que esas capacidades jamás se
+  # ofrecían aunque la evidencia estuviera en el repo.
+  find "$dir" -maxdepth 3 -path "*/migrations/*" -name "*.sql" -print -quit 2>/dev/null | grep -q . && signals+=("migrations")
   grep -rq "argoproj.io" "$dir" --include="*.yaml" 2>/dev/null && signals+=("argocd")
   grep -rq "kargo.akuity.io" "$dir" --include="*.yaml" 2>/dev/null && signals+=("kargo")
   grep -rq 'provider "google"' "$dir" --include="*.tf" 2>/dev/null && signals+=("gcp")

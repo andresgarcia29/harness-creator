@@ -47,22 +47,22 @@ falta de conocimiento: es que la regla estaba en prosa y no en un test.
 - [x] **`deploy-watch` revertía el sha del repo equivocado.** `tail -1` de
   `ship.log` sin filtrar por repo. Commit `98fdd56`.
 
-## P1: mienten sobre haber verificado
+## P1: mienten sobre haber verificado (cerrado, commit `9ddf69e`)
 
-- [ ] **`secrets.sh` con GCP Secret Manager reporta `✅` con todas las claves
+- [x] **`secrets.sh` con GCP Secret Manager reportaba `✅` con todas las claves
   fallidas.** `dump_sm` no incrementa `MISSED` y `pull_gcp_sm` cierra con un
   `✅` fijo en vez de llamar a `finish()`, que es justo lo que Vault y AWS sí
   hacen. Con gcloud sin autenticar, `.secrets` queda vacío y el script sale 0.
   *Arreglo*: dos líneas, copiando el patrón del vecino.
   `templates/scripts/secrets.sh.tmpl:47-58`.
-- [ ] **`vuln-watch` sin red reporta "limpio" y destruye la baseline.** El
+- [x] **`vuln-watch` sin red reportaba "limpio" y destruye la baseline.** El
   `|| true` se traga el fallo de osv-scanner, el archivo del día queda vacío, y
   la línea 27 sobreescribe la baseline con él. Al día siguiente, todas las
   vulnerabilidades preexistentes reaparecen como nuevas y el agente abre una
   tanda de PRs duplicados. *Arreglo*: distinguir "el scan falló" de "no hay
   nada", y no tocar la baseline en el primer caso.
   `templates/cronjobs/jobs/vuln-watch.sh:12-14,27-28`.
-- [ ] **`squawk` se salta en silencio, y el catálogo nunca lo ofrece.** Doble
+- [x] **`squawk` se saltaba en silencio, y el catálogo nunca lo ofrece.** Doble
   agujero sobre la misma migración: el gate se salta si el binario no está (a
   diferencia de `import-linter`, su vecino, que sí avisa), y el `detect:` del
   catálogo pide una señal de migraciones que el discovery no emite, así que
@@ -73,21 +73,21 @@ falta de conocimiento: es que la regla estaba en prosa y no en un test.
   `gh run list` falla en silencio con GitLab, Bitbucket o Gitea, y el job
   registra "detector limpio": CI rojo invisible.
   `templates/cronjobs/jobs/ci-doctor.sh:15-21`.
-- [ ] **El doctor nunca valida la vigencia del token de Vault.** Busca
+- [x] **El doctor nunca validaba la vigencia del token de Vault.** Busca
   `vault_addr:` en `harness-answers.yaml`, pero el esquema canónico (declarado
   FIJO) solo tiene `source:` y `refs:`. La variable sale vacía siempre y cae a
   "token presente (sin validar)", que es exactamente lo que el README jura que
   no pasa. `scripts/doctor.sh:140,151`.
-- [ ] **`mutation-sentinel`: "existe npx" cuenta como "hay herramienta de
+- [x] **`mutation-sentinel`: "existe npx" cuenta como "hay herramienta de
   mutación".** El skip honesto es casi inalcanzable, así que un ciclo donde no
   se mutó nada se registra como limpio.
   `templates/cronjobs/jobs/mutation-sentinel.sh:11-15`.
-- [ ] **`rule-miner`: una de sus dos señales está estructuralmente muerta.** El
+- [x] **`rule-miner`: una de sus dos señales estaba estructuralmente muerta.** El
   `grep '"blocking"' | jq` entrega una línea suelta de un JSON pretty-printed,
   que no es un documento válido; jq falla y el `2>/dev/null` lo silencia. La
   señal produce cero líneas siempre. *Arreglo*: correr jq sobre los archivos,
   sin grep. `templates/cronjobs/jobs/rule-miner.sh:18-20`.
-- [ ] **El doctor no avisa si falta `.mcp.json`.** El bloque que verifica los
+- [x] **El doctor no avisaba si falta `.mcp.json`.** El bloque que verifica los
   MCPs elegidos está condicionado a que el archivo exista y no tiene `else`.
   Con MCPs declarados en answers y el archivo ausente, el doctor sale verde y
   los agentes arrancan sin ningún servidor. `scripts/doctor.sh:65-78`.

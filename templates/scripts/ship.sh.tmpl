@@ -367,10 +367,23 @@ run_lang_gates() {
     else echo "⚠️  .go-arch-lint.yml presente pero go-arch-lint no instalado — gate saltado"; fi
   fi
   # squawk: lint de migraciones SQL NUEVAS del diff (las viejas no se re-litigan)
-  if command -v squawk >/dev/null; then
-    local migs
-    migs="$(git diff origin/main..HEAD --name-only --diff-filter=A | grep -E '(^|/)migrations?/.*\.sql$' || true)"
-    if [ -n "$migs" ]; then gate "squawk (migraciones)"; squawk $migs; fi
+  # La migración manda, no la herramienta: primero se mira el diff y DESPUÉS
+  # si hay con qué lintearlo. Al revés, sin squawk instalado el bloque entero
+  # se saltaba en silencio y un ALTER bloqueante llegaba a prod por el mismo
+  # agujero que squawk existe para cerrar. import-linter y go-arch-lint, sus
+  # vecinos de arriba, ya avisaban honestamente; este era el único que no.
+  local migs
+  migs="$(git diff origin/main..HEAD --name-only --diff-filter=A | grep -E '(^|/)migrations?/.*\.sql$' || true)"
+  if [ -n "$migs" ]; then
+    if command -v squawk >/dev/null; then
+      gate "squawk (migraciones)"; squawk $migs
+    else
+      echo "⚠️  este cambio agrega migraciones SQL y squawk NO está instalado:"
+      printf '%s\n' "$migs" | sed 's/^/     · /'
+      echo "   NO se lintearon: un ALTER bloqueante o un índice sin CONCURRENTLY"
+      echo "   pasaría sin que nadie lo vea. Instalá squawk (npm i -g squawk-cli)."
+      emit assumption "migraciones de $REPO NO lintadas: squawk no está instalado"
+    fi
   fi
   if [ -f buf.yaml ]; then
     LANG_SEEN=1

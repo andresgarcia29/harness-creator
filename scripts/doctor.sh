@@ -75,6 +75,16 @@ if [ -f "$WS/.mcp.json" ]; then
   else
     fail ".mcp.json inválido" "revisa la sintaxis JSON"
   fi
+else
+  # Sin else, un .mcp.json ausente saltaba la verificación entera y el doctor
+  # podía salir verde: los agentes arrancaban sin ninguno de los MCP elegidos
+  # y nadie decía que el archivo faltaba.
+  if grep -qE '^[[:space:]]*mcp:' "$ANSWERS" 2>/dev/null; then
+    fail ".mcp.json FALTA pero harness-answers.yaml declara MCPs" \
+      "re-corre /harness-init . (modo update) para regenerarlo"
+  else
+    ok "sin .mcp.json y sin MCPs declarados (coherente)"
+  fi
 fi
 
 # 4 · Hook de protección de main registrado y ejecutable
@@ -137,7 +147,14 @@ if [ -f "$ANSWERS" ]; then
       warn "sin token de Vault — corre scripts/bootstrap.sh (te lo pide interactivo, fuera del chat)"
     else
       # VIGENCIA, no solo presencia: un token muerto es peor que ninguno
-      vaddr="$(grep -E '^[[:space:]]+vault_addr:' "$ANSWERS" | head -1 | awk '{print $2}' | tr -d '"')"
+      # El esquema de answers NO tiene vault_addr (solo source y refs), así que
+      # este grep salía SIEMPRE vacío y la validación de vigencia jamás corría:
+      # el doctor decía "presente (sin validar)" y el token muerto aparecía a
+      # mitad de pipeline, que es exactamente lo que promete evitar.
+      # La dirección sí existe, renderizada, en el secrets.sh de la instancia.
+      vaddr="${VAULT_ADDR:-}"
+      [ -n "$vaddr" ] || vaddr="$(grep -E '^[[:space:]]*export VAULT_ADDR=' "$WS/scripts/secrets.sh" 2>/dev/null \
+        | head -1 | sed -E 's/.*VAULT_ADDR="?([^"]*)"?.*/\1/')"
       if command -v vault >/dev/null && [ -n "$vaddr" ]; then
         if VAULT_ADDR="$vaddr" VAULT_TOKEN="$(cat "$tokfile")" vault token lookup >/dev/null 2>&1; then
           ok "token de Vault VÁLIDO"

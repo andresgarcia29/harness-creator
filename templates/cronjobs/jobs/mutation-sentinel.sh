@@ -13,6 +13,11 @@ detect() {
   command -v mutmut >/dev/null && any_tool=1
   command -v npx >/dev/null && any_tool=1   # stryker (TS/JS) vía npx
   [ "$any_tool" -eq 1 ] || return 3
+  # "npx existe" NO es "hay herramienta de mutación": npx está en toda máquina
+  # con node, así que el return 3 de arriba era casi inalcanzable y un ciclo
+  # donde NADA se mutó se registraba como limpio. Se cuenta lo que de verdad
+  # corrió, y cero mutaciones es un skip honesto, no un verde.
+  local mutated=0
   : > "$FINDINGS"
   for r in repos/*/; do
     [ -d "$r/.git" ] || continue
@@ -20,18 +25,21 @@ detect() {
     local changed; changed="$(git -C "$r" diff --name-only "@{7 days ago}" 2>/dev/null | grep -vE '_test\.|test_' || true)"
     [ -n "$changed" ] || continue
     if [ -f "$r/go.mod" ] && command -v go-mutesting >/dev/null; then
+      mutated=1
       local pkgs; pkgs="$(echo "$changed" | grep '\.go$' | xargs -I{} dirname {} 2>/dev/null | sort -u | head -5)"
       [ -n "$pkgs" ] && (cd "$r" && echo "$pkgs" | while read -r p; do
         timeout 600 go-mutesting "./$p/" 2>/dev/null | grep -E "^FAIL" | sed "s|^|$name: |"
       done) >> "$FINDINGS" || true
     fi
     if [ -f "$r/pyproject.toml" ] && command -v mutmut >/dev/null; then
+      mutated=1
       (cd "$r" && timeout 900 mutmut run --paths-to-mutate "$(echo "$changed" | grep '\.py$' | paste -sd, -)" >/dev/null 2>&1
        mutmut results 2>/dev/null | grep -i surviv | sed "s|^|$name: |") >> "$FINDINGS" || true
     fi
     # stryker (TS/JS): solo si el repo YA tiene su config — sin config no se inventa
     if [ -f "$r/package.json" ] && command -v npx >/dev/null \
        && { [ -f "$r/stryker.conf.json" ] || [ -f "$r/stryker.config.json" ] || [ -f "$r/stryker.config.mjs" ]; }; then
+      mutated=1
       local ts_changed; ts_changed="$(echo "$changed" | grep -E '\.(ts|tsx|js|jsx)$' | head -5 | paste -sd, -)"
       [ -n "$ts_changed" ] && (cd "$r" \
         && timeout 900 npx stryker run --mutate "$ts_changed" --reporters json >/dev/null 2>&1
@@ -39,6 +47,12 @@ detect() {
           reports/mutation/mutation.json 2>/dev/null | head -20 | sed "s|^|$name: |") >> "$FINDINGS" || true
     fi
   done
+  # Cero mutaciones no es "los tests protegen": es que no se pudo preguntar.
+  # Un skip honesto (3) lo dice; un 0 lo habría registrado como limpio.
+  if [ "$mutated" -eq 0 ]; then
+    echo "ningún repo se pudo mutar: sin herramienta para sus stacks, o sin config de stryker" >&2
+    return 3
+  fi
   [ -s "$FINDINGS" ] && return 10 || return 0
 }
 

@@ -14,9 +14,14 @@ detect() {
     git -C "$r" log --since="30 days ago" --grep="^fix" --grep="^revert" --oneline 2>/dev/null \
       | sed "s|^|$name |" >> "$FINDINGS"
   done
-  # también: blocking repetidos en veredictos archivados
-  grep -h '"blocking"' tasks/archive/*/verdict-*.json 2>/dev/null \
-    | jq -r '.blocking[]? // empty' 2>/dev/null | sort | uniq -c | sort -rn | head -10 \
+  # también: blocking repetidos en veredictos archivados.
+  # El grep previo entregaba UNA LÍNEA de un JSON pretty-printed (los
+  # veredictos los escribe verdict-scaffold con jq -S, multilínea), que no es
+  # un documento válido: jq fallaba, el 2>/dev/null lo silenciaba, y esta
+  # señal producía CERO líneas siempre, sin importar cuántos blocking se
+  # repitieran. jq lee los archivos directo, que es para lo que sirve.
+  jq -r '.blocking[]? // empty' tasks/archive/*/verdict-*.json 2>/dev/null \
+    | sort | uniq -c | sort -rn | head -10 \
     | sed 's/^/veredicto-repetido: /' >> "$FINDINGS" || true
   local n; n=$(wc -l < "$FINDINGS" | tr -d ' ')
   [ "$n" -ge 5 ] && return 10 || return 0

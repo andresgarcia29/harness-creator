@@ -2,6 +2,15 @@
   "schema": 1,
   "workflow": {
     "initial_phase": "intake",
+    "phase_order": [
+      "intake",
+      "rfc",
+      "implement",
+      "review",
+      "ship",
+      "deploy",
+      "archive"
+    ],
     "allowed_transitions": {
       "intake": [
         "rfc"

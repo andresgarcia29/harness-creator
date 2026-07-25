@@ -47,6 +47,34 @@ def state_path(task_dir: Path) -> Path:
     return task_dir / "state.json"
 
 
+# Orden canónico de fases. Solo lo usa `rollback` para saber qué es "atrás";
+# el grafo de avance sigue siendo allowed_transitions. Fallback para
+# instancias viejas cuyo policy.json todavía no lo declara.
+DEFAULT_PHASE_ORDER = ["intake", "rfc", "implement", "review", "ship", "deploy", "archive"]
+
+
+def phase_order(policy: dict) -> list:
+    order = policy.get("workflow", {}).get("phase_order")
+    if isinstance(order, list) and all(isinstance(p, str) for p in order) and order:
+        return order
+    return DEFAULT_PHASE_ORDER
+
+
+def phase_is_declared(state: dict, policy: dict) -> bool:
+    """La fase actual tiene que ser la que dejó el último movimiento registrado.
+
+    Todo comando que mueve `phase` (transition, escalate, pause, resume,
+    rollback) hace append a `history`, así que el invariante es: o la tarea
+    nunca se movió y sigue en initial_phase, o history[-1].to == phase. Una
+    edición a mano de state.json rompe el invariante y por eso se detecta:
+    el `history` dejó de ser prosa y pasó a ser un control."""
+    history = state.get("history")
+    if not isinstance(history, list) or not history:
+        return state.get("phase") == policy.get("workflow", {}).get("initial_phase")
+    last = history[-1]
+    return isinstance(last, dict) and last.get("to") == state.get("phase")
+
+
 def lane_transitions(policy: dict, state: dict) -> dict:
     """Transiciones vigentes para el carril de la tarea.
 
@@ -236,6 +264,50 @@ def cmd_transition(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rollback(args: argparse.Namespace) -> int:
+    """Deshace un avance de fase equivocado, hacia atrás y dejando registro.
+
+    POR QUÉ EXISTE: `allowed_transitions` solo apunta hacia adelante, así que
+    una fase avanzada por error no tenía retorno (el único camino atrás vive
+    en `escalate`, y exige subir de carril: en lane=full es inalcanzable). El
+    resultado era editar state.json a mano, que AGENTS.md prohíbe, y encima
+    quedaba indistinguible de una edición no declarada.
+
+    NO toca review_rounds a propósito. `transition ... review` incrementa el
+    contador porque una ronda de review de verdad empieza; un rollback deshace
+    un movimiento que nunca ocurrió, y cobrarle una ronda castigaría al que
+    corrige el error con un POLICY-LIMIT-001 ajeno."""
+    task_dir = Path(args.task_dir).resolve()
+    policy = load(Path(args.policy), "policy")
+    path = state_path(task_dir)
+    state = load(path, "estado")
+    current = state.get("phase")
+    destination = args.phase
+    if current == "blocked":
+        fail("POLICY-ROLLBACK-001", "tarea bloqueada: usa resume, no rollback")
+    order = phase_order(policy)
+    if current not in order:
+        fail("POLICY-ROLLBACK-002", f"fase actual fuera del orden canónico: {current}")
+    if destination not in order:
+        fail("POLICY-ROLLBACK-002", f"destino desconocido: {destination} (orden: {', '.join(order)})")
+    if order.index(destination) >= order.index(current):
+        fail("POLICY-ROLLBACK-003",
+             f"rollback solo va hacia atrás: {current} → {destination}. "
+             "Para avanzar usa transition, que sí verifica los gates del grafo")
+    if not args.reason.strip():
+        fail("POLICY-ROLLBACK-004", "un rollback sin motivo es una edición a mano con otro nombre")
+    state.setdefault("history", []).append({
+        "kind": "rollback", "from": current, "to": destination,
+        "actor": args.actor, "reason": args.reason,
+    })
+    state["phase"] = destination
+    atomic(path, state)
+    print(f"↩️  {task_dir.name}: rollback {current} → {destination} ({args.reason})")
+    print(f"   review_rounds sin cambios ({state.get('review_rounds', 0)}): "
+          "el rollback deshace, no cobra una ronda")
+    return 0
+
+
 def cmd_validate_ship(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     policy = load(Path(args.policy), "policy")
@@ -244,6 +316,13 @@ def cmd_validate_ship(args: argparse.Namespace) -> int:
         fail("POLICY-STATE-002", "state.json no corresponde a la tarea")
     if state.get("phase") != "review":
         fail("POLICY-SHIP-001", f"ship requiere phase=review; actual={state.get('phase')}")
+    if not phase_is_declared(state, policy):
+        history = state.get("history") or []
+        last = history[-1].get("to") if history and isinstance(history[-1], dict) else "(sin history)"
+        fail("POLICY-STATE-003",
+             f"phase={state.get('phase')} no corresponde al último movimiento registrado "
+             f"({last}): state.json se editó a mano. Reconstruye el movimiento con "
+             "'harness-policy.py rollback|transition', que deja registro en history[]")
     maximum = policy.get("limits", {}).get("max_review_rounds", 3)
     if not isinstance(state.get("review_rounds"), int) or state["review_rounds"] > maximum:
         fail("POLICY-LIMIT-001", "review_rounds inválido o excedido")
@@ -293,6 +372,12 @@ def build_parser() -> argparse.ArgumentParser:
     transition.add_argument("phase")
     transition.add_argument("--actor", required=True)
     transition.set_defaults(func=cmd_transition)
+    rollback = sub.add_parser("rollback")
+    rollback.add_argument("task_dir")
+    rollback.add_argument("phase")
+    rollback.add_argument("--actor", required=True)
+    rollback.add_argument("--reason", required=True)
+    rollback.set_defaults(func=cmd_rollback)
     pause = sub.add_parser("pause")
     pause.add_argument("task_dir")
     pause.add_argument("--reason", required=True)

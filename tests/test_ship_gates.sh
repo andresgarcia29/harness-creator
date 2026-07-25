@@ -189,4 +189,50 @@ printf 'def test_x():\n    assert calc() == 4\n' > tests/test_calc.py
 git add . && git commit -qm quita-bare
 run_tests_gate >/dev/null 2>&1 && fail "bare assert borrado no bloqueó" || pass "bare assert de Python borrado: bloquea"
 
+echo
+echo "── check_verdict: cada rechazo nombra su causa y su remediación"
+# Bug de campo: verdict:"pass" + qa:"pending" salía como "veredicto no es pass,
+# corrige los items blocking", con blocking vacío. La remediación real era
+# correr la fase QA. Mensaje que manda a una lista vacía = ronda quemada.
+
+extract check_verdict > "$WS/check_verdict.sh"
+grep -q 'qa_state' "$WS/check_verdict.sh" || { echo "no pude extraer check_verdict"; exit 1; }
+
+run_check_verdict() {  # run_check_verdict <verdict-json> — imprime salida, retorna su exit
+  mkdir -p "$WS/tasks/T9"
+  printf '%s' "$1" > "$WS/tasks/T9/verdict-svc.json"
+  ( set -u; WS="$WS"; TASK=T9; REPO=svc
+    gate() { :; }
+    . "$WS/check_verdict.sh"; check_verdict ) 2>&1
+}
+
+# 1. todo verde → pasa
+out="$(run_check_verdict '{"verdict":"pass","qa":"pass","blocking":[],"requirements_uncovered":0}')"
+assert_eq 0 $? "verdict pass + qa pass + 0 uncovered: pasa"
+
+# 2. review con blocking → nombra al review, cuenta los blocking
+out="$(run_check_verdict '{"verdict":"fail","qa":"pass","blocking":[{"a":1},{"b":2}],"requirements_uncovered":0}')"
+assert_eq 3 $? "review fail: rechaza con exit 3"
+assert_contains "$out" "el review no es pass" "review fail: nombra al review, no a QA"
+assert_contains "$out" "los 2 items blocking" "review fail: cuenta los blocking reales"
+
+# 3. el bug de campo: review pass, QA nunca corrió
+out="$(run_check_verdict '{"verdict":"pass","qa":"pending","blocking":[],"requirements_uncovered":0}')"
+assert_eq 3 $? "qa pending: rechaza con exit 3"
+assert_contains "$out" "QA no es pass (qa=pending)" "qa pending: nombra a QA, no al review"
+assert_not_contains "$out" "items blocking" "qa pending: NO manda a una lista blocking vacía"
+assert_contains "$out" "evidence.py run" "qa pending: ofrece la ruta determinista (sin navegador)"
+assert_contains "$out" "qa-svc.json" "qa pending: dice dónde escribir el resultado"
+
+# 4. QA corrió y falló → remediación opuesta a la de pending
+out="$(run_check_verdict '{"verdict":"pass","qa":"fail","blocking":[],"requirements_uncovered":0}')"
+assert_eq 3 $? "qa fail: rechaza con exit 3"
+assert_contains "$out" "regrésalas al implementer" "qa fail: manda al implementer, no a correr QA"
+assert_not_contains "$out" "evidence.py run" "qa fail: NO repite la receta de 'nunca corrió'"
+
+# 5. el gate de compliance sigue vivo detrás de los dos anteriores
+out="$(run_check_verdict '{"verdict":"pass","qa":"pass","blocking":[],"requirements_uncovered":2}')"
+assert_eq 3 $? "requirements sin cubrir: rechaza con exit 3"
+assert_contains "$out" "2 requirements del delta-spec" "compliance: cuenta los uncovered"
+
 t_done

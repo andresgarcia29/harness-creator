@@ -382,6 +382,17 @@ con el mismo modelo es, la mitad de las veces, repetir el mismo atasco.
 Límite duro de 10 min por si el heartbeat no se puede observar. Dos
 muertes del mismo rol en la misma tarea → humano con el último estado.
 
+**ANTES DE MATAR, COMPROBÁ SI HAY UNA LLAMADA EN VUELO.** "Sin tool calls
+nuevas" y "sin trabajar" no son lo mismo: un gate de navegador
+(Playwright, WebKit) es UNA llamada bloqueante de 9 a 10 minutos que, por
+definición, no produce eventos mientras corre. El bus ahora emite
+`tool-start` en cada Bash, así que la comprobación es determinista: si el
+último `tool-start` del agente NO tiene su `tool` de cierre, está
+trabajando, no atascado: dejalo, y contá el reloj desde el `tool-start`,
+no desde el último evento. Matar a un agente sano cuesta doble: pierde su
+trabajo en vuelo y lo relanza con el modelo de escalación, que es el
+caro. Pasó en campo con un QA que corría un gate de WebKit.
+
 ## Cuenta lo que decides (el bus)
 
 El humano no está mirando la consola: está mirando el panel (`make ui`). Lo que

@@ -84,6 +84,27 @@ case "$KIND" in
           .tool_input.description // .tool_input.prompt // "") | tostring | .[0:200]),
        ok: ((.tool_response.success // true) | tostring)}' 2>/dev/null | redact)"
     ;;
+  tool-start)
+    # POR QUÉ EXISTE: el watchdog declara "atascado" tras ~3 min sin tool
+    # calls, pero un gate de navegador (Playwright, WebKit) es UNA llamada
+    # bloqueante de 9 a 10 minutos: por definición no produce eventos nuevos
+    # mientras corre. Con solo PostToolUse el bus no puede distinguir "no
+    # está trabajando" de "está trabajando en algo lento", y el watchdog
+    # mataba agentes SANOS y los relanzaba con el modelo de escalación, que
+    # es el caro. Pasó en campo.
+    #
+    # Registrado SOLO en Bash y async, a propósito: la cabecera de este
+    # archivo dice que se evitó PreToolUse por latencia, y esa preocupación
+    # sigue siendo válida para Read/Grep, que son las llamadas frecuentes.
+    # Bash es donde viven las llamadas largas y es una fracción del total.
+    line="$(printf '%s' "$payload" | jq -c --arg ts "$ts" --arg task "${task:-}" '
+      {ts: $ts, kind: "tool-start", task: $task,
+       session: (.session_id // ""),
+       agent: (.agent_id // "main"),
+       tool: (.tool_name // "?"),
+       summary: ((.tool_input.command // .tool_input.description // "")
+                 | tostring | .[0:200])}' 2>/dev/null | redact)"
+    ;;
   subagent-start|subagent-stop|stop|session-start|prompt)
     line="$(printf '%s' "$payload" | jq -c --arg ts "$ts" --arg k "$KIND" --arg task "${task:-}" '
       {ts: $ts, kind: $k, task: $task,

@@ -35,7 +35,7 @@ assert_contains "$skill_gi" "gitignore.tmpl" "la tabla de generación apunta al 
 # Al reescribir prosa vieja, baja el número de abajo al nuevo conteo (nunca
 # lo subas: si tu cambio lo sube, reescribe sin el guion largo). Las cajas
 # de terminal "──" (U+2500) son otro carácter y no cuentan.
-EMDASH_MAX=615
+EMDASH_MAX=614
 emdash_now=$(grep -ro "—" --include="*.md" --include="*.tmpl" --include="*.yaml" \
   --include="*.sh" --include="*.py" --include="*.json" "$root" 2>/dev/null \
   | grep -v "/\.git/" | grep -v "templates/ui/dist" | wc -l | tr -d ' ')

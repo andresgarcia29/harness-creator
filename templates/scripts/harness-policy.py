@@ -250,8 +250,16 @@ def cmd_validate_ship(args: argparse.Namespace) -> int:
     verdict = load(Path(args.verdict), "veredicto")
     if verdict.get("schema") != 1 or verdict.get("commit") != args.commit:
         fail("POLICY-SHIP-002", "veredicto sin schema v1 o perteneciente a otro commit")
+    # Mismo código (la regla es una), pero el mensaje nombra al campo que
+    # falló: "review y QA deben estar en pass" no distingue un review con
+    # blocking de un qa que nunca corrió, y son remediaciones opuestas.
     if verdict.get("verdict") != "pass" or verdict.get("qa") != "pass":
-        fail("POLICY-SHIP-003", "review y QA deben estar en pass")
+        culprits = ", ".join(
+            f"{k}={verdict.get(k)!r}"
+            for k in ("verdict", "qa")
+            if verdict.get(k) != "pass"
+        )
+        fail("POLICY-SHIP-003", f"review y QA deben estar en pass ({culprits})")
     reviewer = verdict.get("reviewer")
     implementers = verdict.get("implementation_agents")
     if policy.get("ship", {}).get("require_independent_review", True):

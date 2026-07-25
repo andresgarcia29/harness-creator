@@ -393,10 +393,32 @@ EOF
 
 check_verdict() {
   gate "veredicto de review"
-  local v="$WS/tasks/$TASK/verdict-$REPO.json"
+  local v="$WS/tasks/$TASK/verdict-$REPO.json" qa_state=""
   [ -f "$v" ] || { echo "❌ sin veredicto en $v"; echo "   ↳ remediación: corre /review $TASK $REPO primero"; exit 3; }
-  jq -e '.verdict=="pass" and .qa=="pass"' "$v" >/dev/null \
-    || { echo "❌ veredicto no es pass — corrige los items blocking listados en $v (cada uno trae su remediación) y re-corre /review"; exit 3; }
+  # Dos condiciones, dos remediaciones opuestas: el review lo arregla el
+  # implementer con los blocking; un qa:"pending" NO tiene blocking que
+  # corregir: le falta correr la fase. Un mensaje único mandaba a leer una
+  # lista vacía y quemaba una ronda, así que se diagnostican por separado.
+  jq -e '.verdict=="pass"' "$v" >/dev/null \
+    || { echo "❌ el review no es pass (verdict=$(jq -r '.verdict' "$v"))"
+         echo "   ↳ remediación: corrige los $(jq '.blocking|length' "$v") items blocking listados en $v"
+         echo "     (cada uno trae la suya) y re-corre /review $TASK $REPO"; exit 3; }
+  jq -e '.qa=="pass"' "$v" >/dev/null \
+    || { qa_state="$(jq -r '.qa' "$v")"
+         echo "❌ QA no es pass (qa=$qa_state)"
+         if [ "$qa_state" = "pending" ]; then
+           echo "   ↳ el review pasó pero la fase QA nunca corrió. QA NO implica navegador:"
+           echo "     · backend / criterios ya cubiertos por tests → QA determinista:"
+           echo "       python3 scripts/evidence.py run --task-dir tasks/$TASK --repo $REPO \\"
+           echo "         --runner qa --kind test --cwd worktrees/$TASK/$REPO -- <comando de test>"
+           echo "     · frontend / criterios de cara al usuario → agente qa (Playwright)"
+           echo "     Escribe el resultado en tasks/$TASK/qa-$REPO.json y re-corre /review"
+           echo "     $TASK $REPO, que lo fusiona al veredicto (ver /review paso 1 y 3)."
+         else
+           echo "   ↳ remediación: QA encontró fallas; regrésalas al implementer como"
+           echo "     blocking y re-corre QA sobre el HEAD nuevo (ver tasks/$TASK/qa-$REPO.json)"
+         fi
+         exit 3; }
   # compliance: todo requirement del delta-spec cubierto por tests
   jq -e '(.requirements_uncovered // 0) == 0' "$v" >/dev/null \
     || { echo "❌ $(jq -r '.requirements_uncovered' "$v") requirements del delta-spec sin test que los proteja"

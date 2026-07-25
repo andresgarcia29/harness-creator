@@ -46,10 +46,43 @@ tool="$(printf '%s' "$payload" | jq -r '.tool_name // ""' 2>/dev/null)"
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 sid="$(printf '%s' "$payload" | jq -r '.session_id // ""' 2>/dev/null)"
 
+# ── LECTURAS DEL WORKSPACE, NO SOLO DEL WORKTREE ──
+# Bug de campo: gate_evidence acepta artefactos relativos al WORKSPACE (busca
+# en "$WS/$art" además de "$WT/$art"), pero este hook solo registraba lo que
+# colgaba de worktrees/. O sea que citar scripts/ship.sh o docs/adr/007.md como
+# evidencia de compliance daba SIEMPRE "citado pero NADIE LO LEYÓ": las dos
+# mitades del mismo gate no se ponían de acuerdo.
+#
+# La ruta de un archivo del workspace no dice a qué tarea pertenece, así que se
+# usa la última tarea que ESTA sesión tocó. Y no, esto no reintroduce el
+# .harness/current-task global que causó el bug de arriba: aquel era UNO para
+# todas las sesiones y por eso se pisaban. Este va indexado por session_id, así
+# que diez sesiones tienen diez punteros y ninguno se pisa. Se refresca en cada
+# lectura dentro de un worktree, así que sigue a la sesión sola.
+STATE_DIR="$WS/.harness/session-task"
+ok_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac; }
+
+remember_task() { ok_id "$sid" || return 0
+  mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+  printf '%s\n' "$1" > "$STATE_DIR/$sid" 2>/dev/null || true; }
+
+recall_task() { ok_id "$sid" || return 0
+  head -1 "$STATE_DIR/$sid" 2>/dev/null; }
+
 # emit <kind> <ruta-o-cmd> <ruta-para-derivar-tarea>
 emit() {
-  local task; task="$(task_of "$3")"
-  [ -n "$task" ] || return 0                       # fuera de un worktree: no es evidencia de ninguna tarea
+  local task kind="$1"; task="$(task_of "$3")"
+  if [ -n "$task" ]; then
+    remember_task "$task"
+  else
+    # Fuera de un worktree solo cuenta lo que cae DENTRO del workspace: un Read
+    # de /etc/hosts o del home no es evidencia de ninguna tarea.
+    case "$3" in /*) case "$3" in "$WS"/*) : ;; *) return 0 ;; esac ;; esac
+    task="$(recall_task)"
+    [ -n "$task" ] || return 0        # la sesión aún no tocó ningún worktree
+    kind="$kind-ws"                   # marcado: se atribuyó por sesión, no por ruta
+  fi
+  set -- "$kind" "$2" "$3"
   case "$task" in *[!A-Za-z0-9._-]*) return 0 ;; esac   # id raro → no construimos rutas con él
   local log="$WS/tasks/$task/evidence.log"
   mkdir -p "$WS/tasks/$task" 2>/dev/null || return 0

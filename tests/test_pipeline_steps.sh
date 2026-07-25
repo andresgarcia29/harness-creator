@@ -11,7 +11,8 @@ t_ws
 mkdir -p "$WS/scripts" "$WS/.claude/pipeline" "$WS/tasks/T1/pipeline"
 cp "$ROOT/templates/scripts/pipeline-steps.sh" "$WS/scripts/"
 cp "$ROOT/templates/scripts/harness-policy.py" "$WS/scripts/"
-cp "$ROOT/templates/policy.json" "$WS/harness-policy.json"
+# El policy de la instancia se RENDERIZA: max_review_rounds sale de loop_budget
+sed 's/{{LOOP_BUDGET}}/3/g' "$ROOT/templates/policy.json.tmpl" > "$WS/harness-policy.json"
 
 echo "── pipeline-steps: orden determinista"
 
@@ -37,7 +38,7 @@ out="$(cd "$WS" && bash scripts/pipeline-steps.sh gate T1 ship 2>&1)"; rc=$?
 assert_eq 3 "$rc" "gate sin result: exit 3 (fail-closed)"
 assert_eq "blocked" "$(jq -r .phase "$WS/tasks/T1/state.json")" "la tarea queda blocked"
 assert_eq "custom_step_failed" "$(jq -r '.history[-1].reason' "$WS/tasks/T1/state.json")" "razón: custom_step_failed"
-grep -q "custom_step_failed" "$ROOT/templates/policy.json" || fail "policy.json no lista custom_step_failed"
+grep -q "custom_step_failed" "$ROOT/templates/policy.json.tmpl" || fail "policy.json no lista custom_step_failed"
 
 # b) result ok:true → verde → no para
 python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" resume "$WS/tasks/T1" --actor human >/dev/null

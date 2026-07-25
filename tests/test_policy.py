@@ -9,7 +9,17 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "templates/scripts/harness-policy.py"
-POLICY = ROOT / "templates/policy.json"
+POLICY_TMPL = ROOT / "templates/policy.json.tmpl"
+
+# El policy de la instancia se RENDERIZA: max_review_rounds sale de
+# loop_budget. Mientras estuvo hardcodeado en 3, pipeline.md prometía
+# "máx {{LOOP_BUDGET}} iteraciones" y el motor paraba en 3 igual, así que
+# quien configuraba 5 recibía 3 sin enterarse.
+_LOOP_BUDGET = 3
+_rendered = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+_rendered.write(POLICY_TMPL.read_text().replace("{{LOOP_BUDGET}}", str(_LOOP_BUDGET)))
+_rendered.close()
+POLICY = Path(_rendered.name)
 
 
 class PolicyTest(unittest.TestCase):
@@ -297,6 +307,30 @@ class PolicyTest(unittest.TestCase):
         # liberado el lock, el mismo comando pasa
         self.assertEqual(self.transition("review").returncode, 0)
         self.assertEqual(self.state()["phase"], "review")
+
+    def test_review_budget_comes_from_loop_budget_not_a_hardcoded_3(self):
+        # Regresión: el numero que el humano configura tiene que ser el que
+        # gobierna. Con 3 a fuego, subir loop_budget no servía de nada y el
+        # pipeline paraba antes de lo configurado, sin decir por qué.
+        self.assertIn("{{LOOP_BUDGET}}", POLICY_TMPL.read_text(),
+                      "max_review_rounds volvió a estar hardcodeado")
+        generous = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+        generous.write(POLICY_TMPL.read_text().replace("{{LOOP_BUDGET}}", "5"))
+        generous.close()
+        self.assertEqual(self.run_policy("init", self.task).returncode, 0)
+        for phase in ("rfc", "implement"):
+            self.assertEqual(self.transition(phase).returncode, 0)
+        # con presupuesto 5, la cuarta ronda de review ya no muere
+        for _ in range(4):
+            self.assertEqual(subprocess.run(
+                ["python3", str(SCRIPT), "--policy", generous.name,
+                 "transition", str(self.task), "review", "--actor", "orch"],
+                capture_output=True, text=True).returncode, 0)
+            self.assertEqual(subprocess.run(
+                ["python3", str(SCRIPT), "--policy", generous.name,
+                 "transition", str(self.task), "implement", "--actor", "orch"],
+                capture_output=True, text=True).returncode, 0)
+        os.unlink(generous.name)
 
     def test_dag_rejects_cycles_and_accepts_parallel_branches(self):
         dag = self.task / "dag.json"

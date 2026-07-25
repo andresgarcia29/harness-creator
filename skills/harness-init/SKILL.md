@@ -266,7 +266,7 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `scripts/repo-brief.sh` | scripts/ | siempre — brief determinista por repo (`.cache/briefs/`); arranque en caliente de implementers/reviewers, $0 tokens |
 | `scripts/graph-refresh.sh` | scripts/ | si graphify elegido — el ciclo de vida del grafo: build inicial, `--update` incremental, stamp por HEADs. Sin esto, "usa graphify query" es un consejo vacío. Lo llama el BOOTSTRAP (build inicial en el onboarding, antes de la primera tarea), el prefetch de /auto y /rfc, harness-janitor y `make graph` |
 | `scripts/harness-policy.py`, `scripts/evidence.py` | scripts/ | siempre — el policy engine v1 (transiciones por carril, escalate, validate-ship) y evidence v1; ship.sh y /auto los invocan |
-| `harness-policy.json` | policy.json | siempre — leyes ejecutables del flujo: transiciones por carril (express\|standard\|full), paradas permitidas, límites |
+| `harness-policy.json` | policy.json.tmpl | siempre — leyes ejecutables del flujo: transiciones por carril (express\|standard\|full), paradas permitidas, límites |
 | `scripts/build-slot.sh` | scripts/ | siempre (semáforo de builds pesados, Ley 8; universal — perl/flock) |
 | `scripts/{gowork,py,fe}.sh` | scripts/ | siempre (loop interno nativo, Ley 9; no-op limpio si el stack no está: Go/Python/frontend) |
 | `scripts/emit.sh` | scripts/emit.sh | siempre — el bus del harness: lo que ship.sh y /auto DECIDEN. Fail-open, redacta antes de escribir. Sin esto el panel solo ve agentes y tokens (la mitad prestada), nunca las decisiones ni los gates (la nuestra) |

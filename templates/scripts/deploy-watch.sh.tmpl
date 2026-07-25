@@ -71,7 +71,27 @@ fi
 # 2 · Kargo: promoción del freight (si el pipeline lo usa)
 if command -v kargo >/dev/null; then
   say "── kargo: esperando promoción ──"
-  kargo get promotions --project "{{KARGO_PROJECT}}" 2>>"$LOG" | tail -5 | tee -a "$LOG" || say "⚠️ kargo no respondió (¿token?)"
+  # UNA VERIFICACIÓN QUE NO SE PUDO EJECUTAR NO SE CALLA. Antes esto era un
+  # warning que moría en el log: el deploy seguía, ArgoCD daba Healthy, y nadie
+  # se enteraba de que el tramo de promoción NUNCA se miró. El silencio de un
+  # verificador ciego se lee igual que un verde.
+  #
+  # "No pude verificar" ya tiene categoría en el harness: un supuesto. Emitirlo
+  # lo pone arriba del resumen de sesión, bajo "audita esto primero", y en el
+  # ledger de supuestos de /auto. No bloquea: el health de ArgoCD sigue siendo
+  # la señal dura. Solo deja de fingir que este tramo se verificó.
+  #
+  # El stderr se captura en vez de irse a $LOG: el motivo real (auth, proyecto
+  # inexistente) era justo lo que no se veía.
+  if kargo_out="$(kargo get promotions --project "{{KARGO_PROJECT}}" 2>&1)"; then
+    printf '%s\n' "$kargo_out" | tail -5 | tee -a "$LOG"
+  else
+    printf '%s\n' "$kargo_out" >> "$LOG"
+    reason="$(printf '%s' "$kargo_out" | head -1 | cut -c1-160)"
+    say "⚠️ kargo no respondió: ${reason:-sin salida}"
+    say "   la promoción del freight NO se verificó; el deploy sigue por health de ArgoCD"
+    emit assumption "promoción de Kargo NO verificada en $REPO: ${reason:-kargo no respondió}"
+  fi
 fi
 
 # 3 · Health de ArgoCD con timeout

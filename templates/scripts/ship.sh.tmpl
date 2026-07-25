@@ -32,6 +32,35 @@ WS="$(cd "$(dirname "$0")/.." && pwd)"
 WT="$WS/worktrees/$TASK/$REPO"
 BASE="$WS/repos/$REPO"
 MAX_RETRY={{LOOP_BUDGET}}
+# El flujo a main que el humano eligió en la entrevista. Este script SOLO
+# implementa trunk direct-to-prod: hace `git push origin HEAD:main`. Las
+# otras dos respuestas (trunk-staging, prs) se ofrecían, se registraban en
+# harness-answers.yaml, y NADIE las leía, así que quien eligió "prs" por
+# política de su empresa recibía commits directos a main, en silencio.
+#
+# Se falla CERRADO y no se finge: implementar PRs o staging cambia también
+# lo que significa "shippeado" para deploy-watch y para /archive, y hacerlo
+# a medias produciría un archive que fusiona specs de un cambio que sigue
+# sin mergear. Mientras tanto, el que configuró otra cosa se entera acá y
+# no en producción.
+FLOW="{{FLOW}}"
+# La grafía varía (la entrevista ofrecía "trunk direct-to-prod" y el answers
+# documenta "trunk-direct-to-prod"), así que se normaliza en vez de exigir una
+# forma exacta. Un placeholder sin sustituir o vacío se trata como trunk: es
+# lo que este script hace y lo que hacen todas las instancias de hoy, y un
+# placeholder crudo es un problema de generación que le toca al doctor, no un
+# motivo para frenar un ship.
+flow_norm="$(printf '%s' "$FLOW" | tr 'A-Z' 'a-z' | tr -d ' +_-')"
+case "$flow_norm" in
+  trunk|trunkdirecttoprod|""|'{{flow}}') : ;;
+  *)
+    echo "❌ harness-answers.yaml declara flow: $FLOW, y ship.sh solo implementa"
+    echo "   trunk direct-to-prod (push a main tras los gates)."
+    echo "   NO voy a pushear a main a espaldas de una política que dice otra cosa."
+    echo "   ↳ opciones: cambiá flow a 'trunk' si eso es lo que querés de verdad,"
+    echo "     o abrí el PR a mano desde la rama task/<id> tras un --precheck verde."
+    exit 7 ;;
+esac
 LOCKDIR="$WS/locks/$REPO.lock.d"
 mkdir -p "$WS/locks" "$WS/tasks/$TASK"
 

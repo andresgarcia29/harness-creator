@@ -47,7 +47,7 @@ falta de conocimiento: es que la regla estaba en prosa y no en un test.
 - [x] **`deploy-watch` revertía el sha del repo equivocado.** `tail -1` de
   `ship.log` sin filtrar por repo. Commit `98fdd56`.
 
-## P1: mienten sobre haber verificado (7 de 8 cerrados, commit `3ee63ce`)
+## P1: mienten sobre haber verificado (cerrado)
 
 - [x] **`secrets.sh` con GCP Secret Manager reportaba `✅` con todas las claves
   fallidas.** `dump_sm` no incrementa `MISSED` y `pull_gcp_sm` cierra con un
@@ -69,7 +69,7 @@ falta de conocimiento: es que la regla estaba en prosa y no en un test.
   nunca se recomienda instalarlo. *Arreglo*: avisar honesto en el gate, y
   agregar la señal `migrations` a `discover.sh`.
   `ship.sh.tmpl:305-309`, `catalog/capabilities.yaml:654`.
-- [ ] **`ci-doctor` con un forge que no sea GitHub reporta "limpio".** El
+- [x] **`ci-doctor` con un forge que no sea GitHub reportaba "limpio".** El
   `gh run list` falla en silencio con GitLab, Bitbucket o Gitea, y el job
   registra "detector limpio": CI rojo invisible.
   `templates/cronjobs/jobs/ci-doctor.sh:15-21`.
@@ -113,18 +113,18 @@ falta de conocimiento: es que la regla estaba en prosa y no en un test.
   escribió el delta-spec nunca supo que el mecanismo de declaración existía.
   `auto.md.tmpl:96-99` contra `ship.sh.tmpl:410-415`.
 
-## P2: perillas que no hacen nada
+## P2: perillas que no hacen nada (cerrado)
 
-- [ ] **`flow: prs | trunk-staging` no lo lee nadie.** `ship.sh` hace
+- [x] **`flow: prs | trunk-staging` no lo lee nadie.** `ship.sh` hace
   `git push origin HEAD:main` incondicional. Quien eligió "prs" por política de
   su empresa recibe commits directos a main, en silencio.
-- [ ] **Degradar el tier de un MCP no cambia nada.** El `.mcp.json` se genera
+- [x] **Degradar el tier de un MCP no cambia nada.** El `.mcp.json` se genera
   copiando el `config` del catálogo tal cual, y nadie lee `tier:`. El usuario
   cree que revocó escritura y el servidor sigue con capacidad completa. Es la
   perilla muerta con perfil de seguridad más alto.
-- [ ] **`memory.profiles` es una perilla muerta.** Se pregunta, se registra, y
+- [x] **`memory.profiles` es una perilla muerta.** Se pregunta, se registra, y
   el `CLAUDE.md` generado hardcodea la respuesta por defecto.
-- [ ] **`{{MODEL_ESCALATION}}` es un placeholder sin fuente.** Nadie lo
+- [x] **`{{MODEL_ESCALATION}}` es un placeholder sin fuente.** Nadie lo
   pregunta, el answers no lo registra, y el camino determinista
   (`harness generate --answers`) no tiene con qué sustituirlo. Si queda literal,
   la escalación por atasco y los cronjobs caros revientan en runtime.

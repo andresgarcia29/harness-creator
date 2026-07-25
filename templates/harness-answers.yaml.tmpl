@@ -30,6 +30,12 @@ models:
   reviewer: {{MODEL_REVIEWER}}        # veredictos de review
   implementer: {{MODEL_IMPLEMENTER}}  # ejecución de tareas
   mechanical: {{MODEL_MECHANICAL}}    # digest, triage, commits
+  escalation: {{MODEL_ESCALATION}}    # relanzar un agente atascado y cronjobs
+                                      # caros. models.yaml lo usa en DOS
+                                      # lugares (roles.escalation y
+                                      # cronjobs.expensive); sin este campo el
+                                      # placeholder quedaba literal y
+                                      # stamp-models resolve fallaba en runtime.
 
 loop_budget: {{LOOP_BUDGET}}
 

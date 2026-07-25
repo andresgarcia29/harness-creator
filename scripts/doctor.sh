@@ -85,6 +85,26 @@ else
   else
     ok "sin .mcp.json y sin MCPs declarados (coherente)"
   fi
+
+# ── El tier degradado de un MCP tiene que ser real o declararse ────────
+# answers puede decir tier: read-only, pero el .mcp.json se genera del campo
+# `config` del catálogo y NADIE lee tier:. El humano cree que revocó
+# escritura y el servidor sigue con capacidad completa. Es la única perilla
+# muerta con perfil de seguridad, así que el doctor la nombra.
+if [ -f "$ANSWERS" ]; then
+  degraded="$(awk '/^capabilities:/{c=1;next} /^[a-z_]+:/{c=0}
+    c && /^[[:space:]]*-[[:space:]]*name:/{n=$NF}
+    c && /^[[:space:]]*mcp:/{ismcp=1}
+    c && /^[[:space:]]*tier:[[:space:]]*read-only/{if(ismcp)print n; ismcp=0}
+    c && /^[[:space:]]*-[[:space:]]*name:/{ismcp=0}' "$ANSWERS" 2>/dev/null | tr '\n' ' ')"
+  if [ -n "$(printf '%s' "$degraded" | tr -d ' ')" ]; then
+    warn "MCPs con tier read-only en answers:$degraded"
+    echo "   ↳ el tier NO se aplica solo: .mcp.json se genera del catálogo y nadie"
+    echo "     lee tier:. La restricción real es el ALCANCE DEL TOKEN que le pases."
+    echo "     Verifica que ese token no tenga permisos de escritura, o quita la"
+    echo "     capacidad. Registrar la preferencia no revoca nada."
+  fi
+fi
 fi
 
 # 4 · Hook de protección de main registrado y ejecutable

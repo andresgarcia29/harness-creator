@@ -147,5 +147,13 @@ section() {  # section <título> <kind> [solo-rojos]
   printf 'esos eventos en ambos resúmenes.\n'
 } > "$OUT" 2>/dev/null || exit 0
 
+# Poda: un archivo por sesión crece sin techo, y con diez sesiones abiertas
+# crece diez veces más rápido. Se conservan los 50 más recientes, que a ese
+# ritmo es más de una semana de historial.
+( cd "$OUT_DIR" 2>/dev/null || exit 0
+  ls -t ./*.md 2>/dev/null | tail -n +51 | while IFS= read -r old; do
+    rm -f "$old" 2>/dev/null || true
+  done ) || true
+
 cat "$OUT" 2>/dev/null
 exit 0

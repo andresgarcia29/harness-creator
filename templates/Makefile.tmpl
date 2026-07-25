@@ -8,6 +8,9 @@ help: ## esta ayuda
 init: ## onboarding de una pasada: deps + token + secretos + doctor
 	@bash scripts/bootstrap.sh
 
+version: ## ¿estoy al día? versión de la instancia vs upstream + estado de las tareas
+	@bash scripts/harness-version.sh
+
 doctor: ## salud del harness (CLIs, MCPs, hooks, links, secretos)
 	@bash scripts/doctor.sh .
 

@@ -190,6 +190,60 @@ git add . && git commit -qm quita-bare
 run_tests_gate >/dev/null 2>&1 && fail "bare assert borrado no bloqueó" || pass "bare assert de Python borrado: bloquea"
 
 echo
+echo "── gate ts: un gate que no puede correr NO reporta rojo"
+# Caso de campo: el worktree nace de origin/main, sin node_modules y sin los
+# tipos de `astro sync`. tsc escupía 8 errores (import.meta.env, astro:assets)
+# que parecían deuda vieja y eran fantasma: con las deps puestas pasó sin
+# tocar una línea. Un rojo falso cuesta una ronda y enseña a desconfiar del gate.
+
+extract run_lang_gates > "$WS/lang.sh"
+grep -q 'node_modules' "$WS/lang.sh" || { echo "no pude extraer run_lang_gates"; exit 1; }
+
+run_lang() {  # run_lang <dir>: corre run_lang_gates ahí, con la toolchain stubbeada
+  ( set -u; cd "$1"; WT="$1"; REPO=fe; TASK=T1
+    gate() { :; }
+    npx() { :; }; npm() { :; }   # la toolchain real no se ejercita aquí
+    . "$WS/lang.sh"; run_lang_gates ) 2>&1
+}
+
+mk_fe() {  # mk_fe <dir>: proyecto node mínimo en un repo git
+  rm -rf "$1"; mkdir -p "$1"; cd "$1"
+  git init -q .; git config user.email t@t; git config user.name t
+  echo '{"name":"fe"}' > package.json
+  echo '{}' > tsconfig.json
+  git add -A && git commit -qm init
+  git update-ref refs/remotes/origin/main HEAD
+  cd "$WS"
+}
+
+# 1. sin node_modules → se niega, y lo dice sin fingir un veredicto
+mk_fe "$WS/fe1"
+out="$(run_lang "$WS/fe1")"; rc=$?
+assert_eq 3 "$rc" "sin node_modules: el gate se niega (exit 3)"
+assert_contains "$out" "NO PUEDE CORRER" "sin node_modules: dice que no puede correr"
+assert_contains "$out" "fantasma" "sin node_modules: avisa que los errores serían fantasma"
+assert_contains "$out" "fe.sh 'install'" "sin node_modules: da la remediación exacta"
+
+# 2. Astro sin los tipos generados → se niega citando astro sync
+mk_fe "$WS/fe2"; mkdir -p "$WS/fe2/node_modules"; touch "$WS/fe2/astro.config.mjs"
+out="$(run_lang "$WS/fe2")"; rc=$?
+assert_eq 3 "$rc" "Astro sin .astro/types.d.ts: el gate se niega"
+assert_contains "$out" "astro sync" "Astro: la remediación nombra astro sync"
+assert_contains "$out" "astro:assets" "Astro: nombra los símbolos que saldrían como fantasma"
+
+# 3. Astro CON los tipos → ya no se niega
+mkdir -p "$WS/fe2/.astro" && touch "$WS/fe2/.astro/types.d.ts"
+run_lang "$WS/fe2" >/dev/null 2>&1 \
+  && pass "Astro con types.d.ts: el gate corre" || fail "Astro preparado: el gate no debió negarse"
+
+# 4. node sin Astro y con deps → corre normal
+mk_fe "$WS/fe3"; mkdir -p "$WS/fe3/node_modules"
+run_lang "$WS/fe3" >/dev/null 2>&1 \
+  && pass "node con deps: el gate corre" || fail "node preparado: el gate no debió negarse"
+
+cd "$WS"
+
+echo
 echo "── check_verdict: cada rechazo nombra su causa y su remediación"
 # Bug de campo: verdict:"pass" + qa:"pending" salía como "veredicto no es pass,
 # corrige los items blocking", con blocking vacío. La remediación real era

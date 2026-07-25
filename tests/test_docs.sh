@@ -71,7 +71,7 @@ assert_contains "$(cat "$root/templates/docs/intake.md.tmpl")" "enrichment" \
 # Al reescribir prosa vieja, baja el número de abajo al nuevo conteo (nunca
 # lo subas: si tu cambio lo sube, reescribe sin el guion largo). Las cajas
 # de terminal "──" (U+2500) son otro carácter y no cuentan.
-EMDASH_MAX=493
+EMDASH_MAX=489
 emdash_now=$(grep -ro "—" --include="*.md" --include="*.tmpl" --include="*.yaml" \
   --include="*.sh" --include="*.py" --include="*.json" "$root" 2>/dev/null \
   | grep -v "/\.git/" | grep -v "templates/ui/dist" | wc -l | tr -d ' ')

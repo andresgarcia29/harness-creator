@@ -2,7 +2,7 @@
 # on failure; como cron (cada 30min) barre los runs fallidos recientes.
 JOB_NAME=ci-doctor
 JOB_TIER=medium
-JOB_TOOLS="Read,Grep,Glob,Bash(gh *),Bash(git *),Edit,Write"
+JOB_TOOLS="Read,Grep,Glob,Bash(gh *),Bash(glab *),Bash(git *),Edit,Write"
 
 # "NO PUDE CONSULTAR" NO ES "CI LIMPIO". Este job solo sabe leer GitHub
 # Actions, y el 2>/dev/null se tragaba todo: con un remote de GitLab,
@@ -14,40 +14,33 @@ JOB_TOOLS="Read,Grep,Glob,Bash(gh *),Bash(git *),Edit,Write"
 # CONTRIBUTING: un eje que varía se detecta y se despacha). Lo que se
 # arregla acá es la mentira: lo que no se pudo mirar se dice.
 detect() {
-  command -v gh >/dev/null || return 3
+  # shellcheck source=/dev/null
+  . scripts/forge.sh 2>/dev/null || { echo "sin scripts/forge.sh" >&2; return 3; }
   command -v jq >/dev/null || return 3
-  local found=0 queried=0 blind=""
+  local found=0 queried=0 blind="" since
+  since="$(date -u -v-2H +%Y-%m-%dT%H:%M 2>/dev/null || date -u -d '2 hours ago' +%Y-%m-%dT%H:%M)"
   while read -r repo; do
     [ -d "repos/$repo/.git" ] || continue
-    local url; url="$(git -C "repos/$repo" remote get-url origin 2>/dev/null)"
-    [ -n "$url" ] || { blind="$blind $repo(sin-remote)"; continue; }
-    case "$url" in
-      *github.com*) : ;;
-      *) blind="$blind $repo(forge-no-github)"; continue ;;
-    esac
-    local slug; slug="$(printf '%s' "$url" | sed -E 's#.*[:/]([^/]+/[^/.]+)(\.git)?$#\1#')"
-    [ -n "$slug" ] || { blind="$blind $repo(slug-ilegible)"; continue; }
-    local out
-    if ! out="$(gh run list --repo "$slug" --branch main --status failure \
-      --created "$(date -u -v-2H +%Y-%m-%dT%H:%M 2>/dev/null || date -u -d '2 hours ago' +%Y-%m-%dT%H:%M)" \
-      --json databaseId,displayTitle,workflowName --jq \
-      '.[] | "'"$repo"' run=\(.databaseId) [\(.workflowName)] \(.displayTitle)"' 2>&1)"; then
-      blind="$blind $repo(gh:$(printf '%s' "$out" | head -1 | cut -c1-30))"
+    local out rc=0
+    out="$(forge_ci_failed "repos/$repo" "$since")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      blind="$blind $repo($(forge_kind "repos/$repo"))"
       continue
     fi
     queried=$((queried+1))
-    if [ -n "$out" ]; then printf '%s\n' "$out" >> "$FINDINGS"; found=1; fi
+    [ -n "$out" ] && { printf '%s\n' "$out" | sed "s|^|$repo |" >> "$FINDINGS"; found=1; }
   done < <(ls repos/ 2>/dev/null)
 
   # Los ciegos se nombran SIEMPRE: así un "limpio" nunca se lee como "todo
   # limpio" cuando en realidad cubría solo una parte del workspace.
-  [ -n "$blind" ] && log "⚠️ CI NO consultado en:$blind (este job solo lee GitHub Actions)"
+  [ -n "$blind" ] && log "⚠️ CI NO consultado en:$blind (falta driver de forge o su CLI)"
   if [ "$queried" -eq 0 ]; then
     log "   no pude consultar el CI de NINGÚN repo: esto no es un verde"
     return 3
   fi
   [ "$found" -eq 1 ] && return 10 || return 0
 }
+
 
 JOB_PROMPT='Eres el ci-doctor del harness. Por cada run fallido de los
 hallazgos: (1) lee el log de fallo con `gh run view <id> --repo <slug>

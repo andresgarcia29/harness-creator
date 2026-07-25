@@ -117,8 +117,17 @@ secrets:
 #    - env://<NOMBRE_DE_LA_VARIABLE>
 #    - vault://<proyecto>/harness/argocd
 
+# Dónde viven los repos. Normalmente se detecta del remote; se declara solo
+# si es un self-hosted con dominio propio. Lo lee scripts/forge.sh, que es por
+# donde los cronjobs entregan PRs e issues.
+forge: {{FORGE}}                   # github | gitlab | bitbucket
+
 tickets:
   provider: {{TICKETS_PROVIDER}}   # linear | github | none
+  repo: {{TICKETS_REPO}}           # solo github: owner/repo donde viven los
+                                   # issues. Sin esto, ticket-pull no sabe de
+                                   # qué repo es "123" y te lo dice en vez de
+                                   # adivinar.
 
 memory:
   provider: {{MEMORY_PROVIDER}}    # engram | none

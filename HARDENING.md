@@ -1,7 +1,8 @@
 # Plan de endurecimiento
 
-Estado de los 34 hallazgos de la auditoría del 2026-07-25, más los 16 que se
-arreglaron ese mismo día. Este archivo es la cola de trabajo: se tacha lo hecho
+Estado de los 34 hallazgos de la auditoría del 2026-07-25 (todos cerrados),
+más los 16 que se arreglaron ese mismo día y los 2 que aparecieron durante los
+arreglos. Este archivo es la cola de trabajo: se tacha lo hecho
 y se agrega lo nuevo. Un hallazgo sin test que lo fije no cuenta como cerrado.
 
 ## La regla que los une
@@ -129,14 +130,14 @@ falta de conocimiento: es que la regla estaba en prosa y no en un test.
   (`harness generate --answers`) no tiene con qué sustituirlo. Si queda literal,
   la escalación por atasco y los cronjobs caros revientan en runtime.
 
-## P2: ejes cableados a un vendor (regla 8)
+## P2: ejes cableados a un vendor (regla 8) (cerrado)
 
 - [x] **La rama trunk se asume `main`.** Catorce ocurrencias en `ship.sh` y seis
   en `worktree-task.sh`, sin `BASE_BRANCH` ni lectura de `origin/HEAD`. Rompe
   cualquier repo con `master`, `trunk` o `develop`, y de paso
   `block-direct-push` tampoco protege esas ramas. *Nota*: `skills-sync.sh:52` ya
   usa la técnica correcta.
-- [ ] **Los 13 cronjobs cablean GitHub como forge y como CI.** El prompt
+- [x] **Los 13 cronjobs cablean GitHub como forge y como CI.** El prompt
   inyectado ordena "entrega PR o issue vía gh" a todos, y la entrevista nunca
   pregunta cuál es tu forge.
 - [x] **El CronJob de Kubernetes fuerza Vertex.** `CLAUDE_CODE_USE_VERTEX=1` y
@@ -150,7 +151,7 @@ falta de conocimiento: es que la regla estaba en prosa y no en un test.
   squawk, goose, sentry, prometheus, k6 y GKE filtran por señales inexistentes,
   así que capacidades correctas nunca se ofrecen aunque la evidencia esté en los
   repos.
-- [ ] **El eje de tickets solo tiene implementación para Linear.** Para
+- [x] **El eje de tickets solo tiene implementación para Linear.** Para
   `tickets: github` la tabla dice "adapta los mismos contratos", o sea un script
   improvisado sin template ni test. Jira y GitLab no son opción.
 

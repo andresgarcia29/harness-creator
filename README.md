@@ -38,7 +38,7 @@ Si nunca trabajaste con agentes de código, esta sección te ahorra el resto del
 | **Idempotente** | Que se puede repetir sin causar daño: correrlo dos veces deja el mismo resultado que correrlo una. | El instalador lo es. Si algo se interrumpe, lo vuelves a correr y retoma, sin duplicar ni romper lo que ya estaba. |
 | **Ledger de supuestos** | Un archivo donde el agente anota cada cosa que **asumió**, con qué evidencia y qué costaría deshacerla. | Es lo primero que lees al final. En 30 segundos ves todas las decisiones que se tomaron sin vos. |
 | **Compliance matrix** | Una tabla que aparea cada requisito con el test que lo demuestra. | "El review aprobó" es una opinión. "Requisitos cubiertos: 100%, y aquí está el test de cada uno" lo verifica una máquina. |
-| **Evidencia** | El registro de que algo se ejecutó de verdad: qué comando, en qué commit exacto, con qué salida. | Impide que un agente diga "los tests pasan" sin haberlos corrido. La prueba queda atada al commit y caduca con él. |
+| **Evidencia** | El registro de que algo se ejecutó de verdad: qué comando, en qué commit exacto, con qué salida. | Impide que un agente diga "los tests pasan" sin haberlos corrido. La prueba queda atada al commit y caduca con él, así que se registra con el árbol limpio: si hubiera cambios sin commitear, el sello nombraría un commit y habría probado otra cosa. |
 | **Spec / EARS** | La especificación del comportamiento del sistema. EARS es un formato de frase fija: *CUANDO ocurre X, EL SISTEMA DEBE hacer Y*. | Escrito así, un requisito no se puede interpretar de dos maneras, y se puede apuntar a él en una discusión. |
 | **Spec-rot** | La podredumbre de la especificación: el documento dice una cosa y el código hace otra, porque nadie actualizó el documento. | Es el fracaso clásico de este enfoque. Aquí la fusión de la spec es automática al final de cada tarea, justamente para que no dependa de la disciplina de nadie. |
 | **ADR** | *Architecture Decision Record*: un documento corto que registra una decisión importante, su contexto y sus alternativas. | Es donde vive la ley. Una decisión que no está en un ADR no existe, aunque se haya hablado en un chat. |
@@ -186,6 +186,7 @@ mi-workspace/
 │   ├── harness-policy.py     ← el motor de fases: transition, rollback, pause, validate-ship
 │   ├── verdict-scaffold.sh   ← esqueleto determinista del veredicto (+ --rebase)
 │   ├── evidence.py           ← corre y sella evidencia atada a un commit exacto
+│   ├── harness-version.sh    ← make version: ¿al día? + estado de las tareas
 │   ├── forge.sh              ← capa de forge: CI, issues y PRs (github · gitlab)
 │   ├── worktree-task.sh      ← una tarea = un worktree por repo
 │   ├── secrets.sh            ← materializa secretos desde tu fuente
@@ -397,7 +398,7 @@ Un implementer es una tarea, en un worktree, de un repo. Sesiones cortas y desec
 
 El arranque es **en caliente**: el prefetch ya dejó el worktree, las dependencias instaladas y el resumen (`repo-brief.sh` destila estructura, comandos de test y convenciones a `.cache/briefs/<repo>.md`, cacheado por HEAD, $0 tokens). El implementer recibe su entrada del plan, sus criterios y el resumen, y **no explora el repo desde cero**: sus primeros minutos son de edición, no de arqueología. Serena cubre el nivel de símbolo.
 
-Antes de entregar, el implementer **registra su propia evidencia** con `evidence.py --runner implementer` sobre el commit final. No es burocracia y no lo puede hacer otro por él: `ship.sh` exige que al menos un runner de implementación aparezca en el veredicto, porque quien revisa no puede ser también quien demuestra. La evidencia queda atada al commit exacto, así que va después del último commit o caduca.
+Antes de entregar, el implementer **registra su propia evidencia** con `evidence.py --runner implementer` sobre el commit final, **con el árbol limpio**. Ese detalle no es ceremonia: todo el contrato de la evidencia es "este resultado pertenece a este commit", y con cambios sin commitear lo que corre es el commit más el working tree, mientras el sello diría solo el commit. `evidence.py` se niega a sellar en esas condiciones. No es burocracia y no lo puede hacer otro por él: `ship.sh` exige que al menos un runner de implementación aparezca en el veredicto, porque quien revisa no puede ser también quien demuestra. La evidencia queda atada al commit exacto, así que va después del último commit o caduca.
 
 Como en el mismo workspace suelen correr varias sesiones a la vez, **`guard-worktree` reclama el worktree para quien escribe primero**. Otra sesión que intente escribir en el mismo árbol se bloquea con el aviso de quién lo tiene. Sin esa guarda, dos implementers en la misma carpeta se pisan archivos e índice de git, y el síntoma que ves después son "cambios que se deshacen solos", cuando ya es imposible saber cuál de las dos sesiones los perdió.
 
@@ -770,9 +771,15 @@ Lo **no** negociable, a propósito: push a main solo por gates, worktrees, valor
 Los arreglos se hacen en **este** repo y las instancias los reciben por diff:
 
 ```bash
+make version                          # ¿hace falta? y qué hay en curso
 /plugin marketplace update harness    # refresca el plugin
 /harness-init .                       # en el workspace: modo update
+make doctor                           # comprobación final
 ```
+
+**`make version` contesta primero las dos preguntas que conviene hacerse juntas**: si tu instancia está atrás de upstream, y qué está pasando ahora mismo en el workspace (tareas con su fase, sesiones, worktrees tomados por quién, supuestos sin confirmar). Sobre todo, marca las tareas cuya fase **no coincide con su historial**, que es justo lo único que un update puede empeorar: `validate-ship` compara esas dos cosas y una tarea desalineada no puede publicar. Verlo antes cuesta dos comandos; verlo después cuesta un ship trabado.
+
+Y cumple la regla de la casa: si no puede consultar la versión de upstream (sin `gh`, sin red, sin auth), **lo dice** en vez de reportar "al día". Su modo `--check` tiene tres salidas distintas, y la tercera existe precisamente para que un script no confunda "no pude comparar" con "estás al día".
 
 El modo update **no re-pregunta** lo respondido, migra esquemas sin tocar tus decisiones, **reconcilia** (una respuesta nueva propaga diffs a manifest, `CLAUDE.md` y DAG) y distingue propiedad: los scripts del plugin se actualizan con upstream; tus answers, modelos, specs y constituciones son ley local y se conservan. Nada se pisa sin confirmación, con una excepción declarada: los **paquetes atados** (carriles, modelos, plan hondo con loop corto) se aceptan o rechazan juntos, porque a medias romperían la instancia. Al aplicar, el update re-estampa modelos y vuelve a correr el doctor.
 

@@ -96,7 +96,12 @@ tpl_for() {
     scripts/*)                       echo "templates/scripts/$base" ;;
     .claude/hooks/*)                 echo "templates/hooks/$base" ;;
     .claude/skills/*/SKILL.md)       p="${p#.claude/skills/}"; echo "templates/skills/${p%/SKILL.md}/SKILL.md" ;;
-    harness-policy.json)             echo "templates/policy.json" ;;
+    # harness-policy.json ya NO se mapea: dejó de copiarse verbatim y pasó a
+    # policy.json.tmpl (max_review_rounds sale de loop_budget). Contra un
+    # template, comparar sha no dice nada: la instancia tiene los valores
+    # sustituidos y siempre daría "distinto". "no-verificable" es la respuesta
+    # honesta, y es la que da el caso por defecto. Mapearlo a un archivo que no
+    # existe daba lo mismo por accidente, que no es lo mismo que por diseño.
     *)                               echo "" ;;
   esac
 }

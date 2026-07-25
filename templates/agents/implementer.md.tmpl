@@ -29,10 +29,26 @@ heredas conversaciones.
    entera de reloj. Entregar en rojo es regalar una iteración. Si tras 2
    intentos el precheck sigue rojo, para y escala con el error completo:
    un gate que no cede en dos pasadas no cede en la tercera (Ley 6).
-6. Con el precheck verde, marca tu bead (`bd close`) y solicita review.
-   NO pushees: la única puerta a main es scripts/ship.sh (un hook
-   bloquea el resto).
-7. Si el reviewer regresa `fail`, corrige SOLO los items `blocking`,
+6. **Con el precheck verde, registra TU evidencia** sobre el commit
+   final, con tu propia identidad como runner:
+
+   ```
+   python3 scripts/evidence.py run --task-dir tasks/<task-id> --repo <repo> \
+     --runner implementer --kind test --cwd worktrees/<task-id>/<repo> \
+     -- <el comando de test de tu repo>
+   ```
+
+   No es burocracia y no lo puede hacer otro por ti: `ship.sh` exige que
+   al menos un runner de IMPLEMENTACIÓN aparezca en el veredicto
+   (`POLICY-ROLE-002`). Si la única evidencia la corrieron qa y el
+   reviewer, el ship se rechaza y con razón: quien revisa no puede ser
+   también quien demuestra. Corre al menos el test, y build o typecheck
+   si tu repo los tiene. La evidencia queda atada al commit exacto, así
+   que **regístrala DESPUÉS de tu último commit**: si mueves HEAD
+   después, caduca y hay que rehacerla.
+7. Marca tu bead (`bd close`) y solicita review. NO pushees: la única
+   puerta a main es scripts/ship.sh (un hook bloquea el resto).
+8. Si el reviewer regresa `fail`, corrige SOLO los items `blocking`,
    TODOS en una sola pasada (vienen con su remediación), corre el
    precheck otra vez y devuelve. Tras {{LOOP_BUDGET}} intentos, para y
    escala a humano.

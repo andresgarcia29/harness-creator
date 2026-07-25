@@ -31,15 +31,39 @@ payload="$(cat 2>/dev/null)"
 session="$(printf '%s' "$payload" | jq -r '.session_id // ""' 2>/dev/null)"
 [ -n "$session" ] || exit 0
 
-# La ventana de la sesión: el primer evento que la trae etiquetada. Los
-# eventos de emit.sh (gate, phase, decision, assumption) NO llevan session
-# porque los escriben scripts fuera de Claude Code, así que la sesión se
-# acota por TIEMPO y luego se incluye todo lo que cayó dentro. Sin esto, el
-# resumen se quedaría justo sin las decisiones del harness, que son el punto.
-since="$(jq -r --arg s "$session" 'select(.session == $s) | .ts' "$BUS" 2>/dev/null | sort | head -1)"
-[ -n "$since" ] || exit 0
+# EL BUS ES COMPARTIDO. En este workspace corren varias sesiones de Claude
+# Code a la vez sobre el mismo .harness/events.jsonl, así que "lo que pasó en
+# esta sesión" NO es "lo que pasó en esta ventana de tiempo": con diez
+# sesiones abiertas, esa cuenta le atribuye a cada una el trabajo de las
+# otras. La atribución va por dos caminos según el emisor:
+#
+#   · ui-emit.sh (tool, prompt, stop, subagent-*) trae .session → por id.
+#   · emit.sh (gate, phase, decision, assumption, ship, deploy) NO lo trae:
+#     lo escriben scripts fuera de Claude Code, que no conocen la sesión.
+#     Se atribuyen por TAREA, y solo entran las tareas que ESTA sesión tocó.
+#
+# Límite honesto y declarado en el pie del resumen: si dos sesiones trabajan
+# la MISMA tarea, sus eventos de harness aparecen en los dos resúmenes. Sin
+# propagar el id de sesión hasta emit.sh no hay forma de separarlos, y un
+# archivo global de "sesión actual" es justo el estado compartido que
+# ui-emit.sh evita a propósito (se pisa entre sesiones).
+bus_cat() {  # el bus rotado primero: la rotación no debe dejar un hueco
+  [ -f "$BUS.1" ] && cat "$BUS.1" 2>/dev/null
+  cat "$BUS" 2>/dev/null
+}
 
-events="$(jq -c --arg since "$since" 'select(.ts >= $since)' "$BUS" 2>/dev/null)"
+mine="$(bus_cat | jq -c --arg s "$session" 'select(.session == $s)' 2>/dev/null)"
+[ -n "$mine" ] || exit 0
+since="$(printf '%s' "$mine" | jq -r '.ts' 2>/dev/null | sort | head -1)"
+[ -n "$since" ] || exit 0
+mytasks="$(printf '%s' "$mine" | jq -sc '[.[] | .task // "" | select(. != "")] | unique' 2>/dev/null)"
+[ -n "$mytasks" ] || mytasks='[]'
+
+events="$(bus_cat | jq -c --arg s "$session" --arg since "$since" --argjson mine "$mytasks" '
+  select(.ts >= $since)
+  | select(if (.session // "") != "" then .session == $s
+           else (.task // "") as $t
+                | ($t != "" and (($mine | index($t)) != null)) end)' 2>/dev/null)"
 [ -n "$events" ] || exit 0
 
 # Duración legible. El parseo de fecha difiere entre BSD y GNU; si ninguno
@@ -117,6 +141,10 @@ section() {  # section <título> <kind> [solo-rojos]
 
   printf '\nFuente: .harness/events.jsonl. Este resumen sale del ledger, no de\n'
   printf 'la memoria del agente: lo que no se emitió, no aparece.\n'
+  printf 'El bus es compartido con las demás sesiones del workspace: los eventos\n'
+  printf 'de Claude Code se filtran por id de sesión y los del harness (gates,\n'
+  printf 'fases, supuestos) por tarea. Dos sesiones sobre la MISMA tarea comparten\n'
+  printf 'esos eventos en ambos resúmenes.\n'
 } > "$OUT" 2>/dev/null || exit 0
 
 cat "$OUT" 2>/dev/null

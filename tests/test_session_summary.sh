@@ -58,6 +58,53 @@ assert_contains "$out" "PARADAS: 1" "la parada se cuenta en el encabezado"
 assert_contains "$out" "1h 30m" "calcula la duración de la sesión"
 
 echo
+echo "── bus compartido: 10 sesiones sobre el mismo .harness/"
+# Bug de campo (introducido y cazado el mismo día): la ventana se acotaba solo
+# por TIEMPO, así que el resumen de una sesión reclamaba los gates, supuestos y
+# paradas de las otras nueve. "Lo que pasó en esta sesión" no es "lo que pasó
+# en esta ventana" cuando el bus es compartido.
+cat > "$BUS" <<'JSONL'
+{"ts":"2026-07-24T10:00:00Z","kind":"prompt","task":"","session":"sess-A","agent":"main","summary":"arranca A"}
+{"ts":"2026-07-24T10:01:00Z","kind":"prompt","task":"","session":"sess-B","agent":"main","summary":"arranca B"}
+{"ts":"2026-07-24T10:02:00Z","kind":"tool","task":"T-A","session":"sess-A","agent":"main","tool":"Bash","summary":"cosa de A","ok":"true"}
+{"ts":"2026-07-24T10:03:00Z","kind":"tool","task":"T-B","session":"sess-B","agent":"main","tool":"Bash","summary":"cosa de B","ok":"true"}
+{"ts":"2026-07-24T10:05:00Z","kind":"gate","task":"T-A","actor":"harness","summary":"gate rojo de la tarea A","ok":false}
+{"ts":"2026-07-24T10:06:00Z","kind":"gate","task":"T-B","actor":"harness","summary":"gate rojo de la tarea B","ok":false}
+{"ts":"2026-07-24T10:07:00Z","kind":"assumption","task":"T-B","actor":"impl","summary":"supuesto que es de B"}
+{"ts":"2026-07-24T10:08:00Z","kind":"stop","task":"T-B","actor":"harness","summary":"parada de B"}
+JSONL
+
+out="$(run_hook sess-A)"
+assert_contains "$out" "gate rojo de la tarea A" "sesión A: ve su propio gate"
+assert_not_contains "$out" "tarea B" "sesión A: NO reclama el gate de B"
+assert_not_contains "$out" "supuesto que es de B" "sesión A: NO reclama el supuesto de B"
+assert_not_contains "$out" "parada de B" "sesión A: NO reclama la parada de B"
+assert_not_contains "$out" "T-B" "sesión A: no lista la tarea de B como tocada"
+assert_contains "$out" "Gates: 1" "sesión A: cuenta solo sus gates"
+
+out="$(run_hook sess-B)"
+assert_contains "$out" "tarea B" "sesión B: ve su propio gate"
+assert_contains "$out" "parada de B" "sesión B: ve su propia parada"
+assert_not_contains "$out" "tarea A" "sesión B: NO reclama el gate de A"
+
+# Una sesión que no tocó ninguna tarea no puede adoptar eventos de harness
+# ajenos: sin tarea no hay atribución posible, y el silencio es la respuesta
+# honesta.
+printf '{"ts":"2026-07-24T10:09:00Z","kind":"prompt","task":"","session":"sess-C","agent":"main","summary":"solo pregunta"}\n' >> "$BUS"
+out="$(run_hook sess-C)"
+assert_contains "$out" "no registró decisiones" "sesión sin tarea: no adopta eventos ajenos"
+assert_not_contains "$out" "tarea A" "sesión sin tarea: no reclama nada de A"
+
+# La rotación del bus (5 MB) no debe dejar un hueco en el resumen: con diez
+# sesiones escribiendo, rotar a mitad de sesión es mucho más probable.
+mv "$BUS" "$BUS.1"
+printf '{"ts":"2026-07-24T10:30:00Z","kind":"gate","task":"T-A","actor":"harness","summary":"gate posterior a la rotacion","ok":false}\n' > "$BUS"
+out="$(run_hook sess-A)"
+assert_contains "$out" "gate rojo de la tarea A" "rotación: sigue viendo lo anterior (bus .1)"
+assert_contains "$out" "posterior a la rotacion" "rotación: y también lo nuevo"
+rm -f "$BUS.1"
+
+echo
 echo "── persistencia y fail-open"
 
 assert_file "$WS/.harness/sessions/sess-actual.md" "escribe .harness/sessions/<id>.md"

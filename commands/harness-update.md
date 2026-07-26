@@ -106,6 +106,12 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
      "formato exacto" sin esos dos campos: un reviewer que lo copie los borra y
      desactiva el mecanismo EN SILENCIO. Sin `change-id.sh` no hay identidad de
      cambio y el resto degrada a exigir el SHA exacto.
+   - **Gates-en-CI** (solo `flow: prs`): `.github/workflows/harness-gates.yml`
+     de cada repo gestionado + `scripts/ship.sh` (modo `--ci`). El workflow
+     llama a `ship.sh --ci`, asi que con un ship.sh viejo el check muere con
+     "task-id invalido" y la cola de merge queda bloqueada para todo el equipo.
+     Los dos van juntos. Y recorda que el workflow no se vuelve obligatorio
+     solo: el required check y la merge queue los activa un humano en el forge.
    - **Modelos**: `models.yaml` (esquema aliases) +
      `scripts/stamp-models.sh` + re-estampado de agentes. Si la instancia
      además usa **harness-cronjobs** (repo aparte), su `cron-runner.sh` lee las

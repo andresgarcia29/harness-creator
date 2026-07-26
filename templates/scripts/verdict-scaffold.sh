@@ -217,6 +217,16 @@ if [ "$REBASE" -eq 1 ]; then
                or (($x | split("/") | last) == ($c | split("/") | last))))))
         end;
     $fresh[0] + {
+      # QUIEN IMPLEMENTO NO CAMBIA PORQUE SE MOVIO LA BASE. Este campo se deriva
+      # de los runners de la evidencia, y tras un intento de ship la unica
+      # evidencia en el HEAD nuevo suele ser la de `ship`, que esta excluida a
+      # proposito (un verificador no puede figurar como implementador). Sin
+      # arrastrarlo, el campo quedaba VACIO y el scaffold se negaba por politica
+      # de roles: un callejon sin salida en cada ronda de rework posterior a un
+      # ship. Se unen los de antes con los frescos que si sean de implementacion.
+      implementation_agents:
+        ((($prev[0].implementation_agents // []) + $fresh[0].implementation_agents)
+         | unique),
       compliance: (($prev[0].compliance // []) | map(
         . + {carried_from: $prevc}
           + (if touched($changed)

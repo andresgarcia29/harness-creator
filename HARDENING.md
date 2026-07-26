@@ -309,6 +309,60 @@ minutos. Con un workspace Δ no importa. Con diez, Δ es donde se muere todo.
   (`refs/notes/harness`) con versión, hash del manifest de gates y workspace.
   Es un paliativo auditable: la solución de fondo es correr los gates en CI.
 
+## P0: lo que aparecio al pasar una feature REAL por el harness
+
+Ninguno de estos lo vieron los tests unitarios. Salieron de correr una feature de
+punta a punta (intake → plan-lint → implement → precheck → review → QA →
+veredicto → ship) sobre un repo Python con remoto git real, y una segunda tarea
+con el trunk movido por otra sesion.
+
+**La regla que los une, otra vez `set -e`**: llamar una funcion dentro de un
+`||`, un `&&` o un `if` SUPRIME `set -e` en TODO su cuerpo. Si esa funcion es la
+que corre los gates, un gate rojo deja de abortar y el resultado se lee verde.
+
+- [x] **`run_lang_gates || lrc=$?` desactivaba `set -e` sobre todos los gates de
+  lenguaje.** Un `pytest` roto salia VERDE del precheck, sellaba evidencia con
+  `exit_code 0` y estampaba `ok:true`. Lo introdujo la extraccion de
+  `--lang-gates`. Ahora se llama suelto y el marcador lo escribe el trap.
+- [x] **Seis gates usaban `A && B`** (`go vet && go build && go test`,
+  `cargo build && cargo test`, flutter, dotnet, mix, composer). Bajo `set -e`
+  una AND-list que falla NO aborta, asi que un build roto nunca puso el gate en
+  rojo. Preexistente, y afectaba a seis stacks. Un comando por linea.
+- [x] **El camino de error del rebase moria mudo.** `git rebase || { git rebase
+  --abort; ...; exit 4; }`: cuando el rebase fallaba SIN dejar rebase en curso
+  (arbol sucio, el caso comun), el `--abort` salia 128 y `set -e` mataba el
+  script antes de imprimir nada. Ahora muestra el error real de git y distingue
+  arbol sucio de conflicto, que tienen remediaciones opuestas.
+- [x] **`verdict-scaffold --rebase` dejaba `implementation_agents` vacio** cuando
+  la unica evidencia fresca era la de `ship` (excluida a proposito), y se negaba
+  por politica de roles: callejon sin salida en toda ronda de rework posterior a
+  un ship. Se arrastran los del veredicto previo.
+- [x] **`gate_tests_untouched` contaba `tests/__pycache__/*.pyc` borrados como
+  tests eliminados.** El patron matchea por RUTA y `/tests?/` atrapa todo lo que
+  cuelgue de ahi. Dejar de versionar artefactos (que es lo correcto) bloqueaba
+  el ship. Se excluyen los compilados, y borrar un test de verdad sigue
+  bloqueando.
+- [x] **El reclamo de locks huerfanos era codigo muerto, y dejaba el repo
+  trabado para siempre.** `pid_alive "$lpid"; alive_rc=$?` es una sentencia
+  suelta en el cuerpo del `until`, y `pid_alive` devuelve 1 o 2 como DATO: con
+  un lock huerfano el script salia con exit 1 sin imprimir una linea y, como
+  `LOCK_HELD` estaba vacio, el lock SOBREVIVIA. Preexistente. Con varias
+  sesiones por maquina, un crash tras escribir el pid deadlockea ese repo.
+- [x] **El gate de evidencia fresca corria en carrera contra su propio
+  productor.** El slot `lang` sella el EV (minutos) y el slot `veredicto` lo
+  exigia (milisegundos), en el mismo fan-out y sin orden entre si: rojo espurio
+  en el primer intento. Se difiere a un gate SERIAL despues del wait.
+- [x] **Un `qa: "pass"` no exigia ningun artefacto.** `check_verdict` leia solo
+  el campo del veredicto, asi que la afirmacion mas cara del pipeline era
+  palabra de agente. Demostrado en la corrida: una tarea shippeo con `qa:"pass"`
+  sin `qa-<repo>.json` y sin una sola evidencia de `runner=qa`. Ahora exige una
+  de las dos.
+- [x] **La suite era ciega a esta clase entera.** `test_ship_lock.sh` extraia
+  las funciones y las corria con `set -u`, no con el `set -euo pipefail` real, y
+  ademas invocaba `acquire_lock && [ ... ]`, que suprime `set -e` en todo el
+  cuerpo. O sea que el test medía el harness, no el codigo. Corregido, y
+  verificado por mutacion: con el patron viejo el test ahora falla.
+
 ### Pendiente: lo único que elimina la clase entera
 
 - [ ] **`flow: prs` + cola de merge del forge.** Todo lo de arriba MITIGA la

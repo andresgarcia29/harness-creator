@@ -140,4 +140,51 @@ assert_eq "0" "$(ls "$WS/tasks/T9/evidence/"EV-*.json 2>/dev/null | wc -l | tr -
 assert_contains "$out" "NO sello evidencia" "y lo dice explícitamente"
 assert_contains "$out" "sin que ninguna suite haya corrido" "explicando por qué sería una mentira"
 
+echo
+echo "── un gate rojo NO puede salir verde (el falso verde que encontró el demo)"
+# Encontrado pasando una feature REAL por el harness, no en los unitarios: el
+# precheck imprimia "✅ precheck verde", sellaba evidencia con exit_code 0 y
+# estampaba ok:true, CON LA SUITE DE TESTS ROTA.
+#
+# La causa: al extraer los gates a `ship.sh --lang-gates` para poder sellarlos
+# como evidencia, la invocacion quedo como `run_lang_gates || lrc=$?`. Esa
+# construccion DESACTIVA set -e dentro de la funcion, asi que el gate que falla
+# no aborta, los siguientes corren igual, y la funcion devuelve el exit del
+# ULTIMO comando, que era 0. Es la forma mas cara del defecto: nadie investiga
+# un verde.
+mkdir -p "$WS/worktrees/T10/svc" "$WS/tasks/T10"
+cp -R "$WS/repos/svc/." "$WS/worktrees/T10/svc/"
+( cd "$WS/worktrees/T10/svc"; : > Cargo.toml; git add -A; git commit -qm "stack cuyo build falla
+
+Task: T10" )
+# cargo de palo que FALLA: hermetico, sin depender de toolchains reales
+printf '#!/bin/sh\necho "error[E0433]: build roto"\nexit 1\n' > "$WS/bin/cargo"
+chmod +x "$WS/bin/cargo"
+
+out="$( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/ship.sh --precheck T10 svc 2>&1 )"; rc=$?
+[ "$rc" -ne 0 ] && pass "gate de lenguaje rojo: el precheck sale != 0" \
+  || fail "GATE ROJO SALIO VERDE: set -e quedo desactivado sobre run_lang_gates"
+assert_not_contains "$out" "precheck verde" "no anuncia verde con un gate rojo"
+assert_contains "$out" "precheck rojo" "lo declara rojo"
+sello="$(cat "$WS/tasks/T10/precheck-svc.json" 2>/dev/null)"
+assert_contains "$sello" '"ok":false' "el sello dice ok:false (lo lee /review para no lanzar a nadie)"
+
+# Y lo que hace al falso verde catastrofico: la evidencia. Si se sella con
+# exit_code 0, satisface --require-fresh-kind y el ship pasa sobre tests rotos.
+ev="$(ls "$WS/tasks/T10/evidence/"EV-*.json 2>/dev/null | head -1)"
+if [ -n "$ev" ]; then
+  code="$(jq -r '.exit_code' "$ev")"
+  [ "$code" != "0" ] && pass "la evidencia del gate rojo lleva exit_code != 0 (inerte para los gates)" \
+    || fail "la evidencia dice exit_code 0 con el build roto: certificaria una suite que fallo"
+else
+  pass "el gate rojo no dejo evidencia utilizable"
+fi
+
+# El camino feliz del mismo stack sigue verde: el arreglo no rompio el verde.
+printf '#!/bin/sh\nexit 0\n' > "$WS/bin/cargo"; chmod +x "$WS/bin/cargo"
+( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/ship.sh --precheck T10 svc >/dev/null 2>&1 ) \
+  && pass "el mismo stack en verde sigue pasando (no se rompio el camino feliz)" \
+  || fail "el camino feliz quedo roto"
+rm -f "$WS/bin/cargo"
+
 t_done

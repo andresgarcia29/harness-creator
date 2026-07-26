@@ -170,6 +170,24 @@ harness; cada agente es contexto y mantenimiento.
     `loop_budget` default 3. Si el humano quiere deep en TODO,
     advierte la latencia comprada donde no hay decisión (las reglas del
     tier deep de models.yaml) y registra la decisión.
+9c. **¿Cuánta gente va a instalar este harness?** Si es más de una (cada
+    quien en su máquina, todos contra los mismos repos remotos), hay dos
+    consecuencias que hay que decidir ACÁ, porque después se pagan caras:
+    - **`cronjobs.run_on`** (placeholder `{{CRONJOBS_RUN_ON}}`, va al answers).
+      Los trece detectores entregan PRs e issues contra repos COMPARTIDOS y su
+      ledger es local: si corren en las diez máquinas, el mismo hallazgo llega
+      como diez PRs duplicados y el circuit breaker abre en una mientras las
+      otras siguen. Con UNA instalación: `any` (el default). Con varias:
+      `k8s` si van a usar el CronJob de Kubernetes, o el hostname de la
+      máquina designada. Sin respuesta el placeholder queda literal, y
+      `cron-runner.sh` lo trata como `any` a propósito (un placeholder sin
+      sustituir es problema del doctor, no motivo para apagar trece jobs en
+      silencio).
+    - **`instance.repo` compartido**, no `self`. La spec maestra, los ADRs, la
+      constitución y `docs/architecture/map.md` son los desempates del
+      enrichment y del RFC. Con `self` cada persona tiene su propia
+      legislación divergiendo en silencio: uno ratifica un ADR el lunes y otro
+      litiga contra la ley vieja el martes, con toda la ceremonia en verde.
 10a. **Profundidad de planeación** (no preguntes, informa): los planes,
     la síntesis del RFC y los ADRs se escriben en modo **ultrathink**, y
     el architect trabaja como hilo fino descomponiendo en probes

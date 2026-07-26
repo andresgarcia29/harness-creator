@@ -15,10 +15,45 @@
 # Requiere las credenciales del proveedor (córrelo vía with-secrets.sh):
 #   linear → LINEAR_API_KEY · github → gh autenticado (GH_TOKEN)
 # Exit: 0 ok · 2 no existe · 3 sin label agent-ready · 4 error auth/red
+#       5 otro workspace ya tomó este ticket
 set -euo pipefail
 ID="${1:?uso: ticket-pull.sh <TICKET-ID>}"
 WS="$(cd "$(dirname "$0")/.." && pwd)"
 PROVIDER="{{TICKETS_PROVIDER}}"
+
+# ── EL CLAIM: QUIÉN SE QUEDA CON EL TICKET ────────────────────────────
+# Este script hacía check-then-act sin atomicidad: leía los labels, verificaba
+# `agent-ready`, y DESPUÉS movía el label. Con un solo workspace eso alcanza.
+# Con varios contra el mismo tracker, dos pueden leer `agent-ready` en la misma
+# ventana y arrancar los dos el pipeline completo sobre el mismo ticket: horas
+# de LLM duplicadas, o peor, dos arreglos distintos del mismo bug aterrizando
+# en main.
+#
+# No hay estado compartido entre workspaces salvo el tracker, así que el
+# tracker ES el registro de claims. El protocolo usa lo único que el servidor
+# ordena de forma total: sus comentarios. Todos publican su claim, y GANA EL
+# PRIMERO que el servidor registró. Es determinista, no necesita locks, y no
+# pelea con un humano que asignó el ticket a alguien (a diferencia de usar
+# assignee, que además rompería el triage manual).
+#
+# El nonce evita que dos sesiones de la MISMA máquina se lean como una sola.
+CLAIM_MARK="harness-claim"
+workspace_id() {
+  printf '%s@%s#%s' "$(id -un 2>/dev/null || echo user)" \
+    "$(hostname -s 2>/dev/null || echo host)" \
+    "$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || echo $$)"
+}
+CLAIM_ID="$(workspace_id)"
+
+claim_lost() {  # claim_lost <ganador>
+  echo "🛑 este ticket ya lo tomó otro workspace: $1"
+  echo "   No arranco el pipeline: dos workspaces sobre el mismo ticket es"
+  echo "   trabajo duplicado en el mejor caso, y dos arreglos distintos del"
+  echo "   mismo bug aterrizando en main en el peor."
+  echo "   ↳ si de verdad querés retomarlo acá, borrá el comentario de claim"
+  echo "     de $1 en el ticket y volvé a correr esto."
+  exit 5
+}
 
 # El sobre de contenido NO CONFIABLE es del harness, no del proveedor: lo
 # comparten los dos drivers para que agregar uno nuevo no pueda olvidarlo.
@@ -89,10 +124,21 @@ else
   echo "⚠️  no existe el label in-harness en el team — créalo en Linear"
 fi
 
-# 4 · Comentar el task-id del harness
-gql "$(jq -n --arg id "$uuid" --arg body "🤖 Tomado por el harness. Task-id: \`$ID\`. Trazabilidad: commits con trailer \`Task: $ID\`." \
+# 4 · Claim + comentario del task-id (mismo protocolo que el driver de github:
+#     publicar, releer, y gana el primero que el servidor ordenó)
+gql "$(jq -n --arg id "$uuid" --arg body "🤖 $CLAIM_MARK: \`$CLAIM_ID\` tomó este ticket. Task-id: \`$ID\`. Trazabilidad: commits con trailer \`Task: $ID\`." \
   '{query:"mutation($id:String!,$body:String!){ commentCreate(input:{issueId:$id, body:$body}){ success } }", variables:{id:$id, body:$body}}')" >/dev/null
-echo "✅ comentario publicado en $ID"
+winner="$(gql "$(jq -n --arg id "$uuid" '{query:"query($id:String!){ issue(id:$id){ comments(first:50){ nodes{ body createdAt } } } }", variables:{id:$id}}')" \
+  | jq -r --arg m "$CLAIM_MARK" '[.data.issue.comments.nodes[]? | select(.body | test($m))] | sort_by(.createdAt) | .[0].body // empty' 2>/dev/null || echo "")"
+if [ -n "$winner" ]; then
+  case "$winner" in
+    *"$CLAIM_ID"*) echo "✅ claim ganado por $CLAIM_ID (comentario publicado en $ID)" ;;
+    *) claim_lost "$(printf '%s' "$winner" | sed -n "s/.*$CLAIM_MARK: \`\([^\`]*\)\`.*/\1/p")" ;;
+  esac
+else
+  echo "⚠️  publiqué el claim pero no pude releerlo: no puedo demostrar que soy"
+  echo "    el único con este ticket. Revisá el issue antes de invertir horas."
+fi
 }
 
 pull_github() {
@@ -146,10 +192,31 @@ pull_github() {
     echo "⚠️  no pude mover el label (¿existe 'in-harness' en $repo?): créalo con"
     echo "    gh label create in-harness --repo $repo"
   fi
-  gh issue comment "$num" --repo "$repo" \
-    --body "🤖 Tomado por el harness. Task-id: \`$ID\`. Trazabilidad: commits con trailer \`Task: $ID\`." \
-    >/dev/null 2>&1 && echo "✅ comentario publicado en $repo#$num" \
-    || echo "⚠️  no pude comentar en $repo#$num"
+  # El claim va ANTES de anunciar nada: publicar y releer, y gana el primero
+  # que el servidor registró. El comentario dice QUÉ workspace lo tomó, cosa
+  # que antes no decía: con 10 instancias, "tomado por el harness" no
+  # identificaba a nadie.
+  if gh issue comment "$num" --repo "$repo" \
+       --body "🤖 $CLAIM_MARK: \`$CLAIM_ID\` tomó este ticket. Task-id: \`$ID\`. Trazabilidad: commits con trailer \`Task: $ID\`." \
+       >/dev/null 2>&1; then
+    local winner
+    winner="$(gh issue view "$num" --repo "$repo" --json comments --jq \
+      "[.comments[] | select(.body | test(\"$CLAIM_MARK\")) | .body] | .[0] // empty" 2>/dev/null || echo "")"
+    if [ -n "$winner" ]; then
+      case "$winner" in
+        *"$CLAIM_ID"*) echo "✅ claim ganado por $CLAIM_ID (comentario publicado en $repo#$num)" ;;
+        *) claim_lost "$(printf '%s' "$winner" | sed -n "s/.*$CLAIM_MARK: \`\([^\`]*\)\`.*/\1/p")" ;;
+      esac
+    else
+      # No poder releer no es haber ganado, pero tampoco es haber perdido.
+      # Se dice y se sigue: bloquear acá dejaría al equipo sin poder trabajar
+      # por un fallo de lectura del tracker.
+      echo "⚠️  publiqué el claim pero no pude releerlo: no puedo demostrar que"
+      echo "    soy el único con este ticket. Revisá el issue antes de invertir horas."
+    fi
+  else
+    echo "⚠️  no pude comentar en $repo#$num: sigo SIN claim verificado (riesgo de trabajo duplicado)"
+  fi
 }
 
 case "$PROVIDER" in

@@ -71,7 +71,11 @@ echo "── gates en paralelo: un rojo no esconde a los demás"
 run_pargates() {  # run_pargates <security-rc> [precheck]: grupos stub, security parametrizado
   ( set -eu; WS="$WS"; REPO=test; CURRENT_GATE=""; sec_rc="$1"; PRECHECK="${2:-0}"
     emit() { :; }; gate() { CURRENT_GATE="$1"; }
+    # run_parallel_gates llama al envoltorio que sella la corrida como
+    # evidencia; el stub va sobre ESE nombre. La distinción importa: es la
+    # pieza que elimina una corrida entera de la suite por tarea.
     run_lang_gates() { echo LANG-EVIDENCIA; }
+    run_lang_gates_sealed() { run_lang_gates; }
     run_security_gates() { echo SEC-EVIDENCIA; return "$sec_rc"; }
     gate_tests_untouched() { echo TESTS-EVIDENCIA; }
     check_verdict() { echo VERDICT-EVIDENCIA; }

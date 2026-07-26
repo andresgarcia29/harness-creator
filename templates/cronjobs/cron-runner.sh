@@ -29,6 +29,48 @@ JOB_MAX_TURNS="${JOB_MAX_TURNS:-40}"
 FAILS_F="$LEDGER_DIR/$JOB_NAME.fails"
 
 log()    { echo "[$JOB_NAME] $1"; }
+
+# ── UN HALLAZGO, UN PR: LOS CRONJOBS NO SE MULTIPLICAN POR WORKSPACE ──
+# Estos jobs entregan PRs e issues contra los repos COMPARTIDOS, pero su
+# ledger y su circuit breaker son locales. Con varias instalaciones del harness
+# (una por persona) el mismo detector encuentra el mismo hallazgo en todas y
+# entrega hasta N PRs duplicados del mismo bump de dependencia; y el breaker
+# abre en una laptop mientras las otras siguen martillando.
+#
+# La perilla vive en harness-answers.yaml:
+#   cronjobs:
+#     run_on: any            → cualquiera (el default, correcto con UN workspace)
+#     run_on: <hostname>     → solo esa máquina (el "workspace designado")
+#     run_on: k8s            → nadie local; corren en el CronJob de Kubernetes
+#                              (templates/cronjobs/k8s-cronjob.yaml.tmpl)
+# Se falla hacia NO correr cuando el dueño está declarado y no somos nosotros:
+# un job que no corre se nota, uno que corre diez veces contamina un repo
+# compartido y se lo come el equipo entero.
+cron_owner() {
+  [ -f "$WS/harness-answers.yaml" ] || { printf 'any'; return 0; }
+  awk '/^cronjobs:/ { insec=1; next }
+       insec && /^[^[:space:]]/ { insec=0 }
+       insec && /^[[:space:]]+run_on:[[:space:]]*/ {
+         v=$0; sub(/^[^:]*:[[:space:]]*/,"",v); gsub(/["\047]/,"",v)
+         sub(/[[:space:]]*#.*$/,"",v); sub(/[[:space:]]+$/,"",v); print v; exit }
+      ' "$WS/harness-answers.yaml" 2>/dev/null | grep . || printf 'any'
+}
+OWNER="$(cron_owner)"
+ME="$(hostname -s 2>/dev/null || echo desconocido)"
+case "$OWNER" in
+  # Un placeholder sin sustituir es un problema de generación (le toca al
+  # doctor), no un motivo para desactivar en silencio los trece cronjobs.
+  any|""|'{{'*) : ;;
+  k8s)
+    log "⏭️  cronjobs.run_on=k8s: este job corre en el CronJob de Kubernetes, no acá."
+    exit 0 ;;
+  "$ME") : ;;
+  *)
+    log "⏭️  cronjobs.run_on=$OWNER y esta máquina es $ME: no corro."
+    log "   Con varios workspaces, correr en todos entrega PRs duplicados del"
+    log "   mismo hallazgo a un repo compartido."
+    exit 0 ;;
+esac
 ledger() { # ledger <status> <cost>
   printf '{"job":"%s","ts":"%s","status":"%s","cost_usd":%s}\n' \
     "$JOB_NAME" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "${2:-0}" >> "$LEDGER"

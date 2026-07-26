@@ -1,0 +1,251 @@
+#!/usr/bin/env bash
+# test_rebase_survival.sh: el hallazgo central de la auditoría del trunk
+# caliente: con varias personas pusheando al mismo main, el rebase de ship.sh
+# reescribía los SHA y tiraba veredicto + evidencia + QA, o sea decenas de
+# minutos de juicio de LLM, por un movimiento que el reviewer nunca miró.
+#
+# Lo que se fija acá:
+#   1. change-id.sh: el MISMO cambio sobre otra base da el MISMO id.
+#   2. change-id.sh NO es ciego al whitespace (patch-id a secas sí lo es, y en
+#      Python/YAML/Makefile la indentación es semántica: sin esto se podría
+#      re-indentar DESPUÉS del review conservando el pass).
+#   3. Interferencia textual cercana → id distinto → re-review (fail-closed).
+#   4. validate-ship reusa el juicio con el mismo patch_id, y NO lo reusa si
+#      el cambio cambió, si el veredicto está viejo, o si la base voló lejos.
+#   5. evidence.py: la prueba REVISADA y la prueba FRESCA son afirmaciones
+#      distintas, y sin la fresca no se pushea un árbol que nadie corrió.
+set -u
+. "$(dirname "$0")/lib.sh"
+t_ws
+
+CHANGE_ID="$ROOT/templates/scripts/change-id.sh"
+POLICY_PY="$ROOT/templates/scripts/harness-policy.py"
+EVIDENCE_PY="$ROOT/templates/scripts/evidence.py"
+
+g() { git -C "$1" -c user.email=t@t -c user.name=t "${@:2}"; }
+
+mk_base() {  # mk_base <dir>: repo con origin/main y un archivo Python
+  rm -rf "$1"; mkdir -p "$1"
+  git init -q -b main "$1"
+  printf 'def f():\n    return 1\n\nHELPER = 0\n' > "$1/app.py"
+  g "$1" add -A; g "$1" commit -qm base
+  g "$1" update-ref refs/remotes/origin/main HEAD
+}
+
+echo "── change-id: el mismo cambio sobrevive a que se mueva la base"
+
+R="$WS/r1"; mk_base "$R"
+# el cambio de la tarea
+printf 'def f():\n    return 2\n\nHELPER = 0\n' > "$R/app.py"
+g "$R" add -A; g "$R" commit -qm "mi cambio"
+ID_ANTES="$(bash "$CHANGE_ID" "$R" main)"
+SHA_ANTES="$(g "$R" rev-parse HEAD)"
+
+# otro workspace pushea a main un archivo AJENO, y nosotros rebaseamos
+g "$R" checkout -q -b tmp origin/main
+printf 'x = 1\n' > "$R/otro.py"; g "$R" add -A; g "$R" commit -qm "commit de otro"
+g "$R" update-ref refs/remotes/origin/main HEAD
+g "$R" checkout -q main >/dev/null 2>&1 || g "$R" checkout -q -
+g "$R" rebase -q origin/main >/dev/null 2>&1
+ID_DESPUES="$(bash "$CHANGE_ID" "$R" main)"
+SHA_DESPUES="$(g "$R" rev-parse HEAD)"
+
+[ "$SHA_ANTES" != "$SHA_DESPUES" ] \
+  && pass "el rebase SÍ cambió el SHA (la premisa del bug se reproduce)" \
+  || fail "el rebase no movió el SHA: el fixture no reproduce el caso"
+assert_eq "$ID_ANTES" "$ID_DESPUES" "mismo cambio sobre otra base: MISMO patch_id"
+
+echo "── change-id: lo que NO debe sobrevivir"
+
+# 2. indentación: `git patch-id` a secas da el mismo id acá (verificado), y por
+#    eso change-id.sh usa --verbatim. Si esto se rompe, se abre la puerta a
+#    re-indentar después del review conservando el veredicto.
+R2="$WS/r2"; mk_base "$R2"
+printf 'def f():\n    return 2\n\nHELPER = 0\n' > "$R2/app.py"
+g "$R2" add -A; g "$R2" commit -qm "indent 4"
+ID_4="$(bash "$CHANGE_ID" "$R2" main)"
+g "$R2" reset -q --hard origin/main
+printf 'def f():\n  return 2\n\nHELPER = 0\n' > "$R2/app.py"
+g "$R2" add -A; g "$R2" commit -qm "indent 2"
+ID_2="$(bash "$CHANGE_ID" "$R2" main)"
+[ "$ID_4" != "$ID_2" ] \
+  && pass "cambiar la indentación cambia el id (whitespace ES semántica en Python)" \
+  || fail "id ciego al whitespace: se podría re-indentar tras el review y conservar el pass"
+
+# 3. un commit ajeno que toca líneas ADYACENTES mueve el contexto del diff, así
+#    que el id cambia y la tarea cae a re-review. Es fail-closed gratis.
+R3="$WS/r3"; mk_base "$R3"
+printf 'def f():\n    return 2\n\nHELPER = 0\n' > "$R3/app.py"
+g "$R3" add -A; g "$R3" commit -qm mio
+ID_LEJOS="$(bash "$CHANGE_ID" "$R3" main)"
+g "$R3" checkout -q -b tmp3 origin/main
+printf 'def f():\n    return 1\n\nHELPER = 99\n' > "$R3/app.py"   # línea vecina
+g "$R3" add -A; g "$R3" commit -qm "otro toca al lado"
+g "$R3" update-ref refs/remotes/origin/main HEAD
+g "$R3" checkout -q - >/dev/null 2>&1
+g "$R3" rebase -q origin/main >/dev/null 2>&1 || g "$R3" rebase --abort >/dev/null 2>&1
+ID_CERCA="$(bash "$CHANGE_ID" "$R3" main 2>/dev/null || echo CONFLICTO)"
+[ "$ID_LEJOS" != "$ID_CERCA" ] \
+  && pass "interferencia en líneas vecinas: id distinto → re-review (fail-closed)" \
+  || fail "un cambio ajeno adyacente no alteró el id"
+
+# 4. diff vacío no tiene identidad: no puede haber un id compartido por todas
+#    las tareas sin cambios.
+R4="$WS/r4"; mk_base "$R4"
+bash "$CHANGE_ID" "$R4" main >/dev/null 2>&1 \
+  && fail "un diff vacío devolvió id" || pass "diff vacío: sin identidad de cambio (exit != 0)"
+
+echo "── validate-ship: reusa el JUICIO, jamás la PRUEBA"
+
+POL="$WS/policy.json"
+cat > "$POL" <<'JSON'
+{"schema":1,
+ "workflow":{"initial_phase":"intake",
+   "phase_order":["intake","rfc","implement","review","ship","deploy","archive"],
+   "allowed_transitions":{"intake":["rfc"],"rfc":["implement"],"implement":["review"],
+     "review":["implement","ship"],"ship":["deploy"],"deploy":["archive"],"archive":[],"blocked":[]},
+   "lanes":{"express":{},"standard":{},"full":{}},
+   "lane_escalation":["express","standard","full"],
+   "allowed_pause_reasons":["enrichment_questions"]},
+ "limits":{"max_review_rounds":3},
+ "ship":{"require_independent_review":true,"require_fresh_evidence":true,
+   "required_evidence_kinds":["test"],
+   "verdict_reuse":{"enabled":true,"max_age_hours":24,"max_base_commits":200}}}
+JSON
+
+TD="$WS/tasks/T1"; mkdir -p "$TD"
+cat > "$TD/state.json" <<'JSON'
+{"schema":1,"task_id":"T1","phase":"review","lane":"full","review_rounds":1,
+ "budget_usd":null,"spent_usd":0.0,
+ "history":[{"from":"implement","to":"review","actor":"orchestrator"}]}
+JSON
+
+mk_verdict() {  # mk_verdict <commit> <patch_id> <reviewed_at>
+  jq -n --arg c "$1" --arg p "$2" --arg t "$3" \
+    '{schema:1, task_id:"T1", repo:"atlas", commit:$c, patch_id:$p, reviewed_at:$t,
+      reviewer:"reviewer", implementation_agents:["impl-atlas"],
+      verdict:"pass", qa:"pass", evidence:["EV-TEST-aaaaaaaaaaaa"],
+      blocking:[], non_blocking:[], docs_updated:true, compliance:[],
+      requirements_uncovered:0, snapshots_updated_justified:true}' > "$TD/verdict-atlas.json"
+}
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+VS() { python3 "$POLICY_PY" --policy "$POL" validate-ship "$TD" \
+         --verdict "$TD/verdict-atlas.json" "$@" 2>&1; }
+
+# el caso que rompía todo: SHA distinto, mismo cambio
+mk_verdict "aaaa111" "PID-IGUAL" "$NOW"
+out="$(VS --commit "bbbb222" --patch-id "PID-IGUAL" --base-moved 3)"; rc=$?
+assert_eq 0 "$rc" "SHA distinto + patch_id igual: el veredicto se reusa"
+assert_contains "$out" "veredicto reusado" "dice explícitamente que lo reusó"
+assert_contains "$out" "REVIEWED_COMMIT=aaaa111" "publica el commit revisado para evidence.py"
+
+# el cambio cambió de verdad → re-review
+out="$(VS --commit "bbbb222" --patch-id "PID-OTRO" --base-moved 3)"; rc=$?
+assert_eq 3 "$rc" "patch_id distinto: NO se reusa"
+assert_contains "$out" "NO es el que se revisó" "nombra la causa real"
+assert_contains "$out" "verdict-scaffold.sh --rebase" "da la remediación exacta"
+
+# sin patch_id en el veredicto (instancia vieja) → comportamiento estricto
+mk_verdict "aaaa111" "" "$NOW"
+out="$(VS --commit "bbbb222" --patch-id "PID-IGUAL")"; rc=$?
+assert_eq 3 "$rc" "veredicto sin patch_id: exige commit exacto (sin aflojar)"
+assert_contains "$out" "no declara patch_id" "explica por qué no puede reusar"
+
+# el juicio caduca en el TIEMPO aunque el texto sea idéntico
+VIEJO="$(python3 -c "import datetime as d;print((d.datetime.now(d.timezone.utc)-d.timedelta(hours=48)).isoformat().replace('+00:00','Z'))")"
+mk_verdict "aaaa111" "PID-IGUAL" "$VIEJO"
+out="$(VS --commit "bbbb222" --patch-id "PID-IGUAL")"; rc=$?
+assert_eq 3 "$rc" "veredicto de 48h con ventana de 24h: NO se reusa"
+assert_contains "$out" "el trunk de abajo ya no" "explica que el texto igual no basta"
+
+# la base voló demasiado lejos
+mk_verdict "aaaa111" "PID-IGUAL" "$NOW"
+out="$(VS --commit "bbbb222" --patch-id "PID-IGUAL" --base-moved 500)"; rc=$?
+assert_eq 3 "$rc" "base +500 commits con tope 200: NO se reusa"
+
+# mismo commit: el camino de siempre, sin necesitar patch_id
+mk_verdict "cccc333" "PID-IGUAL" "$NOW"
+out="$(VS --commit "cccc333")"; rc=$?
+assert_eq 0 "$rc" "commit idéntico: pasa como siempre (compat)"
+assert_not_contains "$out" "veredicto reusado" "commit idéntico: no anuncia reutilización"
+
+echo "── evidence: prueba REVISADA y prueba FRESCA son cosas distintas"
+
+mkdir -p "$TD/evidence"
+mk_ev() {  # mk_ev <id> <runner> <commit>
+  printf 'salida del test\n' > "$TD/evidence/$1.log"
+  local h; h="$(shasum -a 256 "$TD/evidence/$1.log" | cut -d' ' -f1)"
+  jq -n --arg id "$1" --arg r "$2" --arg c "$3" --arg h "$h" \
+    '{schema:1, id:$id, task_id:"T1", repo:"atlas", kind:"test", runner:$r,
+      commit:$c, commit_after:$c, exit_code:0,
+      output:("evidence/"+$id+".log"), output_sha256:$h}' > "$TD/evidence/$1.json"
+}
+mk_ev EV-TEST-aaaaaaaaaaaa impl-atlas "aaaa111"
+mk_verdict "aaaa111" "PID-IGUAL" "$NOW"
+EV() { python3 "$EVIDENCE_PY" verify --task-dir "$TD" --repo atlas "$@" 2>&1; }
+
+# el árbol que se pushea NO es el revisado y nadie lo corrió → fail-closed
+out="$(EV --commit "bbbb222" --reviewed-commit "aaaa111" \
+        --verdict "$TD/verdict-atlas.json" --require-kind test --require-fresh-kind test)"; rc=$?
+assert_eq 3 "$rc" "sin evidencia del árbol integrado: NO se pushea"
+assert_contains "$out" "evidencia FRESCA" "nombra exactamente lo que falta"
+
+# ship corre la suite sobre el árbol integrado y sella SU evidencia
+mk_ev EV-TEST-bbbbbbbbbbbb ship "bbbb222"
+out="$(EV --commit "bbbb222" --reviewed-commit "aaaa111" \
+        --verdict "$TD/verdict-atlas.json" --require-kind test --require-fresh-kind test)"; rc=$?
+assert_eq 0 "$rc" "con evidencia fresca de ship: pasa"
+assert_contains "$out" "evidencia fresca" "declara que verificó el árbol que aterriza"
+assert_contains "$out" "ship" "nombra al runner que la produjo"
+
+# la evidencia del review sigue atada a lo que el reviewer miró
+out="$(EV --commit "bbbb222" --reviewed-commit "zzzz999" \
+        --verdict "$TD/verdict-atlas.json" --require-kind test)"; rc=$?
+assert_eq 3 "$rc" "veredicto de otro commit revisado: sigue rechazando"
+
+# sin --reviewed-commit el contrato es el histórico (compat)
+mk_verdict "bbbb222" "PID-IGUAL" "$NOW"
+mk_ev EV-TEST-aaaaaaaaaaaa impl-atlas "bbbb222"
+out="$(EV --commit "bbbb222" --verdict "$TD/verdict-atlas.json" --require-kind test)"; rc=$?
+assert_eq 0 "$rc" "sin --reviewed-commit: comportamiento histórico intacto"
+
+echo "── las perillas de evidencia del policy dejaron de estar muertas"
+out="$(python3 "$POLICY_PY" --policy "$POL" evidence-policy --field required_evidence_kinds)"
+assert_eq "test" "$out" "required_evidence_kinds se LEE del policy"
+python3 - "$POL" <<'PY'
+import json, sys
+p = json.load(open(sys.argv[1]))
+p["ship"]["required_evidence_kinds"] = ["test", "lint"]
+json.dump(p, open(sys.argv[1], "w"))
+PY
+out="$(python3 "$POLICY_PY" --policy "$POL" evidence-policy --field required_evidence_kinds | tr '\n' ' ')"
+assert_contains "$out" "lint" "editar la perilla cambia lo que se exige (antes no hacía nada)"
+
+echo "── el presupuesto de rondas se cuenta por REPO"
+# Antes era por TAREA: tres repos con UN fix normal cada uno agotaban el
+# presupuesto y escalaban a humano sin que nada estuviera mal. El loop de un
+# repo no dice nada sobre la convergencia de otro.
+TD2="$WS/tasks/T2"; mkdir -p "$TD2"
+python3 "$POLICY_PY" --policy "$POL" init "$TD2" --lane full >/dev/null 2>&1
+TR() { python3 "$POLICY_PY" --policy "$POL" transition "$TD2" "$1" --actor o ${2:+--repo "$2"} 2>&1; }
+TR rfc >/dev/null; TR implement >/dev/null
+for r in atlas hermes proto; do
+  TR review "$r" >/dev/null || fail "primera ronda de $r rechazada"
+  TR implement >/dev/null
+done
+TR review atlas >/dev/null 2>&1 \
+  && pass "3 repos con 1 ronda cada uno: el presupuesto NO se agota" \
+  || fail "el presupuesto se agotó con una ronda por repo"
+rounds="$(jq -r '.review_rounds_by_repo | to_entries | map("\(.key)=\(.value)") | join(",")' "$TD2/state.json")"
+assert_contains "$rounds" "atlas=2" "cuenta las rondas de cada repo por separado"
+assert_contains "$rounds" "hermes=1" "y no le cobra a hermes las de atlas"
+
+# un repo que de verdad no converge sí se corta, y el mensaje lo aísla
+TR implement >/dev/null; TR review atlas >/dev/null
+TR implement >/dev/null
+out="$(TR review atlas)"; rc=$?
+assert_eq 3 "$rc" "un repo que no converge sí agota SU presupuesto"
+assert_contains "$out" "repo atlas" "y el mensaje nombra al repo, no a la tarea"
+assert_contains "$out" "no se ven afectados" "y aclara que los otros repos siguen"
+
+t_done

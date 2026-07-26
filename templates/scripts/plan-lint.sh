@@ -151,6 +151,37 @@ else
   red=1
 fi
 
+# ── 4. El carril, contra los ARCHIVOS que el plan declara ─────────────
+# gate_lane (ship.sh) verifica el carril contra el diff REAL, y es ley. El
+# problema era CUÁNDO: al final, después de implementar, revisar y hacer QA.
+# Un express rojo por carril no es un fix local, es el retroceso más caro del
+# pipeline (escalar carril → volver a /rfc → re-planear → re-implementar), y se
+# descubría en el momento de máximo costo hundido.
+#
+# El plan YA declara `archivos:` por tarea, así que el mismo patrón se puede
+# correr acá, gratis y antes de lanzar a nadie. Esto no reemplaza al gate: es
+# el mismo criterio, aplicado donde todavía no cuesta nada equivocarse.
+LANE=""
+[ -f "$DIR/state.json" ] && LANE="$(sed -n 's/.*"lane"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' "$DIR/state.json" | head -1)"
+if [ "$LANE" = "express" ]; then
+  pat="${LANE_GUARD_PATTERN:-(\.proto$|(^|/)proto/|(^|/)migrations?/|\.sql$|(^|/)helm/|(^|/)charts/|(^|/)terraform/|(^|/)openapi\.|(^|/)swagger\.)}"
+  planned="$(awk '
+    /^[ \t]*[-*][ \t]+[Aa]rchivos[ \t]*:/ {
+      line = $0; sub(/^[^:]*:[ \t]*/, "", line)
+      n = split(line, arr, /[,;]/)
+      for (i = 1; i <= n; i++) { f = arr[i]; gsub(/^[ \t]+|[ \t]+$/, "", f); if (f != "") print f }
+    }' "$PLAN")"
+  hits="$(printf '%s\n' "$planned" | grep -E "$pat" || true)"
+  if [ -n "$hits" ]; then
+    echo "❌ carril express, pero el plan ya declara archivos de contrato/migración/infra:"
+    printf '%s\n' "$hits" | while IFS= read -r l; do [ -n "$l" ] && say "$l"; done
+    echo "   ↳ remediación: este cambio necesita deliberación. Escalá AHORA, que"
+    echo "     es cuando sale barato (después de implementar cuesta re-planear entero):"
+    echo "     python3 scripts/harness-policy.py escalate tasks/$TASK --to standard --actor orchestrator"
+    red=1
+  fi
+fi
+
 if [ "$red" -eq 0 ]; then
   echo "✅ plan ejecutable: $tasks_n tarea(s), claves completas, sin decisiones abiertas"
   exit 0

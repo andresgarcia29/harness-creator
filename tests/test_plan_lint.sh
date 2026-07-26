@@ -91,4 +91,48 @@ assert_eq 2 "$rc" "tarea sin plan.md: exit 2 (falta artefacto, no plan rojo)"
 out="$(run ../evil)"; rc=$?
 assert_eq 2 "$rc" "task-id con traversal: rechazado"
 
+echo
+echo "── el carril se verifica contra los ARCHIVOS del plan, no al final"
+# gate_lane (ship.sh) sigue siendo la ley, pero corría después de implementar,
+# revisar y hacer QA. Un express rojo por carril obliga a escalar y volver a
+# /rfc: el retroceso más caro del pipeline, descubierto en el peor momento.
+mk_task() {  # mk_task <id> <lane> <archivos>
+  mkdir -p "$WS/tasks/$1"
+  printf '{"schema":1,"task_id":"%s","lane":"%s","phase":"rfc"}' "$1" "$2" > "$WS/tasks/$1/state.json"
+  cat > "$WS/tasks/$1/plan.md" <<PLAN
+### T1 · atlas · algo
+- repo: atlas
+- req: R-1
+- archivos: $3
+- criterios: responde 200
+- complexity: low
+- deps: ninguna
+PLAN
+  printf '## ADDED Requirements\n- R-1: algo\n' > "$WS/tasks/$1/delta-spec.md"
+}
+
+mk_task LANE1 express "internal/http/handler.go"
+bash "$WS/scripts/plan-lint.sh" LANE1 >/dev/null 2>&1 \
+  && pass "express con archivos normales: verde" || fail "express limpio fue rechazado"
+
+mk_task LANE2 express "proto/api.proto, internal/x.go"
+out="$(bash "$WS/scripts/plan-lint.sh" LANE2 2>&1)"; rc=$?
+assert_eq 3 "$rc" "express que YA planea tocar un .proto: rojo en el plan"
+assert_contains "$out" "carril express" "nombra el carril"
+assert_contains "$out" "escalate" "da la remediación de escalar, no de borrar el archivo"
+assert_contains "$out" "cuando sale barato" "dice por qué acá y no en el ship"
+
+mk_task LANE3 express "migrations/001_add.sql"
+bash "$WS/scripts/plan-lint.sh" LANE3 >/dev/null 2>&1 \
+  && fail "migración en express no se cazó" || pass "migración planeada en express: rojo"
+
+mk_task LANE4 full "proto/api.proto"
+bash "$WS/scripts/plan-lint.sh" LANE4 >/dev/null 2>&1 \
+  && pass "full tocando proto: no es asunto de este check" || fail "full fue rechazado"
+
+# Sin state.json (tarea vieja o flujo manual) no se inventa un carril.
+mk_task LANE5 express "proto/api.proto"; rm -f "$WS/tasks/LANE5/state.json"
+bash "$WS/scripts/plan-lint.sh" LANE5 >/dev/null 2>&1 \
+  && pass "sin state.json: no asume carril (compat)" || fail "sin state.json bloqueó"
+
 t_done

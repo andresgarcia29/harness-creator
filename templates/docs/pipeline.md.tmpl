@@ -45,9 +45,22 @@ tres piezas que las recortan, en el orden en que actúan:
    decide un implementer a ciegas, y eso vuelve como blocking.
 3. **Lo mecánico antes que el juicio.** `ship.sh --precheck <id> <repo>`
    corre los gates del ship (build, tests, lint, gitleaks,
-   tests-no-debilitados) sobre el worktree, sin veredicto ni push. El
-   reviewer no se lanza en rojo: un test roto no vale una ronda de
-   10-20 minutos. Un precheck rojo NO consume presupuesto de loop.
+   tests-no-debilitados, **trailer y carril**) sobre el worktree, sin
+   veredicto ni push. El reviewer no se lanza en rojo: un test roto no vale
+   una ronda de 10-20 minutos. Un precheck rojo NO consume presupuesto de
+   loop. Con el árbol limpio **sella su corrida como evidencia**, así que el
+   implementer no vuelve a correr la suite: antes se corría cuatro veces por
+   tarea (precheck, evidencia, QA y ship) sobre el mismo código.
+4. **El juicio sobrevive a que se mueva el trunk.** Con varias personas
+   pusheando al mismo main, el rebase del ship reescribía los SHA y tiraba
+   review, QA y evidencia por un movimiento que el reviewer nunca miró. El
+   veredicto se ancla ahora a la identidad del CAMBIO
+   (`scripts/change-id.sh`), no al commit: si el diff es el mismo, el juicio
+   se reusa dentro de una ventana de vigencia. Lo que SÍ se re-corre es la
+   prueba: `ship.sh` vuelve a pasar la suite sobre el árbol integrado y sella
+   evidencia fresca. El juicio se reusa, la prueba jamás.
+   Perder la carrera de push contra otro workspace tampoco es un gate rojo:
+   `ship.sh` reintenta solo, con backoff y jitter.
 
 Y la regla del reviewer que las cierra: **la ronda 1 es exhaustiva**. Los
 blocking se entregan todos juntos; lo que no impide shippear va a
@@ -99,8 +112,13 @@ supuesto que resultó falso se vuelve una regla para que el siguiente
 
 ## Presupuestos (Ley 6)
 
-- Loop implementer↔reviewer: máx {{LOOP_BUDGET}} iteraciones → humano.
-  Las vueltas por precheck rojo NO cuentan: el reviewer no vio nada.
+- Loop implementer↔reviewer: máx {{LOOP_BUDGET}} iteraciones **por repo**
+  (`review_rounds_by_repo` en state.json; se cuenta pasando `--repo` en la
+  transición) → humano. Por tarea castigaba a la multi-repo: tres repos con un
+  fix normal cada uno agotaban el presupuesto sin que nada estuviera mal.
+  Las vueltas por precheck rojo NO cuentan: el reviewer no vio nada. Los
+  reintentos de push por contención tampoco: tienen su propio presupuesto
+  (`HARNESS_PUSH_RETRIES`), porque perder una carrera no es una ronda de review.
 - RFC: 1 ronda normal, 2 máximo → humano. Probes: 2 rondas máximo.
 - Sesiones cortas y desechables por tarea; nunca llegar a compactación.
 - La métrica que se vigila: `review_rounds` en `tasks/<id>/state.json` y

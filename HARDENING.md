@@ -210,6 +210,127 @@ falta de conocimiento: es que la regla estaba en prosa y no en un test.
 
 ---
 
+## P0: el trunk caliente (varios workspaces, un solo main)
+
+Auditoría del 2026-07-25 bajo la topología real: ~10 instalaciones del harness,
+una por persona, todas contra los mismos repos remotos y pusheando seguido.
+Bajo ese supuesto varios "riesgos" resultaron ser el estado normal.
+
+**La regla que los une**: todos los gates se anclan a `origin/<trunk>`, que es
+una referencia MÓVIL, y entre "verifiqué" y "pusheé" hay un Δ de varios
+minutos. Con un workspace Δ no importa. Con diez, Δ es donde se muere todo.
+
+- [x] **El rebase de `ship.sh` invalidaba el veredicto y la evidencia, siempre.**
+  `git rebase` corre ANTES de `run_parallel_gates`, y `gate_policy_and_evidence`
+  comparaba el HEAD post-rebase contra el commit al que el veredicto quedó
+  sellado. Cualquier push ajeno reescribía los SHA y tiraba review + QA +
+  evidencia: `POLICY-SHIP-002`, exit 3, sin llegar nunca al loop de reintentos.
+  O sea que casi ningún ship pasaba a la primera y cada fallo costaba un ciclo
+  completo de juicio de LLM. *Arreglo*: el veredicto se ancla a la identidad
+  del CAMBIO (`scripts/change-id.sh`, `git patch-id --verbatim` sobre el diff
+  contra el merge-base), no al SHA. `validate-ship` lo reusa dentro de una
+  ventana (`ship.verdict_reuse`: 24h y 200 commits de base por default).
+  Reproducido y fijado en `tests/test_rebase_survival.sh`.
+- [x] **`--verbatim` no es un detalle.** `git patch-id` a secas IGNORA el
+  whitespace: dos cambios de Python con 2 y 4 espacios de indentación daban el
+  mismo id (verificado). Anclar ahí habría permitido re-indentar DESPUÉS del
+  review conservando el `pass`, en un harness cuyo diseño entero es
+  anti-manipulación. Con `--verbatim` se distinguen, y hay fallback para git
+  <2.39 que tampoco es ciego al whitespace.
+- [x] **La prueba y el juicio eran la misma afirmación, y no lo son.**
+  `evidence.py verify` exigía que TODA la evidencia fuera del commit que se
+  pushea, así que un rebase la invalidaba entera. Ahora son dos: la evidencia
+  REVISADA se valida contra `verdict.commit` ("el reviewer juzgó con pruebas
+  reales de lo que juzgó") y la evidencia FRESCA contra el HEAD que aterriza
+  ("este árbol pasa la suite"). `ship.sh` produce la fresca él mismo sellando
+  la corrida de `run_lang_gates` que ya hacía. El juicio se reusa; la prueba
+  jamás.
+- [x] **La suite corría CUATRO veces por tarea sin un solo rework** (precheck,
+  evidencia del implementer, QA determinista, ship). Ahora el precheck sella su
+  propia corrida como evidencia y el ship sella la suya: dos, y las dos prueban
+  algo distinto.
+- [x] **El presupuesto de push era el de rondas de review.** `MAX_RETRY={{LOOP_BUDGET}}`:
+  tres movimientos de main en una ventana ocupada agotaban el "presupuesto" y
+  escalaban a humano por pura contención. Ahora `PUSH_RETRY_BUDGET` propio (20)
+  con backoff exponencial y JITTER, porque sin jitter los que pierden la misma
+  carrera reintentan en fase y se vuelven a pisar.
+- [x] **`trailer` y `carril` solo existían en el camino de ship.** Un commit sin
+  `Task:` o un express que tocó un `.proto` se descubrían después de pagar
+  review y QA. Peor: la remediación del trailer es un amend, que mueve HEAD y
+  por lo tanto invalida lo que se acaba de pagar. Ahora corren en `--precheck`,
+  donde el mismo arreglo cuesta cero, y el carril se verifica ANTES incluso, en
+  `plan-lint.sh`, contra los `archivos:` que el plan declara.
+- [x] **`deploy-watch` estaba ciego en la etapa de Actions desde que se
+  escribió.** Usaba `git -C "$WT"` y `$WT` NUNCA se define en el archivo; con
+  `set -u` la sustitución moría entera, `head_sha` quedaba vacío y las dos
+  ramas siguientes estaban guardadas por `[ -n "$head_sha" ]`: ni vigilaba el
+  run ni emitía el aviso. Con `driver: actions` el deploy nunca se verificó, y
+  de paso el arreglo de la carrera del `--limit 1` era código muerto. Ahora el
+  sha sale de `ship.log` (que además pasó a guardarlo COMPLETO: la API del
+  forge devuelve el completo y con el corto la comparación no matcheaba nunca).
+- [x] **El rollback podía revertir tu commit por el deploy rojo de OTRO.** Con
+  varios pusheadores, cuando el watcher ve rojo el trunk ya trae commits
+  ajenos. Ahora compara `.status.sync.revision` contra tu sha y, si la revisión
+  enferma no es tuya, no propone nada; y ensaya el revert en seco
+  (`git revert --no-commit`) para detectar si alguien construyó encima, en cuyo
+  caso PARA en vez de proponer una acción destructiva.
+- [x] **Dos workspaces podían tomar el mismo ticket.** `ticket-pull.sh` hacía
+  check-then-act: leía `agent-ready` y movía el label después. Ahora el claim
+  usa lo único que los workspaces comparten (el tracker) y lo único que el
+  servidor ordena de forma total (sus comentarios): todos publican su claim y
+  gana el primero registrado. Exit 5 si perdés. El comentario además dice QUÉ
+  workspace lo tomó, cosa que "tomado por el harness" nunca dijo.
+- [x] **Los task-ids `AUTO-*` colisionaban entre máquinas.** El chequeo de
+  unicidad solo mira el `tasks/` local y el trailer `Task:` viaja al main
+  compartido. Lleva sufijo de identidad.
+- [x] **Los trece cronjobs corrían en las diez máquinas**, entregando PRs
+  duplicados a repos compartidos con un circuit breaker local. Perilla
+  `cronjobs.run_on` (`any` | hostname | `k8s`), cableada en la entrevista.
+- [x] **El presupuesto de rondas de review era por TAREA.** Tres repos con UN
+  fix normal cada uno agotaban el presupuesto y escalaban a humano sin que nada
+  estuviera mal. Ahora se cuenta por repo (`review_rounds_by_repo`), y
+  `review_rounds` se conserva como el máximo para no romper lo que ya lo lee.
+- [x] **`--rebase` re-emitía `qa: "pending"` siempre**, así que cada ronda de
+  rework pagaba un ciclo de QA entero aunque el fix fuera un nil check, y la
+  promesa de `/review` ("QA solo se repite si el fix tocó lo que QA ejercita")
+  era incumplible. Ahora QA declara `surface[]` y el arrastre es mecánico.
+  Sin `surface[]` se re-corre siempre: fail-closed.
+- [x] **`ship.required_evidence_kinds` y `ship.require_fresh_evidence` no los
+  leía nadie** (ship cableaba `--require-kind test`): perillas muertas de la
+  misma clase que `flow`. Ahora `harness-policy.py evidence-policy` las sirve y
+  ship construye sus flags desde ahí.
+- [x] **La baseline de `buf breaking` envejecía.** `--against` lee los refs de
+  `repos/<repo>`, que solo se refrescan con `pull-all.sh`, mientras el worktree
+  se fetchea en cada ship. Con main caliente los dos "main" divergen en
+  minutos. Se fetchea la baseline antes de comparar.
+- [x] **Nada en el remoto decía con qué harness se shippeó.** Los gates corren
+  en la laptop del que pushea; un workspace atrasado shippea con gates más
+  débiles y su commit queda indistinguible. `ship.sh` deja una git note
+  (`refs/notes/harness`) con versión, hash del manifest de gates y workspace.
+  Es un paliativo auditable: la solución de fondo es correr los gates en CI.
+
+### Pendiente: lo único que elimina la clase entera
+
+- [ ] **`flow: prs` + cola de merge del forge.** Todo lo de arriba MITIGA la
+  carrera; la cola de merge la elimina en el origen, porque serializa en el
+  servidor y corre la suite UNA vez sobre el merge result en infra neutral en
+  vez de una vez por intento en diez laptops. `ship.sh` ya falla cerrado con
+  exit 7 para `flow: prs` (`ship.sh.tmpl:47-64`) y su comentario ya lista el
+  costo real: cambia qué significa "shippeado" para `deploy-watch` (el sha
+  aterrizado sale de `gh pr view --json mergeCommit`, no de `ship.log`) y para
+  `/archive` (dispara en el merge, no en el push). El anclaje por `patch_id` es
+  su HABILITADOR, no su alternativa: la cola rebasea ella misma, así que sin
+  eso `flow: prs` recrearía el mismo problema un paso a la derecha.
+  Por la Ley 13 esta es la recomendada; lo de arriba es el camino corto que la
+  hace innecesaria como urgencia, no como destino.
+- [ ] **Conflicto semántico sin conflicto textual.** Un commit ajeno renombra un
+  símbolo que tu diff usa sin tocar tus líneas: `patch_id` no cambia y el merge
+  no compila. Por eso la evidencia FRESCA es obligatoria y ship re-corre la
+  suite completa sobre el árbol integrado. Queda documentado como límite
+  conocido de `change-id.sh`, no como algo resuelto.
+
+---
+
 ## Cerrado el 2026-07-25
 
 Dieciséis arreglos, todos con test que los fija: el gate del veredicto

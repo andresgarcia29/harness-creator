@@ -164,4 +164,26 @@ out="$(run)"
 assert_contains "$out" "no contiene un digest legible" "marcador ilegible: se nombra como tal"
 assert_not_contains "$out" "DISTINTOS" "y NO se reporta como drift de contenido"
 
+echo
+echo "── una instancia NO puede ir adelante de su origen"
+# Caso real, encontrado en una VPS: la instalacion escribio 0.60.0 en
+# .harness-version, una version que no existe en el plugin y que por CONTENIDO
+# estaba mas de sesenta commits atras. Como 0.60.0 > 0.48.0, caia en el `else`
+# y `make version` decia "✅ al día" mientras los gates de lenguaje ni
+# compilaban. La causa: la tabla del instalador pedia "version del plugin" sin
+# decir de donde leerla, asi que el agente escribio un numero plausible.
+echo "$SET_A" > "$WS/.harness-templates"
+stub_gh "0.48.0" "$SET_A"
+echo "0.60.0" > "$WS/.harness-version"
+out="$(run)"
+assert_not_contains "$out" "al día" "version mayor que upstream: NO se reporta al dia"
+assert_contains "$out" "MAYOR que su origen" "se nombra la imposibilidad"
+assert_contains "$out" "se escribió" "y se dice que el numero no se leyo de ningun lado"
+assert_eq 1 "$(rc_of --check)" "--check: no la trata como sana"
+
+# el instalador ya no puede inventarla
+sk="$(cat "$ROOT/skills/harness-init/SKILL.md")"
+assert_contains "$sk" "plugin.json" "el instalador lee la version del plugin.json"
+assert_contains "$sk" "jamás se escribe de memoria" "y tiene prohibido escribirla de memoria"
+
 t_done

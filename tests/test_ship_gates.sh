@@ -499,4 +499,51 @@ out="$(run_check_verdict '{"verdict":"pass","qa":"pass","blocking":[],"requireme
 assert_eq 0 $? "evidencia con runner=qa: alcanza como respaldo"
 rm -f "$WS/tasks/T9/evidence/EV-TEST-qa1.json"
 
+echo
+echo "── issue #29: ruff y pytest son del PROYECTO, no del sistema"
+# `uv sync` los deja en .venv/bin, FUERA del PATH. Llamarlos pelados da 127 y
+# NINGUN repo Python podia shippear. La linea de pytest ya pasaba por `uv run`;
+# la de ruff no, y esa asimetria era todo el bug.
+mk_py() {  # mk_py <dir> [con-tests]
+  rm -rf "$1"; mkdir -p "$1"; cd "$1"
+  git init -q .; git config user.email t@t; git config user.name t
+  printf '[project]\nname="x"\nversion="0.1"\n\n[tool.pytest.ini_options]\npythonpath=["."]\n' > pyproject.toml
+  [ -n "${2:-}" ] && { mkdir -p tests; printf 'def test_ok():\n    assert True\n' > tests/test_a.py; }
+  git add -A && git commit -qm init >/dev/null
+  git update-ref refs/remotes/origin/main HEAD
+  cd "$WS"
+}
+run_py() {  # run_py <dir> <PATH>
+  ( set -euo pipefail; cd "$1"; PATH="$2"; WT="$1"; REPO=x; TASK=T1; BASE_REF=main; WS="$WS"
+    gate() { :; }; emit() { :; }
+    . "$WS/lang.sh"; run_lang_gates; echo "TESTS_RAN=$TESTS_RAN" ) 2>&1
+}
+
+# 1. sin ruff, sin pytest, sin uv: NO puede salir 127
+mk_py "$WS/py1"
+out="$(run_py "$WS/py1" /usr/bin:/bin)"; rc=$?
+assert_eq 0 "$rc" "sin herramientas: no revienta con 127 (era el bug de #29)"
+assert_contains "$out" "no encuentro ruff" "dice que el lint no corrio"
+assert_contains "$out" "no encuentro pytest" "y que los tests tampoco"
+assert_contains "$out" "TESTS_RAN=0" "y NO afirma haber testeado"
+
+# 2. con uv, ruff se invoca POR uv (el bug era que solo pytest lo hacia)
+mkdir -p "$WS/stub"; printf '#!/bin/sh\necho "UVRUN $*"\nexit 0\n' > "$WS/stub/uv"; chmod +x "$WS/stub/uv"
+mk_py "$WS/py2"
+out="$(run_py "$WS/py2" "$WS/stub:/usr/bin:/bin")"
+assert_contains "$out" "UVRUN run ruff" "con uv presente, ruff se invoca por uv run"
+assert_contains "$out" "UVRUN run pytest" "y pytest tambien (no se rompio lo que andaba)"
+
+# 3. el marcador mide lo que el sello afirma: TESTS RAN, no "reconoci el stack"
+if command -v pytest >/dev/null 2>&1 && command -v ruff >/dev/null 2>&1; then
+  mk_py "$WS/py3" tests
+  out="$(run_py "$WS/py3" "$PATH")"
+  assert_contains "$out" "TESTS_RAN=1" "con la toolchain real: declara que SI corrio"
+else
+  pass "toolchain real: saltado (falta ruff/pytest en esta maquina)"
+fi
+sh="$(cat "$TMPL")"
+assert_contains "$sh" "TESTS_RAN" "el gate distingue 'corri tests' de 'reconoci el stack'"
+assert_not_contains "$sh" 'printf ../%s.. "${LANG_SEEN:-0}" > "$WS/tasks' "y el sello ya no usa LANG_SEEN como prueba"
+
 t_done

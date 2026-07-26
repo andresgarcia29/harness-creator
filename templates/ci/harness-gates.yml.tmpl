@@ -1,0 +1,85 @@
+# Los gates del harness, corriendo en infra NEUTRAL.
+#
+# POR QUE EXISTE: hasta aca los gates corrian en la laptop del que pushea. Con
+# una sola persona ese modelo de confianza es razonable; con un equipo, "los
+# sistemas deterministas verifican" es cierto solo hasta la laptop menos
+# actualizada, y cualquiera puede editar su ship.sh local. Este workflow mueve
+# la verificacion a un runner que nadie controla desde su maquina.
+#
+# CORRE EL MISMO CODIGO, a proposito: `ship.sh --ci`. Un workflow que
+# reimplemente los gates se desincroniza en la primera version, y entonces CI y
+# local dicen cosas distintas del mismo commit, que es peor que no tener CI.
+#
+# COMO SE VUELVE OBLIGATORIO (esto NO lo hace el workflow, lo configuras vos):
+#   1. Settings → Branches → regla de proteccion de {{BASE_BRANCH}}
+#   2. Require status checks to pass → elegi "gates del harness"
+#   3. Require merge queue  (Settings → Branches → misma regla)
+# Recien con (3) el merge se serializa y la suite corre UNA vez sobre el merge
+# result especulativo, en vez de una vez por intento en cada laptop.
+name: gates del harness
+
+on:
+  pull_request:
+    branches: [{{BASE_BRANCH}}]
+  # La cola de merge dispara con este evento sobre el merge result especulativo:
+  # es LA razon de todo esto. Sin esta linea, la cola no tiene que verificar.
+  merge_group:
+
+# Un PR que recibe otro push no necesita seguir gastando runners en el commit
+# viejo: el unico veredicto que importa es el del HEAD actual.
+concurrency:
+  group: harness-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: checkout del repo
+        uses: actions/checkout@v4
+        with:
+          # Los gates comparan contra la trunk (tests no debilitados, carril,
+          # migraciones nuevas, buf breaking). Con un checkout superficial ese
+          # diff sale VACIO y los gates pasan en verde SIN HABER MIRADO NADA,
+          # que es exactamente el fallo que este harness persigue.
+          fetch-depth: 0
+
+      - name: checkout del harness
+        uses: actions/checkout@v4
+        with:
+          repository: {{HARNESS_INSTANCE_REPO}}
+          path: .harness
+          fetch-depth: 1
+
+      - name: toolchain del repo
+        # Cada stack trae la suya. Los gates ya avisan honestamente cuando una
+        # herramienta falta, asi que esto es best-effort: lo que no se pueda
+        # instalar se reporta como "no corrio", no como verde.
+        run: |
+          if [ -f go.mod ]; then echo "GO=1" >> "$GITHUB_ENV"; fi
+          if [ -f package.json ]; then npm ci --no-audit --no-fund || npm install; fi
+          if [ -f pyproject.toml ]; then
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: preparar python
+        if: hashFiles('pyproject.toml') != ''
+        run: uv sync --extra dev || uv sync || true
+
+      - name: la declaracion de tests debilitados sale del cuerpo del PR
+        # gate_tests_untouched acepta que un test cambie SI se declara. En el
+        # workspace eso vive en tasks/<id>/delta-spec.md, que aca no existe, asi
+        # que la declaracion viaja en el PR. Sin ninguna de las dos, un
+        # debilitamiento bloquea: fail-closed.
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          printf '%s\n' "$PR_BODY" > /tmp/pr-delta-spec.md
+          echo "HARNESS_DELTA_SPEC_FILE=/tmp/pr-delta-spec.md" >> "$GITHUB_ENV"
+
+      - name: gates
+        env:
+          HARNESS_BASE_BRANCH: {{BASE_BRANCH}}
+        run: bash .harness/scripts/ship.sh --ci "${GITHUB_REPOSITORY##*/}"

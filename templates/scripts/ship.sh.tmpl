@@ -26,17 +26,38 @@ set -euo pipefail
 
 PRECHECK=0
 LANG_ONLY=0
+CI_MODE=0
 case "${1:-}" in
   --precheck)   PRECHECK=1; shift ;;
   # Modo interno: corre SOLO los gates de lenguaje y sale. Existe para que
   # evidence.py pueda ejecutarlos como un comando y sellar su salida contra el
   # commit exacto (ver run_lang_gates_sealed). No es parte de la interfaz.
   --lang-gates) LANG_ONLY=1; shift ;;
+  # ── MODO CI: los MISMOS gates, sobre un checkout pelado ─────────────
+  # Existe para que la cola de merge del forge corra la verificacion en infra
+  # NEUTRAL en vez de en la laptop del que pushea. Con varias personas, "los
+  # sistemas deterministas verifican" es cierto solo hasta la laptop menos
+  # actualizada del equipo: cualquiera puede editar su ship.sh local.
+  #
+  # Corre el MISMO codigo a proposito. Un workflow que reimplemente los gates
+  # se desincroniza del harness en la primera version, y entonces CI y local
+  # dicen cosas distintas sobre el mismo commit, que es peor que no tener CI.
+  #
+  # Lo que NO hace: veredicto, evidencia, lock, push ni fases. Nada de eso
+  # existe en un checkout de CI, y fingirlo seria inventar.
+  --ci)         CI_MODE=1; shift ;;
 esac
-TASK="${1:?uso: ship.sh [--precheck] <task-id> <repo>}"
+if [ "$CI_MODE" -eq 1 ]; then
+  TASK="${HARNESS_CI_TASK:-ci}"
+  REPO="${1:-$(basename "$(pwd)")}"
+  WS="$(cd "$(dirname "$0")/.." && pwd)"
+  WT="$(pwd)"
+else
+TASK="${1:?uso: ship.sh [--precheck|--ci] <task-id> <repo>}"
 REPO="${2:?uso: ship.sh [--precheck] <task-id> <repo>}"
 WS="$(cd "$(dirname "$0")/.." && pwd)"
 WT="$WS/worktrees/$TASK/$REPO"
+fi
 
 BASE="$WS/repos/$REPO"
 # ── DOS PRESUPUESTOS QUE NO TIENEN NADA QUE VER ───────────────────────
@@ -81,10 +102,17 @@ case "$flow_norm" in
     exit 7 ;;
 esac
 LOCKDIR="$WS/locks/$REPO.lock.d"
-mkdir -p "$WS/locks" "$WS/tasks/$TASK"
+[ "$CI_MODE" -eq 1 ] || mkdir -p "$WS/locks" "$WS/tasks/$TASK"
 
 [ -d "$WT" ] || { echo "❌ no existe el worktree $WT"; echo "   ↳ remediación: scripts/worktree-task.sh $TASK $REPO"; exit 2; }
-[ -d "$BASE/.git" ] || { echo "❌ no existe el clon base $BASE"; exit 2; }
+# En CI no hay clon canonico: el checkout ES el repo, y de ahi salen tanto el
+# diff como la baseline de buf. Exigir repos/<repo> ahi seria pedir un layout
+# de workspace que un runner de CI no tiene por que tener.
+if [ "$CI_MODE" -eq 1 ]; then
+  BASE="$WT"
+else
+  [ -d "$BASE/.git" ] || { echo "❌ no existe el clon base $BASE"; exit 2; }
+fi
 # ── LA RAMA TRUNK NO SIEMPRE SE LLAMA "main" ──────────────────────────
 # Catorce ocurrencias de origin/$BASE_REF en este archivo y seis en
 # worktree-task.sh daban por hecho el nombre. Cualquier repo con `master`,
@@ -239,7 +267,7 @@ on_exit() {
     [ -n "${CURRENT_GATE:-}" ] && emit gate "$CURRENT_GATE" true
     return 0
   fi
-  if [ "$PRECHECK" -eq 1 ]; then
+  if [ "$PRECHECK" -eq 1 ] && [ "${CI_MODE:-0}" -eq 0 ]; then
     stamp_precheck false
     emit gate "precheck de $REPO rojo ($CURRENT_GATE): ronda de review AHORRADA" false
     echo ""
@@ -702,6 +730,10 @@ run_lang_gates() {
 # ship previo no pueda contaminarlo.
 run_lang_gates_sealed() {
   local runner dirty
+  # En CI no hay tasks/<id>/ ni veredicto al que atar una evidencia, y sellar
+  # contra un directorio inventado dejaria un EV que no respalda nada. Los
+  # gates corren igual; lo que no corre es el sello.
+  if [ "${CI_MODE:-0}" -eq 1 ]; then run_lang_gates; return $?; fi
   if [ "${PRECHECK:-0}" -eq 1 ]; then
     runner="${HARNESS_EVIDENCE_RUNNER:-implementer}"
   else
@@ -868,7 +900,11 @@ gate_tests_untouched() {
 
   # La declaración legítima: contenido BAJO encabezados MODIFIED/REMOVED del
   # delta-spec, y debe nombrar el basename de CADA archivo debilitado.
-  local delta="$WS/tasks/$TASK/delta-spec.md" declared=""
+  # En CI no existe tasks/<id>/: la declaracion de un test debilitado viaja
+  # por env (el workflow suele volcar ahi el cuerpo del PR). Sin ninguna de
+  # las dos, un debilitamiento BLOQUEA: no hay forma de declararlo, y el
+  # sesgo correcto es fail-closed.
+  local delta="${HARNESS_DELTA_SPEC_FILE:-$WS/tasks/$TASK/delta-spec.md}" declared=""
   [ -f "$delta" ] && declared="$(awk '
     /^#/ { insec = (toupper($0) ~ /(MODIFIED|REMOVED)/); next }
     insec { print }
@@ -1190,6 +1226,23 @@ if [ "$LANG_ONLY" -eq 1 ]; then
   # El marcador de "verifique algo" lo escribe el trap on_exit, que corre pase
   # lo que pase.
   run_lang_gates
+  exit 0
+fi
+
+# ── Modo CI: los gates mecánicos sobre el checkout actual ─────────────
+# Mismo codigo que el precheck, sin nada que dependa del workspace. Es lo que
+# la cola de merge del forge ejecuta como required check.
+if [ "$CI_MODE" -eq 1 ]; then
+  cd "$WT"
+  echo "══ gates del harness sobre $REPO (modo CI) ══"
+  echo "   base: origin/$BASE_REF · commit: $(git rev-parse --short HEAD)"
+  # PRECHECK=1 hace que run_parallel_gates omita el grupo de veredicto (que
+  # aqui no existe) y que el sellado de evidencia no intente escribir en
+  # tasks/. Se reusa esa bandera en vez de inventar una tercera.
+  PRECHECK=1
+  run_parallel_gates
+  echo "✅ gates verdes sobre el merge result. Este check es el que la cola de"
+  echo "   merge exige, y corre en infra neutral: no depende de la laptop de nadie."
   exit 0
 fi
 

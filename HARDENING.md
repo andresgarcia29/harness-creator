@@ -548,12 +548,28 @@ plataforma hacia `grep -- "--cask"` sobre su propio archivo y encontraba SU
 PROPIO mensaje de aviso, que menciona `--cask`. Avisaba siempre, incluso sin un
 solo cask. Un detector que se detecta a si mismo es un detector roto.
 
+- [x] **Los gates corren en infra NEUTRAL** (`ship.sh --ci` +
+  `templates/ci/harness-gates.yml.tmpl`). Hasta aca corrian en la laptop del que
+  pushea: con una sola persona ese modelo de confianza es razonable, con un
+  equipo significa que "los sistemas deterministas verifican" vale hasta la
+  laptop menos actualizada, y cualquiera puede editar su ship.sh local. El
+  workflow corre EL MISMO codigo a proposito: uno que reimplemente los gates se
+  desincroniza en la primera version, y entonces CI y local dicen cosas
+  distintas del mismo commit, que es peor que no tener CI.
+  Detalles que decidieron el diseño: `fetch-depth: 0` porque un checkout
+  superficial deja el diff contra la trunk VACIO y los gates pasan sin mirar
+  nada (el fallo que este repo persigue); la declaracion de un test debilitado
+  viaja por `HARNESS_DELTA_SPEC_FILE` porque en CI no existe
+  `tasks/<id>/delta-spec.md`, y sin ninguna de las dos bloquea (fail-closed); y
+  en CI no se sella evidencia, porque no hay veredicto al que atarla y un EV
+  que no respalda nada es peor que ninguno.
+
 ### Pendiente
 
-- [ ] **La cola de merge del forge** (required checks + merge queue) sobre el
-  `flow: prs` que ya existe. Lo implementado abre el PR; encolarlo y correr los
-  gates en CI neutral es configuracion del forge mas un workflow, y es lo que
-  mueve la verificacion fuera de las laptops.
+- [ ] **Activar la cola en el forge.** Lo que falta ya no es codigo: marcar
+  "gates del harness" como required check y encender la merge queue en la
+  proteccion de rama. Eso lo hace un humano en la UI del forge, una vez por
+  repo, y es lo que convierte el workflow en obligatorio y serializa el merge.
 - [ ] **`flow: prs` + cola de merge del forge.** Todo lo de arriba MITIGA la
   carrera; la cola de merge la elimina en el origen, porque serializa en el
   servidor y corre la suite UNA vez sobre el merge result en infra neutral en

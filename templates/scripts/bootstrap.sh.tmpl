@@ -32,6 +32,27 @@ link_into_path() {
   return 1
 }
 
+# ── ESTE BOOTSTRAP SE GENERO PARA UNA PLATAFORMA ──────────────────────
+# Los comandos de abajo se eligieron cuando se genero la instancia, mirando la
+# maquina que la genero. Si esta instancia se clona a otra plataforma, algunos
+# no aplican: las formulas normales de Homebrew sobreviven (brew corre en Linux
+# tambien), pero los `--cask` no existen fuera de macOS y las entradas con
+# variante Linux propia quedaron con la de mac. Se avisa una vez, al arrancar,
+# en vez de fallar comando por comando sin explicar por que.
+_bs_platform_note() {
+  local here; here="$(uname -s)"
+  # El patron matchea SOLO lineas de instalacion reales. Con un `grep --cask`
+  # a secas, la funcion encontraba su PROPIO mensaje de aviso (que menciona
+  # --cask) y avisaba siempre, incluso en un bootstrap sin un solo cask.
+  # Verificado: un detector que se detecta a si mismo es un detector roto.
+  if [ "$here" = "Linux" ] && grep -qE '^(ensure|require) .*--cask' "$0" 2>/dev/null; then
+    warn "este bootstrap trae instalaciones con 'brew --cask', que NO existen en Linux"
+    echo "   ↳ se generaron en macOS. Instala esas a mano, o regenera la instancia"
+    echo "     declarando la plataforma destino (ver /harness-init, tabla de generación)."
+  fi
+}
+_bs_platform_note
+
 # ensure <bin> <cmd de instalación...> — instala si falta (o reporta en --check)
 ensure() {
   local bin="$1"; shift

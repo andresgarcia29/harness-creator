@@ -510,6 +510,44 @@ lo que faltaba para poder reconstruir el estado de una tarea sin leer archivos.
   upstream se declara imposible en vez de sana: nadie publica hacia atras, asi
   que ese numero no se leyo, se escribio.
 
+## Lo que aprendio el plugin de una instalacion real
+
+Tres hallazgos de operar una instancia de verdad, no de leer el codigo.
+
+- [x] **El doctor confundia "no esta en MI PATH" con "no esta instalado".** Una
+  sesion no interactiva (`ssh host cmd`, cron, un servicio) NO lee `~/.zshrc`
+  ni `~/.profile`, asi que no ve Homebrew, `~/.local/bin` ni `~/go/bin`. El
+  doctor reporto 22 CLIs faltantes sobre una maquina que las tenia TODAS, y de
+  ahi salio un diagnostico entero equivocado (que faltaba la toolchain, que el
+  bootstrap no servia en Linux, que los repos Go shippeaban sin compilar). Nada
+  de eso era cierto. Ahora busca el binario en las rutas donde instalan los
+  gestores de la casa y, si esta, lo dice como lo que es, con la remediacion
+  correcta (`brew shellenv` va en `~/.zshenv`, que zsh lee siempre, no solo en
+  `~/.zshrc`). Decir "falta" manda a reinstalar lo que ya esta y entrena a no
+  creerle al doctor.
+- [x] **`AGENTS.md` se regeneraba, y borro contenido ajeno.** Estaba clasificado
+  como propiedad del plugin, asi que el update lo reescribio entero: se llevo 70
+  lineas de una instancia real, incluidas la ley del design system del proyecto
+  y un bloque completo de OTRA herramienta (`<!-- BEGIN BEADS INTEGRATION v:1
+  ... hash:6cd5cc61 -->`), que ni siquiera es nuestro para tocar. `AGENTS.md` es
+  la puerta MULTI-HERRAMIENTA por diseño: Codex, Cursor y lo que el proyecto
+  sume dejan lo suyo ahi. Ahora se MERGEA, se preservan los bloques
+  `BEGIN`/`END` de terceros y las secciones que el template no contiene.
+- [x] **El instalador elegia la plataforma de la maquina que GENERA.** La regla
+  decia "si el workspace corre en Linux, usa install_linux", lo que asume que se
+  genera y se ejecuta en el mismo lugar. Con una instancia que se versiona y se
+  clona a otras maquinas eso es falso: se genero en macOS y se clono a VPS
+  Ubuntu, dejando `brew install --cask` (que en Linux no existe) y perdiendo la
+  variante Linux que el catalogo SI tenia para kubectl. Ahora la tabla dice que
+  la plataforma es la del DESTINO, y `bootstrap.sh` avisa al arrancar si detecta
+  el cruce. Matiz que la investigacion corrigio: Homebrew si corre en Linux, asi
+  que las formulas normales sobreviven; lo que no sobrevive son los `--cask`.
+
+Y un bug propio, del mismo tipo, cazado probando: el detector del cruce de
+plataforma hacia `grep -- "--cask"` sobre su propio archivo y encontraba SU
+PROPIO mensaje de aviso, que menciona `--cask`. Avisaba siempre, incluso sin un
+solo cask. Un detector que se detecta a si mismo es un detector roto.
+
 ### Pendiente
 
 - [ ] **La cola de merge del forge** (required checks + merge queue) sobre el

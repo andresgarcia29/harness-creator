@@ -30,7 +30,7 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
      ticket-close,ticket-pull,harness-bug,harness-version,skills-sync,
      pipeline-steps,py,fe}.sh,
      scripts/{harness-policy,evidence}.py, `harness-policy.json`,
-     hooks, `AGENTS.md`, y **el panel**:
+     hooks, y **el panel**:
      `scripts/ui/{panel.sh,server.py,pricing.json,dist/}`): upstream gana por
      default — re-instancia con las respuestas del answers y propón el
      archivo completo. Un parche local aquí casi siempre fue un fix que
@@ -43,6 +43,19 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
        archivo a diffear — `panel.sh` lo baja solo del release público en el
        primer `make ui` (o cae a server.py si no hay acceso). Tras actualizar,
        recuérdale al humano correr `make ui` para bajar el daemon nuevo.
+   - **`AGENTS.md` y cualquier archivo con BLOQUES GESTIONADOS: se MERGEA,
+     nunca se regenera.** Estaba clasificado como propiedad del plugin y por eso
+     se reescribía entero. En una instancia real eso borró 70 líneas de una
+     sola pasada: la ley del design system del proyecto y un bloque completo de
+     otra herramienta (`<!-- BEGIN BEADS INTEGRATION v:1 ... hash:6cd5cc61 -->`),
+     que ni siquiera es nuestro para reescribir. `AGENTS.md` es la puerta de
+     entrada MULTI-HERRAMIENTA: por diseño lo comparten Codex, Cursor y lo que
+     el proyecto sume, y cada uno deja lo suyo ahí.
+     Regla: preservá TODO bloque delimitado por marcas `BEGIN`/`END` de terceros
+     y toda sección que el template no contenga; actualizá solo las secciones
+     que vienen del template (las leyes del harness). Ante la duda, mostrá el
+     diff y que decida el humano: perder la ley de un proyecto es mucho más caro
+     que quedarse una versión atrás en la redacción de una ley del harness.
    - **Skills, por capa**: upstream (las del manifest del generador) se
      actualizan con el plugin; las `.managed` son de skills-sync (ni las
      toques: `make skills` las gobierna); el RESTO de `.claude/skills/`

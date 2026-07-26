@@ -467,6 +467,35 @@ Tres bugs propios que aparecieron construyendolo, los tres del mismo tipo:
   lo habia y lo que fallo fue resolver el merge. Dos causas con remediaciones
   distintas no pueden compartir mensaje.
 
+## Caminos que faltaban ejercitar (corridos, y lo que salio)
+
+Cerrando la lista de "sin probar": `escalate`, `pause`/`resume`, `archive` y la
+limpieza de worktrees, sobre la instancia Corvux.
+
+Funcionaron sin hallazgos, y queda escrito para que se sepa que se probo:
+`escalate` desde intake (cambia carril, se queda) y desde implement (vuelve a
+rfc CONSERVANDO worktree y commits); `plan-lint` cazando el carril antes de
+implementar y pasando despues de escalar; `pause` con motivo del catalogo y
+rechazando uno inventado; una tarea bloqueada que no puede shippear; `resume`;
+la cadena `ship → deploy → archive`; y `worktree-task.sh --rm`, que borra el
+worktree pero CONSERVA la rama con trabajo sin publicar. Ese ultimo se verifico
+hasta el final: la rama sobrevive, `worktree-task.sh` la vuelve a checkoutear y
+el contenido regresa intacto. No hay perdida de trabajo.
+
+Tambien quedo comprobado que `harness-policy.py` emite ahora al bus: el panel ve
+`escalate` como decision, `pause` como stop y cada transicion como fase, que es
+lo que faltaba para poder reconstruir el estado de una tarea sin leer archivos.
+
+- [x] **Con `flow: prs` se podia archivar un cambio sin mergear.** La regla
+  vivia en el prompt de `/archive` y solo ahi, y la prosa no frena a nadie:
+  fusionar el delta-spec de un PR abierto deja la spec maestra describiendo algo
+  que no existe. Es spec rot al reves y mas dificil de ver que el normal, porque
+  la spec parece adelantada en vez de vieja. Ahora `POLICY-SHIP-005` rechaza las
+  transiciones a `deploy` y a `archive` mientras quede un repo con
+  `landed:false`, y nombra cuales. Compatible hacia atras: `flow: trunk` no
+  escribe ese campo, y un campo AUSENTE no cuenta como false (confundir esas dos
+  cosas fue justo el bug del `//` de jq).
+
 ### Pendiente
 
 - [ ] **La cola de merge del forge** (required checks + merge queue) sobre el

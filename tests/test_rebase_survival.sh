@@ -248,4 +248,40 @@ assert_eq 3 "$rc" "un repo que no converge sí agota SU presupuesto"
 assert_contains "$out" "repo atlas" "y el mensaje nombra al repo, no a la tarea"
 assert_contains "$out" "no se ven afectados" "y aclara que los otros repos siguen"
 
+echo "── con flow: prs no se archiva lo que todavia no mergeo (POLICY-SHIP-005)"
+# Estaba en el prompt de /archive y solo ahi. La prosa no frena a nadie, que es
+# la leccion que este repo ya aprendio en otros seis lugares. Archivar un PR
+# abierto fusiona el delta-spec en la spec maestra: la spec pasa a describir
+# algo que no existe. Es spec rot al reves, y mas dificil de ver que el normal
+# porque la spec parece adelantada en vez de vieja.
+TD3="$WS/tasks/T3"; mkdir -p "$TD3"
+python3 "$POLICY_PY" --policy "$POL" init "$TD3" --lane full >/dev/null
+for ph in rfc implement review; do
+  python3 "$POLICY_PY" --policy "$POL" transition "$TD3" $ph --actor o >/dev/null
+done
+printf '%s\n' '{"repo":"web","sha":"aaa","branch":"task/T3","pr":"http://pr/1","landed":false}' > "$TD3/ship.log"
+python3 "$POLICY_PY" --policy "$POL" transition "$TD3" ship --actor o >/dev/null
+out="$(python3 "$POLICY_PY" --policy "$POL" transition "$TD3" deploy --actor o 2>&1)"; rc=$?
+assert_eq 3 "$rc" "PR sin mergear: no se avanza a deploy"
+assert_contains "$out" "POLICY-SHIP-005" "con su codigo propio"
+assert_contains "$out" "web" "nombrando el repo que falta"
+assert_contains "$out" "spec" "y explicando el costo real de archivarlo"
+
+# Cuando el PR mergea, el ship.log registra la entrada aterrizada y se destraba
+printf '%s\n' '{"repo":"web","sha":"bbb","landed":true}' >> "$TD3/ship.log"
+python3 "$POLICY_PY" --policy "$POL" transition "$TD3" deploy --actor o >/dev/null 2>&1 \
+  && pass "tras el merge, deploy se destraba" || fail "sigue trabado despues del merge"
+
+# COMPAT: flow: trunk no escribe `landed`, y un campo AUSENTE no es false
+# (confundir esas dos cosas fue justo el bug del // de jq)
+TD4="$WS/tasks/T4"; mkdir -p "$TD4"
+python3 "$POLICY_PY" --policy "$POL" init "$TD4" --lane full >/dev/null
+for ph in rfc implement review; do
+  python3 "$POLICY_PY" --policy "$POL" transition "$TD4" $ph --actor o >/dev/null
+done
+printf '%s\n' '{"repo":"api","sha":"ccc","short":"ccc"}' > "$TD4/ship.log"
+python3 "$POLICY_PY" --policy "$POL" transition "$TD4" ship --actor o >/dev/null
+python3 "$POLICY_PY" --policy "$POL" transition "$TD4" deploy --actor o >/dev/null 2>&1 \
+  && pass "flow: trunk (sin campo landed) no se ve afectado" || fail "el gate rompio la compat con trunk"
+
 t_done

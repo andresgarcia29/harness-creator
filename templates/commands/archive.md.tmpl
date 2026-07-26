@@ -16,7 +16,9 @@ entrada de `ship.log` tiene que tener `landed` distinto de `false`. Un PR
 abierto NO es un cambio desplegado, y fusionar su delta-spec en la spec maestra
 antes del merge deja la spec describiendo algo que no existe: spec rot, pero al
 revés y más difícil de detectar, porque la spec parece adelantada en vez de
-vieja.
+vieja. **Esto ya no depende de que lo recuerdes**: `harness-policy.py` rechaza
+las transiciones a `deploy` y a `archive` con `POLICY-SHIP-005` mientras quede
+un repo con `landed: false`, y te nombra cuáles.
 
 
 > **La fase se mueve con `harness-policy.py`, siempre.** Este comando es un

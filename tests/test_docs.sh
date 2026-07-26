@@ -92,4 +92,21 @@ else
   fail "$out"
 fi
 
+echo
+echo "── /harness-update clasifica TODOS los scripts del plugin"
+# Un script del plugin que no aparece en harness-update.md no tiene propietario
+# declarado, y el update no sabe si pisarlo o respetarlo: en la practica las
+# instancias no lo reciben. Paso con change-id.sh (nuevo) y llevaba tiempo
+# pasando con deploy-watch.sh y ticket-pull.sh, que SI son del plugin.
+# La regla estaba en prosa; esto la pone en un test.
+UPD="$ROOT/commands/harness-update.md"
+faltan=""
+for f in "$ROOT"/templates/scripts/*; do
+  b="$(basename "$f")"; n="${b%.tmpl}"; n="${n%.sh}"; n="${n%.py}"
+  case "$n" in __pycache__|"") continue ;; esac
+  grep -q -- "$n" "$UPD" || faltan="$faltan $n"
+done
+[ -z "$faltan" ] && pass "todos los scripts del plugin estan clasificados en harness-update.md" \
+  || fail "scripts del plugin sin clasificar en harness-update.md:$faltan"
+
 t_done

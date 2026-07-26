@@ -37,6 +37,29 @@ ends=$(bus | jq -s '[.[] | select(.kind=="tool")] | length')
 assert_eq "$starts" "$ends" "arranque y cierre quedan pareados (así se ve una llamada terminada)"
 
 echo
+echo "── cada evento dice EN QUÉ MÁQUINA pasó"
+# Con un panel en 127.0.0.1 la respuesta era obvia. Al juntar los ledgers de
+# varios VPS deja de serlo, y un evento sin máquina no se puede ordenar ni
+# depurar. Este hook produce la mayoría de los eventos, así que si falta acá
+# falta en casi todo el bus.
+rm -f "$BUS"
+HARNESS_HOST_ID=vps-tokio fire tool '{"command":"echo hola"}'
+assert_contains "$(bus)" '"host":"vps-tokio"' "HARNESS_HOST_ID manda cuando está"
+rm -f "$BUS"
+HARNESS_HOST_ID=vps-tokio fire tool-start '{"command":"echo hola"}'
+assert_contains "$(bus)" '"host":"vps-tokio"' "también en el evento de arranque"
+rm -f "$BUS"
+HARNESS_HOST_ID=vps-tokio fire stop '{}'
+assert_contains "$(bus)" '"host":"vps-tokio"' "y en los de sesión (stop, prompt, subagent)"
+rm -f "$BUS"
+fire tool '{"command":"echo hola"}'
+host_auto="$(bus | jq -r '.host')"
+[ -n "$host_auto" ] && [ "$host_auto" != "null" ] \
+  && pass "sin HARNESS_HOST_ID cae al hostname de la máquina ($host_auto)" \
+  || fail "sin HARNESS_HOST_ID el evento quedó sin host"
+rm -f "$BUS"
+
+echo
 echo "── una llamada en vuelo se distingue de un agente atascado"
 
 : > "$BUS"

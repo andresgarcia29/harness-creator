@@ -32,6 +32,8 @@ import sys
 import shutil
 import subprocess
 import secrets as pysecrets
+import hmac
+import socket
 import uuid
 import urllib.request
 import time
@@ -53,6 +55,29 @@ MAX_SESSIONS = 12       # sesiones que el panel sigue a la vez
 # todo POST. Una página web ajena no puede mandar headers custom a 127.0.0.1
 # sin un preflight CORS que este server nunca contesta → drive-by imposible.
 OP_TOKEN = pysecrets.token_hex(16)
+
+# Identidad de ESTA máquina. El ledger estampaba `actor: 'panel'` y nada más,
+# que alcanzaba mientras el panel era uno solo atado a 127.0.0.1. Al agregar
+# los ledgers de varios VPS en una vista de flota, "lo hizo el panel" no
+# responde cuál, y una auditoría que no distingue máquinas no es auditoría.
+# Se puede fijar a mano con HARNESS_HOST_ID cuando el hostname no dice nada
+# útil (contenedores, VPS con nombres autogenerados).
+HOSTNAME = (os.environ.get('HARNESS_HOST_ID') or socket.gethostname() or 'sin-nombre').split('.')[0]
+ACTOR = 'panel@%s' % HOSTNAME
+
+# UNA definición de qué es un id de tarea válido. Había tres, y esa fue la
+# falla: `task_git` y `task_events` rechazaban `/` y `\`, mientras `op_task`
+# no validaba nada, y ahí el id del ticket entraba crudo a `makedirs` Y al
+# prompt que arranca un agente con git y push. Que la guarda correcta ya
+# existiera en este mismo archivo es lo que lo delata como descuido y no como
+# decisión: no faltaba saber cómo, faltaba aplicarlo en el tercer lugar.
+TASK_ID_RE = re.compile(r'^[A-Za-z0-9#][A-Za-z0-9._#-]{0,63}$')
+
+
+def valid_task_id(tid):
+    """Sirve para nombre de directorio Y para interpolar en un prompt: por eso
+    es una lista blanca corta y no una lista negra de lo peligroso."""
+    return bool(tid) and TASK_ID_RE.match(tid) is not None
 CONFIG_DIR = os.environ.get('HARNESS_CONFIG_DIR') or os.path.join(
     os.path.expanduser('~'), '.config', 'harness')
 
@@ -600,7 +625,7 @@ class State:
         try:
             os.makedirs(os.path.join(self.ws, '.harness'), exist_ok=True)
             e = {'ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-                 'kind': kind, 'task': task, 'actor': 'panel',
+                 'kind': kind, 'task': task, 'actor': ACTOR, 'host': HOSTNAME,
                  'summary': redact(summary)[:400]}
             if ok is not None:
                 e['ok'] = ok
@@ -629,8 +654,12 @@ class State:
             # es un orden implícito que ya nos falló una vez (en tests)
             os.makedirs(os.path.join(self.ws, '.harness'), exist_ok=True)
             with open(os.path.join(self.ws, '.harness', 'runs.jsonl'), 'a') as fh:
+                # host: un pid solo identifica un proceso DENTRO de una máquina.
+                # Al juntar los runs de varios VPS, sin esto no se sabe en cuál
+                # buscar ese pid, ni si dos runs con el mismo pid son el mismo.
                 fh.write(json.dumps({'ts': int(time.time()), 'task': task,
-                                     'session': session, 'pid': pid, 'kind': kind}) + '\n')
+                                     'session': session, 'pid': pid, 'kind': kind,
+                                     'actor': ACTOR, 'host': HOSTNAME}) + '\n')
         except OSError:
             pass
 
@@ -656,6 +685,15 @@ class State:
         if origin != 'ticket' and not title:
             raise ValueError('falta el título')
         if origin == 'ticket':
+            # Este valor llega de afuera y se usa DOS veces como dato peligroso:
+            # como nombre de directorio (el makedirs de más abajo) y dentro del
+            # prompt que lanza un agente con acceso a filesystem, git y push.
+            # Sin esta guarda, un ticket `../../..` escribía fuera del workspace.
+            # Hoy lo contenía el bind a 127.0.0.1; eso es contención, no arreglo,
+            # y se evapora en cuanto el panel deje de ser solo local.
+            if not valid_task_id(ticket):
+                raise ValueError('id de ticket inválido (%s): se permiten letras, '
+                                 'números y . _ - #, hasta 64 caracteres' % ticket[:40])
             tid = ticket
         else:
             slug = re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')
@@ -988,7 +1026,7 @@ class State:
     def task_git(self, task_id):
         """Qué repos toca (worktrees) vs lee (evidencia), branch, commits, PR.
         Cache 15 s. Shell a git/gh: fail-open, con timeout, jamás bloquea."""
-        if any(c in task_id for c in '/\\'):
+        if not valid_task_id(task_id):
             return {'repos': [], 'read': []}
         cache = getattr(self, '_git_cache', {})
         hit = cache.get(task_id)
@@ -1055,7 +1093,7 @@ class State:
         """TODOS los eventos del bus de una tarea (no solo la ventana reciente
         del snapshot) — para que el grafo y la historia muestren el arco
         completo: T1 → T2 → T3, con sus bloqueos y reaperturas."""
-        if any(c in task_id for c in '/\\'):
+        if not valid_task_id(task_id):
             return []
         out = []
         try:
@@ -1123,7 +1161,25 @@ class Handler(BaseHTTPRequestHandler):
             body = body.replace(b'__OP_TOKEN__', OP_TOKEN.encode())
         return self._send(200, self.MIME.get(ext, 'application/octet-stream'), body)
 
+    def _local_only(self):
+        """El Host tiene que ser local. Es la guarda anti DNS-rebinding, y la
+        exigen los DOS verbos: el POST además pide token, pero el GET no puede
+        (una navegación del navegador no manda headers custom).
+
+        Que el GET no tuviera NI esto era el hueco real: `/api/state`,
+        `/api/session` y `/api/task-events` sirven el texto de los agentes, sus
+        rutas de archivos, ramas y el ledger de supuestos. Todo eso salía sin
+        una sola comprobación mientras la guarda vivía únicamente en do_POST.
+        """
+        host = (self.headers.get('Host') or '').split(':')[0]
+        if host in ('127.0.0.1', 'localhost'):
+            return True
+        self._send(403, 'application/json', b'{"error":"solo 127.0.0.1"}')
+        return False
+
     def do_GET(self):
+        if not self._local_only():
+            return
         path = self.path.split('?')[0]
         if path == '/api/state':
             body = json.dumps(self.state.snapshot()).encode()
@@ -1155,11 +1211,12 @@ class Handler(BaseHTTPRequestHandler):
         # Guardias anti-CSRF (ADR-0010): Host local + token del arranque en un
         # header custom. El preflight CORS que exigiría ese header nunca se
         # contesta, así que una página web ajena no puede llegar aquí.
-        host = (self.headers.get('Host') or '').split(':')[0]
-        if host not in ('127.0.0.1', 'localhost'):
-            return self._send(403, 'application/json',
-                              b'{"error":"solo 127.0.0.1"}')
-        if self.headers.get('X-Corvux-Token') != OP_TOKEN:
+        if not self._local_only():
+            return
+        # compare_digest y no `!=`: la comparación corta de Python filtra por
+        # tiempo cuántos caracteres del token acertaste. Contra un atacante
+        # local es un margen estrecho, pero el arreglo cuesta una línea.
+        if not hmac.compare_digest(self.headers.get('X-Corvux-Token') or '', OP_TOKEN):
             return self._send(403, 'application/json',
                               b'{"error":"token de operacion invalido - recarga la pagina"}')
         try:

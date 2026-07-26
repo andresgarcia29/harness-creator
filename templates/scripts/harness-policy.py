@@ -176,6 +176,45 @@ def repos_pending_ship(task_dir: Path) -> list:
     return [r for r in verdicts if r not in shipped]
 
 
+def repos_not_landed(task_dir: Path) -> list:
+    """Repos cuyo ship abrió un PR que todavía NO mergeó.
+
+    Con `flow: prs`, ship.sh termina con la rama publicada y el PR abierto, y
+    deja `landed:false` en ship.log: el cambio NO está en la trunk. Avanzar a
+    deploy no tiene sentido (no hay nada desplegado que vigilar) y avanzar a
+    archive es peor, porque /archive fusiona el delta-spec en la spec maestra:
+    la spec pasaría a describir algo que no existe. Es spec rot al revés, y más
+    difícil de detectar que el normal, porque la spec parece adelantada en vez
+    de vieja.
+
+    Esto estaba escrito en el prompt de /archive. La prosa no frena a nadie, y
+    esa es la leccion que este repo ya aprendió en otros seis lugares.
+
+    Compatible hacia atrás: las entradas de `flow: trunk` no traen `landed`, y
+    un campo ausente NO cuenta como false (el bug de `//` en jq salió justo de
+    confundir esas dos cosas)."""
+    log = task_dir / "ship.log"
+    if not log.exists():
+        return []
+    pending = []
+    for line in log.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("landed") is False:
+            repo = entry.get("repo")
+            if repo and repo not in pending:
+                pending.append(repo)
+        elif entry.get("repo") in pending:
+            # Un ship posterior del mismo repo que SI aterrizo lo saca de la
+            # lista: el estado vale el ultimo registro, no el primero.
+            pending.remove(entry["repo"])
+    return sorted(pending)
+
+
 def lane_transitions(policy: dict, state: dict) -> dict:
     """Transiciones vigentes para el carril de la tarea.
 
@@ -377,6 +416,15 @@ def cmd_transition(args: argparse.Namespace) -> int:
     # `review_rounds` se mantiene como el MÁXIMO entre repos: es lo que
     # validate-ship compara y lo que los reportes ya leen, así que las tareas y
     # los estados viejos siguen funcionando igual.
+    if args.phase in ("deploy", "archive"):
+        not_landed = repos_not_landed(task_dir)
+        if not_landed:
+            fail("POLICY-SHIP-005",
+                 f"estos repos abrieron PR pero NO mergearon: {', '.join(not_landed)}. "
+                 f"Con flow: prs el cambio no está en la trunk hasta el merge, así que "
+                 f"no hay deploy que vigilar y archivar fusionaría el delta-spec de algo "
+                 f"que todavía no existe. Esperá el merge y re-corré deploy-watch, que "
+                 f"resuelve el commit real")
     rounds_by_repo = state.get("review_rounds_by_repo")
     if not isinstance(rounds_by_repo, dict):
         rounds_by_repo = {}

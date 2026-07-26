@@ -66,7 +66,13 @@ Dirección de dependencias (ley, referencia del DAG de shipping):
    (redacta secretos, deduplica, cuota 3/24h). Rodearlo con un
    workaround silencioso condena al siguiente usuario. Protocolo
    completo: `.claude/skills/harness-bug-report/SKILL.md`.
-13. **La recomendada es la que elimina la causa, jamás la más rápida.**
+13. **Un repo ARCHIVADO en el forge se ignora SIEMPRE.** No entra al grafo,
+   ni al inventario, ni a los briefs, ni a los pulls, ni lo cites como
+   referencia: está muerto por decisión explícita de alguien y es de solo
+   lectura. Si una consulta te devuelve algo de un repo archivado, no es
+   material: es ruido que nadie puede tocar. La lista la mantiene
+   `scripts/archived-repos.sh refresh` (cacheada; el doctor avisa si envejece).
+14. **La recomendada es la que elimina la causa, jamás la más rápida.**
    Cuando presentes alternativas a un humano, la que marques como
    recomendada es la que deja el problema resuelto para siempre, aunque
    cueste más trabajo hoy. El atajo se puede listar, NUNCA como

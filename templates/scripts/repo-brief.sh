@@ -20,6 +20,12 @@ OUT_DIR="$WS/.cache/briefs"
 OUT="$OUT_DIR/$REPO.md"
 
 [ -d "$SRC/.git" ] || { echo "⚠️  no existe repos/$REPO; sin brief" >&2; exit 0; }
+# Un brief de un repo archivado viaja DENTRO del prompt del implementer como si
+# fuera material vivo. Es la forma mas cara de contaminar: no se ve.
+if [ -f "$WS/.cache/archived-repos.txt" ] && grep -qxF "$REPO" "$WS/.cache/archived-repos.txt"; then
+  echo "⚠️  repos/$REPO está ARCHIVADO en el forge: no genero brief (ver scripts/archived-repos.sh)" >&2
+  exit 0
+fi
 mkdir -p "$OUT_DIR"
 
 head_sha="$(git -C "$SRC" rev-parse HEAD 2>/dev/null || echo unknown)"

@@ -39,6 +39,18 @@ nodes_in() {  # nodos de un graph.json (0 si no existe o no parsea)
 }
 
 # huella global: la suma de HEADs de todos los repos (cksum es POSIX)
+
+# ── LEY: UN REPO ARCHIVADO SE IGNORA SIEMPRE ──────────────────────────
+# Esta muerto por decision explicita de alguien y es de solo lectura. Meterlo
+# aca contamina el resultado con codigo que nadie mantiene y que ningun agente
+# puede tocar. La lista la mantiene scripts/archived-repos.sh (cacheada); si no
+# existe, no se filtra nada: ausencia de cache no es ausencia de archivados,
+# pero tampoco se inventa una lista.
+_is_archived() {  # _is_archived <repo>
+  [ -f "$WS/.cache/archived-repos.txt" ] || return 1
+  grep -qxF "$1" "$WS/.cache/archived-repos.txt"
+}
+
 heads_sum="$(for d in "$WS"/repos/*/; do
   [ -d "$d/.git" ] && git -C "$d" rev-parse HEAD 2>/dev/null
 done | sort | cksum | cut -d' ' -f1)"
@@ -76,6 +88,10 @@ trap 'rm -rf "$LOCKDIR"' EXIT
 parts=""; built=0; empty=""; total_repos=0
 
 for d in repos/*/; do
+  if _is_archived "$(basename "$d")"; then
+    echo "  ⏭️  $(basename "$d"): archivado en el forge, fuera del grafo"
+    continue
+  fi
   [ -d "$d/.git" ] || continue
   total_repos=$((total_repos+1))
   name="$(basename "$d")"

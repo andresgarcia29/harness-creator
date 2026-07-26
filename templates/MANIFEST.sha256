@@ -3,7 +3,7 @@
 # Un generador DEBE escribir el digest de abajo en .harness-templates de
 # la instancia: sin eso, nadie puede saber con qué set se generó.
 plugin_version: 0.48.0
-fbeaa69f0df7b3e0719e350045e18f75fe921463e205c41e79c0d5ce0ca080c8  scripts/doctor.sh
+a33aef3888ca309ebaac465e2fccea228548e79c88abb86c7a2e2bc739d283cd  scripts/doctor.sh
 d05fc8fb8e40aef8f8b256359e7916d18d2a924cd047123b46471db9f7f8020a  templates/AGENTS.md.tmpl
 2b004114a7f28abcc8ddae236962ce84908d585a765d990cc4139e0d4e985395  templates/CLAUDE.md.tmpl
 e603eb3ba07606a783ebce129bec2b0e5d4fb0466a5cb665399f33eb4858c462  templates/Makefile.tmpl
@@ -58,7 +58,7 @@ b3621c53be0067b4fe37b5d6b045a2af72996f241fca91b78eccd487830ec01c  templates/scri
 da9a483b9374ee12a5a1e01a93506476d30b1a2bfb0271e0eec6eaab4ad55d2f  templates/scripts/graph-refresh.sh
 95b3febb357f0805299c1010aa1396b0d31ada7a2f040c22c4f6a05bea230e42  templates/scripts/harness-bug.sh
 763f6a0a0b7f34b455ef1586d632aec26a4a50a5e3832faa1fdf35ac7faa7ce4  templates/scripts/harness-policy.py
-b584ab514f669d07b17dd6806de4396740e8bc953c0f485a0d7353340e962ed6  templates/scripts/harness-version.sh
+8f456fe23cbb4d58fb38b345ad5d434ffafa57513dbf09079cd7e36b5cb25798  templates/scripts/harness-version.sh
 ffa92b2c4026fee10565f82f21ed3b7b6014f062889dd04fa3a83a27756f07d2  templates/scripts/minion-probe.sh
 98ad9a36ccba121f7c3ddab831578fb26296a852011d50878264ae5e7a649af0  templates/scripts/pipeline-steps.sh
 b4145f3c04fc7c5fc865da8bdc83e78b30b08a4277c8d5f9b62f0852f61b7f84  templates/scripts/plan-lint.sh
@@ -84,4 +84,4 @@ e83db35f541dd054f74ebfa0e43bd9acefb15546f3809a3d18577eecf7a45faa  templates/skil
 b1dd142a73b0d762d45b40ed26c78c83761620e73851078872fe0c97ca8d52f3  templates/ui/panel.sh
 af164c1f918036c0ba25f21a4a45f9d5bce9221fa28fe19647955d099ec7b3c7  templates/ui/pricing.json
 c1788266c91e18d16646ad8c345a4d7a91255ec138db609437276b812f9b0e16  templates/ui/server.py
-digest: b6c536947cf632f4b741cd64472bc0d20d50c9448166545c3f47022f799939a4
+digest: 10d6982df5227e6aa5c242bab91c1fdda22d15603dd770e730af6a8e5af0eb87

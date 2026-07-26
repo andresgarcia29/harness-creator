@@ -30,7 +30,12 @@ done
 # escribiera con la versión nueva habiendo generado desde templates viejos.
 # El digest del set es lo único que compara CONTENIDO.
 if [ -f "$WS/.harness-templates" ]; then
-  ok ".harness-templates presente (set $(cut -c1-12 < "$WS/.harness-templates"))"
+  # Misma normalizacion que harness-version.sh: el marcador vale con o sin el
+  # prefijo `digest: `, y lo que no sea un sha256 es ILEGIBLE, no drift.
+  _dg="$(sed -n 's/^[[:space:]]*\(digest:[[:space:]]*\)\{0,1\}\([0-9a-fA-F]\{64\}\).*$/\2/p' "$WS/.harness-templates" 2>/dev/null | head -1)"
+  if [ -n "$_dg" ]; then ok ".harness-templates presente (set $(printf '%.12s' "$_dg"))"
+  else fail ".harness-templates no contiene un digest legible (se esperan 64 hex, con o sin 'digest: ')" \
+            "regenerá con /harness-init . o copiá el digest de templates/MANIFEST.sha256"; fi
 else
   fail ".harness-templates faltante: no se puede saber con qué set de templates se generó esta instancia" \
        "regenera con /harness-init . : el generador que la creó no dejó rastro de su fuente, así que .harness-version no es confiable"

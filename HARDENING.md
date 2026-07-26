@@ -414,6 +414,21 @@ corto la cuarta ronda de api nombrando al repo.
   se toca. Primera corrida real de `deploy-watch` (459 lineas, cero ejecuciones
   hasta hoy).
 
+- [x] **El marcador del set de templates tenia dos lecturas y solo se aceptaba
+  una, asi que `make version` podia reportar drift eterno.**
+  `templates/MANIFEST.sha256` termina con la linea `digest: <hash>` y la tabla
+  de generacion pedia "el `digest:` de MANIFEST.sha256": eso se lee como el
+  VALOR o como la LINEA. `harness-version.sh` hacia `tr -d ' \n'` y comparaba
+  contra el hash pelado, asi que una instancia cuyo generador escribio la linea
+  quedaba en `digest:abc...` y NUNCA igualaba. Reproducido con dos instancias
+  identicas: una `✅ idénticos a upstream`, la otra `⬆️ DISTINTOS`. Es el peor
+  sitio posible para un falso rojo, porque esta comprobacion existe justamente
+  para que un update no pueda mentir, y mintiendo ella enseña a ignorar el
+  aviso. Ahora se normalizan las dos formas (con o sin prefijo, mayusculas o
+  minusculas), un marcador que no sea sha256 se declara ILEGIBLE en vez de
+  drift (son remediaciones distintas), y la instruccion del generador dejo de
+  ser ambigua. Mismo criterio en `doctor.sh`.
+
 ### Pendiente: lo único que elimina la clase entera
 
 - [ ] **`flow: prs` + cola de merge del forge.** Todo lo de arriba MITIGA la

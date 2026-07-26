@@ -88,4 +88,52 @@ gen vault
 out="$(cd "$WS" && bash scripts/secrets.sh check 2>&1)"; rc=$?
 assert_eq 0 "$rc" "check con .secrets presente: verde"
 
+echo
+echo "── el token de Vault: renovar, no necesitar renovacion, y no poder mirar"
+# Un token root (o con TTL infinito) NO es renovable: `vault token renew` falla
+# SIEMPRE, y el aviso de "¿expiro?" quedaba en cada pull para siempre. Un
+# warning permanente que no significa nada enseña a ignorar los warnings, que es
+# justo lo que no queremos el dia que uno si importe.
+awk '/^pull_vault\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$ROOT/templates/scripts/secrets.sh.tmpl" \
+  | sed -e 's|{{VAULT_ADDR}}|http://v:8200|g' -e 's|{{VAULT_KEYS}}||g' -e 's|{{VAULT_KV_BASE}}|kv|g' > "$WS/pv.sh"
+mkdir -p "$WS/bin" "$WS/fake/.config/harness"
+echo tok > "$WS/fake/.config/harness/vault-token"
+
+vault_stub() {  # vault_stub <json-lookup> <exit-renew>
+  printf '#!/bin/sh\ncase "$*" in\n  *"token lookup"*) cat <<JEOF\n%s\nJEOF\n ;;\n  *"token renew"*) exit %s ;;\n  *) exit 0 ;;\nesac\n' "$1" "$2" > "$WS/bin/vault"
+  chmod +x "$WS/bin/vault"
+}
+run_pull() {
+  ( set -u; PATH="$WS/bin:$PATH"; HOME="$WS/fake"
+    OUT="$WS/o"; OUTD="$WS/od"; mkdir -p "$OUTD"; finish() { :; }
+    . "$WS/pv.sh"; pull_vault ) 2>&1
+}
+
+vault_stub '{"data":{"renewable":true,"ttl":100}}' 0
+out="$(run_pull)"
+assert_not_contains "$out" "expiró" "token renovable que renueva: sin ruido"
+assert_not_contains "$out" "sin caducidad" "y no lo confunde con un root"
+
+vault_stub '{"data":{"renewable":false,"ttl":0}}' 1
+out="$(run_pull)"
+assert_contains "$out" "no requiere renovación" "root/TTL infinito: lo dice, no lo trata como error"
+assert_not_contains "$out" "expiró" "y NO deja el warning permanente que se aprende a ignorar"
+
+vault_stub '{"data":{"renewable":true,"ttl":100}}' 1
+out="$(run_pull)"
+assert_contains "$out" "renovación falló" "renovable que falla de verdad: sí avisa"
+
+vault_stub "" 1
+out="$(run_pull)"
+assert_contains "$out" "no pude consultar" "token ilegible: 'no pude mirar', distinto de las otras tres"
+
+echo
+echo "── el mensaje del bootstrap no vende Vault como unica opcion"
+bs="$(cat "$ROOT/templates/scripts/bootstrap.sh.tmpl")"
+assert_contains "$bs" "secrets.source: {{SECRETS_SOURCE}}" "dice QUE fuente declaro la instancia"
+assert_contains "$bs" "gcp-secret-manager" "y nombra las otras que existen"
+assert_contains "$bs" "OPCIÓN B · root token" "documenta el root token como opcion real"
+assert_contains "$bs" "llave maestra" "con su costo escrito, para que sea decision y no sorpresa"
+assert_contains "$bs" "NO tenés que re-autenticarte nunca" "y aclara que el periodic ya evita re-autenticarse"
+
 t_done

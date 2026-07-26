@@ -1216,7 +1216,17 @@ class Handler(BaseHTTPRequestHandler):
         # compare_digest y no `!=`: la comparación corta de Python filtra por
         # tiempo cuántos caracteres del token acertaste. Contra un atacante
         # local es un margen estrecho, pero el arreglo cuesta una línea.
-        if not hmac.compare_digest(self.headers.get('X-Corvux-Token') or '', OP_TOKEN):
+        #
+        # Se comparan BYTES y no str: con str, compare_digest lanza TypeError
+        # ante cualquier carácter no-ASCII, y esta línea corre ANTES del try de
+        # abajo. Un header `X-Corvux-Token: tokén` dejaba la petición sin
+        # respuesta y escupía un traceback (reproducido). No era un bypass, pero
+        # un guardia que se cae con la entrada que vino a inspeccionar no es un
+        # guardia. surrogateescape porque http.server decodifica los headers en
+        # latin-1: cualquier byte tiene que poder volver sin excepción.
+        supplied = (self.headers.get('X-Corvux-Token') or '').encode(
+            'utf-8', 'surrogateescape')
+        if not hmac.compare_digest(supplied, OP_TOKEN.encode('ascii')):
             return self._send(403, 'application/json',
                               b'{"error":"token de operacion invalido - recarga la pagina"}')
         try:

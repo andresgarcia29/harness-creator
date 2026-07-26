@@ -240,5 +240,55 @@ class TestOpHTTP(unittest.TestCase):
         self.assertTrue(runs[-1]['host'], 'el run no dice dónde vive ese pid')
 
 
+    def test_14_token_no_ascii_responde_403_y_no_tumba_la_peticion(self):
+        """Un header con un byte no-ASCII tiene que dar 403, no morir.
+
+        `hmac.compare_digest` lanza TypeError comparando str con caracteres
+        no-ASCII, y esa comparacion corre ANTES del try del handler: un
+        `X-Corvux-Token: tokén` dejaba la peticion SIN RESPUESTA y escupia un
+        traceback. No era un bypass, pero un guardia que se cae con la entrada
+        que vino a inspeccionar no es un guardia. Por eso se comparan bytes.
+
+        Se usa http.client y no urllib porque urllib rechaza el header antes de
+        que salga, y entonces el server nunca veria el caso que se prueba.
+        """
+        import http.client
+        c = http.client.HTTPConnection('127.0.0.1', self.port, timeout=10)
+        c.putrequest('POST', '/api/op/task')
+        c.putheader('Host', '127.0.0.1')
+        c.putheader('X-Corvux-Token', 'tok\u00e9n'.encode('latin-1'))
+        c.putheader('Content-Type', 'application/json')
+        c.putheader('Content-Length', '2')
+        c.endheaders()
+        c.send(b'{}')
+        try:
+            status = c.getresponse().status
+        except Exception as exc:   # RemoteDisconnected = el bug
+            self.fail('el server no respondio al token no-ASCII (%s): la '
+                      'comparacion del token lanzo una excepcion' % type(exc).__name__)
+        self.assertEqual(status, 403)
+
+    def test_15_el_token_se_compara_en_tiempo_constante(self):
+        """Estructural: el fuente usa compare_digest y no `!=`.
+
+        Es el unico de los tres guardias del panel que no se puede probar por
+        comportamiento: un test de timing real es flaky por naturaleza, y por
+        eso este arreglo viajo sin red. Verificado con una mutacion: al volver
+        la linea a `!=` la suite entera seguia en verde, o sea que un refactor
+        podia revertirlo sin que nada se quejara. Una asercion sobre el fuente
+        es fea, pero es la que falla cuando alguien lo deshace.
+        """
+        src = open(SERVER, encoding='utf-8').read()
+        self.assertIn('hmac.compare_digest', src,
+                      'el token debe compararse con hmac.compare_digest')
+        self.assertNotRegex(
+            src, r"headers\.get\('X-Corvux-Token'\)\s*!=",
+            'comparar el token con != filtra por tiempo cuantos caracteres '
+            'acertaste: usa hmac.compare_digest sobre bytes')
+        self.assertRegex(
+            src, r'compare_digest\(\s*supplied',
+            'compare_digest debe recibir BYTES: con str lanza TypeError ante '
+            'cualquier caracter no-ASCII (ver test_14)')
+
 if __name__ == '__main__':
     unittest.main(verbosity=0)

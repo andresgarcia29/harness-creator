@@ -61,17 +61,6 @@ upstream_issues: {{UPSTREAM_ISSUES}}
 # supuestos). Para conducir fase por fase: comandos sueltos, no /auto.
 autonomy: {{AUTONOMY}}
 
-# Cronjobs self-healing: quién los corre. Los detectores entregan PRs e issues
-# contra los repos COMPARTIDOS, así que en un equipo con varias instalaciones
-# del harness deben correr UNA vez, no una por persona: si no, el mismo
-# hallazgo llega como N PRs duplicados y el circuit breaker (que es local)
-# abre en una máquina mientras las otras siguen.
-#   any        → cualquiera lo corre (correcto con UN solo workspace)
-#   <hostname> → solo esa máquina (el workspace designado del equipo)
-#   k8s        → nadie local; corren en templates/cronjobs/k8s-cronjob.yaml
-cronjobs:
-  run_on: {{CRONJOBS_RUN_ON}}
-
 # MinionS (docs/harness/minions-decomposition.md): el supervisor descompone en
 # sub-preguntas y workers baratos las responden EN PARALELO; el supervisor
 # sintetiza. No es "elegir modelo barato": es descomposición + fan-out, y es lo

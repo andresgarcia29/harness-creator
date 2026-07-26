@@ -147,7 +147,7 @@ if [ -f "$ANSWERS" ]; then
     if command -v "$bin" >/dev/null; then
       ok "cli: $bin"
     elif [ "$scope" = "cronjob" ]; then
-      warn "cli faltante: $bin (scope: cronjob — instálalo al activar su cronjob)"
+      warn "cli faltante: $bin (scope: cronjob — solo lo usa harness-cronjobs, repo aparte)"
     else
       fail "cli faltante: $bin" "corre scripts/bootstrap.sh (instala todo lo elegido) o ver install en catalog/capabilities.yaml"
     fi
@@ -423,6 +423,9 @@ fi
 [ -d "$WS/specs" ] && ok "specs/ presente ($(ls "$WS/specs" 2>/dev/null | wc -l | tr -d ' ') capabilities)" || warn "sin specs/ — los abogados litigan sin documento citable"
 
 # 11 · Cronjobs self-healing
+# Los cronjobs viven en su propio repo (andresgarcia29/harness-cronjobs): el
+# harness no los instala. Si alguien lo clonó DENTRO del workspace, se revisa
+# como integración opcional; si no está, no es un hallazgo.
 if [ -d "$WS/scripts/cronjobs" ]; then
   [ -x "$WS/scripts/cronjobs/cron-runner.sh" ] && ok "cron-runner.sh ejecutable" || fail "cron-runner.sh no ejecutable" "chmod +x scripts/cronjobs/cron-runner.sh"
   njobs=$(ls "$WS/scripts/cronjobs/jobs/"*.sh 2>/dev/null | wc -l | tr -d ' ')

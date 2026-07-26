@@ -142,15 +142,6 @@ assert_contains "$fg" "glab" "hay driver de gitlab, no solo github"
 assert_contains "$fg" "forge_base_branch" "y tampoco supone que la rama trunk es main"
 
 echo
-echo "── los consumidores usan la capa, no la CLI"
-assert_contains "$(cat "$R/templates/cronjobs/jobs/ci-doctor.sh")" "forge_ci_failed" \
-  "ci-doctor consulta por la capa"
-assert_not_contains "$(cat "$R/templates/cronjobs/cron-runner.sh")" "vía gh" \
-  "el prompt inyectado a los 13 jobs ya no ordena entregar 'vía gh'"
-assert_contains "$(cat "$R/skills/harness-init/SKILL.md")" "scripts/forge.sh" \
-  "y forge.sh está en la tabla de generación (si no, no se copia a la instancia)"
-
-echo
 echo "── claim del ticket: dos workspaces no pueden tomar el mismo"
 # Antes esto era check-then-act sin atomicidad: los dos leían agent-ready y los
 # dos arrancaban el pipeline completo. El tracker es el único registro que los

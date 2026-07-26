@@ -696,7 +696,7 @@ Es la única acción del harness que publica algo hacia afuera, así que se decl
 
 ## Self-healing: los cronjobs
 
-Arquitectura innegociable: **un detector determinista (script, cero LLM) produce hallazgos; el agente solo despierta si hay algo que arreglar**, con modelo y presupuesto en dólares definidos en `models.yaml`, y todo aterriza como PR o issue, jamás como push directo. El `cron-runner.sh` trae circuit breaker (3 fallos y se apaga avisando) y un registro de gasto que el digest reporta: **el harness se auto-audita**.
+Viven en un repo aparte, [andresgarcia29/harness-cronjobs](https://github.com/andresgarcia29/harness-cronjobs): su unidad de ejecucion no es "cada quien" sino "una vez", y con varias instalaciones el mismo hallazgo llegaba como N PRs duplicados. Arquitectura innegociable: **un detector determinista (script, cero LLM) produce hallazgos; el agente solo despierta si hay algo que arreglar**, con modelo y presupuesto en dólares definidos en `models.yaml`, y todo aterriza como PR o issue, jamás como push directo. El `cron-runner.sh` trae circuit breaker (3 fallos y se apaga avisando) y un registro de gasto que el digest reporta: **el harness se auto-audita**.
 
 ```mermaid
 flowchart LR
@@ -761,7 +761,6 @@ El flujo es fijo (discovery, entrevista, generación, verificación); **todo lo 
 | Cambiar de proveedor | la línea `provider:` de `models.yaml` más `make models`; roles y comandos no se tocan |
 | Modelo para una tarea puntual | `/auto <id> --model deep` (o `model:` en el frontmatter de `task.md`) |
 | Usar el harness desde Cursor, Kimi Code u otro agente | ya está: `AGENTS.md` es el punto de entrada, y los comandos de `.claude/commands/` son playbooks legibles por cualquiera |
-| Otro cronjob de self-healing | un archivo en `cronjobs/jobs/`: metadata, `detect()` y prompt. El runner hace el resto |
 | Más o menos agentes | el clustering se decide en la entrevista y se corrige en `harness-answers.yaml` |
 | Cuántas vueltas puede dar el loop antes de escalarte | `loop_budget` en `harness-answers.yaml`; de ahí sale también el límite que aplica el motor de política |
 | Que `/auto` te pida un "go" antes de tocar main | `autonomy: checkpoint` o `full` en `harness-answers.yaml` |
@@ -846,7 +845,6 @@ templates/         todo lo que se genera:
   ├── hooks/       block-direct-push · guard-canonical · guard-worktree (fail-closed: bloquean)
   │                track-read · ui-emit · session-summary (fail-open: observan)
   ├── ui/          server.py · pricing.json · web/ (fuente React) · dist/ (build vendorizado)
-  └── cronjobs/    cron-runner + 13 jobs + manifiesto de Kubernetes
 ```
 
 ## Tests

@@ -63,12 +63,5 @@ doc="$(cat "$root/scripts/doctor.sh")"
 assert_contains "$doc" "tier read-only en answers" "el doctor nombra los degradados que no se aplican"
 assert_contains "$doc" "Registrar la preferencia no revoca nada" "sin ambigüedad sobre qué significa"
 
-echo
-echo "── ci-doctor: el último falso verde del grupo P1"
-ci="$(cat "$root/templates/cronjobs/jobs/ci-doctor.sh")"
-assert_contains "$ci" "forge_ci_failed" "consulta el CI por la capa de forge, no con gh cableado"
-assert_contains "$ci" "CI NO consultado en:" "los repos que no pudo consultar se nombran"
-assert_contains "$ci" "no pude consultar el CI de NINGÚN repo" "y si no vio nada, no dice limpio"
-assert_contains "$ci" "return 3" "devuelve saltado, no verde"
 
 t_done

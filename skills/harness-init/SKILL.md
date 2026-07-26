@@ -116,10 +116,10 @@ harness; cada agente es contexto y mantenimiento.
    emitir un token de menos permisos o no instalarla. Prometer un
    read-only que no se aplica es peor que no ofrecerlo: el humano cree
    que revocó escritura. Registra nombre + bin/mcp + tier + `scope:` (core |
-   cronjob, según el campo `cronjob:` del catálogo). REGLA: si los
-   cronjobs quedaron deshabilitados (#12), NO palomees capacidades
-   cuyo ÚNICO consumidor es un cronjob — regístralas comentadas como
-   "pendientes de activar cronjobs". Las `phase: 2` se mencionan como
+   cronjob, según el campo `cronjob:` del catálogo). REGLA: los cronjobs
+   viven en un repo aparte (#12), así que NO palomees capacidades cuyo ÚNICO
+   consumidor es un cronjob salvo que el humano diga que va a usarlo;
+   regístralas comentadas como "solo para harness-cronjobs". Las `phase: 2` se mencionan como
    siguientes pasos, no se instalan.
 6. **Tickets**: `linear` | `github` | `none`. Los TRES están
    implementados en `ticket-pull.sh` y `ticket-close.sh` (antes solo
@@ -171,18 +171,8 @@ harness; cada agente es contexto y mantenimiento.
     advierte la latencia comprada donde no hay decisión (las reglas del
     tier deep de models.yaml) y registra la decisión.
 9c. **¿Cuánta gente va a instalar este harness?** Si es más de una (cada
-    quien en su máquina, todos contra los mismos repos remotos), hay dos
-    consecuencias que hay que decidir ACÁ, porque después se pagan caras:
-    - **`cronjobs.run_on`** (placeholder `{{CRONJOBS_RUN_ON}}`, va al answers).
-      Los trece detectores entregan PRs e issues contra repos COMPARTIDOS y su
-      ledger es local: si corren en las diez máquinas, el mismo hallazgo llega
-      como diez PRs duplicados y el circuit breaker abre en una mientras las
-      otras siguen. Con UNA instalación: `any` (el default). Con varias:
-      `k8s` si van a usar el CronJob de Kubernetes, o el hostname de la
-      máquina designada. Sin respuesta el placeholder queda literal, y
-      `cron-runner.sh` lo trata como `any` a propósito (un placeholder sin
-      sustituir es problema del doctor, no motivo para apagar trece jobs en
-      silencio).
+    quien en su máquina, todos contra los mismos repos remotos), hay una
+    consecuencia que hay que decidir ACÁ, porque después se paga cara:
     - **`instance.repo` compartido**, no `self`. La spec maestra, los ADRs, la
       constitución y `docs/architecture/map.md` son los desempates del
       enrichment y del RFC. Con `self` cada persona tiene su propia
@@ -205,13 +195,14 @@ harness; cada agente es contexto y mantenimiento.
 11. **Principios del proyecto** para la constitución: 2-4 reglas
     innegociables propias del dominio (ej. multi-tenancy, localización)
     — van a `docs/constitution.md` §6, DRAFT hasta ratificar.
-12. **Cronjobs self-healing**: presenta el catálogo de
-    `templates/cronjobs/jobs/` con tu recomendación por etapa
-    (arranque mínimo: daily-digest, doc-gardener, harness-janitor,
-    ci-doctor; el resto cuando sus detectores tengan herramienta
-    instalada). Pregunta dónde corren: crontab local | GKE (genera
-    los manifiestos K8s) | GitHub Actions schedule. Si el humano los
-    deshabilita, respeta la regla de #5 (sin capacidades cronjob-only).
+12. **Cronjobs self-healing**: este harness YA NO LOS INSTALA. Viven en
+    `andresgarcia29/harness-cronjobs`, un repo aparte, porque su unidad de
+    ejecución no es "cada quien" sino "una vez": entregan PRs e issues contra
+    repos compartidos con un ledger local, así que N instalaciones producían N
+    PRs duplicados del mismo hallazgo. MENCIÓNALO en una línea y sigue: si el
+    humano los quiere, se clonan aparte y se apuntan a este workspace (leen su
+    `models.yaml` y usan su `scripts/forge.sh`). No palomees capacidades cuyo
+    ÚNICO consumidor sea un cronjob salvo que diga que va a usar ese repo.
 13. **Versionado de la instancia**: ¿el workspace se versiona en sí
     mismo (git init aquí) o existe un repo destino (ej.
     `acme-harness`)? Registra `instance.repo` en answers. Si un repo
@@ -291,9 +282,6 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `docs/constitution.md` | docs/constitution.md.tmpl | siempre (DRAFT; §6 desde entrevista #11) |
 | `specs/<capability>/spec.md` | docs/spec.md.tmpl | UNO por dominio de ownership (esqueleto DRAFT; la arqueología los llena) |
 | `docs/harness/testing-policy.md` | docs/testing-policy.md.tmpl | siempre |
-| `docs/harness/cronjobs.md` | docs/cronjobs.md.tmpl | si eligió cronjobs |
-| `scripts/cronjobs/cron-runner.sh` + `scripts/cronjobs/jobs/<elegidos>.sh` | cronjobs/ | los jobs palomeados en #12 |
-| `k8s/cronjobs/<job>.yaml` | cronjobs/k8s-cronjob.yaml.tmpl | si eligió GKE, uno por job |
 | `ratchets.json` | inline: `{}` | si eligió ratchet-keeper |
 | `scripts/doctor.sh` | COPIA de `${CLAUDE_PLUGIN_ROOT}/scripts/doctor.sh` | siempre (instancia autocontenida) |
 | `scripts/bootstrap.sh` | scripts/bootstrap.sh.tmpl | siempre — {{ENSURE_LINES}} se llena con UNA línea `ensure`/`require` por capacidad elegida, derivando el comando real del campo `install:` del catálogo. REGLA de decisión: la manda el campo `install_kind:` del catálogo, NO tu lectura del texto: `auto` → `ensure <bin> <install>` (auto-instala); `manual` → `require <bin> "<install>"` (solo verifica). Ej.: gcloud (`install_kind: auto`) → `ensure gcloud brew install --cask gcloud-cli`; flutter (`manual`) → `require flutter "https://..."`. Inferirlo del texto fue el bug: un generador que solo reconocía `brew` degradó a `require` 8 de 25 capacidades (npm, pip, go install, uv tool, gcloud components), el bootstrap se declaró terminado sin instalarlas y el doctor las reportó en ❌ con la remediación "corre scripts/bootstrap.sh", que ya se había corrido: bucle sin salida (issue #23). Si una entrada vieja no trae `install_kind`, el fallback es la lista CERRADA de package managers: brew, npm, npx, pnpm, yarn, pip, pip3, pipx, uv, go, cargo, gem, apt-get, apt, dnf, yum, winget, scoop, gcloud → `ensure`; una URL → `require`. Si la entrada trae `install_linux:` y el workspace corre en Linux (`uname -s`), usa ESE valor y su `install_linux_kind:` en vez del `install:` por defecto: una fórmula de brew sin bottle de Linux deja la capacidad en ❌ sin explicación (issue #24: kargo). Si la entrada trae `post_install:`, añade DESPUÉS de su ensure la línea `command -v <bin> >/dev/null && { <post_install> \|\| true; }` (idempotente, fail-open — ej. graphify registra su skill con `graphify install`) |

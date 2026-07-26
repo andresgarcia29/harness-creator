@@ -39,37 +39,6 @@ assert_eq 0 "$rc" "con la credencial buena: sale 0"
 assert_contains "$out" "✅ secretos materializados" "y sí reporta el verde"
 
 echo
-echo "── vuln-watch: un scan que no corrió no es 'limpio', y no toca la baseline"
-# El |o| true se tragaba el fallo de osv-scanner; el archivo del día quedaba
-# vacío, el detector devolvía 0 = limpio, Y la baseline se sobreescribía con
-# ese vacío. Al día siguiente TODAS las vulns preexistentes volvían como
-# nuevas y el agente abría una tanda de PRs duplicados.
-
-mkdir -p "$WS/cron/.cache/cron" "$WS/cron/repos"
-cp "$ROOT/templates/cronjobs/jobs/vuln-watch.sh" "$WS/cron/"
-printf 'CVE-2020-0001 paquete-viejo\n' > "$WS/cron/.cache/cron/vuln-watch.baseline"
-base_before="$(cat "$WS/cron/.cache/cron/vuln-watch.baseline")"
-
-run_vuln() {  # run_vuln: corre solo detect() con el osv-scanner que haya en bin
-  ( cd "$WS/cron" && PATH="$WS/bin:$PATH" FINDINGS="$WS/cron/findings.txt" \
-      bash -c '. ./vuln-watch.sh; detect' ) 2>&1
-}
-
-printf '#!/usr/bin/env bash\nexit 127\n' > "$WS/bin/osv-scanner"; chmod +x "$WS/bin/osv-scanner"
-out="$(run_vuln)"; rc=$?
-[ "$rc" -ne 0 ] && pass "scan fallido: NO devuelve 0 (limpio)" \
-  || fail "un scan que no corrió se sigue leyendo como limpio"
-assert_contains "$out" "NO toco la baseline" "dice explícitamente que la protege"
-assert_eq "$base_before" "$(cat "$WS/cron/.cache/cron/vuln-watch.baseline")" \
-  "la baseline sobrevive intacta al scan fallido"
-
-# Scan que sí corre y no encuentra nada: 0 = limpio de verdad.
-printf '#!/usr/bin/env bash\necho "{\\"results\\":[]}"\n' > "$WS/bin/osv-scanner"
-chmod +x "$WS/bin/osv-scanner"
-run_vuln >/dev/null 2>&1
-assert_eq 0 $? "scan que corrió sin hallazgos: 0 (el camino feliz sigue)"
-
-echo
 echo "── squawk: la migración manda, no la herramienta"
 # Sin squawk instalado, el bloque entero se saltaba en silencio aunque el diff
 # agregara migraciones: un ALTER bloqueante llegaba a prod por el mismo
@@ -90,34 +59,6 @@ assert_contains "$(cat "$ROOT/scripts/discover.sh")" 'signals+=("migrations")' \
   "el discovery emite la señal de migraciones"
 assert_contains "$(cat "$ROOT/catalog/capabilities.yaml")" "signal:migrations" \
   "y squawk filtra por ella, no por prosa inverificable"
-
-echo
-echo "── rule-miner: la señal de blocking repetidos estaba muerta"
-# El grep entregaba UNA línea de un JSON pretty-printed, que no es un
-# documento válido: jq fallaba y el 2>/dev/null lo silenciaba, así que la
-# señal producía cero líneas SIEMPRE.
-rm_src="$(cat "$ROOT/templates/cronjobs/jobs/rule-miner.sh")"
-assert_not_contains "$rm_src" "grep -h '\"blocking\"'" "ya no pasa una línea suelta a jq"
-mkdir -p "$WS/archive/T1"
-cat > "$WS/archive/T1/verdict-atlas.json" <<'JSON'
-{
-  "schema": 1,
-  "blocking": [
-    "falta manejo de nil en el handler",
-    "el test no cubre el caso vacío"
-  ]
-}
-JSON
-n="$(jq -r '.blocking[]? // empty' "$WS/archive"/*/verdict-*.json 2>/dev/null | wc -l | tr -d ' ')"
-assert_eq 2 "$n" "jq sobre los archivos SÍ extrae los blocking (el grep daba 0)"
-
-echo
-echo "── mutation-sentinel: 'existe npx' no es 'hay herramienta de mutación'"
-ms="$(cat "$ROOT/templates/cronjobs/jobs/mutation-sentinel.sh")"
-assert_contains "$ms" "mutated=0" "cuenta lo que realmente se mutó"
-assert_contains "$ms" "ningún repo se pudo mutar" "y si fue cero, lo dice"
-n="$(printf '%s' "$ms" | grep -c 'mutated=1')"
-assert_eq 3 "$n" "las tres ramas de mutación (go, python, ts) marcan que corrieron"
 
 echo
 echo "── doctor: la validación del token de Vault ya puede ejecutarse"

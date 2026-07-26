@@ -15,7 +15,7 @@ hay juicio. De ahí se derivan las reglas de este repo:
 1. **La regla anti-consejo-vacío.** Toda herramienta que un prompt cite debe
    tener su cadena completa: quién la instala (catálogo → bootstrap) → quién
    la alimenta (índices/configs con ciclo de vida) → quién la vigila (doctor,
-   con remediación) → quién la ejecuta (gate, cronjob o agente). Un PR que
+   con remediación) → quién la ejecuta (gate, cronjob de andresgarcia29/harness-cronjobs o agente). Un PR que
    añade una herramienta "recomendada" sin esa cadena no entra.
 2. **Todo archivo generado se registra** en la tabla de generación de
    `skills/harness-init/SKILL.md`. Un template sin fila ahí nunca se instala.

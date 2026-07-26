@@ -189,6 +189,15 @@ task: $TASK" "$sha" >/dev/null 2>&1 || return 0
 
 on_exit() {
   local rc=$?
+  # El marcador se escribe DESDE EL TRAP, no después de llamar a run_lang_gates.
+  # Es la unica forma de conservar `set -e` sobre los gates: cualquier
+  # construccion tipo `run_lang_gates || rc=$?` DESACTIVA set -e dentro de la
+  # funcion, y entonces un `pytest` que falla no aborta, los gates siguientes
+  # corren igual y la funcion devuelve 0. Reproducido: el precheck imprimia
+  # "verde" con la suite rota Y sellaba evidencia con exit_code 0.
+  if [ "${LANG_ONLY:-0}" -eq 1 ]; then
+    printf '%s' "${LANG_SEEN:-0}" > "$WS/tasks/$TASK/.langseen-$REPO" 2>/dev/null || true
+  fi
   [ -n "$LOCK_HELD" ] && rm -rf "$LOCKDIR"
   if [ "$rc" -eq 0 ]; then
     [ -n "${CURRENT_GATE:-}" ] && emit gate "$CURRENT_GATE" true
@@ -255,7 +264,15 @@ acquire_lock() {
     if [ -f "$LOCKDIR/pid" ]; then
       # lock huérfano: el proceso dueño ya no existe
       lpid="$(cat "$LOCKDIR/pid" 2>/dev/null)"
-      pid_alive "$lpid"; alive_rc=$?
+      # `pid_alive "$lpid"; alive_rc=$?` MATABA EL SCRIPT. pid_alive devuelve 1
+      # (muerto) o 2 (ilegible) como valores de DATO, no como error, pero es una
+      # sentencia suelta en el cuerpo del until y ahi `set -e` si aplica: con un
+      # lock huerfano el script salia con exit 1 sin imprimir una linea, el trap
+      # lo reportaba como "preflight", y como LOCK_HELD estaba vacio el lock
+      # SOBREVIVIA. O sea que todo el camino de reclamo era codigo muerto y el
+      # repo quedaba trabado para siempre hasta un rm -rf a mano. Reproducido.
+      # Con `if` el valor se lee sin que errexit lo confunda con un fallo.
+      if pid_alive "$lpid"; then alive_rc=0; else alive_rc=$?; fi
       if [ "$alive_rc" -eq 1 ]; then
         echo "⚠️  lock huérfano de pid $lpid (proceso inexistente); lo reclamo"
         rm -rf "$LOCKDIR"; nopid=0; continue
@@ -328,7 +345,15 @@ run_lang_gates() {
   # verificó NADA, y eso tiene que verse: era el silencio más caro del script.
   LANG_SEEN=0
   if [ -f go.mod ]; then
-    gate go; go vet ./... && go build ./... && go test ./...
+    # UN COMANDO POR LINEA, NUNCA `A && B`: bajo set -e una AND-list que falla
+    # NO aborta (set -e se ignora en todo comando de una lista AND-OR que no
+    # sea el ultimo), asi que la funcion seguia y devolvia 0. O sea que un
+    # `go test` en rojo salia VERDE del gate. Reproducido; era el silencio mas
+    # caro que quedaba, y afectaba a seis stacks.
+    gate go
+    go vet ./...
+    go build ./...
+    go test ./...
     LANG_SEEN=1
   fi
   # Repo TS cuyo package.json NO está en la raíz (monorepo, apps/, packages/):
@@ -449,7 +474,9 @@ run_lang_gates() {
     if command -v uv >/dev/null; then uv run pytest -q; else pytest -q; fi
   fi
   if [ -f pubspec.yaml ]; then
-    gate flutter; flutter analyze && flutter test
+    gate flutter
+    flutter analyze
+    flutter test
     LANG_SEEN=1
   fi
   # ── Stacks que faltaban ───────────────────────────────────────────────
@@ -469,7 +496,7 @@ run_lang_gates() {
   }
   if [ -f Cargo.toml ]; then
     LANG_SEEN=1
-    if need cargo Rust; then gate rust; cargo build --locked && cargo test; fi
+    if need cargo Rust; then gate rust; cargo build --locked; cargo test; fi
   fi
   if [ -f pom.xml ]; then
     LANG_SEEN=1
@@ -495,7 +522,8 @@ run_lang_gates() {
     if need composer PHP; then
       gate php
       if [ -f phpunit.xml ] || [ -f phpunit.xml.dist ]; then
-        composer install --no-interaction --quiet && vendor/bin/phpunit
+        composer install --no-interaction --quiet
+        vendor/bin/phpunit
       else
         echo "⚠️  $REPO es PHP sin phpunit.xml: no encontré qué correr"
         emit assumption "$REPO (PHP) sin config de phpunit: el gate no corrió tests"
@@ -504,11 +532,11 @@ run_lang_gates() {
   fi
   if ls ./*.sln ./*.csproj >/dev/null 2>&1; then
     LANG_SEEN=1
-    if need dotnet dotNET; then gate dotnet; dotnet build --nologo -v q && dotnet test --nologo -v q; fi
+    if need dotnet dotNET; then gate dotnet; dotnet build --nologo -v q; dotnet test --nologo -v q; fi
   fi
   if [ -f mix.exs ]; then
     LANG_SEEN=1
-    if need mix Elixir; then gate elixir; mix compile --warnings-as-errors && mix test; fi
+    if need mix Elixir; then gate elixir; mix compile --warnings-as-errors; mix test; fi
   fi
   # Gates de arquitectura y SQL: la CONFIG del repo es el opt-in (sin config,
   # silencio). Con config presente son gates duros — igual que go/ts. Config
@@ -620,6 +648,16 @@ run_lang_gates_sealed() {
       echo "→ árbol con cambios sin commitear: corro los gates SIN sellar evidencia"
       echo "  (commitea y re-corre el precheck para que el sello salga de acá y"
       echo "   no tengas que correr la suite otra vez con evidence.py)"
+    else
+      # En SHIP un arbol sucio no es "a mitad de trabajo": es un problema que va
+      # a explotar dos pasos mas adelante (sin evidencia fresca el gate de
+      # frescura falla, y el rebase del proximo intento se niega). Decirlo aca
+      # ahorra descubrirlo por un mensaje que habla de otra cosa.
+      echo "⚠️  el worktree tiene cambios SIN COMMITEAR sobre archivos versionados:"
+      printf '%s\n' "$dirty" | head -5 | sed 's/^/     /'
+      echo "   NO puedo sellar evidencia contra un commit con el árbol así, y el"
+      echo "   rebase del próximo intento se va a negar por lo mismo. Suele ser un"
+      echo "   artefacto que los tests reescriben y que el repo versiona por error."
     fi
     run_lang_gates
     return $?
@@ -696,13 +734,22 @@ run_security_gates() {
 gate_tests_untouched() {
   gate "tests no debilitados"
   local pat="${TEST_PATH_PATTERN:-(test|spec|Test|_test\.|\.test\.|\.spec\.|/tests?/|/spec/)}"
+  # ARTEFACTOS COMPILADOS NO SON TESTS. El patron de arriba matchea por RUTA, y
+  # `/tests?/` atrapa todo lo que cuelgue de tests/, incluidos los .pyc de
+  # __pycache__. Borrar esos archivos (por ejemplo al dejar de versionarlos, que
+  # es lo correcto) se leia como "test BORRADO sin declarar" y bloqueaba el ship.
+  # Un falso positivo aca cuesta una ronda y ensena a desconfiar del gate.
+  # Ninguno de estos puede contener una asercion, asi que se excluyen por nombre.
+  local artifacts="${TEST_ARTIFACT_PATTERN:-(__pycache__/|\.pyc$|\.pyo$|\.class$|\.pytest_cache/|/node_modules/)}"
   local touched
   touched="$(git diff -M origin/$BASE_REF..HEAD --name-status \
-    | awk -F'\t' '{ for (i = 2; i <= NF; i++) print $i }' | grep -E "$pat" | sort -u || true)"
+    | awk -F'\t' '{ for (i = 2; i <= NF; i++) print $i }' \
+    | grep -E "$pat" | grep -vE "$artifacts" | sort -u || true)"
   [ -n "$touched" ] || return 0
 
   local deleted
-  deleted="$(git diff -M origin/$BASE_REF..HEAD --diff-filter=D --name-only | grep -E "$pat" || true)"
+  deleted="$(git diff -M origin/$BASE_REF..HEAD --diff-filter=D --name-only \
+    | grep -E "$pat" | grep -vE "$artifacts" || true)"
 
   # UN pase del diff completo en awk (BSD-safe: sin \b ni \s; gsub cuenta
   # OCURRENCIAS, no líneas). Salida: "<aserciones_netas>\t<skips_netos>\t<archivo>".
@@ -861,6 +908,32 @@ check_verdict() {
            echo "     blocking y re-corre QA sobre el HEAD nuevo (ver tasks/$TASK/qa-$REPO.json)"
          fi
          exit 3; }
+  # ── UN `qa: "pass"` TIENE QUE TENER UN QA DETRAS ────────────────────
+  # Hasta acá esto leía SOLO el campo del veredicto, o sea que la afirmación
+  # más cara del pipeline ("alguien ejercitó el comportamiento") era palabra de
+  # agente sin ningún artefacto que la respalde. Demostrado en una corrida real:
+  # una tarea shippeó con qa:"pass", sin qa-<repo>.json y sin una sola evidencia
+  # de runner=qa. La ley de la casa es que los agentes proponen y los sistemas
+  # deterministas verifican; acá el verificador estaba proponiendo.
+  #
+  # Se acepta cualquiera de las dos formas que /review documenta: el artefacto
+  # de la fase QA, o evidencia sellada con --runner qa. Lo que no se acepta es
+  # ninguna de las dos.
+  local qa_file="$WS/tasks/$TASK/qa-$REPO.json" qa_ev=0
+  qa_ev="$(grep -l '"runner": *"qa"' "$WS/tasks/$TASK/evidence/"EV-*.json 2>/dev/null | wc -l | tr -d ' ')"
+  if [ ! -f "$qa_file" ] && [ "${qa_ev:-0}" -eq 0 ]; then
+    echo "❌ el veredicto dice qa=\"pass\" pero no hay NADA que lo respalde:"
+    echo "   ni tasks/$TASK/qa-$REPO.json ni evidencia con --runner qa."
+    echo "   ↳ remediación: corré la fase QA de verdad (ver /review paso 1 y 3):"
+    echo "     · backend / criterios ya cubiertos por tests → QA determinista:"
+    echo "       python3 scripts/evidence.py run --task-dir tasks/$TASK --repo $REPO \\"
+    echo "         --runner qa --kind test --cwd worktrees/$TASK/$REPO -- <comando>"
+    echo "     · frontend / cara al usuario → agente qa, y escribí qa-$REPO.json"
+    echo "   Un pass de QA sin artefacto es la afirmación más cara del pipeline"
+    echo "   sostenida por nada."
+    exit 3
+  fi
+
   # compliance: todo requirement del delta-spec cubierto por tests
   jq -e '(.requirements_uncovered // 0) == 0' "$v" >/dev/null \
     || { echo "❌ $(jq -r '.requirements_uncovered' "$v") requirements del delta-spec sin test que los proteja"
@@ -905,43 +978,59 @@ gate_policy_and_evidence() {
   # y `require_fresh_evidence` se declaraban en harness-policy.json y no los leía
   # nadie: editarlos no hacía nada, en silencio. Misma clase de perilla muerta
   # que `flow`, ya corregida arriba.
-  local kinds kind kind_flags="" fresh_flags=""
+  local kinds kind kind_flags=""
   kinds="$(python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" \
     evidence-policy --field required_evidence_kinds 2>/dev/null || echo test)"
-  local want_fresh
-  want_fresh="$(python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" \
-    evidence-policy --field require_fresh_evidence 2>/dev/null || echo true)"
   for kind in $kinds; do
     kind_flags="$kind_flags --require-kind $kind"
-    # La evidencia FRESCA solo se exige cuando el árbol que se pushea NO es el
-    # que se revisó: ahí la prueba vieja ya no habla de este árbol. Cuando
-    # coinciden, la evidencia citada YA es la fresca y pedirla dos veces sería
-    # ceremonia.
-    #
-    # Y solo para `test`, que es lo que ship PUEDE demostrar por sí mismo
-    # (sella su corrida de run_lang_gates: build + typecheck + suite). Exigir
-    # fresco un kind que ship no produce sería un gate imposible de satisfacer,
-    # o sea la parada de ceremonia que este repo ya persiguió en otros lados.
-    if [ "$reviewed" != "$head" ] && [ "$want_fresh" = "true" ] && [ "$kind" = "test" ]; then
-      # Un repo cuyo stack el gate no reconoce NO PUEDE producir esta prueba, y
-      # exigírsela lo volvería imposible de shippear en cuanto el trunk se
-      # mueva. Tampoco se finge que está verificado: se declara el hueco, que
-      # es lo que la casa ya hace con este mismo caso en run_lang_gates.
-      if [ "$(cat "$WS/tasks/$TASK/.langseen-$REPO" 2>/dev/null || echo 1)" = "0" ]; then
-        echo "⚠️  el árbol integrado de $REPO NO se pudo verificar: su stack no lo"
-        echo "   reconoce ningún gate de lenguaje, así que no hay suite que correr"
-        echo "   sobre el merge con los commits ajenos que aterrizaron."
-        emit assumption "$REPO: merge result NO verificado (sin stack reconocido) al reusar veredicto"
-      else
-        fresh_flags="$fresh_flags --require-fresh-kind $kind"
-      fi
-    fi
   done
 
+  # La evidencia REVISADA se verifica acá, en paralelo con el resto: ya existe.
   # shellcheck disable=SC2086
   python3 "$WS/scripts/evidence.py" verify \
     --task-dir "$WS/tasks/$TASK" --repo "$REPO" --commit "$head" \
-    --reviewed-commit "$reviewed" --verdict "$v" $kind_flags $fresh_flags
+    --reviewed-commit "$reviewed" --verdict "$v" $kind_flags
+
+  # La FRESCA no: la produce el slot `lang` de este mismo fan-out, y los slots
+  # corren sin orden entre si. Exigirla acá era una carrera contra su propio
+  # productor: verify (milisegundos) contra la suite (minutos), o sea un rojo
+  # espurio "falta evidencia FRESCA" en el primer intento y un verde en el
+  # segundo usando el sello del intento fallido. Se difiere al final, cuando el
+  # wait ya garantizo que lang termino.
+}
+
+# Verificacion diferida de la evidencia FRESCA. Corre en SERIE, despues del wait
+# de run_parallel_gates, que es la unica barrera que garantiza que el sello de
+# `lang` ya existe. Se recalcula todo desde el veredicto y el policy en vez de
+# heredarlo del slot: el subshell ya murio y su GDIR se borro.
+gate_fresh_evidence() {
+  local v="$WS/tasks/$TASK/verdict-$REPO.json" head reviewed want kinds kind flags=""
+  [ -f "$v" ] || return 0
+  head="$(git rev-parse HEAD)"
+  reviewed="$(jq -r '.commit // ""' "$v" 2>/dev/null || true)"
+  # Solo aplica cuando el arbol que se pushea NO es el que se reviso: si son el
+  # mismo, la evidencia citada YA es la fresca.
+  [ -n "$reviewed" ] && [ "$reviewed" != "$head" ] || return 0
+  want="$(python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" \
+    evidence-policy --field require_fresh_evidence 2>/dev/null || echo true)"
+  [ "$want" = "true" ] || return 0
+  [ "$(cat "$WS/tasks/$TASK/.langseen-$REPO" 2>/dev/null || echo 1)" != "0" ] || {
+    echo "⚠️  el árbol integrado de $REPO NO se pudo verificar: su stack no lo"
+    echo "   reconoce ningún gate de lenguaje, así que no hay suite que correr"
+    echo "   sobre el merge con los commits ajenos que aterrizaron."
+    emit assumption "$REPO: merge result NO verificado (sin stack reconocido) al reusar veredicto"
+    return 0; }
+  kinds="$(python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" \
+    evidence-policy --field required_evidence_kinds 2>/dev/null || echo test)"
+  for kind in $kinds; do
+    [ "$kind" = "test" ] && flags="$flags --require-fresh-kind $kind"
+  done
+  [ -n "$flags" ] || return 0
+  gate "evidencia fresca del árbol integrado"
+  # shellcheck disable=SC2086
+  python3 "$WS/scripts/evidence.py" verify \
+    --task-dir "$WS/tasks/$TASK" --repo "$REPO" --commit "$head" \
+    --reviewed-commit "$reviewed" --verdict "$v" $flags
 }
 
 # ── Gates en paralelo ─────────────────────────────────────────────────
@@ -1018,13 +1107,13 @@ run_parallel_gates() {
 # solo la corrida que evidence.py va a sellar.
 if [ "$LANG_ONLY" -eq 1 ]; then
   cd "$WT"
-  lrc=0
-  run_lang_gates || lrc=$?
-  # El padre necesita saber si esto VERIFICÓ algo para decidir si el sello de
-  # evidencia es honesto. Corre en otro proceso, así que el dato viaja por
-  # disco. Sin esto, un repo sin stack reconocido acuñaba un EV-TEST vacío.
-  printf '%s' "${LANG_SEEN:-0}" > "$WS/tasks/$TASK/.langseen-$REPO" 2>/dev/null || true
-  exit "$lrc"
+  # SIN `|| rc=$?` NI NADA QUE LO ENVUELVA: eso desactivaria `set -e` dentro de
+  # run_lang_gates y un gate rojo dejaria de abortar. El exit de esta invocacion
+  # ES el veredicto que evidence.py sella, asi que tiene que ser el de verdad.
+  # El marcador de "verifique algo" lo escribe el trap on_exit, que corre pase
+  # lo que pase.
+  run_lang_gates
+  exit 0
 fi
 
 # ── Precheck: los gates mecánicos ANTES de gastar una ronda de review ─
@@ -1070,10 +1159,36 @@ while [ "$attempt" -lt "$PUSH_RETRY_BUDGET" ]; do
   attempt=$((attempt+1))
   echo "══ ship $REPO (task $TASK) intento $attempt/$PUSH_RETRY_BUDGET ══"
   git fetch origin
-  git rebase origin/$BASE_REF || { git rebase --abort; echo "❌ conflicto de rebase — resuélvelo en el worktree $WT"; exit 4; }
+  # EL CAMINO DE ERROR TAMBIEN TIENE QUE FUNCIONAR. Antes esto era
+  # `git rebase ... || { git rebase --abort; echo ...; exit 4; }`, y cuando el
+  # rebase fallaba SIN dejar un rebase en curso (arbol sucio, que es el caso
+  # comun), el `--abort` salia 128, `set -e` mataba el script ahi mismo, y el
+  # humano recibia "exit 128" sin una sola linea de diagnostico. Reproducido
+  # pasando una feature de verdad por el harness.
+  #
+  # Y el mensaje unico tampoco servia: "conflicto de rebase" es falso cuando la
+  # causa fue un archivo versionado que los tests reescribieron (.pyc, un
+  # snapshot, un reporte de coverage). Son dos causas con remediaciones
+  # distintas, asi que se diagnostican por separado.
+  if ! rebase_out="$(git rebase origin/$BASE_REF 2>&1)"; then
+    git rebase --abort >/dev/null 2>&1 || true
+    echo "❌ no pude rebasear sobre origin/$BASE_REF:"
+    printf '%s\n' "$rebase_out" | sed 's/^/   /'
+    case "$rebase_out" in
+      *"unstaged changes"*|*"local changes"*|*"cambios sin"*|*"would be overwritten"*)
+        echo "   ↳ el worktree tiene cambios SIN COMMITEAR sobre archivos versionados."
+        echo "     Suele ser un artefacto que los propios tests reescriben (.pyc,"
+        echo "     snapshots, coverage) y que el repo versiona por accidente."
+        echo "     Commiteálo, o agregalo al .gitignore de $REPO y re-corré." ;;
+      *)
+        echo "   ↳ conflicto real: resolvélo en el worktree $WT y re-corré ship.sh." ;;
+    esac
+    exit 4
+  fi
   gate_trailer
   gate_lane
   run_parallel_gates
+  gate_fresh_evidence
   if git push origin HEAD:$BASE_REF; then
     sha="$(git rev-parse HEAD)"          # COMPLETO: deploy-watch lo compara
     short="$(git rev-parse --short HEAD)" # contra el headSha de la API del forge,

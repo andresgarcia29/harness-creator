@@ -418,9 +418,13 @@ echo "── check_verdict: cada rechazo nombra su causa y su remediación"
 extract check_verdict > "$WS/check_verdict.sh"
 grep -q 'qa_state' "$WS/check_verdict.sh" || { echo "no pude extraer check_verdict"; exit 1; }
 
-run_check_verdict() {  # run_check_verdict <verdict-json> — imprime salida, retorna su exit
+run_check_verdict() {  # run_check_verdict <verdict-json> [sin-qa] — salida + exit
   mkdir -p "$WS/tasks/T9"
   printf '%s' "$1" > "$WS/tasks/T9/verdict-svc.json"
+  # Un qa:"pass" ahora exige artefacto (qa-<repo>.json o evidencia runner=qa).
+  # El fixture lo provee salvo que el caso pruebe justamente su ausencia.
+  if [ "${2:-}" = "sin-qa" ]; then rm -f "$WS/tasks/T9/qa-svc.json"
+  else printf '{"schema":1,"qa":"pass"}' > "$WS/tasks/T9/qa-svc.json"; fi
   ( set -u; WS="$WS"; TASK=T9; REPO=svc; BASE_REF=main
     gate() { :; }
     . "$WS/check_verdict.sh"; check_verdict ) 2>&1
@@ -454,5 +458,45 @@ assert_not_contains "$out" "evidence.py run" "qa fail: NO repite la receta de 'n
 out="$(run_check_verdict '{"verdict":"pass","qa":"pass","blocking":[],"requirements_uncovered":2}')"
 assert_eq 3 $? "requirements sin cubrir: rechaza con exit 3"
 assert_contains "$out" "2 requirements del delta-spec" "compliance: cuenta los uncovered"
+
+echo
+echo "── artefactos compilados NO son tests (falso positivo que costaba una ronda)"
+# El patron matchea por RUTA, y `/tests?/` atrapa todo lo que cuelgue de tests/,
+# incluidos los .pyc de __pycache__. Dejar de versionarlos (que es lo correcto)
+# se leia como "test BORRADO sin declarar" y bloqueaba el ship.
+mk_test_repo "$WS/g9"
+mkdir -p tests/__pycache__ && printf 'binario\n' > tests/__pycache__/test_health.cpython-310.pyc
+git add -A && git commit -qm "versiona el pyc por accidente"
+git update-ref refs/remotes/origin/main HEAD
+git rm -r -q --cached tests/__pycache__ && git commit -qm "deja de versionar artefactos"
+rm -f "$WS/tasks/T1/delta-spec.md"
+run_tests_gate >/dev/null 2>&1 \
+  && pass "borrar un .pyc de tests/: NO bloquea" \
+  || fail "un .pyc borrado se leyo como test eliminado (falso positivo)"
+
+# Y el gate real sigue vivo: borrar un test DE VERDAD sigue bloqueando
+mk_test_repo "$WS/g10"
+git rm -q tests/auth.test.js && git commit -qm "borra un test de verdad"
+run_tests_gate >/dev/null 2>&1 \
+  && fail "borrar un test real dejo de bloquear" \
+  || pass "borrar un test real sigue bloqueando (no se aflojo el gate)"
+
+echo
+echo "── un qa:\"pass\" sin artefacto detras NO pasa"
+# Demostrado en una corrida real: una tarea shippeo con qa:"pass", sin
+# qa-<repo>.json y sin una sola evidencia de runner=qa. check_verdict leia SOLO
+# el campo del veredicto, o sea que la afirmacion mas cara del pipeline
+# ("alguien ejercito el comportamiento") era palabra de agente sin respaldo.
+out="$(run_check_verdict '{"verdict":"pass","qa":"pass","blocking":[],"requirements_uncovered":0}' sin-qa)"
+assert_eq 3 $? "qa pass sin qa-<repo>.json ni evidencia de qa: rechaza"
+assert_contains "$out" "no hay NADA que lo respalde" "nombra la causa"
+assert_contains "$out" "runner qa" "y dice como producir el respaldo"
+
+# Con evidencia de runner=qa (la via determinista) alcanza, sin el json
+mkdir -p "$WS/tasks/T9/evidence"
+printf '{"schema":1,"runner": "qa","kind":"test"}' > "$WS/tasks/T9/evidence/EV-TEST-qa1.json"
+out="$(run_check_verdict '{"verdict":"pass","qa":"pass","blocking":[],"requirements_uncovered":0}' sin-qa)"
+assert_eq 0 $? "evidencia con runner=qa: alcanza como respaldo"
+rm -f "$WS/tasks/T9/evidence/EV-TEST-qa1.json"
 
 t_done

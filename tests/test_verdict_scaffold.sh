@@ -177,4 +177,31 @@ rm -f "$V"
 bash "$WS/scripts/verdict-scaffold.sh" "../evil" atlas >/dev/null 2>&1 && fail "task traversal pasó" || pass "task-id inválido: exit 1"
 bash "$WS/scripts/verdict-scaffold.sh" T1 "re/po" >/dev/null 2>&1 && fail "repo traversal pasó" || pass "repo inválido: exit 1"
 
+echo
+echo "── --rebase conserva implementation_agents (el callejon sin salida del ship)"
+# Encontrado pasando una feature real: tras un intento de ship, la unica
+# evidencia en el HEAD nuevo es la de `ship`, que esta excluida a proposito de
+# implementation_agents (un verificador no puede figurar como implementador).
+# Sin arrastrar el campo quedaba VACIO y el scaffold se negaba por politica de
+# roles, o sea que toda ronda de rework posterior a un ship moria ahi.
+# Los fail-closed de arriba dejaron el veredicto borrado: se reconstruye la
+# base (evidencia del implementer + scaffold) antes de probar el arrastre.
+rm -f "$WS/tasks/T1/evidence/"EV-*.json
+BASE2="$(cd "$WT1" && git rev-parse HEAD)"
+mk_ev EV-TEST-dddddddddddd impl-atlas test "$BASE2"
+rm -f "$V"
+bash "$WS/scripts/verdict-scaffold.sh" T1 atlas revisor-1 >/dev/null 2>&1
+assert_contains "$(jq -r '.implementation_agents|join(",")' "$V")" "impl-atlas" \
+  "base: el scaffold registra al implementer"
+
+# Ahora el caso: nuevo commit y SOLO evidencia de ship en el HEAD nuevo
+NEW2="$(cd "$WT1" && git commit -q --allow-empty -m fix2 && git rev-parse HEAD)"
+rm -f "$WS/tasks/T1/evidence/"EV-*.json
+mk_ev EV-TEST-eeeeeeeeeeee ship test "$NEW2"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --rebase T1 atlas revisor-1 2>&1)"; rc=$?
+assert_eq 0 "$rc" "rebase con solo evidencia de ship: no se traba"
+agents="$(jq -r '.implementation_agents | join(",")' "$V")"
+assert_contains "$agents" "impl-atlas" "arrastra al implementer del veredicto previo"
+assert_not_contains "$agents" "ship" "y NO deja que ship figure como implementador"
+
 t_done

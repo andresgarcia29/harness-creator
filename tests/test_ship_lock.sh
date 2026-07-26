@@ -20,8 +20,14 @@ grep -q 'pid_alive' "$WS/lock.sh" || { echo "no pude extraer pid_alive del templ
 
 run_acquire() {  # run_acquire <lockdir> [timeout]  (timeout portable: macOS no trae coreutils)
   bash -c "
-    set -u; LOCKDIR='$1'; REPO=test; LOCK_HELD=''
-    . '$WS/lock.sh'; acquire_lock && [ -n \"\$LOCK_HELD\" ] && [ -f '$1/pid' ]
+    set -euo pipefail; LOCKDIR='$1'; REPO=test; LOCK_HELD=''
+    # acquire_lock SUELTO, no dentro de un && : llamar una funcion como parte
+    # de una AND-list SUPRIME set -e en todo su cuerpo, y entonces el test mide
+    # el harness en vez del codigo. Asi sobrevivia el deadlock del lock huerfano.
+    . '$WS/lock.sh'
+    acquire_lock
+    [ -n \"\$LOCK_HELD\" ]
+    [ -f '$1/pid' ]
   " &
   local pid=$! rc
   ( sleep "${2:-30}"; kill -9 "$pid" 2>/dev/null ) & local watcher=$!
@@ -62,17 +68,17 @@ echo "── 'no pude mirar' no libera un lock"
 # otro usuario, o sea VIVO). Robarle el lock a un vivo mete dos ships
 # concurrentes en el mismo repo.
 LOCKDIR="$WS/ilegible.lock.d"; mkdir -p "$LOCKDIR"; printf 'no-soy-un-pid' > "$LOCKDIR/pid"
-out="$( ( set -u; LOCKDIR="$LOCKDIR"; . "$WS/lock.sh"
-          pid_alive "$(cat "$LOCKDIR/pid")"; echo "rc=$?" ) 2>&1 )"
+out="$( ( set -euo pipefail; LOCKDIR="$LOCKDIR"; . "$WS/lock.sh"
+          if pid_alive "$(cat "$LOCKDIR/pid")"; then rc=0; else rc=$?; fi; echo "rc=$rc" ) 2>&1 )"
 assert_contains "$out" "rc=2" "pid ilegible: 'no se pudo saber', no 'muerto'"
 
-out="$( ( set -u; . "$WS/lock.sh"; pid_alive ""; echo "rc=$?" ) 2>&1 )"
+out="$( ( set -euo pipefail; . "$WS/lock.sh"; if pid_alive ""; then rc=0; else rc=$?; fi; echo "rc=$rc" ) 2>&1 )"
 assert_contains "$out" "rc=2" "pid vacío: tampoco se lee como muerto"
 
-out="$( ( set -u; . "$WS/lock.sh"; pid_alive 1; echo "rc=$?" ) 2>&1 )"
+out="$( ( set -euo pipefail; . "$WS/lock.sh"; if pid_alive 1; then rc=0; else rc=$?; fi; echo "rc=$rc" ) 2>&1 )"
 assert_contains "$out" "rc=0" "pid 1 (init, de root): VIVO aunque kill -0 dé EPERM"
 
-out="$( ( set -u; . "$WS/lock.sh"; pid_alive 99999999; echo "rc=$?" ) 2>&1 )"
+out="$( ( set -euo pipefail; . "$WS/lock.sh"; if pid_alive 99999999; then rc=0; else rc=$?; fi; echo "rc=$rc" ) 2>&1 )"
 assert_contains "$out" "rc=1" "pid inexistente: muerto de verdad, ese sí se reclama"
 
 t_done

@@ -140,4 +140,28 @@ out="$(run)"
 assert_contains "$out" "no declara versión" "y dice qué le falta"
 assert_contains "$out" "(ninguna)" "sin tareas, lo dice en vez de romperse"
 
+echo
+echo "── el marcador de templates vale con o sin el prefijo 'digest: '"
+# templates/MANIFEST.sha256 termina con la linea `digest: <hash>` y la tabla de
+# generacion pedia "el digest: de MANIFEST.sha256": se lee como el VALOR o como
+# la LINEA. Solo se aceptaba una, asi que una instancia cuyo generador escribio
+# la linea reportaba drift PARA SIEMPRE estando al dia. Es el peor sitio para un
+# falso rojo: esta comprobacion existe para que un update no pueda mentir.
+stub_gh "0.47.0" "$SET_A"
+for form in "$SET_A" "digest: $SET_A" "  digest:   $SET_A  "; do
+  printf '%s' "$form" > "$WS/.harness-templates"
+  out="$(run)"
+  assert_contains "$out" "idénticos a upstream" "forma aceptada: '$(printf '%.24s' "$form")'"
+done
+# mayusculas: mismo digest, otra grafia
+printf '%s' "$(printf '%s' "$SET_A" | tr 'a-f' 'A-F')" > "$WS/.harness-templates"
+assert_contains "$(run)" "idénticos a upstream" "hex en mayusculas: mismo set"
+
+# Un marcador ROTO no es drift, y decirlo asi mandaria a regenerar por la razon
+# equivocada.
+printf 'no-soy-un-digest' > "$WS/.harness-templates"
+out="$(run)"
+assert_contains "$out" "no contiene un digest legible" "marcador ilegible: se nombra como tal"
+assert_not_contains "$out" "DISTINTOS" "y NO se reporta como drift de contenido"
+
 t_done

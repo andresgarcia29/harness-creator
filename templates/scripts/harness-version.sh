@@ -82,7 +82,25 @@ echo "$line"
 # escribe el suyo en `.harness-templates` al generar. Si no está, no es un
 # detalle cosmético: significa que el generador no puede decir con qué set
 # trabajó, y entonces nadie puede saber qué tiene esta instancia.
-local_tpl="$(tr -d ' \n' < "$WS/.harness-templates" 2>/dev/null || true)"
+# ── EL MARCADOR SE NORMALIZA, NO SE SUPONE ────────────────────────────
+# `templates/MANIFEST.sha256` termina con la linea `digest: <hash>`, y la tabla
+# de generacion pide escribir "el digest: de MANIFEST.sha256". Eso se lee de dos
+# formas: el VALOR, o la LINEA entera. Antes solo se aceptaba una (`tr -d ' \n'`
+# y comparar contra el hash pelado), asi que una instancia cuyo generador
+# escribio `digest: abc...` quedaba en `digest:abc...` y NUNCA igualaba: `make
+# version` reportaba drift para siempre sobre una instancia perfectamente al
+# dia. Reproducido con dos instancias identicas.
+#
+# Es el peor sitio posible para un falso rojo: esta comprobacion existe para que
+# un update no pueda mentir, y mintiendo ella enseña a ignorar el aviso.
+# Se aceptan las dos formas y se exige que lo que quede sea un sha256 de verdad;
+# cualquier otra cosa es un marcador ILEGIBLE, que no es lo mismo que drift.
+read_digest() {  # read_digest <archivo> → sha256 en minusculas, o vacio
+  sed -n 's/^[[:space:]]*\(digest:[[:space:]]*\)\{0,1\}\([0-9a-fA-F]\{64\}\).*$/\2/p' \
+    "$1" 2>/dev/null | head -1 | tr 'A-Z' 'a-z'
+}
+local_tpl="$(read_digest "$WS/.harness-templates")"
+tpl_raw="$(tr -d ' \n' < "$WS/.harness-templates" 2>/dev/null || true)"
 up_tpl=""
 if command -v gh >/dev/null 2>&1; then
   up_tpl="$(gh api "repos/$UPSTREAM_REPO/contents/templates/MANIFEST.sha256" \
@@ -90,7 +108,16 @@ if command -v gh >/dev/null 2>&1; then
     | sed -n 's/^digest: *//p' | head -1 || true)"
 fi
 
-if [ -z "$local_tpl" ]; then
+if [ -z "$local_tpl" ] && [ -n "$tpl_raw" ]; then
+  # El archivo existe pero no trae un sha256. NO es drift: es un marcador roto,
+  # y decir "distintos" mandaria a regenerar por la razon equivocada.
+  echo "⚠️  .harness-templates existe pero no contiene un digest legible"
+  echo "   (leído: '$(printf '%.40s' "$tpl_raw")')."
+  echo "   Se esperan 64 caracteres hex, con o sin el prefijo 'digest: '."
+  echo "   ↳ se arregla regenerando con /harness-init . , o escribiendo a mano"
+  echo "     el digest que publica templates/MANIFEST.sha256 de upstream."
+  [ "$verdict" -eq 0 ] && verdict=1
+elif [ -z "$local_tpl" ]; then
   echo "⚠️  esta instancia NO declara con qué set de templates se generó"
   echo "   (falta .harness-templates). Quien la generó no dejó rastro de su"
   echo "   fuente, así que el número de versión de arriba no se puede creer:"

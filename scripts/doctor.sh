@@ -67,6 +67,25 @@ if [ -f "$WS/.gitignore" ]; then
   done
 fi
 
+# 1d · Repos ARCHIVADOS: la ley es ignorarlos siempre. El doctor no los
+# descubre (eso cuesta red), pero sí vigila que la lista exista y esté fresca:
+# un cache viejo hace que un repo archivado ayer siga entrando al grafo hoy.
+if [ -d "$WS/repos" ]; then
+  _arch="$WS/.cache/archived-repos.txt"
+  if [ -f "$_arch" ]; then
+    _n="$(grep -c . "$_arch" 2>/dev/null || echo 0)"
+    if [ -f "$WS/.cache/archived-repos.stamp" ] && [ -n "$(find "$WS/.cache/archived-repos.stamp" -mtime +7 2>/dev/null)" ]; then
+      warn "la lista de repos archivados tiene más de 7 días ($_n archivados conocidos)"
+      echo "   ↳ scripts/archived-repos.sh refresh — si un repo se archivó después, sigue entrando al grafo"
+    else
+      ok "repos archivados: $_n conocidos y la lista está fresca"
+    fi
+  else
+    warn "sin lista de repos archivados: los archivados están entrando al grafo, a los briefs y a los pulls"
+    echo "   ↳ scripts/archived-repos.sh refresh (la consulta al forge se cachea; no corre en caliente)"
+  fi
+fi
+
 # 2 · Scripts de instancia ejecutables
 for s in ship.sh worktree-task.sh quiet.sh with-secrets.sh emit.sh          build-slot.sh gowork.sh py.sh fe.sh repo-brief.sh          stamp-models.sh graph-refresh.sh pull-all.sh skills-sync.sh          verdict-scaffold.sh minion-probe.sh pipeline-steps.sh plan-lint.sh          harness-bug.sh; do
   if [ -f "$WS/scripts/$s" ]; then

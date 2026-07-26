@@ -45,7 +45,20 @@ pull_one() {  # pull_one <dir> <slot>
 
 slot=0
 PIDS=""
+
+# ── LEY: UN REPO ARCHIVADO SE IGNORA SIEMPRE ──────────────────────────
+# Esta muerto por decision explicita de alguien y es de solo lectura. Meterlo
+# aca contamina el resultado con codigo que nadie mantiene y que ningun agente
+# puede tocar. La lista la mantiene scripts/archived-repos.sh (cacheada); si no
+# existe, no se filtra nada: ausencia de cache no es ausencia de archivados,
+# pero tampoco se inventa una lista.
+_is_archived() {  # _is_archived <repo>
+  [ -f "$WS/.cache/archived-repos.txt" ] || return 1
+  grep -qxF "$1" "$WS/.cache/archived-repos.txt"
+}
+
 for d in "$WS"/repos/*/; do
+  if _is_archived "$(basename "$d")"; then continue; fi
   [ -d "$d/.git" ] || continue
   slot=$((slot+1))
   pull_one "${d%/}" "$slot" &

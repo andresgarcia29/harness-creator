@@ -95,6 +95,34 @@ forge_issue_create() {  # forge_issue_create <dir> <título> <cuerpo>
   esac
 }
 
+# ── ¿este repo esta ARCHIVADO en el forge? ────────────────────────────
+# Un repo archivado es de solo lectura y esta muerto por decision explicita de
+# alguien. Tomarlo en cuenta cuesta de tres formas: contamina el grafo y el
+# inventario con simbolos que ya nadie mantiene, hace que un explorador cite
+# codigo que no se puede tocar, y gasta reloj clonando y refrescando lo que no
+# se va a modificar nunca.
+#
+#   exit 0 = archivado · 1 = vivo · 3 = NO pude averiguarlo
+# La tercera no se colapsa con las otras dos a proposito: ante duda el repo se
+# trata como VIVO (no se esconde nada por no haber podido mirar), pero quien
+# llama puede decir que no verifico.
+forge_is_archived() {  # forge_is_archived <dir>
+  local d="$1" k slug out
+  k="$(forge_kind "$d")"; slug="$(forge_slug "$d")"
+  [ -n "$slug" ] || return 3
+  case "$k" in
+    github)
+      command -v gh >/dev/null || return 3
+      out="$(gh repo view "$slug" --json isArchived --jq '.isArchived' 2>/dev/null)" || return 3
+      [ "$out" = "true" ] && return 0 || return 1 ;;
+    gitlab)
+      command -v glab >/dev/null || return 3
+      out="$(glab api "projects/${slug//\//%2F}" 2>/dev/null | jq -r '.archived // empty' 2>/dev/null)" || return 3
+      [ "$out" = "true" ] && return 0 || return 1 ;;
+    *) return 3 ;;
+  esac
+}
+
 # ── ¿ya hay un PR abierto para esta rama? ─────────────────────────────
 # Lo necesita `flow: prs`: una ronda de rework re-corre ship.sh sobre la MISMA
 # rama, y crear el PR otra vez falla. Preguntar primero convierte ese fallo en

@@ -61,6 +61,13 @@ redact() {
 
 emit() { printf '%s\n' "$1" >> "$BUS" 2>/dev/null; }
 
+# En QUÉ máquina pasó. Este hook produce la mayoría de los eventos del bus, y
+# mientras el panel era uno solo en 127.0.0.1 la respuesta era obvia: en esta.
+# Al juntar los ledgers de varios VPS en una vista de flota deja de serlo, y un
+# evento que no dice de dónde sale no se puede ni ordenar ni depurar. Se fija a
+# mano con HARNESS_HOST_ID cuando el hostname no dice nada útil.
+HOST_ID="${HARNESS_HOST_ID:-$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo sin-nombre)}"
+
 ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # La tarea se DERIVA del cwd (worktrees/<task>/<repo>), nunca de un archivo
 # compartido: con diez sesiones abiertas, un .harness/current-task global se
@@ -74,8 +81,8 @@ esac
 
 case "$KIND" in
   tool)
-    line="$(printf '%s' "$payload" | jq -c --arg ts "$ts" --arg task "${task:-}" '
-      {ts: $ts, kind: "tool", task: $task,
+    line="$(printf '%s' "$payload" | jq -c --arg ts "$ts" --arg task "${task:-}" --arg host "$HOST_ID" '
+      {ts: $ts, kind: "tool", task: $task, host: $host,
        session: (.session_id // ""),
        agent: (.agent_id // "main"),
        tool: (.tool_name // "?"),
@@ -97,8 +104,8 @@ case "$KIND" in
     # archivo dice que se evitó PreToolUse por latencia, y esa preocupación
     # sigue siendo válida para Read/Grep, que son las llamadas frecuentes.
     # Bash es donde viven las llamadas largas y es una fracción del total.
-    line="$(printf '%s' "$payload" | jq -c --arg ts "$ts" --arg task "${task:-}" '
-      {ts: $ts, kind: "tool-start", task: $task,
+    line="$(printf '%s' "$payload" | jq -c --arg ts "$ts" --arg task "${task:-}" --arg host "$HOST_ID" '
+      {ts: $ts, kind: "tool-start", task: $task, host: $host,
        session: (.session_id // ""),
        agent: (.agent_id // "main"),
        tool: (.tool_name // "?"),
@@ -106,8 +113,8 @@ case "$KIND" in
                  | tostring | .[0:200])}' 2>/dev/null | redact)"
     ;;
   subagent-start|subagent-stop|stop|session-start|prompt)
-    line="$(printf '%s' "$payload" | jq -c --arg ts "$ts" --arg k "$KIND" --arg task "${task:-}" '
-      {ts: $ts, kind: $k, task: $task,
+    line="$(printf '%s' "$payload" | jq -c --arg ts "$ts" --arg k "$KIND" --arg task "${task:-}" --arg host "$HOST_ID" '
+      {ts: $ts, kind: $k, task: $task, host: $host,
        session: (.session_id // ""),
        agent: (.agent_id // "main"),
        summary: ((.prompt // .reason // "") | tostring | .[0:200])}' 2>/dev/null | redact)"

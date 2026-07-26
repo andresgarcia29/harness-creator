@@ -166,5 +166,79 @@ class TestOpHTTP(unittest.TestCase):
         self.assertTrue(any(x.get('session') == self._sess for x in s['runs']))
 
 
+    # ── Lo que se rompía al dejar de ser 127.0.0.1-only ────────────────
+
+    def get(self, path, host=None):
+        req = urllib.request.Request('http://127.0.0.1:%d%s' % (self.port, path))
+        if host:
+            req.add_header('Host', host)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read() or b''
+
+    def test_09_ticket_con_traversal_no_escapa_ni_lanza_agente(self):
+        """El id del ticket se usaba crudo en makedirs Y en el prompt.
+
+        Son dos fallas en una: escribir fuera del workspace, y meter texto de
+        afuera en las instrucciones de un agente con git y push. Por eso el
+        test comprueba las dos, no solo la del directorio.
+        """
+        evil = '../../harness-pwned-%d' % os.getpid()
+        escaped = os.path.abspath(os.path.join(self.ws, 'tasks', evil))
+        with open(self.stub_log) as fh:
+            antes = len(fh.read().splitlines())
+
+        code, body = self.post('/api/op/task',
+                               {'origin': 'ticket', 'ticket': evil},
+                               token=self.token)
+
+        self.assertEqual(code, 400)
+        self.assertIn('inválido', body.get('error', ''))
+        self.assertFalse(os.path.exists(escaped),
+                         'el id del ticket escapó del workspace: %s' % escaped)
+        time.sleep(0.5)
+        with open(self.stub_log) as fh:
+            despues = len(fh.read().splitlines())
+        self.assertEqual(antes, despues,
+                         'se lanzó un agente con un id que no pasó validación')
+
+    def test_10_ticket_legitimo_sigue_funcionando(self):
+        """La guarda es una lista blanca: tiene que dejar pasar lo normal."""
+        code, r = self.post('/api/op/task',
+                            {'origin': 'ticket', 'ticket': 'ENG-1234'},
+                            token=self.token)
+        self.assertEqual(code, 200)
+        self.assertEqual(r['id'], 'ENG-1234')
+        self.assertTrue(os.path.isdir(os.path.join(self.ws, 'tasks', 'ENG-1234')))
+
+    def test_11_los_GET_tambien_exigen_host_local(self):
+        """La guarda vivía solo en do_POST. Mientras tanto los GET servían el
+        estado, el texto de las sesiones y el HTML que LLEVA EL TOKEN, sin una
+        sola comprobación."""
+        for path in ('/api/state', '/api/session?id=x',
+                     '/api/task-git?task=x', '/api/task-events?task=x', '/'):
+            code, _ = self.get(path, host='evil.example.com')
+            self.assertEqual(code, 403, 'GET %s le respondió a un Host ajeno' % path)
+
+    def test_12_los_GET_locales_siguen_sirviendo(self):
+        for path in ('/api/state', '/'):
+            code, _ = self.get(path)
+            self.assertEqual(code, 200, 'GET %s dejó de servir en local' % path)
+
+    def test_13_el_ledger_dice_en_que_maquina_paso(self):
+        """`actor: 'panel'` alcanzaba con un panel. Al juntar los ledgers de
+        varios VPS, no responde cuál, y un pid sin máquina no se puede buscar."""
+        with open(os.path.join(self.ws, '.harness', 'events.jsonl')) as fh:
+            bus = [json.loads(l) for l in fh]
+        self.assertTrue(bus[-1]['actor'].startswith('panel@'),
+                        'el actor no identifica la máquina: %r' % bus[-1]['actor'])
+        self.assertTrue(bus[-1]['host'], 'el evento no dice en qué host pasó')
+        with open(os.path.join(self.ws, '.harness', 'runs.jsonl')) as fh:
+            runs = [json.loads(l) for l in fh]
+        self.assertTrue(runs[-1]['host'], 'el run no dice dónde vive ese pid')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=0)

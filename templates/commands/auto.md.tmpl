@@ -301,7 +301,11 @@ Reglas del ledger, en orden de precedencia:
 6. **Ship**. Por orden del DAG, repo por repo, vía `ship.sh`. Entre
    repos NO pausas: expand/contract hace seguro el orden. Gate rojo →
    máx 2 rondas de autofix (el error del gate ES el prompt del fix).
-   Tras todos los repos verdes solicita `review → ship`.
+   La transición `review → ship` **ya no la pides vos**: la registra `ship.sh`
+   tras cada push, y solo prospera cuando todos los repos shippearon. Con
+   `flow: prs` el ship termina con el PR abierto y `landed: false`: ahí el
+   cambio todavía NO está en la trunk, así que no sigas a deploy ni a archive
+   hasta que mergee.
    **Perder la carrera de push contra otro workspace NO es un gate rojo.**
    `ship.sh` reintenta solo, con backoff y jitter, hasta 20 veces: no lo
    interrumpas ni cuentes eso como ronda de autofix. Y si el trunk se movió

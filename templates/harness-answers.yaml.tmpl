@@ -20,7 +20,11 @@ project:
 instance:
   repo: {{INSTANCE_REPO}}
 
-# trunk-direct-to-prod | trunk-staging | prs
+# trunk | prs  (trunk-staging NO está implementado y ship.sh falla cerrado)
+#   trunk → push directo a la trunk tras los gates
+#   prs   → misma verificación, pero publica la rama y abre el PR: el cambio NO
+#           está en la trunk cuando ship.sh termina, y deploy-watch espera al
+#           merge para resolver el commit que de verdad aterrizó
 flow: {{FLOW}}
 
 # Sandwich de razonamiento: juicio caro solo donde hay juicio.

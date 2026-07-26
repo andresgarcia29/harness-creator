@@ -53,6 +53,30 @@ def state_path(task_dir: Path) -> Path:
     return task_dir / "state.json"
 
 
+def emit_bus(task_dir: Path, kind: str, summary: str) -> None:
+    """Cuenta el movimiento de fase en el bus, que es lo que el humano mira.
+
+    Las transiciones se imprimian por stdout y nada mas, asi que el panel (la
+    vista real: `make ui`) no tenia ni un evento de fase. Lo que no se emite,
+    para quien mira el tablero NO PASO, y el estado de una tarea se volvia algo
+    que solo se puede reconstruir leyendo archivos a mano.
+
+    Fail-open y con timeout, igual que emit.sh: un bus caido no puede impedir
+    que una tarea avance."""
+    try:
+        ws = task_dir.parent.parent
+        script = ws / "scripts" / "emit.sh"
+        if not script.is_file():
+            return
+        subprocess.run(
+            ["bash", str(script), kind, summary, "", task_dir.name],
+            cwd=str(ws), timeout=5, check=False,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
 _LOCKS_HELD = []   # mantiene vivos los fd: si el GC los cierra, se suelta el lock
 
 
@@ -220,6 +244,7 @@ def cmd_escalate(args: argparse.Namespace) -> int:
         "lane": f"{current_lane}→{args.to}", "reason": args.reason,
     })
     atomic(path, state)
+    emit_bus(task_dir, "decision", f"carril {current_lane} → {args.to}: vuelve a {destination}")
     print(f"⤴️  {task_dir.name}: carril {current_lane} → {args.to}, fase {destination}")
     return 0
 
@@ -243,6 +268,7 @@ def cmd_pause(args: argparse.Namespace) -> int:
         "reason": args.reason, "detail": args.detail,
     })
     atomic(path, state)
+    emit_bus(task_dir, "stop", f"{args.reason}: {args.detail}")
     print(f"⏸️  {task_dir.name}: {args.reason}")
     return 0
 
@@ -260,6 +286,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
         "from": "blocked", "to": destination, "actor": args.actor,
     })
     atomic(path, state)
+    emit_bus(task_dir, "phase", f"reanuda en {destination}")
     print(f"▶️  {task_dir.name}: reanuda en {destination}")
     return 0
 
@@ -384,6 +411,7 @@ def cmd_transition(args: argparse.Namespace) -> int:
         state["review_rounds_by_repo"] = rounds_by_repo
     atomic(path, state)
     detail = f" (repo {args.repo}: ronda {rounds_by_repo.get(args.repo)})" if args.repo and args.phase == "review" else ""
+    emit_bus(task_dir, "phase", f"{current} → {args.phase}" + (f" ({args.repo})" if args.repo else ""))
     print(f"✅ {task_dir.name}: {current} → {args.phase}{detail}")
     return 0
 
@@ -427,6 +455,7 @@ def cmd_rollback(args: argparse.Namespace) -> int:
     })
     state["phase"] = destination
     atomic(path, state)
+    emit_bus(task_dir, "decision", f"rollback {current} → {destination}: {args.reason}")
     print(f"↩️  {task_dir.name}: rollback {current} → {destination} ({args.reason})")
     print(f"   review_rounds sin cambios ({state.get('review_rounds', 0)}): "
           "el rollback deshace, no cobra una ronda")

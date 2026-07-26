@@ -64,12 +64,30 @@ elif [ -z "$up_ver" ]; then
 elif ver_lt "$local_ver" "$up_ver"; then
   verdict=1
   line="⬆️  instancia $local_ver · upstream $up_ver: HAY UPDATE"
+elif ver_lt "$up_ver" "$local_ver"; then
+  # UNA INSTANCIA NO PUEDE IR ADELANTE DE SU ORIGEN. Si dice una version mayor
+  # que la de upstream, ese numero no salio de ningun lado: lo escribio alguien
+  # (o algun agente) de memoria. Antes esto caia en el `else` de abajo y se
+  # reportaba "✅ al día", que es la peor lectura posible.
+  #
+  # CASO REAL: una instalacion escribio `0.60.0` en .harness-version. Esa
+  # version no existe en el plugin (0.45.2 / 0.47.0 / 0.48.0) y por CONTENIDO
+  # estaba mas de sesenta commits atras. `make version` decia "al día" mientras
+  # los gates de lenguaje ni compilaban. La causa: la tabla del instalador pedia
+  # "version del plugin" sin decir de donde leerla.
+  verdict=1
+  line="❗ instancia $local_ver · upstream $up_ver: la instancia dice una versión MAYOR que su origen"
+  extra_ver="   Eso es imposible: nadie publica hacia atrás. Ese número no se leyó de
+   ningún lado, se escribió. No te fíes de él para nada, y mirá el digest de
+   templates de abajo, que compara CONTENIDO y no se puede inventar.
+   ↳ se arregla regenerando con /harness-init . (lee la versión de plugin.json)"
 else
   verdict=0
   line="✅ instancia $local_ver · upstream $up_ver: al día"
 fi
 
 echo "$line"
+[ -n "${extra_ver:-}" ] && echo "$extra_ver"
 
 # ── 1b · el SET de templates que realmente generó esta instancia ──────
 # El número de versión NO alcanza, y esto se aprendió caro: un generador

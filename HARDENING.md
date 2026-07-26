@@ -496,6 +496,20 @@ lo que faltaba para poder reconstruir el estado de una tarea sin leer archivos.
   escribe ese campo, y un campo AUSENTE no cuenta como false (confundir esas dos
   cosas fue justo el bug del `//` de jq).
 
+- [x] **El instalador podia INVENTAR el numero de version, y `make version`
+  lo bendecia.** Encontrado en una VPS real: `.harness-version` decia `0.60.0`,
+  una version que no existe en ningun origen del plugin (0.45.2 / 0.47.0 /
+  0.48.0) y cuyo CONTENIDO estaba 67 commits atras. La causa es la de siempre:
+  la tabla de generacion pedia "`.harness-version` | version del plugin" SIN
+  decir de donde leerla, y quien instala es un agente, asi que escribio un
+  numero plausible. El agravante: `harness-version.sh` comparaba con `ver_lt` y
+  todo lo que no fuera "local < upstream" caia en un `else` que imprimia
+  "✅ al día". Con 0.60.0 contra 0.48.0 la instancia se reportaba SANA mientras
+  sus gates de lenguaje no compilaban nada. Ahora la tabla nombra la fuente
+  (`plugin.json`) y prohibe escribirla de memoria, y una version MAYOR que la de
+  upstream se declara imposible en vez de sana: nadie publica hacia atras, asi
+  que ese numero no se leyo, se escribio.
+
 ### Pendiente
 
 - [ ] **La cola de merge del forge** (required checks + merge queue) sobre el

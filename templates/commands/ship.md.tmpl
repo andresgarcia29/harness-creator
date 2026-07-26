@@ -20,6 +20,12 @@ es correr los scripts y solo despertar en rojo.
    - Falla → el mensaje trae la remediación exacta. Si es de código,
      regresa al implementer; si es veredicto faltante, `/review`
      primero. NO puentees un gate JAMÁS.
+1b. **Si `flow: prs`**, `ship.sh` no toca la trunk: publica la rama y abre el
+   PR, y su `ship.log` queda con `landed: false`. El cambio NO está desplegado
+   hasta que ese PR mergee, así que **no corras `/archive` todavía**: fusionar
+   el delta-spec de algo sin mergear es spec rot al revés. `deploy-watch`
+   resuelve solo el commit real cuando el PR mergea, y mientras tanto te lo
+   dice en vez de vigilar el commit equivocado.
 2. Verde → `scripts/with-secrets.sh scripts/deploy-watch.sh <task-id> <repo>`
    — Actions → Kargo → health ArgoCD → smoke canary.
    - 🔴 → deploy-watch ya hizo/pidió ROLLBACK PRIMERO. Lee su log en
@@ -27,8 +33,11 @@ es correr los scripts y solo despertar en rojo.
      quiet.sh + with-secrets.sh) y propón el fix como nueva tarea.
 3. 🟢 → `scripts/worktree-task.sh --rm <task-id>` si ya no quedan
    tareas del repo, y consulta `bd ready`: ¿siguiente tarea del DAG?
-4. ¿Era la última tarea del ticket? → **primero la fase, después el cierre**:
-   `scripts/harness-policy.py transition tasks/<task-id> ship --actor orchestrator`.
+4. ¿Era la última tarea del ticket? → **la fase ya la registró `ship.sh`**: la
+   pide él tras cada push y solo prospera cuando `POLICY-SHIP-004` ve que
+   todos los repos con veredicto shippearon. No la pidas vos; si la ves en
+   `review` con todo shippeado, eso es un bug y hay que reportarlo (Ley 12).
+   Después:
    Va DESPUÉS de que TODOS los repos hayan shippeado, no antes: `ship.sh`
    exige `phase=review` y se corre una vez por repo, así que adelantarla
    deja a los repos que faltan sin camino. `POLICY-SHIP-004` lo rechaza y

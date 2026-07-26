@@ -70,13 +70,14 @@ FLOW="{{FLOW}}"
 # motivo para frenar un ship.
 flow_norm="$(printf '%s' "$FLOW" | tr 'A-Z' 'a-z' | tr -d ' +_-')"
 case "$flow_norm" in
-  trunk|trunkdirecttoprod|""|'{{flow}}') : ;;
+  trunk|trunkdirecttoprod|""|'{{flow}}') FLOW_MODE=trunk ;;
+  prs|pr) FLOW_MODE=prs ;;
   *)
-    echo "❌ harness-answers.yaml declara flow: $FLOW, y ship.sh solo implementa"
-    echo "   trunk direct-to-prod (push a main tras los gates)."
-    echo "   NO voy a pushear a main a espaldas de una política que dice otra cosa."
-    echo "   ↳ opciones: cambiá flow a 'trunk' si eso es lo que querés de verdad,"
-    echo "     o abrí el PR a mano desde la rama task/<id> tras un --precheck verde."
+    echo "❌ harness-answers.yaml declara flow: $FLOW, y ship.sh implementa dos:"
+    echo "   'trunk' (push directo tras los gates) y 'prs' (rama + PR)."
+    echo "   NO voy a pushear a espaldas de una política que dice otra cosa."
+    echo "   ↳ opciones: cambiá flow a 'trunk' o a 'prs', o abrí el PR a mano"
+    echo "     desde la rama task/<id> tras un --precheck verde."
     exit 7 ;;
 esac
 LOCKDIR="$WS/locks/$REPO.lock.d"
@@ -185,6 +186,41 @@ workspace: $who
 task: $TASK" "$sha" >/dev/null 2>&1 || return 0
   git push origin refs/notes/harness >/dev/null 2>&1 \
     || echo "   ℹ️  procedencia anotada localmente; no pude publicarla (git push origin refs/notes/harness)"
+}
+
+# ── LA FASE LA REGISTRA EL HECHO, NO EL RECORDATORIO ──────────────────
+# `review → ship` era prosa en el prompt de /ship y de /auto. Si el orquestador
+# se la olvidaba (y se la olvidaba), state.json quedaba en `review` con el
+# codigo ya en main: quien auditara por el estado reconstruia una historia
+# falsa, y un /auto <task-id> posterior re-entraba a revisar algo publicado.
+# Verificado en dos corridas reales.
+#
+# POLICY-SHIP-004 ya encierra la condicion correcta (no se avanza hasta que
+# TODOS los repos con veredicto shippearon), asi que esto se intenta despues de
+# cada repo y solo prospera en el ultimo. La regla no se duplica aca.
+#
+# FAIL-OPEN A PROPOSITO: el push YA ocurrio. Si la contabilidad falla, el cambio
+# esta igual de publicado, y salir en rojo aqui diria que el ship fallo cuando
+# no fallo. Se avisa fuerte y se sigue.
+request_ship_phase() {
+  local out rc=0
+  [ -f "$WS/tasks/$TASK/state.json" ] || return 0
+  out="$(python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" \
+        transition "$WS/tasks/$TASK" ship --actor ship.sh 2>&1)" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "   fase: review → ship (la registró el push, no el prompt)"
+    return 0
+  fi
+  case "$out" in
+    *POLICY-SHIP-004*)
+      echo "   fase: sigue en review, faltan repos por shippear (es lo correcto)" ;;
+    *POLICY-TRANSITION-001*)
+      echo "   fase: ya estaba avanzada, no la muevo" ;;
+    *)
+      echo "   ⚠️  no pude registrar la fase: $(printf '%s' "$out" | head -1)"
+      echo "      El push SÍ ocurrió. Registrala a mano o el estado va a mentir." ;;
+  esac
+  return 0
 }
 
 on_exit() {
@@ -1195,6 +1231,72 @@ while [ "$attempt" -lt "$PUSH_RETRY_BUDGET" ]; do
   gate_lane
   run_parallel_gates
   gate_fresh_evidence
+  # ── flow: prs — la rama y el PR, NUNCA main ─────────────────────────
+  # Los gates son los MISMOS: lo unico que cambia es la puerta. Y cambia algo
+  # mas, que es lo que hace falta decir sin ambiguedad: con PRs, cuando ship.sh
+  # termina el cambio NO esta en main todavia. El sha que se verifico aqui
+  # tampoco es el que va a aterrizar, porque la cola de merge del forge rebasea
+  # o hace squash. Por eso ship.log NO registra un sha "shippeado" a secas:
+  # registra el PR y deja `landed:false`, y deploy-watch resuelve el commit real
+  # cuando el PR se mergee. Fingir aqui un ship producirla un /archive que
+  # fusiona specs de un cambio que sigue sin mergear.
+  if [ "$FLOW_MODE" = "prs" ]; then
+    branch="$(git rev-parse --abbrev-ref HEAD)"
+    [ "$branch" != "HEAD" ] || { echo "❌ el worktree está en detached HEAD: no hay rama que pushear"; exit 4; }
+    # El rebase de arriba reescribio la historia de la rama, asi que a partir
+    # del segundo intento el push necesita forzar. --force-with-lease y no
+    # --force: si alguien mas movio ESA rama, se para en vez de pisarla.
+    if ! git push origin "HEAD:refs/heads/$branch" 2>/dev/null; then
+      git push --force-with-lease origin "HEAD:refs/heads/$branch" || {
+        echo "❌ no pude publicar la rama $branch (¿alguien más la movió?)"
+        echo "   ↳ --force-with-lease se niega a pisar trabajo ajeno: mirá la rama remota"
+        exit 4; }
+    fi
+    sha="$(git rev-parse HEAD)"; short="$(git rev-parse --short HEAD)"
+    # shellcheck source=/dev/null
+    . "$WS/scripts/forge.sh" 2>/dev/null || true
+    pr=""
+    if command -v forge_pr_url >/dev/null 2>&1 || type forge_pr_url >/dev/null 2>&1; then
+      pr="$(forge_pr_url "$WT" "$branch" 2>/dev/null || true)"
+      if [ -z "$pr" ]; then
+        pr="$(forge_pr_create "$WT" "$branch" \
+              "$TASK: $REPO" \
+              "Abierto por el harness tras pasar los gates de ship.sh.
+
+Task: $TASK
+Commit verificado: $sha
+Veredicto: tasks/$TASK/verdict-$REPO.json
+
+El sha que aterrice NO sera este si la cola de merge rebasea o hace squash." 2>/dev/null || true)"
+      fi
+    fi
+    if [ -z "$pr" ]; then
+      echo "⚠️  rama publicada, pero NO pude abrir ni encontrar el PR"
+      echo "   (el forge no tiene driver acá, o falta su CLI, o no hay acceso)."
+      emit assumption "$REPO: rama $branch publicada, PR no confirmado"
+    fi
+    printf '{"repo":"%s","sha":"%s","short":"%s","branch":"%s","pr":"%s","landed":false,"shipped_at":"%s"}\n' \
+      "$REPO" "$sha" "$short" "$branch" "${pr:-}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$WS/tasks/$TASK/ship.log"
+    stamp_provenance "$sha"
+    [ -n "${CURRENT_GATE:-}" ] && emit gate "$CURRENT_GATE" true && CURRENT_GATE=""
+    emit ship "$REPO: PR abierto desde $branch @ $short (falta el merge)" true
+    # El anuncio final NO puede afirmar lo que el aviso de arriba acaba de
+    # negar: si no hubo PR, decir "PR abierto" seria la mentira mas barata de
+    # todas, la de la ultima linea que alguien lee.
+    if [ -n "$pr" ]; then
+      echo "✅ gates verdes y PR abierto: $pr"
+      echo "   ⚠️  el cambio NO esta en $BASE_REF todavia: falta que el PR se mergee."
+    else
+      echo "✅ gates verdes y rama publicada en origin/$branch, SIN PR confirmado"
+      echo "   ⚠️  el cambio NO esta en $BASE_REF y NO hay PR que lo lleve. Abrilo"
+      echo "      a mano desde esa rama, o esto no llega a ningun lado."
+    fi
+    echo "→ siguiente: cuando mergee, scripts/deploy-watch.sh $TASK $REPO resuelve"
+    echo "   el commit real y recien ahi corresponde /archive."
+    request_ship_phase
+    exit 0
+  fi
+
   if git push origin HEAD:$BASE_REF; then
     sha="$(git rev-parse HEAD)"          # COMPLETO: deploy-watch lo compara
     short="$(git rev-parse --short HEAD)" # contra el headSha de la API del forge,
@@ -1208,6 +1310,7 @@ while [ "$attempt" -lt "$PUSH_RETRY_BUDGET" ]; do
     [ -n "${CURRENT_GATE:-}" ] && emit gate "$CURRENT_GATE" true && CURRENT_GATE=""
     emit ship "$REPO @ $short — pasó los gates y está en main" true
     echo "✅ shipped $REPO @ $short"
+    request_ship_phase
     echo "→ siguiente: scripts/deploy-watch.sh $TASK $REPO (o /ship se encarga)"
     exit 0
   fi

@@ -84,6 +84,62 @@ shipped_sha() {  # shipped_sha → sha completo del último ship de ESTE repo
   printf '%s' "$s"
 }
 
+# ── CON flow: prs, EL SHA VERIFICADO NO ES EL QUE ATERRIZA ────────────
+# ship.sh registra `landed:false` y el PR, porque la cola de merge del forge
+# rebasea o hace squash: el commit que llega a main es OTRO. Vigilar el deploy
+# del sha equivocado es peor que no vigilar, porque el watcher diria "no hay run
+# para este commit" (ceguera) o, peor, se pondria a mirar el deploy de otra
+# cosa. Se resuelve el commit real preguntandole al forge, y si el PR todavia no
+# mergeo se dice y se para: un cambio sin mergear no tiene deploy que vigilar.
+# El sha viaja por una GLOBAL y no por stdout, porque esta funcion tambien
+# EXPLICA lo que encontro con say(), y say escribe a stdout: llamarla dentro de
+# `$( )` se tragaba todos los diagnosticos dentro de la variable y el humano no
+# veia una linea. El canal de datos y el de explicacion no pueden ser el mismo.
+#   LANDED_SHA = sha a vigilar · exit 0 hay que vigilar · 1 no hay nada todavia
+LANDED_SHA=""
+resolve_landed_sha() {
+  local entry landed pr branch sha
+  LANDED_SHA=""
+  entry="$(jq -c --arg r "$REPO" 'select(.repo == $r)' "$WS/tasks/$TASK/ship.log" 2>/dev/null | tail -1)"
+  [ -n "$entry" ] || return 0
+  # OJO con `.landed // true`: el operador `//` de jq trata `false` COMO
+  # AUSENTE, asi que `false // true` da `true` y la entrada de un PR sin
+  # mergear se leia como aterrizada. Reproducido: el watcher se ponia a buscar
+  # el run de Actions de un commit que no esta en main. Hay que preguntar por
+  # la igualdad, no por la presencia.
+  landed="$(printf '%s' "$entry" | jq -r 'if .landed == false then "false" else "true" end' 2>/dev/null)"
+  if [ "$landed" != "false" ]; then
+    LANDED_SHA="$(printf '%s' "$entry" | jq -r '.sha // empty')"; return 0
+  fi
+  branch="$(printf '%s' "$entry" | jq -r '.branch // empty')"
+  pr="$(printf '%s' "$entry" | jq -r '.pr // empty')"
+  # shellcheck source=/dev/null
+  . "$WS/scripts/forge.sh" 2>/dev/null || true
+  if type forge_pr_merged >/dev/null 2>&1 && [ -n "$branch" ]; then
+    # El exit code se captura EXPLICITAMENTE. Un `local rc=$?` despues de un if
+    # no lee lo que uno cree (y `local` ademas pisa $?), y aca la diferencia
+    # entre "no mergeo todavia" (1) y "no pude mirar" (3) decide si el watcher
+    # se calla o declara un supuesto: son cosas distintas.
+    local rc=0
+    sha="$(forge_pr_merged "$WS/repos/$REPO" "$branch" 2>/dev/null)" || rc=$?
+    if [ "$rc" -eq 0 ] && [ -n "$sha" ]; then
+      say "── el PR de $branch ya mergeó: vigilo el commit que aterrizó (${sha:0:12}), no el que verificó ship.sh ──"
+      LANDED_SHA="$sha"; return 0
+    fi
+    if [ "$rc" -eq 3 ]; then
+      say "⚠️  no pude preguntarle al forge si el PR mergeó (falta la CLI o no hay acceso)."
+      say "   NO vigilo nada: con flow: prs el sha que verificó ship.sh no es el que"
+      say "   aterriza, así que mirar ese seria mirar el deploy equivocado.${pr:+ PR: $pr}"
+      emit assumption "deploy de $REPO NO verificado: no pude resolver el merge del PR"
+      return 1
+    fi
+  fi
+  say "ℹ️  el PR de $REPO todavía NO está mergeado${pr:+ ($pr)}."
+  say "   No hay deploy que vigilar: el cambio no llegó a $BASE_REF."
+  say "   ↳ volvé a correr esto cuando el PR mergee."
+  return 1
+}
+
 # La trunk no siempre se llama main: ship.sh y worktree-task.sh ya lo resuelven
 # con origin/HEAD, y este script cableaba `--branch main` igual que el resto del
 # repo antes de esa corrección.
@@ -303,7 +359,20 @@ red() { # red <motivo>
   # `tail -1` en una tarea multi-repo devolvía el sha de OTRO repo: revertirlo
   # dentro de este falla con "bad object", o peor, si el objeto existe en los
   # dos, revierte un commit equivocado y el ship del revert lo lleva a main.
-  last_sha="$(shipped_sha)"
+  resolve_landed_sha || LANDED_SHA=""
+  last_sha="$LANDED_SHA"
+  # Sin sha hay DOS causas distintas y no se pueden contar igual: que no exista
+  # ship de este repo, o que exista pero no se haya podido resolver que commit
+  # aterrizo (PR sin mergear, o forge inalcanzable). La segunda ya se explico
+  # arriba, y repetir "no hay ship" seria decir algo falso justo antes de una
+  # decision sobre produccion.
+  if [ -z "$last_sha" ] && jq -e --arg r "$REPO" 'select(.repo == $r)' \
+       "$WS/tasks/$TASK/ship.log" >/dev/null 2>&1; then
+    say "⏪ NO propongo revertir nada: hay un ship de $REPO registrado, pero no"
+    say "   pude establecer QUÉ commit está desplegado (el motivo está arriba)."
+    say "   Revertir sin saber qué se revierte es exactamente lo que no hago."
+    return 0
+  fi
   if [ -z "$last_sha" ]; then
     # Sin sha no hay revert que proponer, y sugerirlo con el campo vacío es
     # peor que callarse: manda al agente a improvisar sobre produccion.
@@ -325,7 +394,8 @@ if command -v gh >/dev/null; then
   # `--limit 1` devuelve el run ANTERIOR: si aquel estaba rojo, red() declaraba
   # rojo un deploy que ni siquiera había arrancado y proponía revertirlo.
   # Se filtra por el sha exacto y se espera a que aparezca.
-  head_sha="$(shipped_sha)"
+  resolve_landed_sha || exit 0
+  head_sha="$LANDED_SHA"
   run_id=""
   if [ -n "$head_sha" ]; then
     for _ in 1 2 3 4 5 6 7 8 9 10; do   # hasta ~100 s esperando que GitHub lo cree

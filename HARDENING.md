@@ -429,8 +429,50 @@ corto la cuarta ronda de api nombrando al repo.
   drift (son remediaciones distintas), y la instruccion del generador dejo de
   ser ambigua. Mismo criterio en `doctor.sh`.
 
-### Pendiente: lo único que elimina la clase entera
+## Los dos pendientes que quedaban, cerrados
 
+- [x] **La fase la registra el push, no el prompt.** `review → ship` era prosa
+  en `/ship` y en `/auto`, y el orquestador se la olvidaba: `state.json` quedaba
+  en `review` con el codigo ya en main, asi que quien auditara por el estado
+  reconstruia una historia falsa y un `/auto <task-id>` posterior re-entraba a
+  revisar algo publicado. Verificado en dos corridas. Ahora la pide `ship.sh`
+  tras cada push, y `POLICY-SHIP-004` sigue siendo quien decide (solo prospera
+  cuando todos los repos shippearon): la regla no se duplica. Es fail-open a
+  proposito, porque el push YA ocurrio y salir en rojo por la contabilidad diria
+  que el ship fallo cuando no fallo. Y `harness-policy.py` emite cada movimiento
+  al bus: antes el panel no tenia un solo evento de fase.
+- [x] **`flow: prs` implementado.** Dejo de ser la perilla que solo sabia
+  negarse (exit 7). Mismos gates, otra puerta: publica la rama (con
+  `--force-with-lease`, porque el rebase la reescribe y no se pisa trabajo
+  ajeno) y abre el PR por la capa de forge, que gano `forge_pr_url` y
+  `forge_pr_merged`. Lo que NO hace es fingir: `ship.log` queda con
+  `landed:false`, el mensaje dice que el cambio no esta en la trunk, y
+  `/archive` exige que haya aterrizado (fusionar el delta-spec de un PR abierto
+  es spec rot al reves, y mas dificil de ver porque la spec parece adelantada).
+  `deploy-watch` resuelve el commit REAL preguntando al forge, porque la cola de
+  merge rebasea o hace squash y el sha que verifico ship.sh no es el que
+  aterriza.
+
+Tres bugs propios que aparecieron construyendolo, los tres del mismo tipo:
+
+- [x] `.landed // true` en jq: el operador `//` trata `false` COMO AUSENTE, asi
+  que una entrada con `landed:false` se leia como aterrizada y el watcher se
+  ponia a buscar el deploy de un commit que no esta en main.
+- [x] `resolve_landed_sha` devolvia el sha por stdout y ademas EXPLICABA con
+  `say`, que tambien escribe a stdout: llamada dentro de `$( )`, todos los
+  diagnosticos se los tragaba la variable. El canal de datos y el de
+  explicacion no pueden ser el mismo.
+- [x] Un mensaje afirmaba lo que el anterior negaba ("no pude abrir el PR"
+  seguido de "✅ PR abierto"), y otro decia "no hay ship en ship.log" cuando si
+  lo habia y lo que fallo fue resolver el merge. Dos causas con remediaciones
+  distintas no pueden compartir mensaje.
+
+### Pendiente
+
+- [ ] **La cola de merge del forge** (required checks + merge queue) sobre el
+  `flow: prs` que ya existe. Lo implementado abre el PR; encolarlo y correr los
+  gates en CI neutral es configuracion del forge mas un workflow, y es lo que
+  mueve la verificacion fuera de las laptops.
 - [ ] **`flow: prs` + cola de merge del forge.** Todo lo de arriba MITIGA la
   carrera; la cola de merge la elimina en el origen, porque serializa en el
   servidor y corre la suite UNA vez sobre el merge result en infra neutral en

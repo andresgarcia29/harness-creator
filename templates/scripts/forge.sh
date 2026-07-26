@@ -95,6 +95,54 @@ forge_issue_create() {  # forge_issue_create <dir> <título> <cuerpo>
   esac
 }
 
+# ── ¿ya hay un PR abierto para esta rama? ─────────────────────────────
+# Lo necesita `flow: prs`: una ronda de rework re-corre ship.sh sobre la MISMA
+# rama, y crear el PR otra vez falla. Preguntar primero convierte ese fallo en
+# un caso normal. Exit 0 con salida vacía = miré y no hay PR. Exit 3 = no pude
+# mirar, que no es lo mismo y quien llama tiene que poder distinguirlo.
+forge_pr_url() {  # forge_pr_url <dir> <rama>
+  local d="$1" branch="$2" k slug
+  k="$(forge_kind "$d")"; slug="$(forge_slug "$d")"
+  case "$k" in
+    github)
+      command -v gh >/dev/null || return 3
+      gh pr list --repo "$slug" --head "$branch" --state open \
+        --json url --jq '.[0].url // empty' 2>/dev/null || return 3 ;;
+    gitlab)
+      command -v glab >/dev/null || return 3
+      glab mr list --repo "$slug" --source-branch "$branch" 2>/dev/null \
+        | awk 'NR==1{print $1}' || return 3 ;;
+    *) return 3 ;;
+  esac
+}
+
+# ── ¿el PR de esta rama ya se mergeó, y en qué commit? ────────────────
+# La respuesta que `flow: prs` le debe a deploy-watch: con PRs, el sha que
+# ship.sh verificó NO es el que aterriza (la cola de merge rebasea o hace
+# squash). Vigilar el deploy del sha equivocado es peor que no vigilar.
+#   stdout = sha del merge · exit 0 mergeado · 1 abierto/cerrado · 3 no pude ver
+forge_pr_merged() {  # forge_pr_merged <dir> <rama>
+  local d="$1" branch="$2" k slug out state sha
+  k="$(forge_kind "$d")"; slug="$(forge_slug "$d")"
+  case "$k" in
+    github)
+      command -v gh >/dev/null || return 3
+      out="$(gh pr list --repo "$slug" --head "$branch" --state all \
+        --json state,mergeCommit --jq '.[0] | "\(.state) \(.mergeCommit.oid // "")"' 2>/dev/null)" || return 3
+      [ -n "$out" ] || return 3
+      state="${out%% *}"; sha="${out##* }"
+      [ "$state" = "MERGED" ] || return 1
+      [ -n "$sha" ] || return 3
+      printf '%s' "$sha" ;;
+    gitlab)
+      command -v glab >/dev/null || return 3
+      out="$(glab mr view "$branch" --repo "$slug" 2>/dev/null)" || return 3
+      printf '%s' "$out" | grep -qi 'merged' || return 1
+      printf '%s' "$out" | sed -n 's/.*[Mm]erge commit:[[:space:]]*\([0-9a-f]\{7,\}\).*/\1/p' | head -1 ;;
+    *) return 3 ;;
+  esac
+}
+
 forge_pr_create() {  # forge_pr_create <dir> <rama> <título> <cuerpo>
   local d="$1" branch="$2" title="$3" body="$4" k slug base
   k="$(forge_kind "$d")"; slug="$(forge_slug "$d")"; base="$(forge_base_branch "$d")"

@@ -52,7 +52,13 @@ done
 assert_contains "$(cmd feature)" "harness-policy.py init" "/feature abre el estado"
 assert_contains "$(cmd rfc)" "transition tasks/\$ARGUMENTS rfc" "/rfc pide intake → rfc"
 assert_contains "$(cmd implement)" "implement --actor" "/implement pide su transición"
-assert_contains "$(cmd ship)" "ship --actor" "/ship pide review → ship"
+# `review → ship` cambio de dueño A PROPOSITO: la pide ship.sh tras el push, no
+# el prompt. Era la transicion que el orquestador se olvidaba, y entonces
+# state.json quedaba en `review` con el codigo ya en main. Lo que el contrato
+# exige ahora es que la pida el HECHO y que el prompt NO la duplique.
+assert_contains "$(cat "$ROOT/templates/scripts/ship.sh.tmpl")" "transition \"\$WS/tasks/\$TASK\" ship" \
+  "ship.sh pide review → ship el mismo, tras el push"
+assert_contains "$(cmd ship)" "ya la registró" "y /ship le dice al orquestador que no la duplique"
 assert_contains "$(cmd archive)" "archive --actor" "/archive pide deploy → archive"
 
 # El ORDEN importa: pedir review → ship antes de shippear todos los repos es

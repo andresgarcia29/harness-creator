@@ -41,4 +41,4 @@ jobs:
         run: |
           shellcheck --version
           shellcheck -S error scripts/*.sh templates/scripts/*.sh templates/hooks/*.sh \
-            templates/cronjobs/cron-runner.sh templates/ui/panel.sh tests/*.sh
+            templates/ui/panel.sh tests/*.sh

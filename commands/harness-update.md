@@ -30,7 +30,7 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
      ticket-close,ticket-pull,harness-bug,harness-version,skills-sync,
      pipeline-steps,py,fe}.sh,
      scripts/{harness-policy,evidence}.py, `harness-policy.json`,
-     `scripts/cronjobs/cron-runner.sh`, hooks, `AGENTS.md`, y **el panel**:
+     hooks, `AGENTS.md`, y **el panel**:
      `scripts/ui/{panel.sh,server.py,pricing.json,dist/}`): upstream gana por
      default — re-instancia con las respuestas del answers y propón el
      archivo completo. Un parche local aquí casi siempre fue un fix que
@@ -94,9 +94,11 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
      desactiva el mecanismo EN SILENCIO. Sin `change-id.sh` no hay identidad de
      cambio y el resto degrada a exigir el SHA exacto.
    - **Modelos**: `models.yaml` (esquema aliases) +
-     `scripts/stamp-models.sh` + `scripts/cronjobs/cron-runner.sh` (el
-     runner viejo parsea el esquema inline viejo: con el models.yaml
-     nuevo muere en config-error) + re-estampado de agentes.
+     `scripts/stamp-models.sh` + re-estampado de agentes. Si la instancia
+     además usa **harness-cronjobs** (repo aparte), su `cron-runner.sh` lee las
+     secciones `cronjobs:`, `cronjob_effort:` y `budgets:` de este mismo
+     `models.yaml`: el runner viejo parsea el esquema inline viejo y muere en
+     config-error, así que hay que actualizarlo del lado de ESE repo.
 4b. **`.gitignore` de la instancia**: las instalaciones previas a esta
    versión no ignoran `go.work`, `go.work.sum` ni `graphify-out/`. El grafo
    pesa cientos de MB (128 medidos con 28 repos) y el flujo invita al

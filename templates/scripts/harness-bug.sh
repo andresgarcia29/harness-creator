@@ -74,7 +74,11 @@ ver_lt() {  # ver_lt <a> <b> → 0 si a < b (semver simple, sin pre-releases)
 owner_of() {
   case "$1" in
     scripts/smoke/*|scripts/cronjobs/jobs/local-*) echo instance ;;
-    scripts/*.sh|scripts/*.py|scripts/ui/*|scripts/cronjobs/*) echo plugin ;;
+    # Los cronjobs se extrajeron a su propio repo (harness-cronjobs). Siguen
+    # siendo codigo de plugin, pero de OTRO plugin: reportarlos aca abriria el
+    # issue en el repo equivocado, contra una ruta que ya no existe.
+    scripts/cronjobs/*) echo otro-repo ;;
+    scripts/*.sh|scripts/*.py|scripts/ui/*) echo plugin ;;
     .claude/hooks/*.sh) echo plugin ;;
     .claude/commands/*.md) echo plugin ;;
     .claude/skills/skill-creator/*|.claude/skills/pipeline-step-creator/*|.claude/skills/harness-bug-report/*) echo plugin ;;
@@ -90,8 +94,6 @@ owner_of() {
 tpl_for() {
   local p="$1" base; base="$(basename "$p")"
   case "$p" in
-    scripts/cronjobs/cron-runner.sh) echo "templates/cronjobs/cron-runner.sh" ;;
-    scripts/cronjobs/jobs/*)         echo "templates/cronjobs/jobs/$base" ;;
     scripts/ui/*)                    echo "templates/ui/${p#scripts/ui/}" ;;
     scripts/*)                       echo "templates/scripts/$base" ;;
     .claude/hooks/*)                 echo "templates/hooks/$base" ;;
@@ -135,6 +137,11 @@ cmd_check() {
   echo "artefacto: $p"
   echo "propiedad: $own"
   echo "drift:     $drift"
+  if [ "$own" = "otro-repo" ]; then
+    echo "veredicto: NO reportable ACA: los cronjobs viven en harness-cronjobs"
+    note "abri el issue en ese repo. Reportarlo aca lo mandaria al proyecto equivocado, contra una ruta que ya no existe"
+    return 3
+  fi
   if [ "$own" != "plugin" ]; then
     echo "veredicto: NO reportable upstream (es artefacto de tu instancia)"
     note "arréglalo aquí; si crees que el GENERADOR lo produjo mal, reporta el generador, no el archivo"
@@ -176,6 +183,7 @@ cmd_report() {
 
   # 1 · propiedad y drift (fail-closed)
   local own drift; own="$(owner_of "$file")"; drift="$(drift_of "$file")"
+  [ "$own" = "otro-repo" ] && die "$file pertenece a harness-cronjobs, no a este plugin: abri el issue en ese repo" 3
   [ "$own" = "plugin" ] || die "$file es artefacto de tu instancia, no del plugin: no hay bug upstream que reportar" 3
   if [ "$drift" = "distinto" ] && [ "$force" -ne 1 ]; then
     die "$file está personalizado localmente: upstream no lo reproduce tal cual" 7

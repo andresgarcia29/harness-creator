@@ -20,17 +20,26 @@ heredas conversaciones.
    Docs de librerías: context7, no web-search.
 3. Implementa con tests. Los criterios de aceptación de tu tarea son la
    definición de terminado.
-4. Commits con trailer `Task: <task-id>` (ship.sh lo verifica como gate).
-5. **Antes de entregar, corre `scripts/ship.sh --precheck <task-id>
-   <repo>`**: son los MISMOS gates mecánicos del ship (build, tests,
-   lint, gitleaks, tests-no-debilitados) sobre tu worktree, sin
-   veredicto y sin push. Rojo lo arreglas tú AHÍ: cuesta segundos y
-   cero tokens, mientras que descubrirlo en review cuesta una ronda
-   entera de reloj. Entregar en rojo es regalar una iteración. Si tras 2
-   intentos el precheck sigue rojo, para y escala con el error completo:
-   un gate que no cede en dos pasadas no cede en la tercera (Ley 6).
-6. **Con el precheck verde, registra TU evidencia** sobre el commit
-   final, con tu propia identidad como runner:
+4. Commits con trailer `Task: <task-id>`. **Ponelo desde el PRIMER commit.**
+   El precheck ahora lo exige, y su remediación es un amend: temprano no
+   cuesta nada, tarde mueve HEAD y te invalida evidencia y veredicto.
+5. **Commitea primero, y después corre `scripts/ship.sh --precheck
+   <task-id> <repo>` con el árbol limpio.** Son los MISMOS gates mecánicos
+   del ship (build, tests, lint, gitleaks, tests-no-debilitados, y ahora
+   también trailer y carril) sobre tu worktree, sin veredicto y sin push.
+   - Rojo lo arreglas tú AHÍ: cuesta segundos y cero tokens, mientras que
+     descubrirlo en review cuesta una ronda entera de reloj. Entregar en
+     rojo es regalar una iteración. Si tras 2 intentos sigue rojo, para y
+     escala con el error completo: un gate que no cede en dos pasadas no
+     cede en la tercera (Ley 6).
+   - **Con el árbol limpio, el precheck SELLA TU EVIDENCIA solo.** La
+     corrida de tests que ya estaba haciendo queda registrada como
+     `EV-TEST-*` con vos de runner, atada a tu commit exacto. No corras la
+     suite otra vez: antes se corría cuatro veces por tarea (precheck,
+     evidencia, QA y ship) sobre el mismo código.
+   - Con el árbol sucio corre igual pero NO sella, y te lo dice. Ese es el
+     caso de "estoy a mitad de trabajo", no el de entregar.
+6. **Solo si el precheck no pudo sellar**, registra tu evidencia vos:
 
    ```
    python3 scripts/evidence.py run --task-dir tasks/<task-id> --repo <repo> \
@@ -38,17 +47,13 @@ heredas conversaciones.
      -- <el comando de test de tu repo>
    ```
 
-   No es burocracia y no lo puede hacer otro por ti: `ship.sh` exige que
-   al menos un runner de IMPLEMENTACIÓN aparezca en el veredicto
-   (`POLICY-ROLE-002`). Si la única evidencia la corrieron qa y el
-   reviewer, el ship se rechaza y con razón: quien revisa no puede ser
-   también quien demuestra. Corre al menos el test, y build o typecheck
-   si tu repo los tiene. La evidencia queda atada al commit exacto, así
-   que **regístrala DESPUÉS de tu último commit, con el árbol limpio**.
-   Correrla antes sella contra el commit PADRE, y al commitear la evidencia
-   queda stale: una ronda perdida. `evidence.py` ahora se niega si hay
-   cambios sin commitear, así que el error se detecta al instante en vez de
-   en el scaffold del veredicto.
+   Por qué importa quién la corre: `ship.sh` exige que al menos un runner de
+   IMPLEMENTACIÓN aparezca en el veredicto (`POLICY-ROLE-002`). Si la única
+   evidencia la corrieron qa y el reviewer, el ship se rechaza y con razón:
+   quien revisa no puede ser también quien demuestra. Va DESPUÉS de tu
+   último commit y con el árbol limpio: `evidence.py` se niega si hay
+   cambios sin commitear, porque un sello que dice "commit P" cuando lo que
+   corrió fue P más tu working tree está mintiendo sobre qué probó.
 7. Marca tu bead (`bd close`) y solicita review. NO pushees: la única
    puerta a main es scripts/ship.sh (un hook bloquea el resto).
 8. Si el reviewer regresa `fail`, corrige SOLO los items `blocking`,

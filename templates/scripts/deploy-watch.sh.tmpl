@@ -65,6 +65,37 @@ ROLLBACK_MODE="{{ROLLBACK_MODE}}"   # auto | manual
 
 say() { echo "$1" | tee -a "$LOG"; }
 
+# ── EL SHA QUE SE VIGILA SALE DE ship.log, NO DE UN WORKTREE ──────────
+# Bug de origen: este script usaba `git -C "$WT" rev-parse HEAD` y $WT NUNCA se
+# definía en el archivo. Con `set -u` la sustitución entera moría en la
+# expansión (los fallbacks del || ni corrían), head_sha quedaba VACÍO, y como
+# las dos ramas siguientes estaban guardadas por [ -n "$head_sha" ], la etapa de
+# Actions se saltaba COMPLETA: ni vigilaba el run ni emitía el aviso honesto.
+# O sea que el arreglo de la carrera del `--limit 1` estaba muerto desde que se
+# escribió, y con driver=actions el deploy nunca se verificó.
+#
+# La fuente correcta no era el worktree igual: puede estar borrado por
+# `worktree-task.sh --rm` cuando corre /ship. ship.log tiene el sha que
+# REALMENTE aterrizó, que es de lo que este watcher habla.
+shipped_sha() {  # shipped_sha → sha completo del último ship de ESTE repo
+  local s
+  s="$(jq -r --arg r "$REPO" 'select(.repo == $r) | .sha // empty' \
+        "$WS/tasks/$TASK/ship.log" 2>/dev/null | tail -1)"
+  printf '%s' "$s"
+}
+
+# La trunk no siempre se llama main: ship.sh y worktree-task.sh ya lo resuelven
+# con origin/HEAD, y este script cableaba `--branch main` igual que el resto del
+# repo antes de esa corrección.
+deploy_base_branch() {
+  local b
+  if [ -n "${HARNESS_BASE_BRANCH:-}" ]; then printf '%s' "$HARNESS_BASE_BRANCH"; return 0; fi
+  b="$(git -C "$WS/repos/$REPO" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
+  [ -n "$b" ] || b=main
+  printf '%s' "$b"
+}
+BASE_REF="$(deploy_base_branch)"
+
 # ── ¿ESTE REPO DESPLIEGA POR AQUÍ? ────────────────────────────────────
 # Este watcher modela UNA forma de desplegar: Actions → Kargo → ArgoCD →
 # smoke, o sea GitOps sobre Kubernetes. Un repo de terraform no despliega
@@ -160,6 +191,80 @@ fi
 #     script; lo ejecuta el agente/humano.
 #  3. `argocd app rollback` es el ÚLTIMO recurso MANUAL: crea drift
 #     git↔cluster y exige desactivar auto-sync. Nunca automático.
+# ── ROLLBACK EN UN TRUNK COMPARTIDO ───────────────────────────────────
+# Con varias personas pusheando al mismo main, cuando este watcher ve rojo el
+# trunk YA trae commits de otras tareas. Proponer "revertí tu sha" a ciegas
+# tiene dos formas de salir mal, y las dos se han visto:
+#   · el deploy enfermo es del commit de OTRO, y revertir el tuyo no arregla
+#     nada mientras mete ruido en main;
+#   · alguien construyó ENCIMA de tu cambio, y el revert conflictúa o rompe al
+#     de arriba.
+# Las dos se distinguen de forma DETERMINISTA, sin juicio: comparando la
+# revisión que el cluster declara enferma, y ensayando el revert en seco.
+OBSERVED_REVISION=""   # lo llena check_argocd_health cuando el cluster lo dice
+
+rollback_advice() {  # rollback_advice <sha-completo-de-mi-ship>
+  local mine="$1" after="" dry
+  git -C "$WS/repos/$REPO" fetch origin --quiet 2>/dev/null || true
+
+  # ¿La revisión enferma es la mía? Si el cluster nombra otra, revertir lo mío
+  # es tocar producción por un problema que no es mío.
+  if [ -n "$OBSERVED_REVISION" ]; then
+    case "$OBSERVED_REVISION" in
+      "$mine"*|"") : ;;
+      *)
+        case "$mine" in
+          "$OBSERVED_REVISION"*) : ;;
+          *)
+            say "⏪ NO propongo revertir nada mío: el cluster declara enferma la"
+            say "   revisión ${OBSERVED_REVISION:0:12} y mi ship fue ${mine:0:12}."
+            say "   Otro workspace aterrizó después. Revertir mi commit no arregla"
+            say "   ese deploy y ensucia el trunk compartido."
+            say "   ↳ quien puede decidir acá es quien shippeó ${OBSERVED_REVISION:0:12}."
+            emit assumption "deploy rojo de $REPO en revisión ajena ${OBSERVED_REVISION:0:12}: no propongo rollback"
+            return 0 ;;
+        esac ;;
+    esac
+  fi
+
+  after="$(git -C "$WS/repos/$REPO" rev-list --count "$mine..origin/$BASE_REF" 2>/dev/null || echo "?")"
+
+  # Ensayo en seco: `git revert --no-commit` y se deshace. Si conflictúa, es
+  # que alguien construyó encima y el revert ya no es una acción puntual.
+  dry=ok
+  if git -C "$WS/repos/$REPO" rev-parse --verify --quiet "$mine^{commit}" >/dev/null 2>&1; then
+    if ! git -C "$WS/repos/$REPO" revert --no-commit "$mine" >/dev/null 2>&1; then
+      dry=conflicto
+    fi
+    git -C "$WS/repos/$REPO" revert --abort >/dev/null 2>&1 || true
+    git -C "$WS/repos/$REPO" reset --hard --quiet >/dev/null 2>&1 || true
+  else
+    dry=ausente
+  fi
+
+  if [ "$dry" = "conflicto" ]; then
+    say "⏪ PARO: el revert de ${mine:0:12} conflictúa con lo que aterrizó después"
+    say "   ($after commit(s) de otras tareas encima). Revertir acá no es una"
+    say "   acción puntual: rompería el trabajo de alguien más."
+    say "   ↳ diagnostica con el rango: git -C repos/$REPO log --oneline $mine..origin/$BASE_REF"
+    emit stop "deploy rojo de $REPO: el revert conflictúa con $after commit(s) ajenos; necesito una decisión humana"
+    return 0
+  fi
+  if [ "$dry" = "ausente" ]; then
+    say "⏪ no puedo ensayar el revert: ${mine:0:12} no está en repos/$REPO (¿fetch pendiente?)."
+    say "   No propongo una acción destructiva que no pude comprobar."
+    return 0
+  fi
+  [ "$after" != "0" ] && [ "$after" != "?" ] \
+    && say "   (nota: $after commit(s) de otras tareas aterrizaron después; el revert ensayado NO conflictúa con ellos)"
+  if [ "$ROLLBACK_MODE" = "auto" ]; then
+    say "⏪ preparando revert en git de $mine (GitOps-safe; ArgoCD lo sincroniza solo):"
+    say "   cd repos/$REPO && git revert --no-edit $mine  → luego ship.sh del revert"
+  else
+    say "⏪ revert manual sugerido del commit $mine (git revert, NUNCA argocd app rollback salvo emergencia humana)"
+  fi
+}
+
 red() { # red <motivo>
   say "🔴 $1"
   emit deploy "$REPO — $1" false
@@ -173,19 +278,15 @@ red() { # red <motivo>
   # `tail -1` en una tarea multi-repo devolvía el sha de OTRO repo: revertirlo
   # dentro de este falla con "bad object", o peor, si el objeto existe en los
   # dos, revierte un commit equivocado y el ship del revert lo lleva a main.
-  last_sha="$(jq -r --arg r "$REPO" 'select(.repo == $r) | .sha // empty' \
-    "$WS/tasks/$TASK/ship.log" 2>/dev/null | tail -1)"
+  last_sha="$(shipped_sha)"
   if [ -z "$last_sha" ]; then
     # Sin sha no hay revert que proponer, y sugerirlo con el campo vacío es
     # peor que callarse: manda al agente a improvisar sobre produccion.
     say "⏪ NO sé qué revertir: no hay ship de $REPO en tasks/$TASK/ship.log."
     say "   Puede que este deploy no venga de un ship de esta tarea. Diagnostica"
     say "   primero y decide vos: no propongo una acción destructiva a ciegas."
-  elif [ "$ROLLBACK_MODE" = "auto" ]; then
-    say "⏪ preparando revert en git de $last_sha (GitOps-safe; ArgoCD lo sincroniza solo):"
-    say "   cd repos/$REPO && git revert --no-edit $last_sha  → luego ship.sh del revert"
   else
-    say "⏪ revert manual sugerido del commit $last_sha (git revert, NUNCA argocd app rollback salvo emergencia humana)"
+    rollback_advice "$last_sha"
   fi
   say "🩺 diagnóstico inicial en $LOG — despierta al agente con este contexto"
   exit 1
@@ -199,21 +300,32 @@ if command -v gh >/dev/null; then
   # `--limit 1` devuelve el run ANTERIOR: si aquel estaba rojo, red() declaraba
   # rojo un deploy que ni siquiera había arrancado y proponía revertirlo.
   # Se filtra por el sha exacto y se espera a que aparezca.
-  head_sha="$(git -C "$WT" rev-parse HEAD 2>/dev/null || git rev-parse HEAD 2>/dev/null || echo "")"
+  head_sha="$(shipped_sha)"
   run_id=""
   if [ -n "$head_sha" ]; then
     for _ in 1 2 3 4 5 6 7 8 9 10; do   # hasta ~100 s esperando que GitHub lo cree
-      run_id="$(gh run list --repo "$ORG/$REPO" --branch main --limit 20 \
+      # startswith y no ==: ship.log guardaba el sha CORTO hasta hace poco, y
+      # la API del forge devuelve el completo. Con == la comparación no
+      # matcheaba NUNCA para logs viejos, o sea el mismo silencio por otra
+      # puerta. Los shas nuevos son completos y comparan exacto igual.
+      run_id="$(gh run list --repo "$ORG/$REPO" --branch "$BASE_REF" --limit 20 \
         --json databaseId,headSha --jq \
-        "map(select(.headSha == \"$head_sha\")) | .[0].databaseId // empty" 2>/dev/null || echo "")"
+        "map(select(.headSha | startswith(\"$head_sha\"))) | .[0].databaseId // empty" 2>/dev/null || echo "")"
       [ -n "$run_id" ] && break
       sleep 10
     done
+  else
+    # Antes esto no existía y era el agujero: sin sha, el script seguía como si
+    # nada. Un watcher que no sabe qué mirar tiene que decirlo.
+    say "⚠️ no sé qué commit vigilar: no hay ship de $REPO en tasks/$TASK/ship.log."
+    say "   La etapa de Actions NO corrió. Esto no es un deploy verde: es un"
+    say "   deploy del que no sé nada."
+    emit assumption "Actions de $REPO NO verificado: sin sha en ship.log"
   fi
   if [ -z "$run_id" ] && [ -n "$head_sha" ]; then
     say "⚠️ ningún run de Actions para el commit ${head_sha:0:12} tras 100 s."
     say "   NO vigilo el run anterior: su resultado no dice nada de este cambio."
-    say "   Puede que el workflow no dispare en push a main, o que aún no exista."
+    say "   Puede que el workflow no dispare en push a $BASE_REF, o que aún no exista."
     emit assumption "Actions de $REPO NO verificado: sin run para el commit ${head_sha:0:12}"
   fi
   if [ -n "$run_id" ]; then
@@ -278,11 +390,16 @@ argocd_cli_ready() {
 check_argocd_health() {  # → 0 sano · 1 no sano · 2 no concluyente
   local sync health out
   if command -v kubectl >/dev/null 2>&1; then
+    # Se pide también la REVISIÓN: sin ella no se puede saber si el deploy
+    # enfermo es el nuestro o el de otro workspace que aterrizó después, y esa
+    # distinción es la que decide si proponer un rollback o callarse.
     out="$(kubectl get application "$APP" -n "${ARGOCD_NAMESPACE:-argocd}" \
-      -o jsonpath='{.status.sync.status} {.status.health.status}' 2>/dev/null)" || out=""
+      -o jsonpath='{.status.sync.status} {.status.health.status} {.status.sync.revision}' 2>/dev/null)" || out=""
     if [ -n "$out" ]; then
-      sync="${out%% *}"; health="${out##* }"
-      say "   estado observado: sync=$sync health=$health"
+      sync="$(printf '%s' "$out" | awk '{print $1}')"
+      health="$(printf '%s' "$out" | awk '{print $2}')"
+      OBSERVED_REVISION="$(printf '%s' "$out" | awk '{print $3}')"
+      say "   estado observado: sync=$sync health=$health${OBSERVED_REVISION:+ revision=${OBSERVED_REVISION:0:12}}"
       [ "$sync" = "Synced" ] && [ "$health" = "Healthy" ] && return 0
       return 1
     fi

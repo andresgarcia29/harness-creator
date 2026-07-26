@@ -7,9 +7,16 @@ Review de $ARGUMENTS. El artefacto de salida es
 `tasks/<task-id>/verdict-<repo>.json` — sin él, ship.sh no abre la
 puerta.
 
-Antes del primer review de la tarea solicita la transición ejecutable:
-`scripts/harness-policy.py transition tasks/<task-id> review --actor orchestrator`.
-Si policy la rechaza, no falsifiques el estado: corrige la fase precedente o
+Antes de CADA entrada a review de un repo solicita la transición ejecutable,
+**nombrando el repo**:
+`scripts/harness-policy.py transition tasks/<task-id> review --repo <repo> --actor orchestrator`.
+
+El `--repo` no es decorativo: el presupuesto de rondas se cuenta POR REPO. Sin
+él se cuenta por tarea, y una tarea de tres repos donde cada uno necesita un
+solo fix normal agota el presupuesto y escala a humano sin que nada esté mal.
+Cada vuelta fail→fix es `review → implement → review` de ESE repo; si no pedís
+la transición, el contador nunca sube y el presupuesto deja de gobernar. Si
+policy la rechaza, no falsifiques el estado: corrige la fase precedente o
 reporta el código de error.
 
 0. **Puerta mecánica antes de gastar juicio**: lee
@@ -40,7 +47,15 @@ reporta el código de error.
      `verdict-<repo>.json` con `qa: "pending"`.
    - QA (agente o determinista) → escribe su resultado en
      `tasks/<task-id>/qa-<repo>.json`: `{schema: 1, task_id, repo,
-     commit, qa: "pass|fail", evidence: [...], notes}`.
+     commit, qa: "pass|fail", evidence: [...], notes, surface: [...]}`.
+
+     **`surface[]` es lo que evita re-correr QA entero en cada ronda.** Declara
+     las rutas que QA realmente ejercita (`["internal/http/",
+     "web/src/checkout/"]`). En un re-review, `verdict-scaffold.sh --rebase`
+     arrastra el `qa: pass` si el delta no tocó ninguna de esas rutas, y lo
+     re-corre si sí. Sin `surface[]` se re-corre siempre: fail-closed, que es
+     el comportamiento viejo. Antes esta promesa estaba solo en prosa y el
+     scaffold la rompía, así que cada fix de una línea pagaba un ciclo de QA.
 3. **Merge mecánico** (tú, con jq — es fusión, no juicio): cuando ambos
    archivos existen y su `commit` coincide, copia `qa`, `evidence` y
    `notes` de `qa-<repo>.json` al veredicto. Si los commits difieren
@@ -59,9 +74,10 @@ reporta el código de error.
    reviewer juzga SOLO las entradas con `.rejudge` más el cierre de cada
    blocking, no el cambio completo otra vez. **Nunca uses `--force` en el
    loop de rework**: borra la matriz de compliance entera y te cobra un
-   re-review completo por un fix de una línea. QA solo se repite si el
-   fix tocó comportamiento que QA ejercita. Presupuesto agotado → humano,
-   con el historial de veredictos.
+   re-review completo por un fix de una línea. QA solo se repite si el fix
+   tocó la `surface[]` que QA declaró, y eso ahora lo decide el scaffold, no
+   la buena voluntad. Presupuesto agotado (el de ESE repo) → humano, con el
+   historial de veredictos.
 5. Antes de anunciar, comprueba que el veredicto tiene `schema: 1`, task, repo,
    HEAD completo, reviewer, implementation_agents y al menos un ID en
    `evidence[]`.

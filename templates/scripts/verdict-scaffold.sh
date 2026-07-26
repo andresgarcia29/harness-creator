@@ -141,14 +141,36 @@ if [ -z "$rows" ] && [ "$ALLOW_EMPTY" -ne 1 ]; then
   exit 3
 fi
 
+# ── La identidad del CAMBIO, no la del commit ─────────────────────────
+# El veredicto es un juicio sobre un diff; sellarlo solo contra un SHA hacía
+# que cualquier rebase (o sea, cualquier push ajeno al mismo trunk) lo tirara
+# entero. `patch_id` deja que harness-policy.py reuse el juicio cuando el
+# cambio es el MISMO sobre otra base, y `reviewed_at` acota esa reutilización
+# en el tiempo. Fail-open acá a propósito: si no se puede calcular, el
+# veredicto sale sin patch_id y el ship exige commit exacto, que es el
+# comportamiento viejo. Degradar no puede significar aflojar el gate.
+# -f y no -x: el bit de ejecución no sobrevive de forma confiable a un cp, un
+# checkout con otro umask ni a un zip, y se invoca con `bash` de todas formas.
+# Un guard que depende del modo del archivo degradaría en silencio justo la
+# propiedad que evita el re-review.
+PATCH_ID=""
+if [ -f "$WS/scripts/change-id.sh" ]; then
+  PATCH_ID="$(bash "$WS/scripts/change-id.sh" "$WT" 2>/dev/null || true)"
+fi
+[ -n "$PATCH_ID" ] || echo "⚠️  sin patch_id (no pude identificar el cambio): si el trunk se mueve antes del ship, este veredicto caduca y habrá re-review"
+
 tmp="$(mktemp "$WS/tasks/$TASK/.verdict-$REPO.XXXXXX")"
 printf '%s\n' "$rows" | jq -RnS --arg task "$TASK" --arg repo "$REPO" \
-    --arg commit "$HEAD" --arg reviewer "$REVIEWER" '
+    --arg commit "$HEAD" --arg reviewer "$REVIEWER" \
+    --arg patch_id "$PATCH_ID" --arg reviewed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
   [inputs | select(length > 0) | split("|")] as $rows
   | { schema: 1, task_id: $task, repo: $repo, commit: $commit,
+      patch_id: $patch_id, reviewed_at: $reviewed_at,
       reviewer: $reviewer,
       implementation_agents:
-        ($rows | map(.[1]) | map(select(. != "" and . != $reviewer and . != "qa")) | unique),
+        ($rows | map(.[1])
+         | map(select(. != "" and . != $reviewer and . != "qa" and . != "ship"))
+         | unique),
       evidence: ($rows | map(.[0])),
       verdict: "PENDING_REVIEWER",
       qa: "pending",
@@ -160,9 +182,20 @@ printf '%s\n' "$rows" | jq -RnS --arg task "$TASK" --arg repo "$REPO" \
 
 # ── Arrastre del juicio (--rebase) ────────────────────────────────────
 # Se conserva compliance[], non_blocking[] y los flags del reviewer. NO se
-# conserva verdict, qa ni blocking: el veredicto y el QA se re-emiten siempre
-# (el comportamiento cambió), y los blocking están justamente siendo
-# corregidos. requirements_uncovered sigue en -1: el reviewer lo re-declara.
+# conserva verdict ni blocking: el veredicto se re-emite siempre y los blocking
+# están justamente siendo corregidos. requirements_uncovered sigue en -1: el
+# reviewer lo re-declara.
+#
+# QA es el caso especial, y hasta acá el mecanismo contradecía al prompt:
+# /review promete "QA solo se repite si el fix tocó comportamiento que QA
+# ejercita", y este script mandaba qa:"pending" SIEMPRE. Como check_verdict
+# bloquea con qa != pass, la promesa era incumplible y cada ronda de rework
+# pagaba un ciclo de QA entero, aunque el fix fuera un nil check.
+#
+# Se mecaniza con una DECLARACIÓN, no con una adivinanza: qa-<repo>.json puede
+# traer `surface: ["ruta", ...]` con lo que ejercita. Si el delta no toca nada
+# de esa superficie, el pass se arrastra marcado. Sin `surface` no se arrastra
+# nada: fail-closed, igual que antes.
 if [ "$REBASE" -eq 1 ]; then
   changed="$(git -C "$WT" diff --name-only "$PREV_COMMIT" "$HEAD" 2>/dev/null \
     | jq -Rsc 'split("\n") | map(select(length > 0))')"
@@ -199,6 +232,35 @@ if [ "$REBASE" -eq 1 ]; then
       echo "❌ no pude rebasear el juicio previo (¿veredicto corrupto?)"
       echo "   ↳ remediación: --force"; exit 3; }
   mv "$reb" "$tmp"
+
+  # QA: se arrastra el pass SOLO si su superficie declarada quedó fuera del delta.
+  QA_FILE="$WS/tasks/$TASK/qa-$REPO.json"
+  if [ -f "$QA_FILE" ] && [ "$(jq -r '.qa // ""' "$QA_FILE" 2>/dev/null)" = "pass" ]; then
+    qa_prev_commit="$(jq -r '.commit // ""' "$QA_FILE" 2>/dev/null)"
+    if [ "$qa_prev_commit" != "$PREV_COMMIT" ]; then
+      echo "  qa: NO se arrastra (el qa-$REPO.json es del commit ${qa_prev_commit:0:12}, no del veredicto previo)"
+    elif ! jq -e '(.surface | type) == "array" and (.surface | length) > 0' "$QA_FILE" >/dev/null 2>&1; then
+      echo "  qa: NO se arrastra (qa-$REPO.json no declara surface[]); QA se re-corre"
+      echo "     ↳ para permitir el arrastre, QA declara qué ejercita:"
+      echo '       {"qa":"pass", ..., "surface":["internal/http/","web/src/checkout/"]}'
+    else
+      qa_touched="$(jq -n --slurpfile qa "$QA_FILE" --argjson changed "$changed" '
+        ($qa[0].surface // []) as $s
+        | [ $changed[] | . as $c
+            | select($s | any(. as $x
+                | ($c | startswith($x)) or ($c | endswith($x))
+                or (($c | split("/") | last) == ($x | split("/") | last)))) ]' )"
+      if [ "$(printf '%s' "$qa_touched" | jq 'length')" -eq 0 ]; then
+        jq --arg from "$PREV_COMMIT" \
+           '.qa = "pass" | .qa_carried_from = $from
+            | .evidence_qa_stale = true' "$tmp" > "$tmp.qa" && mv "$tmp.qa" "$tmp"
+        echo "  qa: pass ARRASTRADO desde ${PREV_COMMIT:0:12} (el delta no tocó su surface declarada)"
+      else
+        echo "  qa: se re-corre — el delta tocó su superficie: $(printf '%s' "$qa_touched" | jq -r 'join(", ")')"
+      fi
+    fi
+  fi
+
   carried="$(jq '[.compliance[] | select(.rejudge | not)] | length' "$tmp")"
   rejudge="$(jq '[.compliance[] | select(.rejudge)] | length' "$tmp")"
   echo "↻ rebase desde ${PREV_COMMIT:0:12}: $(printf '%s' "$changed" | jq 'length') archivos en el delta"

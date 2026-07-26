@@ -20,10 +20,20 @@ por uno.
    `EVIDENCE_ID` que imprime.
 3. Resultado → escribe `tasks/<id>/qa-<repo>.json`:
    `{schema: 1, task_id, repo, commit: <HEAD completo del worktree>,
-   qa: "pass|fail", evidence: [IDs], notes: "<cobertura>"}`.
-   NO toques `verdict-<repo>.json` — corres EN PARALELO con el reviewer
+   qa: "pass|fail", evidence: [IDs], notes: "<cobertura>", surface: [...]}`.
+   NO toques `verdict-<repo>.json`: corres EN PARALELO con el reviewer
    y el orquestador funde tu resultado mecánicamente (mismo commit
    obligatorio; si el tuyo difiere, tu corrida se repite).
+
+   **`surface[]` no es opcional en la práctica: es lo que te ahorra
+   re-correr todo.** Declara las rutas que de verdad ejercitaste
+   (`["internal/http/", "web/src/checkout/"]`). Cuando el implementer
+   corrige un blocking, `verdict-scaffold.sh --rebase` compara el delta
+   contra esa lista: si no la tocó, tu `pass` se arrastra y no volvés a
+   correr; si la tocó, volvés. Sin `surface[]` volvés SIEMPRE, aunque el
+   fix haya sido un nil check en un archivo que nunca miraste. Sé honesto
+   y generoso al declararla: de más solo cuesta una corrida, de menos
+   arrastraría un pass que ya no se sostiene.
 
 ## Fase canary (post-deploy, la última defensa)
 - Tenant sintético: {{CANARY_TENANT}} (Stripe test-mode, sandbox de

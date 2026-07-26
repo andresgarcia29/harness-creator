@@ -210,17 +210,72 @@ def verify_one(task_dir: Path, evidence_id: str, repo: str, commit: str) -> dict
     return data
 
 
+def fresh_evidence(task_dir: Path, repo: str, commit: str) -> list:
+    """Evidencia del task_dir sellada contra ``commit``, sin pasar por el veredicto.
+
+    POR QUÉ NO SE PIDE QUE ESTÉ EN ``verdict.evidence[]``: el veredicto es
+    inmutable después del review, así que no puede citar una evidencia que se
+    produce DESPUÉS, en el ship, sobre el árbol ya integrado con el trunk
+    nuevo.  Son dos afirmaciones distintas y el contrato las tenía confundidas
+    en una sola:
+
+      · evidencia REVISADA  → "el reviewer juzgó con pruebas reales de lo que
+        juzgó".  Se valida contra el commit que el veredicto declara.
+      · evidencia FRESCA    → "el árbol que se pushea pasó la suite".  Se valida
+        contra el HEAD que va a aterrizar, y la produce ship.sh.
+
+    Confundirlas obligaba a re-revisar (juicio de LLM, minutos) cada vez que se
+    movía el trunk, cuando lo único que hacía falta era re-correr los tests
+    (determinista, gratis en tokens)."""
+    found = []
+    evidence_dir = task_dir / "evidence"
+    if not evidence_dir.is_dir():
+        return found
+    for path in sorted(evidence_dir.glob("EV-*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue          # un manifiesto ilegible no cuenta como prueba
+        if not isinstance(data, dict):
+            continue
+        if data.get("id") != path.stem:
+            continue          # id falsificado: fuera (mismo criterio que el scaffold)
+        checks = {
+            "schema": SCHEMA, "task_id": task_dir.name, "repo": repo,
+            "commit": commit, "commit_after": commit, "exit_code": 0,
+        }
+        if any(data.get(field) != wanted for field, wanted in checks.items()):
+            continue
+        if not isinstance(data.get("runner"), str) or not data["runner"].strip():
+            continue
+        output = data.get("output")
+        if not isinstance(output, str) or not output:
+            continue
+        try:
+            output_path = contained(task_dir, task_dir / output)
+        except SystemExit:
+            continue
+        if not output_path.is_file() or sha256(output_path) != data.get("output_sha256"):
+            continue          # el log no respalda al manifiesto
+        found.append(data)
+    return found
+
+
 def command_verify(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     verdict = load_json(Path(args.verdict), "veredicto")
+    # Sin --reviewed-commit el comportamiento es el histórico: la evidencia
+    # revisada tiene que ser del mismo commit que se pushea.
+    reviewed = args.reviewed_commit or args.commit
     if verdict.get("schema") != SCHEMA:
         die("el veredicto debe declarar schema: 1", 3)
     if verdict.get("task_id") != task_dir.name:
         die("task_id del veredicto no coincide", 3)
     if verdict.get("repo") != args.repo:
         die("repo del veredicto no coincide", 3)
-    if verdict.get("commit") != args.commit:
-        die("el veredicto pertenece a otro commit", 3)
+    if verdict.get("commit") != reviewed:
+        die(f"el veredicto pertenece a otro commit (declara {verdict.get('commit')!r}, "
+            f"se esperaba {reviewed!r})", 3)
     evidence_ids = verdict.get("evidence")
     if not isinstance(evidence_ids, list) or not evidence_ids:
         die("el veredicto no referencia evidence[]", 3)
@@ -230,13 +285,35 @@ def command_verify(args: argparse.Namespace) -> int:
         if not isinstance(evidence_id, str) or evidence_id in seen:
             die("evidence[] contiene IDs inválidos o duplicados", 3)
         seen.add(evidence_id)
-        manifests.append(verify_one(task_dir, evidence_id, args.repo, args.commit))
+        manifests.append(verify_one(task_dir, evidence_id, args.repo, reviewed))
     required = set(args.require_kind)
     present = {item.get("kind") for item in manifests}
     missing = sorted(required - present)
     if missing:
         die(f"faltan tipos de evidencia: {', '.join(missing)}", 3)
-    print(f"✅ {len(manifests)} evidencias ligadas a {args.repo}@{args.commit[:12]}")
+
+    # ── Evidencia FRESCA sobre el árbol que realmente se pushea ──────────
+    # Solo se exige cuando el commit revisado NO es el que aterriza (o cuando
+    # quien llama lo pide explícito).  Fail-closed: sin ella no se pushea.
+    fresh_required = set(args.require_fresh_kind)
+    if fresh_required:
+        fresh = fresh_evidence(task_dir, args.repo, args.commit)
+        fresh_kinds = {item.get("kind") for item in fresh}
+        gaps = sorted(fresh_required - fresh_kinds)
+        if gaps:
+            die(f"falta evidencia FRESCA sobre el árbol que se pushea "
+                f"({args.repo}@{args.commit[:12]}): {', '.join(gaps)}. "
+                "El veredicto se revisó sobre otro commit, así que la prueba de "
+                "que ESTE árbol pasa la suite tiene que producirse ahora: "
+                "evidence.py run --runner ship --kind test ... sobre el HEAD actual", 3)
+        print(f"✅ evidencia fresca sobre {args.repo}@{args.commit[:12]}: "
+              f"{', '.join(sorted(k for k in fresh_kinds if k in fresh_required))} "
+              f"(runners: {', '.join(sorted({str(i.get('runner')) for i in fresh}))})")
+    if reviewed != args.commit:
+        print(f"✅ {len(manifests)} evidencias del review ligadas a {args.repo}@{reviewed[:12]} "
+              f"(el árbol que se pushea es {args.commit[:12]})")
+    else:
+        print(f"✅ {len(manifests)} evidencias ligadas a {args.repo}@{args.commit[:12]}")
     return 0
 
 
@@ -254,9 +331,17 @@ def parser() -> argparse.ArgumentParser:
     verify = sub.add_parser("verify", help="verifica evidencia citada por un veredicto")
     verify.add_argument("--task-dir", required=True)
     verify.add_argument("--repo", required=True)
-    verify.add_argument("--commit", required=True)
+    verify.add_argument("--commit", required=True,
+                        help="el HEAD que se pushea (el árbol integrado)")
+    verify.add_argument("--reviewed-commit", default=None,
+                        help="el commit que el veredicto declara haber revisado; "
+                             "si se omite, se exige que sea el mismo que --commit")
     verify.add_argument("--verdict", required=True)
-    verify.add_argument("--require-kind", action="append", default=[])
+    verify.add_argument("--require-kind", action="append", default=[],
+                        help="tipos exigidos en la evidencia CITADA por el veredicto")
+    verify.add_argument("--require-fresh-kind", action="append", default=[],
+                        help="tipos exigidos sobre el HEAD que se pushea, "
+                             "sin necesidad de estar citados en el veredicto")
     verify.set_defaults(func=command_verify)
     return root
 

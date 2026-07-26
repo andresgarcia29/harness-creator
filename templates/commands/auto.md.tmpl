@@ -35,8 +35,13 @@ un `task-id` de una corrida previa.
 
 **B · Prompt literal** — cualquier otra cosa. Es el enunciado completo
 del trabajo y no habrá aclaraciones. Entonces:
-1. `id = AUTO-$(date +%Y%m%d)-<slug-de-3-palabras>` (verifica que no
-   exista; sufija `-2` si choca).
+1. `id = AUTO-$(date +%Y%m%d)-<slug-de-3-palabras>-$(id -un | cut -c1-4)`
+   (verifica que no exista localmente; sufija `-2` si choca).
+   **El sufijo de identidad no es adorno.** El chequeo de colisión solo ve el
+   `tasks/` de ESTA máquina, y el trailer `Task: <id>` viaja al main que
+   comparten todos los workspaces: dos personas con prompts parecidos el mismo
+   día producían el mismo id, y la trazabilidad (y `/archive`) mezclaba dos
+   trabajos distintos bajo una sola clave, para siempre.
 2. Escribe `tasks/<id>/task.md` con el formato de `docs/harness/intake.md`
    y `origin: prompt` en el frontmatter, **incluyendo `title:`** (verbo +
    resultado observable, el mismo del heading): el panel lee ese campo y
@@ -85,10 +90,14 @@ al blast radius, no al revés. Clasifica con señales DETERMINISTAS
   --to <carril> --actor orchestrator` y entra por `/rfc`. El worktree y
   los commits se conservan; solo se recupera la deliberación saltada.
 
-**El mini-plan express** (lo escribes tú, sin lanzar architect ni abogados —
-ya tienes todo el contexto en esta sesión). **Piénsalo en modo ultrathink
-aunque sea corto**: express recorta sesiones LLM, no profundidad de
-decisión, y un mini-plan flojo se paga igual en rondas de review.
+**El mini-plan express** (lo escribes tú, sin lanzar architect ni abogados:
+ya tienes todo el contexto en esta sesión). Es corto a propósito y NO lleva
+ultrathink: el carril express existe porque el blast radius es chico (1 repo,
+1 dominio, cero contratos), y razonar hondo sobre un cambio de un archivo
+compra latencia sin comprar decisión. Lo que sí tiene que cumplir es no dejar
+huecos, y de eso se ocupa `plan-lint.sh`, que cuesta cero. Si al escribirlo
+descubrís que la decisión NO es obvia, esa es la señal de que el carril está
+mal clasificado: escalá, no pienses más fuerte.
 - `tasks/<id>/plan.md`: 1 tarea en el formato de bloque `### T1 · <repo> ·
   <título>` con repo/req/archivos/criterios/complexity/deps (el mismo que
   usa el architect; lo verifica plan-lint). Los archivos salen del grafo,
@@ -221,9 +230,19 @@ Reglas del ledger, en orden de precedencia:
    - **Si nada califica, no preguntes.** Dilo en una línea y sigue.
      Fabricar preguntas para parecer diligente es la forma más cara de
      perder el tiempo de alguien, y convierte esta fase en ceremonia.
-   Cuando haya preguntas: `scripts/harness-policy.py pause tasks/<id>
-   --reason enrichment_questions --detail "<n> preguntas"` y emítelas.
-   Al reanudar, incorpora las respuestas.
+
+   **Preguntar NO es parar.** Emite las preguntas con sus defaults y SIGUE
+   trabajando con esos defaults, registrando cada uno en el ledger de
+   supuestos. El humano corrige en vuelo si no le gusta alguno; el costo de
+   corregir un supuesto reversible son minutos, y el costo de una parada
+   abierta esperando a alguien que no está mirando la consola son horas. Por
+   eso cada pregunta DEBE traer su default: sin default no es una pregunta,
+   es un bloqueo disfrazado.
+
+   La única excepción es `assumptions_ok: false` en el frontmatter del panel
+   (paso 0.4): ahí el humano pidió explícitamente que no asumas, y entonces sí
+   `scripts/harness-policy.py pause tasks/<id> --reason enrichment_questions
+   --detail "<n> preguntas"` y esperás. Al reanudar, incorpora las respuestas.
 
    1d. **Enriquece.** Reescribe `tasks/<id>/task.md` con lo aprendido:
    criterios verificables, fuera de scope explícito, y el contexto del
@@ -264,14 +283,17 @@ Reglas del ledger, en orden de precedencia:
    barrera: T1 en review mientras T4 se implementa). Precheck rojo
    vuelve al implementer y NO cuenta como ronda: el reviewer no vio nada.
 4. **Review**. Reviewer (veredicto + compliance matrix) y qa (ejercita
-   los criterios) **EN PARALELO** — qa no espera el veredicto; el merge
+   los criterios) **EN PARALELO**: qa no espera el veredicto; el merge
    del campo `qa` es mecánico (ver /review). Al entrar solicita
-   `implement → review`. El reviewer entrega su lista de blocking
-   COMPLETA en la ronda 1 y los `non_blocking` se vuelven beads, no
-   rondas. Loops fail→fix vuelven mediante
-   `review → implement → review`; policy cuenta y limita las rondas. El
-   re-review es INCREMENTAL: el reviewer re-evalúa el diff desde su
-   veredicto anterior + los blocking, no el cambio completo otra vez.
+   `implement → review --repo <repo>`. **El `--repo` es obligatorio**: el
+   presupuesto de rondas se cuenta por repo, y sin él una tarea de tres repos
+   con un fix normal en cada uno agota el presupuesto y escala a humano sin
+   que nada esté mal. El reviewer entrega su lista de blocking COMPLETA en la
+   ronda 1 y los `non_blocking` se vuelven beads, no rondas. Loops fail→fix
+   vuelven mediante `review → implement → review --repo <repo>`; policy cuenta
+   y limita. El re-review es INCREMENTAL: el reviewer re-evalúa el diff desde
+   su veredicto anterior + los blocking, no el cambio completo otra vez, y QA
+   solo se repite si el delta tocó su `surface[]`.
    Toda prueba que sustenta un pass usa `scripts/evidence.py run`.
 5. **Checkpoint** — SOLO si `autonomy: checkpoint` en
    harness-answers.yaml: un resumen de 10 líneas antes del PRIMER ship
@@ -280,6 +302,11 @@ Reglas del ledger, en orden de precedencia:
    repos NO pausas: expand/contract hace seguro el orden. Gate rojo →
    máx 2 rondas de autofix (el error del gate ES el prompt del fix).
    Tras todos los repos verdes solicita `review → ship`.
+   **Perder la carrera de push contra otro workspace NO es un gate rojo.**
+   `ship.sh` reintenta solo, con backoff y jitter, hasta 20 veces: no lo
+   interrumpas ni cuentes eso como ronda de autofix. Y si el trunk se movió
+   entre el review y el push, el veredicto sobrevive mientras el CAMBIO sea el
+   mismo (`patch_id`): el que se re-corre es el test, no el reviewer.
 7. **Deploy-watch**. 🟢 sigue el DAG. 🔴 **rollback PRIMERO**,
    diagnóstico después. Al iniciar solicita `ship → deploy`.
 8. **Archive**. Fusiona el delta-spec en la spec maestra, cierra el

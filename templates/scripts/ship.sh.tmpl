@@ -25,14 +25,31 @@
 set -euo pipefail
 
 PRECHECK=0
-if [ "${1:-}" = "--precheck" ]; then PRECHECK=1; shift; fi
+LANG_ONLY=0
+case "${1:-}" in
+  --precheck)   PRECHECK=1; shift ;;
+  # Modo interno: corre SOLO los gates de lenguaje y sale. Existe para que
+  # evidence.py pueda ejecutarlos como un comando y sellar su salida contra el
+  # commit exacto (ver run_lang_gates_sealed). No es parte de la interfaz.
+  --lang-gates) LANG_ONLY=1; shift ;;
+esac
 TASK="${1:?uso: ship.sh [--precheck] <task-id> <repo>}"
 REPO="${2:?uso: ship.sh [--precheck] <task-id> <repo>}"
 WS="$(cd "$(dirname "$0")/.." && pwd)"
 WT="$WS/worktrees/$TASK/$REPO"
 
 BASE="$WS/repos/$REPO"
-MAX_RETRY={{LOOP_BUDGET}}
+# ── DOS PRESUPUESTOS QUE NO TIENEN NADA QUE VER ───────────────────────
+# Antes los dos salían de {{LOOP_BUDGET}}, que son las RONDAS DE REVIEW (juicio
+# de LLM). Perder una carrera de push contra otro workspace no es una ronda de
+# review: es contención mecánica, y con varias personas pusheando al mismo
+# trunk es rutina. Con loop_budget=3, tres movimientos de main en una ventana
+# ocupada agotaban el "presupuesto" y escalaban a humano sin que nada
+# estuviera roto.
+PUSH_RETRY_BUDGET="${HARNESS_PUSH_RETRIES:-20}"
+# Backoff con JITTER: sin él, N workspaces que pierden la misma carrera
+# reintentan en fase y se vuelven a pisar (manada). El jitter los desincroniza.
+PUSH_BACKOFF_MAX="${HARNESS_PUSH_BACKOFF_MAX:-30}"
 # El flujo a main que el humano eligió en la entrevista. Este script SOLO
 # implementa trunk direct-to-prod: hace `git push origin HEAD:$BASE_REF`. Las
 # otras dos respuestas (trunk-staging, prs) se ofrecían, se registraban en
@@ -135,6 +152,41 @@ stamp_precheck() {  # stamp_precheck <ok:true|false>: sello que /review lee
     "$TASK" "$REPO" "$head" "$ok" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     > "$WS/tasks/$TASK/precheck-$REPO.json"
 }
+# ── Procedencia: qué harness, de qué máquina, con qué gates ───────────
+# Con varios workspaces, los gates corren en la laptop del que pushea y NADA
+# en el remoto compartido dice cuál de ellos, con qué versión ni con qué set de
+# reglas. Un workspace atrasado (o retocado) shippea con gates más débiles y su
+# commit en main queda indistinguible de los demás.
+#
+# Una git note lo deja auditable DESDE EL REMOTO sin reescribir la historia
+# (que rompería el patch_id y de paso el trailer). Es best-effort a propósito:
+# no poder anotar la procedencia no es motivo para deshacer un push que ya
+# pasó todos los gates. La solución de fondo es correr los gates en CI
+# (flow: prs), donde este problema deja de existir por construcción.
+stamp_provenance() {  # stamp_provenance <sha-completo>
+  local sha="$1" ver="?" man="?" who
+  # `if` y no `[ ... ] && VAR=...`: es la regla de la casa por el set -e, y ya
+  # costó un exit 128 sin una línea de salida en este mismo archivo.
+  if [ -f "$WS/harness-answers.yaml" ]; then
+    ver="$(awk -F'"' '/^harness_version:/ {print $2; exit}' "$WS/harness-answers.yaml" 2>/dev/null || echo "?")"
+  fi
+  # El digest del set de templates vive en `.harness-templates` de la INSTANCIA,
+  # que es lo que escribe el generador. `templates/MANIFEST.sha256` es la ruta
+  # del repo del PLUGIN y en una instancia no existe: leerla de ahí habría
+  # dejado siempre "?" y la nota de procedencia no habría servido para lo único
+  # que existe, distinguir un workspace atrasado de uno al día.
+  if [ -f "$WS/.harness-templates" ]; then
+    man="$(tr -d ' \n' < "$WS/.harness-templates" 2>/dev/null | cut -c1-16 || echo "?")"
+  fi
+  who="$(id -un 2>/dev/null || echo "?")@$(hostname -s 2>/dev/null || echo "?")"
+  git notes --ref=harness add -f -m "harness_version: $ver
+gates_manifest: $man
+workspace: $who
+task: $TASK" "$sha" >/dev/null 2>&1 || return 0
+  git push origin refs/notes/harness >/dev/null 2>&1 \
+    || echo "   ℹ️  procedencia anotada localmente; no pude publicarla (git push origin refs/notes/harness)"
+}
+
 on_exit() {
   local rc=$?
   [ -n "$LOCK_HELD" ] && rm -rf "$LOCKDIR"
@@ -491,6 +543,15 @@ run_lang_gates() {
   if [ -f buf.yaml ]; then
     LANG_SEEN=1
     gate buf
+    # LA BASELINE TAMBIÉN ENVEJECE. `--against` lee los refs del clon canónico
+    # (repos/<repo>), que solo se refrescan cuando alguien corre pull-all.sh,
+    # mientras que el worktree se fetchea en CADA ship. Con varias personas
+    # pusheando al mismo trunk, los dos "main" divergen en minutos y este gate
+    # empieza a comparar contra un pasado: puede acusar como NUEVAS violaciones
+    # que ya están en main, o dejar pasar un breaking real contra el main de
+    # verdad. Un fetch acá cuesta segundos y vale la comparación entera.
+    git -C "$BASE" fetch origin --quiet 2>/dev/null \
+      || echo "⚠️  no pude refrescar la baseline de $REPO (offline): buf compara contra los refs locales de repos/$REPO, que pueden estar atrás"
     # breaking: SIEMPRE duro (--against apunta al gitdir del clon base)
     buf breaking --against "$BASE/.git#branch=origin/$BASE_REF"
     # lint: RATCHET — solo violaciones NUEVAS respecto a main bloquean.
@@ -523,6 +584,75 @@ run_lang_gates() {
     echo "   un eje sin implementación es un vendor cableado (CONTRIBUTING #8)."
     emit assumption "$REPO NO compilado ni testeado: run_lang_gates no reconoce su stack"
   fi
+}
+
+# ── La corrida de gates de lenguaje, SELLADA como evidencia ───────────
+# POR QUÉ: la suite completa se corría CUATRO veces por tarea sin un solo
+# rework: (1) el precheck del implementer, (2) su evidence.py run, (3) el QA
+# determinista, (4) este gate en el ship. Las cuatro sobre el mismo código.
+# run_lang_gates ya compila, typechequea y corre la suite; sellar SU salida es
+# evidencia real y no cuesta una corrida extra.
+#
+# En SHIP el sello importa por otra razón además: tras el rebase el árbol es
+# otro (trae los commits ajenos que aterrizaron) y ninguna prueba anterior
+# habla de él. Esta es la única que sí.
+#
+# No afloja la separación de roles, la refuerza: hasta ahora la única prueba la
+# producía el implementer, que es parte interesada; ahora el verificador
+# determinista produce la suya. `implementation_agents` sigue saliendo del
+# veredicto, y verdict-scaffold.sh excluye a "ship" de ese campo para que un
+# ship previo no pueda contaminarlo.
+run_lang_gates_sealed() {
+  local runner dirty
+  if [ "${PRECHECK:-0}" -eq 1 ]; then
+    runner="${HARNESS_EVIDENCE_RUNNER:-implementer}"
+  else
+    runner="ship"
+  fi
+  # La evidencia exige árbol limpio (evidence.py se niega, y con razón: sellar
+  # con cambios sin commitear certifica código que no es el que corrió). En
+  # precheck eso es normal a mitad de trabajo, así que se degrada a la corrida
+  # de siempre y se DICE: no sellar es perder una comodidad, fingir un sello
+  # sería perder la prueba.
+  dirty="$(git -C "$WT" status --porcelain -uno 2>/dev/null || echo "?")"
+  if [ -n "$dirty" ]; then
+    if [ "${PRECHECK:-0}" -eq 1 ]; then
+      echo "→ árbol con cambios sin commitear: corro los gates SIN sellar evidencia"
+      echo "  (commitea y re-corre el precheck para que el sello salga de acá y"
+      echo "   no tengas que correr la suite otra vez con evidence.py)"
+    fi
+    run_lang_gates
+    return $?
+  fi
+  if [ ! -f "$WS/scripts/evidence.py" ]; then
+    run_lang_gates; return $?
+  fi
+  echo "→ gates de lenguaje sellados como evidencia (runner: $runner)"
+  local out evrc=0
+  out="$(python3 "$WS/scripts/evidence.py" run \
+    --task-dir "$WS/tasks/$TASK" --repo "$REPO" --runner "$runner" \
+    --kind test --cwd "$WT" \
+    -- bash "$WS/scripts/ship.sh" --lang-gates "$TASK" "$REPO" 2>&1)" || evrc=$?
+  printf '%s\n' "$out"
+
+  # ── UN SELLO QUE NO PROBÓ NADA ES PEOR QUE NO TENER SELLO ───────────
+  # Si run_lang_gates no reconoció el stack, no compiló ni testeó NADA, y aun
+  # así acuñaríamos un EV-TEST con exit_code 0. Ese manifiesto es justo el que
+  # satisface `--require-fresh-kind test`, o sea que el gate de frescura
+  # pasaría sin que ningún test haya corrido: el verde silencioso exacto que
+  # este archivo persigue en todos lados. Se borra y se declara.
+  if [ "$(cat "$WS/tasks/$TASK/.langseen-$REPO" 2>/dev/null || echo 1)" = "0" ]; then
+    local evid
+    evid="$(printf '%s\n' "$out" | sed -n 's/^EVIDENCE_ID=//p' | tail -1)"
+    if [ -n "$evid" ]; then
+      rm -f "$WS/tasks/$TASK/evidence/$evid.json" "$WS/tasks/$TASK/evidence/$evid.log"
+      echo "⚠️  NO sello evidencia de $REPO: el gate no reconoció su stack, así que"
+      echo "   no compiló ni testeó nada. Un EV-TEST de una corrida vacía diría"
+      echo "   'este árbol pasa la suite' sin que ninguna suite haya corrido."
+      emit assumption "$REPO sin evidencia de test: run_lang_gates no reconoce su stack"
+    fi
+  fi
+  return $evrc
 }
 
 run_security_gates() {
@@ -743,13 +873,75 @@ check_verdict() {
 gate_policy_and_evidence() {
   gate "policy + evidencia v1"
   local v="$WS/tasks/$TASK/verdict-$REPO.json"
-  local head
+  local head pid base_moved out reviewed
   head="$(git rev-parse HEAD)"
-  python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" \
-    validate-ship "$WS/tasks/$TASK" --commit "$head" --verdict "$v"
+
+  # La identidad del CAMBIO (no la del commit). Con varias personas pusheando
+  # al mismo trunk, el rebase de más abajo reescribe los SHA sin tocar el
+  # contenido: exigir SHA idéntico tiraba el review y el QA por un movimiento
+  # que el reviewer nunca miró. Ver scripts/change-id.sh.
+  pid="$(bash "$WS/scripts/change-id.sh" "$WT" "$BASE_REF" 2>/dev/null || true)"
+
+  # Cuánto avanzó la base desde lo que se revisó: el juicio caduca en el
+  # tiempo, no solo en el texto. Best-effort (el commit viejo puede haber sido
+  # recolectado); si no se puede medir, policy aplica solo la ventana temporal.
+  base_moved=""
+  reviewed="$(jq -r '.commit // ""' "$v" 2>/dev/null || true)"
+  if [ -n "$reviewed" ] && git cat-file -e "$reviewed^{commit}" 2>/dev/null; then
+    base_moved="$(git rev-list --count "$reviewed..origin/$BASE_REF" 2>/dev/null || true)"
+  fi
+
+  out="$(python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" \
+    validate-ship "$WS/tasks/$TASK" --commit "$head" --verdict "$v" \
+    ${pid:+--patch-id "$pid"} ${base_moved:+--base-moved "$base_moved"})" || return 1
+  printf '%s\n' "$out"
+
+  # El commit revisado lo declara policy, no lo re-derivamos: dos derivaciones
+  # del mismo hecho es una oportunidad de divergir.
+  reviewed="$(printf '%s\n' "$out" | sed -n 's/^REVIEWED_COMMIT=//p' | tail -1)"
+  [ -n "$reviewed" ] || reviewed="$head"
+
+  # Los tipos exigidos salen del POLICY, no cableados acá. `required_evidence_kinds`
+  # y `require_fresh_evidence` se declaraban en harness-policy.json y no los leía
+  # nadie: editarlos no hacía nada, en silencio. Misma clase de perilla muerta
+  # que `flow`, ya corregida arriba.
+  local kinds kind kind_flags="" fresh_flags=""
+  kinds="$(python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" \
+    evidence-policy --field required_evidence_kinds 2>/dev/null || echo test)"
+  local want_fresh
+  want_fresh="$(python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" \
+    evidence-policy --field require_fresh_evidence 2>/dev/null || echo true)"
+  for kind in $kinds; do
+    kind_flags="$kind_flags --require-kind $kind"
+    # La evidencia FRESCA solo se exige cuando el árbol que se pushea NO es el
+    # que se revisó: ahí la prueba vieja ya no habla de este árbol. Cuando
+    # coinciden, la evidencia citada YA es la fresca y pedirla dos veces sería
+    # ceremonia.
+    #
+    # Y solo para `test`, que es lo que ship PUEDE demostrar por sí mismo
+    # (sella su corrida de run_lang_gates: build + typecheck + suite). Exigir
+    # fresco un kind que ship no produce sería un gate imposible de satisfacer,
+    # o sea la parada de ceremonia que este repo ya persiguió en otros lados.
+    if [ "$reviewed" != "$head" ] && [ "$want_fresh" = "true" ] && [ "$kind" = "test" ]; then
+      # Un repo cuyo stack el gate no reconoce NO PUEDE producir esta prueba, y
+      # exigírsela lo volvería imposible de shippear en cuanto el trunk se
+      # mueva. Tampoco se finge que está verificado: se declara el hueco, que
+      # es lo que la casa ya hace con este mismo caso en run_lang_gates.
+      if [ "$(cat "$WS/tasks/$TASK/.langseen-$REPO" 2>/dev/null || echo 1)" = "0" ]; then
+        echo "⚠️  el árbol integrado de $REPO NO se pudo verificar: su stack no lo"
+        echo "   reconoce ningún gate de lenguaje, así que no hay suite que correr"
+        echo "   sobre el merge con los commits ajenos que aterrizaron."
+        emit assumption "$REPO: merge result NO verificado (sin stack reconocido) al reusar veredicto"
+      else
+        fresh_flags="$fresh_flags --require-fresh-kind $kind"
+      fi
+    fi
+  done
+
+  # shellcheck disable=SC2086
   python3 "$WS/scripts/evidence.py" verify \
     --task-dir "$WS/tasks/$TASK" --repo "$REPO" --commit "$head" \
-    --verdict "$v" --require-kind test
+    --reviewed-commit "$reviewed" --verdict "$v" $kind_flags $fresh_flags
 }
 
 # ── Gates en paralelo ─────────────────────────────────────────────────
@@ -800,7 +992,7 @@ run_parallel_gates() {
   else
     echo "── gates en paralelo: lang ∥ security ∥ tests ∥ veredicto ──"
   fi
-  par lang      run_lang_gates
+  par lang      run_lang_gates_sealed
   par security  run_security_gates
   par tests     gate_tests_untouched
   [ "${PRECHECK:-0}" -eq 1 ] || par veredicto check_verdict gate_evidence gate_policy_and_evidence
@@ -820,14 +1012,48 @@ run_parallel_gates() {
   fi
 }
 
+# ── Modo interno --lang-gates ─────────────────────────────────────────
+# Va acá, después de TODAS las definiciones de función, porque bash resuelve
+# funciones en tiempo de ejecución. Sin lock, sin rebase, sin veredicto:
+# solo la corrida que evidence.py va a sellar.
+if [ "$LANG_ONLY" -eq 1 ]; then
+  cd "$WT"
+  lrc=0
+  run_lang_gates || lrc=$?
+  # El padre necesita saber si esto VERIFICÓ algo para decidir si el sello de
+  # evidencia es honesto. Corre en otro proceso, así que el dato viaja por
+  # disco. Sin esto, un repo sin stack reconocido acuñaba un EV-TEST vacío.
+  printf '%s' "${LANG_SEEN:-0}" > "$WS/tasks/$TASK/.langseen-$REPO" 2>/dev/null || true
+  exit "$lrc"
+fi
+
 # ── Precheck: los gates mecánicos ANTES de gastar una ronda de review ─
 # Sin lock (no toca main), sin rebase (no reescribe la historia del
 # implementer) y sin veredicto. Solo responde una pregunta: ¿este worktree
 # pasaría hoy los gates que no dependen de juicio humano ni de review?
+#
+# TRAILER Y CARRIL TAMBIÉN VAN ACÁ. Antes vivían SOLO en el camino de ship, o
+# sea que un commit sin `Task:` o un express que tocó un .proto se descubrían
+# después de pagar review y QA completos. Los dos son operaciones de git que
+# cuestan milisegundos, y el carril rojo es el retroceso más caro del pipeline
+# (escala de carril → vuelta a /rfc → re-planear → re-implementar). Descubrirlo
+# en el momento de máximo costo hundido era el peor orden posible.
+gate_entry_precheck() {
+  local total
+  total="$(git rev-list --count "origin/$BASE_REF..HEAD" 2>/dev/null || echo 0)"
+  if [ "${total:-0}" -eq 0 ]; then
+    echo "ℹ️  todavía no hay commits sobre origin/$BASE_REF: sin trailer ni carril que verificar."
+    return 0
+  fi
+  gate_trailer
+  gate_lane
+}
+
 if [ "$PRECHECK" -eq 1 ]; then
   cd "$WT"
   git fetch origin --quiet 2>/dev/null || true   # fail-open: sin red, compara contra el origin/$BASE_REF local
   echo "══ precheck $REPO (task $TASK) ══"
+  gate_entry_precheck
   run_parallel_gates
   stamp_precheck true
   emit gate "precheck de $REPO verde, listo para review" true
@@ -840,27 +1066,51 @@ fi
 acquire_lock
 cd "$WT"
 attempt=0
-while [ "$attempt" -lt "$MAX_RETRY" ]; do
+while [ "$attempt" -lt "$PUSH_RETRY_BUDGET" ]; do
   attempt=$((attempt+1))
-  echo "══ ship $REPO (task $TASK) intento $attempt/$MAX_RETRY ══"
+  echo "══ ship $REPO (task $TASK) intento $attempt/$PUSH_RETRY_BUDGET ══"
   git fetch origin
   git rebase origin/$BASE_REF || { git rebase --abort; echo "❌ conflicto de rebase — resuélvelo en el worktree $WT"; exit 4; }
   gate_trailer
   gate_lane
   run_parallel_gates
   if git push origin HEAD:$BASE_REF; then
-    sha="$(git rev-parse --short HEAD)"
-    echo "{\"repo\":\"$REPO\",\"sha\":\"$sha\",\"shipped_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" >> "$WS/tasks/$TASK/ship.log"
+    sha="$(git rev-parse HEAD)"          # COMPLETO: deploy-watch lo compara
+    short="$(git rev-parse --short HEAD)" # contra el headSha de la API del forge,
+                                          # que siempre viene completo. Con el sha
+                                          # corto la comparación no matcheaba nunca.
+    echo "{\"repo\":\"$REPO\",\"sha\":\"$sha\",\"short\":\"$short\",\"shipped_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" >> "$WS/tasks/$TASK/ship.log"
+    stamp_provenance "$sha"
     # Cierra el último gate ANTES de anunciar el ship: si lo dejara al trap,
     # el "veredicto ✅" saldría en el bus DESPUÉS del "shippeé" y la historia
     # tendría el penúltimo paso después del último.
     [ -n "${CURRENT_GATE:-}" ] && emit gate "$CURRENT_GATE" true && CURRENT_GATE=""
-    emit ship "$REPO @ $sha — pasó los gates y está en main" true
-    echo "✅ shipped $REPO @ $sha"
+    emit ship "$REPO @ $short — pasó los gates y está en main" true
+    echo "✅ shipped $REPO @ $short"
     echo "→ siguiente: scripts/deploy-watch.sh $TASK $REPO (o /ship se encarga)"
     exit 0
   fi
-  echo "⚠️ push rechazado (non-fast-forward), reintentando tras rebase…"
+  # ── Perder la carrera es NORMAL, no un error ────────────────────────
+  # Con varios workspaces contra el mismo trunk, que otro llegue primero entre
+  # el último gate y el push es rutina. Antes esto consumía el presupuesto de
+  # RONDAS DE REVIEW y a la tercera escalaba a humano por pura contención.
+  # El backoff va ACÁ (antes del próximo fetch), y lleva jitter: sin él, los
+  # que pierden la misma carrera reintentan en fase y se vuelven a pisar.
+  if [ "$attempt" -lt "$PUSH_RETRY_BUDGET" ]; then
+    base_wait=$(( attempt * attempt ))
+    [ "$base_wait" -gt "$PUSH_BACKOFF_MAX" ] && base_wait="$PUSH_BACKOFF_MAX"
+    jitter=$(( RANDOM % (base_wait + 1) ))
+    wait_s=$(( base_wait + jitter ))
+    echo "⚠️ push rechazado: otro workspace llegó primero a origin/$BASE_REF."
+    echo "   Reintento en ${wait_s}s (intento $attempt/$PUSH_RETRY_BUDGET, con jitter para no pisarnos)."
+    emit gate "ship de $REPO: perdí la carrera de push, reintento $((attempt+1))/$PUSH_RETRY_BUDGET" ""
+    sleep "$wait_s"
+  fi
 done
-echo "❌ agotados $MAX_RETRY intentos — escala a humano"
+echo "❌ agotados $PUSH_RETRY_BUDGET intentos de push contra origin/$BASE_REF."
+echo "   El trunk se mueve más rápido de lo que tarda esta suite en correr. Esto"
+echo "   NO es un problema del cambio: es contención. Opciones, en orden:"
+echo "   · subí el presupuesto: HARNESS_PUSH_RETRIES=40 scripts/ship.sh $TASK $REPO"
+echo "   · pasá a flow: prs (la cola de merge del forge serializa por vos, y la"
+echo "     suite corre una vez sobre el merge result en vez de una vez por intento)"
 exit 5

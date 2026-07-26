@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import fcntl
 import json
 import math
@@ -12,6 +13,10 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+
+# Ventana por defecto para reusar un veredicto cuyo commit cambió por rebase.
+# Conservadora a propósito: el juicio caduca en el TIEMPO, no solo en el texto.
+DEFAULT_VERDICT_REUSE = {"enabled": True, "max_age_hours": 24, "max_base_commits": 200}
 
 
 def fail(code: str, message: str) -> "None":
@@ -335,18 +340,51 @@ def cmd_transition(args: argparse.Namespace) -> int:
                  "una vez por repo y exige phase=review: si avanzas ahora, esos repos "
                  "quedan sin camino (desde ship solo se va a deploy). Shippea cada uno "
                  "con scripts/ship.sh y recién entonces pide review → ship")
+    # ── LAS RONDAS SE CUENTAN POR REPO ────────────────────────────────
+    # El presupuesto existe para cortar un loop implementer↔reviewer que no
+    # converge. Contarlo por TAREA hacía que una tarea de tres repos, donde
+    # cada repo necesita UN fix normal, agotara el presupuesto y escalara a
+    # humano sin que nada estuviera mal: el loop de un repo no dice nada sobre
+    # la convergencia de otro.
+    #
+    # `review_rounds` se mantiene como el MÁXIMO entre repos: es lo que
+    # validate-ship compara y lo que los reportes ya leen, así que las tareas y
+    # los estados viejos siguen funcionando igual.
+    rounds_by_repo = state.get("review_rounds_by_repo")
+    if not isinstance(rounds_by_repo, dict):
+        rounds_by_repo = {}
     rounds = state.get("review_rounds", 0)
     if args.phase == "review":
-        rounds += 1
         maximum = policy.get("limits", {}).get("max_review_rounds", 3)
-        if rounds > maximum:
-            fail("POLICY-LIMIT-001", f"review round {rounds} excede el máximo {maximum}")
+        if args.repo:
+            rounds_by_repo[args.repo] = rounds_by_repo.get(args.repo, 0) + 1
+            this_repo = rounds_by_repo[args.repo]
+            if this_repo > maximum:
+                fail("POLICY-LIMIT-001",
+                     f"review round {this_repo} del repo {args.repo} excede el máximo "
+                     f"{maximum}. Ese repo no converge: escala a humano con el "
+                     "historial de veredictos (los otros repos de la tarea no se "
+                     "ven afectados)")
+            rounds = max([rounds] + list(rounds_by_repo.values()))
+        else:
+            rounds += 1
+            if rounds > maximum:
+                fail("POLICY-LIMIT-001",
+                     f"review round {rounds} excede el máximo {maximum}. Si es una "
+                     "tarea multi-repo, pasá --repo <repo> para que el presupuesto "
+                     "se cuente por repo y no castigue a los que sí convergieron")
     history = state.setdefault("history", [])
-    history.append({"from": current, "to": args.phase, "actor": args.actor})
+    entry = {"from": current, "to": args.phase, "actor": args.actor}
+    if args.repo:
+        entry["repo"] = args.repo
+    history.append(entry)
     state["phase"] = args.phase
     state["review_rounds"] = rounds
+    if rounds_by_repo:
+        state["review_rounds_by_repo"] = rounds_by_repo
     atomic(path, state)
-    print(f"✅ {task_dir.name}: {current} → {args.phase}")
+    detail = f" (repo {args.repo}: ronda {rounds_by_repo.get(args.repo)})" if args.repo and args.phase == "review" else ""
+    print(f"✅ {task_dir.name}: {current} → {args.phase}{detail}")
     return 0
 
 
@@ -395,6 +433,112 @@ def cmd_rollback(args: argparse.Namespace) -> int:
     return 0
 
 
+def verdict_reuse_cfg(policy: dict) -> dict:
+    cfg = dict(DEFAULT_VERDICT_REUSE)
+    declared = policy.get("ship", {}).get("verdict_reuse")
+    if isinstance(declared, dict):
+        cfg.update({k: v for k, v in declared.items() if k in cfg})
+    return cfg
+
+
+def parse_iso(value) -> "dt.datetime | None":
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def check_verdict_commit(verdict: dict, policy: dict, args: argparse.Namespace) -> str:
+    """El veredicto vale para este HEAD, y devuelve el commit que se revisó.
+
+    POR QUÉ NO ALCANZA CON `verdict.commit == HEAD`: con varias personas
+    pusheando al mismo trunk, el rebase de ship.sh reescribe los SHA sin tocar
+    el contenido del cambio.  Exigir igualdad de SHA tiraba review y QA (juicio
+    de LLM, decenas de minutos) por un movimiento que el reviewer nunca miró.
+
+    Lo que se acepta en su lugar es una identidad de CONTENIDO
+    (`scripts/change-id.sh`, patch-id --verbatim: sensible al whitespace a
+    propósito), y solo dentro de una ventana, porque un juicio también caduca
+    en el tiempo aunque el texto sea idéntico: con el trunk 200 commits
+    adelante, el mismo diff puede significar otra cosa.
+
+    Lo que este permiso NO cubre: que el árbol integrado funcione.  Eso lo
+    prueba la evidencia FRESCA que exige evidence.py --require-fresh-kind, y
+    ship.sh la produce re-corriendo la suite sobre el HEAD que aterriza."""
+    reviewed = verdict.get("commit")
+    if not isinstance(reviewed, str) or not reviewed:
+        fail("POLICY-SHIP-002", "el veredicto no declara commit")
+    if reviewed == args.commit:
+        return reviewed
+    cfg = verdict_reuse_cfg(policy)
+    if not cfg.get("enabled", True):
+        fail("POLICY-SHIP-002",
+             f"el veredicto es del commit {reviewed[:12]} y se pushea {args.commit[:12]}; "
+             "la reutilización de veredicto está deshabilitada en harness-policy.json")
+    reviewed_pid = verdict.get("patch_id")
+    if not isinstance(reviewed_pid, str) or not reviewed_pid:
+        fail("POLICY-SHIP-002",
+             f"el veredicto es del commit {reviewed[:12]} y se pushea {args.commit[:12]}, "
+             "y no declara patch_id: no hay forma de saber si es el MISMO cambio. "
+             "Re-corre scripts/verdict-scaffold.sh --rebase y el review incremental")
+    if not args.patch_id:
+        fail("POLICY-SHIP-002",
+             "falta --patch-id: sin la identidad del cambio actual no puedo comparar "
+             "contra el patch_id del veredicto")
+    if reviewed_pid != args.patch_id:
+        fail("POLICY-SHIP-002",
+             f"el cambio NO es el que se revisó (patch_id {reviewed_pid[:12]} → "
+             f"{args.patch_id[:12]}). O el implementer commiteó algo nuevo, o el rebase "
+             "tocó las líneas de contexto del diff. Las dos cosas piden re-review: "
+             "scripts/verdict-scaffold.sh --rebase y /review")
+    max_age = cfg.get("max_age_hours")
+    reviewed_at = parse_iso(verdict.get("reviewed_at"))
+    if isinstance(max_age, (int, float)) and max_age > 0:
+        if reviewed_at is None:
+            fail("POLICY-SHIP-002",
+                 "el veredicto no declara reviewed_at: no puedo comprobar su vigencia. "
+                 "Re-corre el scaffold, que ahora lo sella")
+        age_h = (dt.datetime.now(dt.timezone.utc) - reviewed_at).total_seconds() / 3600.0
+        if age_h > max_age:
+            fail("POLICY-SHIP-002",
+                 f"el veredicto tiene {age_h:.1f}h y el máximo para reusarlo tras un "
+                 f"rebase es {max_age}h. El texto del cambio es el mismo, pero el trunk "
+                 "de abajo ya no: re-revisa")
+    max_base = cfg.get("max_base_commits")
+    if isinstance(max_base, int) and max_base > 0 and args.base_moved is not None:
+        if args.base_moved > max_base:
+            fail("POLICY-SHIP-002",
+                 f"la base avanzó {args.base_moved} commits desde el review y el máximo "
+                 f"para reusar el veredicto es {max_base}: re-revisa")
+    print(f"↻ veredicto reusado: mismo cambio (patch_id {args.patch_id[:12]}) sobre "
+          f"otra base ({reviewed[:12]} → {args.commit[:12]})"
+          + (f", base +{args.base_moved} commits" if args.base_moved is not None else ""))
+    return reviewed
+
+
+def cmd_evidence_policy(args: argparse.Namespace) -> int:
+    """Imprime lo que harness-policy.json exige como evidencia.
+
+    Existe porque `ship.required_evidence_kinds` y `ship.require_fresh_evidence`
+    se declaraban en el policy y NO los leía nadie: ship.sh cableaba
+    `--require-kind test`. Editarlos no cambiaba nada, en silencio, que es
+    exactamente la clase de perilla muerta que este repo ya persiguió con
+    `flow`. Ahora ship.sh construye sus flags desde acá."""
+    policy = load(Path(args.policy), "policy")
+    ship = policy.get("ship", {})
+    kinds = ship.get("required_evidence_kinds")
+    if not isinstance(kinds, list) or not all(isinstance(k, str) for k in kinds):
+        kinds = ["test"]
+    if args.field == "required_evidence_kinds":
+        for kind in kinds:
+            print(kind)
+    elif args.field == "require_fresh_evidence":
+        print("true" if ship.get("require_fresh_evidence", True) else "false")
+    return 0
+
+
 def cmd_validate_ship(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     policy = load(Path(args.policy), "policy")
@@ -414,8 +558,9 @@ def cmd_validate_ship(args: argparse.Namespace) -> int:
     if not isinstance(state.get("review_rounds"), int) or state["review_rounds"] > maximum:
         fail("POLICY-LIMIT-001", "review_rounds inválido o excedido")
     verdict = load(Path(args.verdict), "veredicto")
-    if verdict.get("schema") != 1 or verdict.get("commit") != args.commit:
-        fail("POLICY-SHIP-002", "veredicto sin schema v1 o perteneciente a otro commit")
+    if verdict.get("schema") != 1:
+        fail("POLICY-SHIP-002", "veredicto sin schema v1")
+    reviewed_commit = check_verdict_commit(verdict, policy, args)
     # Mismo código (la regla es una), pero el mensaje nombra al campo que
     # falló: "review y QA deben estar en pass" no distingue un review con
     # blocking de un qa que nunca corrió, y son remediaciones opuestas.
@@ -435,6 +580,10 @@ def cmd_validate_ship(args: argparse.Namespace) -> int:
             fail("POLICY-ROLE-002", "falta implementation_agents[]")
         if reviewer in implementers:
             fail("POLICY-ROLE-003", "el reviewer también figura como implementador")
+    # El commit revisado se imprime en una línea parseable para que ship.sh se
+    # lo pase a evidence.py --reviewed-commit sin volver a derivarlo por su
+    # cuenta: dos derivaciones del mismo hecho es una oportunidad de divergir.
+    print(f"REVIEWED_COMMIT={reviewed_commit}")
     print(f"✅ política de ship válida para {task_dir.name}@{args.commit[:12]}")
     return 0
 
@@ -458,6 +607,9 @@ def build_parser() -> argparse.ArgumentParser:
     transition.add_argument("task_dir")
     transition.add_argument("phase")
     transition.add_argument("--actor", required=True)
+    transition.add_argument("--repo", default="",
+                            help="repo cuya ronda de review se cuenta; sin él el "
+                                 "presupuesto se cuenta por tarea (compat)")
     transition.set_defaults(func=cmd_transition)
     rollback = sub.add_parser("rollback")
     rollback.add_argument("task_dir")
@@ -484,9 +636,19 @@ def build_parser() -> argparse.ArgumentParser:
     dag.set_defaults(func=cmd_validate_dag)
     ship = sub.add_parser("validate-ship")
     ship.add_argument("task_dir")
-    ship.add_argument("--commit", required=True)
+    ship.add_argument("--commit", required=True,
+                      help="el HEAD que se pushea (post-rebase)")
+    ship.add_argument("--patch-id", default="",
+                      help="identidad del cambio actual (scripts/change-id.sh); "
+                           "permite reusar un veredicto cuyo SHA cambió por rebase")
+    ship.add_argument("--base-moved", type=int, default=None,
+                      help="commits que avanzó la base desde el review")
     ship.add_argument("--verdict", required=True)
     ship.set_defaults(func=cmd_validate_ship)
+    evpol = sub.add_parser("evidence-policy")
+    evpol.add_argument("--field", default="required_evidence_kinds",
+                       choices=("required_evidence_kinds", "require_fresh_evidence"))
+    evpol.set_defaults(func=cmd_evidence_policy)
     return root
 
 

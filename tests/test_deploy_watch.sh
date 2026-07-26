@@ -249,4 +249,80 @@ assert_contains "$out" "SIN VERIFICAR: ningún tramo se pudo observar" \
 assert_not_contains "$out" "actions + argocd + smoke" \
   "el cierre ya no recita una lista fija por driver"
 
+
+echo
+echo "── el sha a vigilar sale de ship.log (antes: \$WT sin definir = ceguera total)"
+# Bug de origen: el script usaba `git -C "$WT" rev-parse HEAD` y $WT nunca se
+# definía. Con set -u la sustitución moría entera, head_sha quedaba vacío, y
+# como las ramas siguientes exigían [ -n "$head_sha" ], la etapa de Actions se
+# saltaba sin vigilar NI avisar. Con driver=actions el deploy nunca se verificó.
+extract_fn() { awk "/^$1\(\) \{/{f=1} f{print} f&&/^\}/{exit}" \
+  "$ROOT/templates/scripts/deploy-watch.sh.tmpl"; }
+
+# Solo CÓDIGO: el comentario que documenta el bug sí nombra $WT, y debe poder
+# hacerlo sin que el test lo confunda con una regresión.
+grep -v '^[[:space:]]*#' "$ROOT/templates/scripts/deploy-watch.sh.tmpl" \
+  | grep -q 'git -C "$WT"' \
+  && fail "sigue usando \$WT en código, y esa variable nunca se define" \
+  || pass "ya no depende de \$WT (la variable fantasma que causaba la ceguera)"
+
+extract_fn shipped_sha > "$WS/shipped.sh"
+mkdir -p "$WS/tasks/T7"
+printf '%s\n' \
+  '{"repo":"otro","sha":"1111111111111111111111111111111111111111"}' \
+  '{"repo":"videocore","sha":"2222222222222222222222222222222222222222"}' \
+  > "$WS/tasks/T7/ship.log"
+got="$( WS="$WS" TASK=T7 REPO=videocore; . "$WS/shipped.sh"; shipped_sha )"
+assert_eq "2222222222222222222222222222222222222222" "$got" \
+  "toma el sha de ESTE repo, no la última línea del log"
+got="$( WS="$WS" TASK=T7 REPO=inexistente; . "$WS/shipped.sh"; shipped_sha )"
+assert_eq "" "$got" "repo sin ship: devuelve vacío (y el watcher lo declara)"
+
+# El sha completo importa: la API del forge devuelve headSha completo, así que
+# con el sha corto de antes la comparación no matcheaba nunca.
+grep -q 'startswith' "$ROOT/templates/scripts/deploy-watch.sh.tmpl" \
+  && pass "compara por prefijo (tolera los ship.log viejos con sha corto)" \
+  || fail "comparación exacta: los ship.log con sha corto nunca matchearían"
+grep -q 'branch "\$BASE_REF"' "$ROOT/templates/scripts/deploy-watch.sh.tmpl" \
+  && pass "la rama del run sale de origin/HEAD, no cableada a main" \
+  || fail "sigue cableando --branch main"
+
+echo
+echo "── rollback en trunk compartido: no revertir por el rojo de otro"
+extract_fn rollback_advice > "$WS/rb.sh"
+mkdir -p "$WS/repos/videocore"
+git init -q -b main "$WS/repos/videocore"
+( cd "$WS/repos/videocore"; git config user.email t@t; git config user.name t
+  echo a > f.txt; git add -A; git commit -qm base
+  echo b > f.txt; git add -A; git commit -qm mio
+  git update-ref refs/remotes/origin/main HEAD )
+MINE="$( cd "$WS/repos/videocore" && git rev-parse HEAD )"
+
+run_rb() {  # run_rb <observed-revision> <sha>
+  ( set -u; WS="$WS"; REPO=videocore; TASK=T7; BASE_REF=main
+    ROLLBACK_MODE=auto; OBSERVED_REVISION="$1"
+    LOG="$WS/rb.log"; say() { echo "$1"; }; emit() { :; }
+    . "$WS/rb.sh"; rollback_advice "$2" ) 2>&1
+}
+
+out="$(run_rb "9999999999999999999999999999999999999999" "$MINE")"
+assert_contains "$out" "NO propongo revertir nada mío" \
+  "revisión enferma AJENA: no propone revertir lo propio"
+assert_contains "$out" "workspace aterrizó después" "y dice por qué"
+
+out="$(run_rb "$MINE" "$MINE")"
+assert_contains "$out" "revert en git de $MINE" "revisión enferma PROPIA: sí propone el revert"
+
+out="$(run_rb "" "$MINE")"
+assert_contains "$out" "revert en git de $MINE" "sin revisión observable: se comporta como antes"
+
+# alguien construyó ENCIMA: el revert deja de ser puntual
+( cd "$WS/repos/videocore"; echo c > f.txt; git add -A; git commit -qm "de otro, encima"
+  git update-ref refs/remotes/origin/main HEAD )
+out="$(run_rb "" "$MINE")"
+assert_contains "$out" "PARO" "revert que conflictúa con lo de encima: para en vez de proponerlo"
+assert_contains "$out" "rompería el trabajo de alguien más" "y nombra el riesgo real"
+[ -z "$( cd "$WS/repos/videocore" && git status --porcelain )" ] \
+  && pass "el ensayo en seco deja el repo limpio" || fail "el ensayo dejó basura en el repo"
+
 t_done

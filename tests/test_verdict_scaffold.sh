@@ -9,12 +9,19 @@ set -u
 t_ws
 
 mkdir -p "$WS/scripts" "$WS/tasks/T1/evidence" "$WS/worktrees/T1"
-cp "$ROOT/templates/scripts/verdict-scaffold.sh" "$WS/scripts/"
+cp "$ROOT/templates/scripts/verdict-scaffold.sh" "$ROOT/templates/scripts/change-id.sh" "$WS/scripts/"
 
-# worktree falso con HEAD real
-git init -q -b main "$WS/worktrees/T1/atlas"
-git -C "$WS/worktrees/T1/atlas" -c user.email=t@t -c user.name=t commit -q --allow-empty -m x
-HEAD="$(git -C "$WS/worktrees/T1/atlas" rev-parse HEAD)"
+# worktree falso con HEAD real y una BASE contra la cual haya diff: sin
+# origin/<trunk> no hay cambio que identificar, y patch_id (la identidad que
+# deja sobrevivir el veredicto a un rebase) no se podría calcular.
+WT1="$WS/worktrees/T1/atlas"
+git init -q -b main "$WT1"
+git -C "$WT1" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+git -C "$WT1" update-ref refs/remotes/origin/main HEAD
+echo "cambio de la tarea" > "$WT1/feature.txt"
+git -C "$WT1" add -A
+git -C "$WT1" -c user.email=t@t -c user.name=t commit -q -m x
+HEAD="$(git -C "$WT1" rev-parse HEAD)"
 
 mk_ev() {  # mk_ev <id> <runner> <kind> <commit>
   jq -n --arg id "$1" --arg r "$2" --arg k "$3" --arg c "$4" \
@@ -50,11 +57,25 @@ assert_eq "3" "$(jq '.evidence | length' "$V")" "los 3 EVs del commit correcto (
 wait_no=$(jq -r '.implementation_agents | join(",")' "$V")
 assert_eq "impl-atlas" "$wait_no" "implementation_agents = runners menos qa/reviewer"
 
-# 4. idempotencia a bytes con --force
-h1="$(shasum "$V" | cut -d' ' -f1)"
+# 4. idempotencia con --force. Lo que esta aserción protege es que la SELECCIÓN
+# de evidencia sea determinista (el `sort` de $rows): dos scaffolds del mismo
+# estado no pueden elegir distinto. `reviewed_at` es deliberadamente volátil
+# (sella CUÁNDO se emitió el juicio, y de ahí sale la ventana de vigencia que
+# harness-policy.py usa para reusar un veredicto tras un rebase), así que se
+# excluye de la comparación en vez de congelarlo: congelarlo haría que un
+# re-scaffold heredara la vigencia del anterior, que es justo lo contrario de
+# lo que la ventana quiere medir.
+stable() { jq -S 'del(.reviewed_at)' "$1" | shasum | cut -d' ' -f1; }
+h1="$(stable "$V")"
 bash "$WS/scripts/verdict-scaffold.sh" --force T1 atlas revisor-1 >/dev/null 2>&1
-h2="$(shasum "$V" | cut -d' ' -f1)"
-assert_eq "$h1" "$h2" "re-scaffold con --force: bytes idénticos"
+h2="$(stable "$V")"
+assert_eq "$h1" "$h2" "re-scaffold con --force: idéntico salvo reviewed_at"
+[ -n "$(jq -r '.reviewed_at // ""' "$V")" ] \
+  && pass "el scaffold sella reviewed_at (la ventana de vigencia lo necesita)" \
+  || fail "sin reviewed_at: policy no puede acotar la reutilización del veredicto"
+[ -n "$(jq -r '.patch_id // ""' "$V")" ] \
+  && pass "el scaffold sella patch_id (identidad del cambio, sobrevive al rebase)" \
+  || fail "sin patch_id: un rebase invalidaría el veredicto entero"
 
 # 5. existente sin --force → exit 3 mostrando el commit previo
 out="$(bash "$WS/scripts/verdict-scaffold.sh" T1 atlas revisor-1 2>&1)"; rc=$?

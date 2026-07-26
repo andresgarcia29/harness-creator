@@ -229,17 +229,42 @@ rollback_advice() {  # rollback_advice <sha-completo-de-mi-ship>
 
   after="$(git -C "$WS/repos/$REPO" rev-list --count "$mine..origin/$BASE_REF" 2>/dev/null || echo "?")"
 
-  # Ensayo en seco: `git revert --no-commit` y se deshace. Si conflictúa, es
-  # que alguien construyó encima y el revert ya no es una acción puntual.
+  # ── EL ENSAYO VA CONTRA EL MAIN DE VERDAD, EN UN WORKTREE APARTE ─────
+  # Primero se hacía en el clon canónico (repos/<repo>) y sobre su HEAD, y eso
+  # estaba mal por dos motivos, los dos verificados en una corrida real:
+  #
+  #   1. El clon canónico está STALE casi siempre: solo se refresca con
+  #      pull-all.sh o al crear un worktree. Con HEAD atrasado, el commit a
+  #      revertir ni siquiera es ancestro suyo, así que `git revert` fallaba
+  #      SIEMPRE y el watcher decía "conflictúa con lo que aterrizó después"
+  #      aunque nadie hubiera tocado nada. Medido: clon en eb17f9d, main real
+  #      en f2a105e. El camino de rollback quedaba inservible.
+  #   2. Se limpiaba con `git reset --hard` sobre ese clon, que es el recurso
+  #      del que cuelgan todos los worktrees de todas las tareas. Un ensayo no
+  #      puede escribir sobre algo compartido.
+  #
+  # Un worktree temporal y desacoplado resuelve las dos: prueba contra
+  # origin/<trunk> (lo que de verdad está desplegado) y no toca nada de nadie.
   dry=ok
   if git -C "$WS/repos/$REPO" rev-parse --verify --quiet "$mine^{commit}" >/dev/null 2>&1; then
-    if ! git -C "$WS/repos/$REPO" revert --no-commit "$mine" >/dev/null 2>&1; then
-      dry=conflicto
+    local tmpwt
+    tmpwt="$(mktemp -d "${TMPDIR:-/tmp}/revert-dry.XXXXXX")"
+    rm -rf "$tmpwt"   # git worktree add exige que no exista
+    if git -C "$WS/repos/$REPO" worktree add --detach -q "$tmpwt" "origin/$BASE_REF" 2>/dev/null; then
+      git -C "$tmpwt" revert --no-commit "$mine" >/dev/null 2>&1 || dry=conflicto
+      git -C "$tmpwt" revert --abort >/dev/null 2>&1 || true
+      git -C "$WS/repos/$REPO" worktree remove --force "$tmpwt" >/dev/null 2>&1 || rm -rf "$tmpwt"
+    else
+      rm -rf "$tmpwt"
+      dry=nopude
     fi
-    git -C "$WS/repos/$REPO" revert --abort >/dev/null 2>&1 || true
-    git -C "$WS/repos/$REPO" reset --hard --quiet >/dev/null 2>&1 || true
   else
     dry=ausente
+  fi
+  if [ "$dry" = "nopude" ]; then
+    say "⏪ no pude ensayar el revert (no pude crear un worktree temporal)."
+    say "   No propongo una acción destructiva que no pude comprobar."
+    return 0
   fi
 
   if [ "$dry" = "conflicto" ]; then

@@ -399,6 +399,21 @@ corto la cuarta ronda de api nombrando al repo.
   sellado, asi que el subshell del slot no lo veia. Se nombra el tramo en el
   padre; el detalle sigue en la salida del hijo.
 
+- [x] **El ensayo del revert corria contra el clon canonico, que esta STALE.**
+  `deploy-watch` probaba `git revert --no-commit` en `repos/<repo>` y sobre su
+  HEAD. Ese clon solo se refresca con `pull-all.sh` o al crear un worktree, asi
+  que casi siempre esta atras, y el resultado del ensayo era el de OTRO arbol.
+  Verificado que falla en las DOS direcciones: con el clon en un commit que no
+  contiene el cambio, `revert` falla y se inventaba un conflicto que no existe
+  (rollback inservible); y con el clon atrasado respecto de un commit ajeno que
+  reescribio las mismas lineas, `revert` sale OK y se PROPONIA una accion
+  destructiva sobre produccion que en el main real conflictua. Ese segundo caso
+  es el peor: un falso OK sobre un rollback. Ademas limpiaba con `reset --hard`
+  sobre el clon COMPARTIDO del que cuelgan todos los worktrees. Ahora el ensayo
+  va en un worktree temporal desacoplado contra `origin/<trunk>`, y el clon no
+  se toca. Primera corrida real de `deploy-watch` (459 lineas, cero ejecuciones
+  hasta hoy).
+
 ### Pendiente: lo único que elimina la clase entera
 
 - [ ] **`flow: prs` + cola de merge del forge.** Todo lo de arriba MITIGA la

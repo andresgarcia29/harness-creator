@@ -20,8 +20,15 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
    harness-answers.yaml (por eso el esquema es fijo) y compara contra
    el archivo real de la instancia.
 3. Clasifica cada diferencia según la PROPIEDAD del archivo:
-   - **Propiedad del plugin** (scripts/{doctor,bootstrap,secrets,ship,
-     worktree-task,quiet,with-secrets,repo-brief,stamp-models}.sh,
+   - **Propiedad del plugin**: TODO `scripts/` sale del plugin, así que la
+     lista es "todos", y se enumera para que un script NUEVO no se cuele sin
+     clasificar (`tests/test_docs.sh` lo verifica: agregar un script al plugin
+     y no nombrarlo acá deja a las instancias sin recibirlo).
+     scripts/{doctor,bootstrap,secrets,ship,worktree-task,quiet,with-secrets,
+     repo-brief,stamp-models,change-id,verdict-scaffold,plan-lint,build-slot,
+     deploy-watch,emit,forge,gowork,graph-refresh,minion-probe,pull-all,
+     ticket-close,ticket-pull,harness-bug,harness-version,skills-sync,
+     pipeline-steps,py,fe}.sh,
      scripts/{harness-policy,evidence}.py, `harness-policy.json`,
      `scripts/cronjobs/cron-runner.sh`, hooks, `AGENTS.md`, y **el panel**:
      `scripts/ui/{panel.sh,server.py,pricing.json,dist/}`): upstream gana por
@@ -73,6 +80,19 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
      publicar issues en el repo público del plugin; si no lo quiere, `off`).
      La ley sin el script manda a los agentes a un comando que no existe, y
      el script sin la skill reporta sin verificar.
+   - **Veredicto-sobrevive-al-rebase**: `scripts/change-id.sh` (NUEVO, hay que
+     crearlo) + `scripts/harness-policy.py` + `scripts/evidence.py` +
+     `scripts/verdict-scaffold.sh` + `scripts/ship.sh` + `harness-policy.json`
+     + `.claude/agents/reviewer.md`. Es el paquete que MÁS duele a medias, y el
+     modo de fallo es total, no parcial: el `ship.sh` nuevo le pasa
+     `--patch-id` a `validate-ship`, y el `harness-policy.py` viejo no conoce
+     ese flag, así que argparse sale con error y **TODO ship queda rojo**.
+     Con el scaffold viejo el veredicto no lleva `patch_id` ni `reviewed_at`,
+     así que el policy nuevo se niega a reusarlo y volvés al comportamiento de
+     antes (estricto, no roto). Y el `reviewer.md` viejo trae un JSON de
+     "formato exacto" sin esos dos campos: un reviewer que lo copie los borra y
+     desactiva el mecanismo EN SILENCIO. Sin `change-id.sh` no hay identidad de
+     cambio y el resto degrada a exigir el SHA exacto.
    - **Modelos**: `models.yaml` (esquema aliases) +
      `scripts/stamp-models.sh` + `scripts/cronjobs/cron-runner.sh` (el
      runner viejo parsea el esquema inline viejo: con el models.yaml

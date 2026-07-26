@@ -144,6 +144,19 @@ if [ -f "$WS/CLAUDE.md" ]; then
   [ "$broken" -eq 0 ] && ok "links del CLAUDE.md resuelven"
 fi
 
+# _bin_elsewhere <bin> → ruta donde SÍ está, si existe fuera de este PATH.
+# Los sitios donde los gestores de la casa instalan: Homebrew (mac y linux),
+# los binarios de usuario de uv/pipx, los de `go install`, y npm global.
+_bin_elsewhere() {
+  local b="$1" d
+  for d in /home/linuxbrew/.linuxbrew/bin /opt/homebrew/bin /usr/local/bin \
+           "$HOME/.linuxbrew/bin" "$HOME/.local/bin" "$HOME/go/bin" \
+           "$HOME/.cargo/bin" "$HOME/.npm-global/bin" /snap/bin; do
+    [ -x "$d/$b" ] && { printf '%s' "$d"; return 0; }
+  done
+  return 1
+}
+
 # 6 · CLIs seleccionadas (bin: del answers). scope: cronjob degrada a
 #     warning cuando falta — solo lo usa un detector de cronjob.
 if [ -f "$ANSWERS" ]; then
@@ -151,6 +164,21 @@ if [ -f "$ANSWERS" ]; then
     [ -n "$bin" ] || continue
     if command -v "$bin" >/dev/null; then
       ok "cli: $bin"
+    elif found_at="$(_bin_elsewhere "$bin")"; then
+      # ── "NO ESTÁ EN MI PATH" NO ES "NO ESTÁ INSTALADO" ────────────────
+      # Caso real, y costó un diagnóstico entero: una sesión no interactiva
+      # (ssh host 'cmd', cron, un servicio) NO lee ~/.zshrc ni ~/.profile, así
+      # que no ve Homebrew ni ~/.local/bin ni ~/go/bin. El doctor reportaba 22
+      # CLIs faltantes sobre una máquina que las tenía TODAS instaladas, y de
+      # ahí salió la conclusión de que faltaba la toolchain entera.
+      #
+      # Decir "falta" cuando el binario está a un PATH de distancia manda a
+      # reinstalar lo que ya está, y de paso entrena a no creerle al doctor.
+      # Es el mismo defecto que perseguimos en los gates, en el diagnóstico.
+      warn "cli: $bin NO está en este PATH, pero SÍ está instalado en $found_at"
+      echo "   ↳ NO lo reinstales: agregá ese directorio al PATH del entorno que corre"
+      echo "     el harness. Si es Homebrew, 'brew shellenv' va en ~/.zshenv (que zsh lee"
+      echo "     SIEMPRE), no solo en ~/.zshrc, que las sesiones no interactivas se saltan."
     elif [ "$scope" = "cronjob" ]; then
       warn "cli faltante: $bin (scope: cronjob — solo lo usa harness-cronjobs, repo aparte)"
     else

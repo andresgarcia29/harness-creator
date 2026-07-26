@@ -109,4 +109,32 @@ done
 [ -z "$faltan" ] && pass "todos los scripts del plugin estan clasificados en harness-update.md" \
   || fail "scripts del plugin sin clasificar en harness-update.md:$faltan"
 
+echo
+echo "── AGENTS.md no se regenera: se mergea"
+# Caso real: el update lo trato como propiedad del plugin y lo reescribio
+# entero, borrando 70 lineas de una instancia: la ley del design system del
+# proyecto y un bloque completo de OTRA herramienta (beads, con su hash).
+# AGENTS.md es la puerta multi-herramienta por diseño: Codex, Cursor y lo que
+# el proyecto sume dejan lo suyo ahi.
+UPD="$ROOT/commands/harness-update.md"
+assert_contains "$(cat "$UPD")" "se MERGEA" "el updater dice que AGENTS.md se mergea"
+assert_contains "$(cat "$UPD")" "BLOQUES GESTIONADOS" "y nombra la clase entera, no solo AGENTS.md"
+assert_contains "$(cat "$UPD")" "BEGIN" "explica como se reconoce un bloque ajeno"
+# y ya NO puede figurar en la lista de "upstream gana por default"
+own="$(sed -n '/Propiedad del plugin/,/Skills, por capa/p' "$UPD")"
+assert_not_contains "$own" "\`AGENTS.md\`, y **el panel**" "AGENTS.md salio de la lista de upstream-gana"
+
+echo
+echo "── el doctor distingue 'no esta' de 'no esta en MI PATH'"
+# Una sesion no interactiva (ssh host cmd, cron) no lee ~/.zshrc ni ~/.profile,
+# asi que no ve Homebrew ni ~/.local/bin. El doctor reportaba 22 CLIs faltantes
+# sobre una maquina que las tenia TODAS. Decir "falta" manda a reinstalar lo que
+# ya esta, y entrena a no creerle al doctor.
+doc="$(cat "$ROOT/scripts/doctor.sh")"
+assert_contains "$doc" "_bin_elsewhere" "el doctor busca el binario fuera del PATH"
+assert_contains "$doc" "linuxbrew" "en las rutas de Homebrew (tambien Linux)"
+assert_contains "$doc" "NO está en este PATH" "y lo dice como lo que es"
+assert_contains "$doc" "NO lo reinstales" "sin mandar a reinstalar lo que ya esta"
+assert_contains "$doc" "zshenv" "y explica donde va brew shellenv para que persista"
+
 t_done

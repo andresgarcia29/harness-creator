@@ -666,6 +666,12 @@ run_lang_gates_sealed() {
     run_lang_gates; return $?
   fi
   echo "→ gates de lenguaje sellados como evidencia (runner: $runner)"
+  # El nombre del gate especifico (python, go, buf...) lo pone `gate()` DENTRO
+  # del proceso hijo, asi que el subshell de este slot no lo ve: al fallar
+  # reportaba `gate '' falló`, un mensaje sin sujeto. Se nombra el tramo acá
+  # para que el rojo del padre diga de que habla; el detalle fino sigue en la
+  # salida del hijo, que se imprime completa.
+  CURRENT_GATE="gates de lenguaje de $REPO"
   local out evrc=0
   out="$(python3 "$WS/scripts/evidence.py" run \
     --task-dir "$WS/tasks/$TASK" --repo "$REPO" --runner "$runner" \

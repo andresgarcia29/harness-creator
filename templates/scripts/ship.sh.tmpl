@@ -232,7 +232,7 @@ on_exit() {
   # corren igual y la funcion devuelve 0. Reproducido: el precheck imprimia
   # "verde" con la suite rota Y sellaba evidencia con exit_code 0.
   if [ "${LANG_ONLY:-0}" -eq 1 ]; then
-    printf '%s' "${LANG_SEEN:-0}" > "$WS/tasks/$TASK/.langseen-$REPO" 2>/dev/null || true
+    printf '%s' "${TESTS_RAN:-0}" > "$WS/tasks/$TASK/.langseen-$REPO" 2>/dev/null || true
   fi
   [ -n "$LOCK_HELD" ] && rm -rf "$LOCKDIR"
   if [ "$rc" -eq 0 ]; then
@@ -380,6 +380,14 @@ run_lang_gates() {
   # ¿Reconocimos el stack de este repo? Si al final sigue en 0, el gate no
   # verificó NADA, y eso tiene que verse: era el silencio más caro del script.
   LANG_SEEN=0
+  # ── "RECONOCI EL STACK" NO ES "CORRI TESTS" ─────────────────────────
+  # El sello de evidencia usaba LANG_SEEN como prueba de que algo se verifico,
+  # y LANG_SEEN solo dice que se encontro un marcador (go.mod, pyproject...).
+  # Un repo con pyproject.toml pero sin pytest instalado tenia LANG_SEEN=1 y
+  # cero tests corridos: se acuñaba un EV-TEST que decia "este arbol pasa la
+  # suite" sin que ninguna suite hubiera corrido. TESTS_RAN mide lo que el
+  # sello afirma, que es lo unico honesto que puede medir.
+  TESTS_RAN=0
   if [ -f go.mod ]; then
     # UN COMANDO POR LINEA, NUNCA `A && B`: bajo set -e una AND-list que falla
     # NO aborta (set -e se ignora en todo comando de una lista AND-OR que no
@@ -390,6 +398,7 @@ run_lang_gates() {
     go vet ./...
     go build ./...
     go test ./...
+    TESTS_RAN=1
     LANG_SEEN=1
   fi
   # Repo TS cuyo package.json NO está en la raíz (monorepo, apps/, packages/):
@@ -497,6 +506,7 @@ run_lang_gates() {
     # verificador se lee igual que un verde.
     if jq -e '.scripts.test' package.json >/dev/null 2>&1; then
       npm test
+      TESTS_RAN=1
     else
       echo "⚠️  $REPO no declara script 'test' en package.json: el gate ts NO corrió tests."
       echo "   No lo bloqueo (puede ser legítimo), pero que quede dicho: este gate"
@@ -506,13 +516,36 @@ run_lang_gates() {
   if [ -f pyproject.toml ]; then
     LANG_SEEN=1
     gate python
-    ruff check .
-    if command -v uv >/dev/null; then uv run pytest -q; else pytest -q; fi
+    # RUFF Y PYTEST SON DEPENDENCIAS DEL PROYECTO, NO DEL SISTEMA. `uv sync`
+    # los deja en .venv/bin, o sea FUERA del PATH: llamarlos pelados da
+    # `command not found` y exit 127, y ningun repo Python podia shippear
+    # (issue #29, reportado por el propio harness). La linea de pytest ya
+    # pasaba por `uv run`; la de ruff no, y esa asimetria era todo el bug.
+    #
+    # Y si no hay NI uv NI la herramienta en el PATH, no se finge un veredicto:
+    # se dice que ese tramo no se verifico, igual que hacen gitleaks,
+    # import-linter y los seis stacks que pasan por need(). Un 127 rojo enseña
+    # a desconfiar del gate tanto como un verde falso.
+    if command -v uv >/dev/null; then uv run ruff check .
+    elif command -v ruff >/dev/null; then ruff check .
+    else
+      echo "⚠️  $REPO es Python pero no encuentro ruff (ni uv para invocarlo): el lint NO CORRIÓ."
+      echo "   ↳ instalá uv (y corré 'uv sync --extra dev'), o poné ruff en el PATH."
+      emit assumption "$REPO (Python): lint NO ejecutado, falta ruff/uv"
+    fi
+    if command -v uv >/dev/null; then uv run pytest -q; TESTS_RAN=1
+    elif command -v pytest >/dev/null; then pytest -q; TESTS_RAN=1
+    else
+      echo "⚠️  $REPO es Python pero no encuentro pytest (ni uv para invocarlo): los tests NO CORRIERON."
+      echo "   ↳ instalá uv (y corré 'uv sync --extra dev'), o poné pytest en el PATH."
+      emit assumption "$REPO (Python): tests NO ejecutados, falta pytest/uv"
+    fi
   fi
   if [ -f pubspec.yaml ]; then
     gate flutter
     flutter analyze
     flutter test
+    TESTS_RAN=1
     LANG_SEEN=1
   fi
   # ── Stacks que faltaban ───────────────────────────────────────────────
@@ -532,23 +565,23 @@ run_lang_gates() {
   }
   if [ -f Cargo.toml ]; then
     LANG_SEEN=1
-    if need cargo Rust; then gate rust; cargo build --locked; cargo test; fi
+    if need cargo Rust; then gate rust; cargo build --locked; cargo test; TESTS_RAN=1; fi
   fi
   if [ -f pom.xml ]; then
     LANG_SEEN=1
-    if need mvn Java-Maven; then gate java-maven; mvn -B -q verify; fi
+    if need mvn Java-Maven; then gate java-maven; mvn -B -q verify; TESTS_RAN=1; fi
   fi
   if [ -f build.gradle ] || [ -f build.gradle.kts ]; then
     LANG_SEEN=1
-    if [ -x ./gradlew ]; then gate java-gradle; ./gradlew --quiet build
-    elif need gradle Java-Gradle; then gate java-gradle; gradle --quiet build; fi
+    if [ -x ./gradlew ]; then gate java-gradle; ./gradlew --quiet build; TESTS_RAN=1
+    elif need gradle Java-Gradle; then gate java-gradle; gradle --quiet build; TESTS_RAN=1; fi
   fi
   if [ -f Gemfile ]; then
     LANG_SEEN=1
     if need bundle Ruby; then
       gate ruby
-      if [ -f Rakefile ]; then bundle exec rake
-      elif [ -d spec ]; then bundle exec rspec
+      if [ -f Rakefile ]; then bundle exec rake; TESTS_RAN=1
+      elif [ -d spec ]; then bundle exec rspec; TESTS_RAN=1
       else echo "⚠️  $REPO es Ruby pero no tiene Rakefile ni spec/: no encontré qué correr"
            emit assumption "$REPO (Ruby) sin suite reconocible: el gate no corrió tests"; fi
     fi
@@ -560,6 +593,7 @@ run_lang_gates() {
       if [ -f phpunit.xml ] || [ -f phpunit.xml.dist ]; then
         composer install --no-interaction --quiet
         vendor/bin/phpunit
+        TESTS_RAN=1
       else
         echo "⚠️  $REPO es PHP sin phpunit.xml: no encontré qué correr"
         emit assumption "$REPO (PHP) sin config de phpunit: el gate no corrió tests"
@@ -568,11 +602,11 @@ run_lang_gates() {
   fi
   if ls ./*.sln ./*.csproj >/dev/null 2>&1; then
     LANG_SEEN=1
-    if need dotnet dotNET; then gate dotnet; dotnet build --nologo -v q; dotnet test --nologo -v q; fi
+    if need dotnet dotNET; then gate dotnet; dotnet build --nologo -v q; dotnet test --nologo -v q; TESTS_RAN=1; fi
   fi
   if [ -f mix.exs ]; then
     LANG_SEEN=1
-    if need mix Elixir; then gate elixir; mix compile --warnings-as-errors; mix test; fi
+    if need mix Elixir; then gate elixir; mix compile --warnings-as-errors; mix test; TESTS_RAN=1; fi
   fi
   # Gates de arquitectura y SQL: la CONFIG del repo es el opt-in (sin config,
   # silencio). Con config presente son gates duros — igual que go/ts. Config
@@ -726,10 +760,11 @@ run_lang_gates_sealed() {
     evid="$(printf '%s\n' "$out" | sed -n 's/^EVIDENCE_ID=//p' | tail -1)"
     if [ -n "$evid" ]; then
       rm -f "$WS/tasks/$TASK/evidence/$evid.json" "$WS/tasks/$TASK/evidence/$evid.log"
-      echo "⚠️  NO sello evidencia de $REPO: el gate no reconoció su stack, así que"
-      echo "   no compiló ni testeó nada. Un EV-TEST de una corrida vacía diría"
+      echo "⚠️  NO sello evidencia de $REPO: ninguna suite de tests llegó a correr"
+      echo "   (stack no reconocido, o su herramienta de test no está). Un EV-TEST"
+      echo "   de una corrida sin tests diría"
       echo "   'este árbol pasa la suite' sin que ninguna suite haya corrido."
-      emit assumption "$REPO sin evidencia de test: run_lang_gates no reconoce su stack"
+      emit assumption "$REPO sin evidencia de test: ninguna suite llegó a correr"
     fi
   fi
   return $evrc
@@ -1060,7 +1095,7 @@ gate_fresh_evidence() {
     echo "⚠️  el árbol integrado de $REPO NO se pudo verificar: su stack no lo"
     echo "   reconoce ningún gate de lenguaje, así que no hay suite que correr"
     echo "   sobre el merge con los commits ajenos que aterrizaron."
-    emit assumption "$REPO: merge result NO verificado (sin stack reconocido) al reusar veredicto"
+    emit assumption "$REPO: merge result NO verificado (ninguna suite corrió) al reusar veredicto"
     return 0; }
   kinds="$(python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" \
     evidence-policy --field required_evidence_kinds 2>/dev/null || echo test)"

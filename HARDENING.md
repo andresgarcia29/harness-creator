@@ -363,6 +363,42 @@ que corre los gates, un gate rojo deja de abortar y el resultado se lee verde.
   cuerpo. O sea que el test medía el harness, no el codigo. Corregido, y
   verificado por mutacion: con el patron viejo el test ahora falla.
 
+## Corridas de validacion (lo que SI quedo ejercitado)
+
+Dos corridas completas sobre una instancia Corvux con tres repos y remotos git
+reales. Sirven como linea base de que camino esta probado de punta a punta y
+cual sigue sin tocarse.
+
+**Corrida 1, carril standard, 3 repos (contracts + api + web), DAG con
+dependencias.** Quedo ejercitado: `validate-dag`, worktrees multi-repo,
+`plan-lint` sobre 3 bloques, `buf breaking` en expand (paso) y el ratchet de
+`buf lint` reportando deuda preexistente sin bloquear, `POLICY-SHIP-004`
+rechazando la transicion a ship dos veces con la lista de repos que faltaban, y
+el ship en orden del DAG. Dos gates frenaron de verdad y con razon: el precheck
+de api por una regresion real (el campo nuevo rompia un test de igualdad
+exacta), y `gate_evidence` en contracts por una compliance matrix que citaba una
+ruta inexistente.
+
+**Corrida 2, express con dos rondas fail→fix y contencion de push real.** Quedo
+ejercitado el ciclo incremental completo: `--rebase` con `compliance` a
+re-juzgar, arrastre de `implementation_agents`, y las DOS ramas del arrastre de
+QA (se re-corre cuando el fix toca su `surface`, se arrastra cuando no,
+ahorrando el ciclo). Y la contencion, con un proceso rival pusheando en bucle:
+
+    intento 1/20  base +9 commits   veredicto reusado (patch_id b7113f3341cf)
+    intento 2/20  base +12 commits  veredicto reusado (mismo patch_id)
+    intento 3/20  base +14 commits  veredicto reusado -> shipped
+
+El `patch_id` se mantuvo constante en los tres rebases mientras la base se movia
+14 commits, y la evidencia fresca se re-sello sobre cada arbol integrado. Antes
+de este trabajo el intento 1 moria con `POLICY-SHIP-002`. `POLICY-LIMIT-001`
+corto la cuarta ronda de api nombrando al repo.
+
+- [x] **Un gate de lenguaje rojo reportaba `gate '"'"''"'"' fallo`, sin sujeto.** El nombre
+  fino (python, go, buf) lo pone `gate()` DENTRO del proceso hijo que hace el
+  sellado, asi que el subshell del slot no lo veia. Se nombra el tramo en el
+  padre; el detalle sigue en la salida del hijo.
+
 ### Pendiente: lo único que elimina la clase entera
 
 - [ ] **`flow: prs` + cola de merge del forge.** Todo lo de arriba MITIGA la

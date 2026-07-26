@@ -325,4 +325,45 @@ assert_contains "$out" "rompería el trabajo de alguien más" "y nombra el riesg
 [ -z "$( cd "$WS/repos/videocore" && git status --porcelain )" ] \
   && pass "el ensayo en seco deja el repo limpio" || fail "el ensayo dejó basura en el repo"
 
+echo
+echo "── el ensayo del revert va contra el main REAL, no contra el clon stale"
+# Encontrado corriendo deploy-watch de verdad: el ensayo se hacia en el clon
+# canonico y sobre su HEAD. Ese clon esta atrasado casi siempre (solo se
+# refresca con pull-all.sh o al crear un worktree), asi que el commit a revertir
+# ni era ancestro suyo y `git revert` fallaba SIEMPRE: el watcher decia
+# "conflictua con lo que aterrizo despues" aunque nadie hubiera tocado nada, y
+# el camino de rollback quedaba inservible. Medido: clon en eb17f9d, main en
+# f2a105e. Ademas limpiaba con `reset --hard` sobre ese clon COMPARTIDO.
+mkdir -p "$WS/repos/stale"
+git init -q -b main "$WS/repos/stale"
+( cd "$WS/repos/stale"; git config user.email t@t; git config user.name t
+  echo base > f.txt; git add -A; git commit -qm base
+  printf 'linea1\nlinea2\n' > g.txt; git add -A; git commit -qm mio
+  git update-ref refs/remotes/origin/main HEAD )
+MINE_S="$( cd "$WS/repos/stale" && git rev-parse HEAD )"
+# OTRO toca LAS MISMAS lineas y aterriza; el clon se queda atras
+( cd "$WS/repos/stale"
+  printf 'linea1\nMODIFICADA por otro\n' > g.txt; git add -A; git commit -qm "de otro, misma linea"
+  git update-ref refs/remotes/origin/main HEAD
+  git checkout -q "$MINE_S~1" )
+stale_head="$( cd "$WS/repos/stale" && git rev-parse HEAD )"
+
+# Contra el main REAL el revert conflictua (otro reescribio esas lineas), asi
+# que hay que PARAR. Contra el clon stale el revert "funciona" y se propondria
+# una accion destructiva sobre produccion que en main no aplica: es un FALSO OK,
+# peor que un falso conflicto.
+out="$( set -u; WS="$WS"; REPO=stale; TASK=T7; BASE_REF=main
+        ROLLBACK_MODE=manual; OBSERVED_REVISION=""
+        LOG="$WS/rb2.log"; say() { echo "$1"; }; emit() { :; }
+        . "$WS/rb.sh"; rollback_advice "$MINE_S" 2>&1 )"
+assert_contains "$out" "PARO" "ensayo contra el main REAL: detecta el conflicto y para"
+assert_not_contains "$out" "revert manual sugerido" \
+  "y NO propone una accion destructiva que en main no aplica"
+
+# Y lo que no puede pasar nunca: tocar el clon canonico compartido
+assert_eq "$stale_head" "$( cd "$WS/repos/stale" && git rev-parse HEAD )" \
+  "el ensayo NO movio el HEAD del clon canonico"
+assert_eq "" "$( cd "$WS/repos/stale" && git status --porcelain )" \
+  "ni lo dejo sucio (antes hacia reset --hard sobre un recurso compartido)"
+
 t_done

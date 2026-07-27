@@ -1,13 +1,18 @@
 {
   "name": "harness",
-  "owner": { "name": "Andres Garcia" },
+  "owner": {
+    "name": "Andres Garcia"
+  },
   "plugins": [
     {
       "name": "harness-creator",
       "source": "./",
-      "version": "0.45.2",
+      "version": "0.49.0",
       "description": "Creador e instalador de harnesses de ingeniería agéntica multi-repo — para cualquier proyecto",
-      "keywords": ["harness", "installer"]
+      "keywords": [
+        "harness",
+        "installer"
+      ]
     }
   ]
 }

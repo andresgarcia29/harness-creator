@@ -33,6 +33,17 @@ jobs:
         if: runner.os == 'macOS'
         run: /bin/bash tests/run.sh
 
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: la version dice lo mismo en los tres lugares
+        # marketplace.json es lo que Claude Code lee para INSTALAR y plugin.json
+        # contra lo que `make version` compara. Desalineados, una instancia se
+        # reporta al dia contra un numero que nadie publico. Ya paso.
+        run: bash scripts/version.sh check
+
   shellcheck:
     runs-on: ubuntu-latest
     steps:

@@ -1,0 +1,72 @@
+# Versionado automatico: cada push a main deriva la version de los commits,
+# la escribe en los tres lugares y crea el tag.
+#
+# POR QUE: la version vivia en tres archivos editados a mano y terminaron
+# diciendo cosas distintas (plugin.json 0.48.0, marketplace.json 0.45.2, tag
+# v0.47.0). marketplace.json es lo que Claude Code lee para INSTALAR, asi que
+# una instancia podia instalar 0.45.2 y reportarse al dia contra 0.48.0.
+#
+# La logica NO vive aca: vive en scripts/version.sh, que se puede correr en
+# local. Un workflow que implemente su propia regla de bump se desincroniza del
+# script en la primera version, y entonces CI y tu maquina calculan versiones
+# distintas del mismo commit.
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    # El propio workflow commitea, y ese commit dispara otro push a main. Sin
+    # esta guarda se llama a si mismo para siempre.
+    if: "!contains(github.event.head_commit.message, '[skip release]')"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # necesita los tags y la historia para derivar el bump
+
+      - name: derivar la version de los commits
+        id: v
+        run: |
+          next="$(bash scripts/version.sh next)"
+          current="$(bash scripts/version.sh current)"
+          echo "next=$next"    >> "$GITHUB_OUTPUT"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          if git rev-parse "v$next" >/dev/null 2>&1; then
+            echo "ya existe el tag v$next: nada que hacer"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: escribir la version y taggear
+        if: steps.v.outputs.skip != '1'
+        env:
+          NEXT: ${{ steps.v.outputs.next }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          bash scripts/version.sh set "$NEXT"
+          # El manifiesto de templates es parte de lo que se publica: un tag con
+          # el manifiesto viejo describe un set que no es el que se etiqueta.
+          bash scripts/templates-manifest.sh generate
+          if ! git diff --quiet; then
+            git add .claude-plugin/plugin.json .claude-plugin/marketplace.json templates/MANIFEST.sha256
+            git commit -m "chore(release): v$NEXT [skip release]"
+            git push
+          fi
+          git tag -a "v$NEXT" -m "v$NEXT"
+          git push origin "v$NEXT"
+
+      - name: release con las novedades
+        if: steps.v.outputs.skip != '1'
+        env:
+          NEXT: ${{ steps.v.outputs.next }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prev="$(git tag --list 'v*' --sort=-v:refname | sed -n 2p)"
+          notes="$(git log --format='- %s' "${prev:+$prev..}v$NEXT" | grep -vE '^- (chore\(release\)|Merge )' || true)"
+          gh release create "v$NEXT" --title "v$NEXT" --notes "${notes:-sin novedades}"

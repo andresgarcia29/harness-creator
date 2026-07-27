@@ -528,20 +528,95 @@ assert_contains "$out" "no encuentro pytest" "y que los tests tampoco"
 assert_contains "$out" "TESTS_RAN=0" "y NO afirma haber testeado"
 
 # 2. con uv, ruff se invoca POR uv (el bug era que solo pytest lo hacia)
-mkdir -p "$WS/stub"; printf '#!/bin/sh\necho "UVRUN $*"\nexit 0\n' > "$WS/stub/uv"; chmod +x "$WS/stub/uv"
+# El stub deja rastro en un log, no en stdout: su stdout es el JSON que el
+# ratchet consume, y lo que se mide aca es QUIEN invoca, no que imprime.
+mkdir -p "$WS/stub"
+cat > "$WS/stub/uv" <<'SH'
+#!/bin/sh
+echo "UVRUN $*" >> "$UVLOG"
+case "$2" in
+  ruff) [ "$3" = "--version" ] && { echo "ruff 0.0.0-stub"; exit 0; }; echo '[]'; exit 0 ;;
+esac
+exit 0
+SH
+chmod +x "$WS/stub/uv"
+export UVLOG="$WS/uv-calls.log"; : > "$UVLOG"
 mk_py "$WS/py2"
 out="$(run_py "$WS/py2" "$WS/stub:/usr/bin:/bin")"
-assert_contains "$out" "UVRUN run ruff" "con uv presente, ruff se invoca por uv run"
-assert_contains "$out" "UVRUN run pytest" "y pytest tambien (no se rompio lo que andaba)"
+calls="$(cat "$UVLOG")"
+assert_contains "$calls" "UVRUN run ruff check" "con uv presente, ruff se invoca por uv run"
+assert_contains "$calls" "UVRUN run pytest" "y pytest tambien (no se rompio lo que andaba)"
 
 # 3. el marcador mide lo que el sello afirma: TESTS RAN, no "reconoci el stack"
 if command -v pytest >/dev/null 2>&1 && command -v ruff >/dev/null 2>&1; then
+  # uv que falla: fuerza la rama de binario pelado y evita que `uv run` salga a
+  # sincronizar un venv (la suite es hermetica, no baja nada de la red).
+  mkdir -p "$WS/nouv"; printf '#!/bin/sh\nexit 2\n' > "$WS/nouv/uv"; chmod +x "$WS/nouv/uv"
   mk_py "$WS/py3" tests
-  out="$(run_py "$WS/py3" "$PATH")"
+  out="$(run_py "$WS/py3" "$WS/nouv:$PATH")"
   assert_contains "$out" "TESTS_RAN=1" "con la toolchain real: declara que SI corrio"
 else
   pass "toolchain real: saltado (falta ruff/pytest en esta maquina)"
 fi
+
+echo
+echo "── issue #30: uv presente y ruff ausente del venv no puede matar el gate"
+# `uv run ruff` sale 2 ("Failed to spawn: ruff") y bajo set -e mataba el gate
+# ANTES del else honesto: la rama que explica como arreglarlo era inalcanzable.
+mkdir -p "$WS/stub2"; printf '#!/bin/sh\necho "error: Failed to spawn: $2" >&2\nexit 2\n' > "$WS/stub2/uv"
+chmod +x "$WS/stub2/uv"
+mk_py "$WS/py30"
+out="$(run_py "$WS/py30" "$WS/stub2:/usr/bin:/bin")"; rc=$?
+assert_eq 0 "$rc" "uv sin ruff en el venv: el gate NO muere con exit 2"
+assert_contains "$out" "no encuentro ruff" "y SI llega a la rama que explica como arreglarlo"
+assert_contains "$out" "no encuentro pytest" "lo mismo para pytest (misma trampa)"
+assert_contains "$out" "TESTS_RAN=0" "y no afirma haber testeado"
+
+echo
+echo "── issue #31: ruff ratchetea igual que buf, la deuda de main no bloquea"
+# Medido en un repo real: 144 violaciones heredadas en main dejaban a TODA
+# tarea de ese repo sin poder llegar a review, sin haber tocado una sola.
+# El stub reporta una violacion por archivo .py que diga VIOLA: asi la baseline
+# tiene que ser un CHECKOUT de origin/main de verdad para que el ratchet ande.
+mkdir -p "$WS/stubruff"
+cat > "$WS/stubruff/ruff" <<'SH'
+#!/bin/sh
+[ "$1" = "--version" ] && { echo "ruff 0.0.0-stub"; exit 0; }
+for a in "$@"; do root="$a"; done
+printf '['; sep=""; n=0
+for f in "$root"/*.py; do
+  [ -f "$f" ] || continue
+  grep -q VIOLA "$f" || continue
+  printf '%s{"filename":"%s","code":"F401","message":"import sin usar"}' "$sep" "$f"
+  sep=","; n=$((n+1))
+done
+printf ']\n'
+[ "$n" -eq 0 ] || exit 1
+SH
+chmod +x "$WS/stubruff/ruff"
+mk_py_debt() {  # mk_py_debt <dir> — main YA trae deuda de lint
+  mk_py "$1"; cd "$1"
+  printf 'import os  # VIOLA\n' > deuda.py
+  git add -A; git commit -qm deuda >/dev/null
+  git update-ref refs/remotes/origin/main HEAD
+  cd "$WS"
+}
+
+# 1. deuda preexistente y cero cambios propios: pasa, y lo dice
+mk_py_debt "$WS/py31a"
+out="$(run_py "$WS/py31a" "$WS/stubruff:/usr/bin:/bin")"; rc=$?
+assert_eq 0 "$rc" "deuda heredada en main: NO bloquea (era el bug de #31)"
+assert_contains "$out" "PREEXISTENTES" "y la cuenta queda dicha, no escondida"
+
+# 2. una violacion NUEVA sobre esa misma deuda: bloquea con exit 3
+mk_py_debt "$WS/py31b"; cd "$WS/py31b"
+printf 'import sys  # VIOLA\n' > nueva.py
+git add -A; git commit -qm nueva >/dev/null
+cd "$WS"
+out="$(run_py "$WS/py31b" "$WS/stubruff:/usr/bin:/bin")"; rc=$?
+assert_eq 3 "$rc" "violacion nueva: bloquea (el ratchet no es una amnistia)"
+assert_contains "$out" "nueva.py" "y nombra SOLO la que introdujo el cambio"
+assert_not_contains "$out" "deuda.py: F401" "sin arrastrar la deuda ajena al error"
 sh="$(cat "$TMPL")"
 assert_contains "$sh" "TESTS_RAN" "el gate distingue 'corri tests' de 'reconoci el stack'"
 assert_not_contains "$sh" 'printf ../%s.. "${LANG_SEEN:-0}" > "$WS/tasks' "y el sello ya no usa LANG_SEEN como prueba"

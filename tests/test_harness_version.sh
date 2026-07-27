@@ -18,21 +18,43 @@ chmod +x "$WS/scripts/harness-version.sh"
 # plugin y el manifiesto de templates. Son preguntas distintas a propósito:
 # el número puede coincidir mientras el contenido difiere, que es justo el
 # fallo que este script existe para detectar.
-stub_gh() {  # stub_gh <version-upstream|""> [digest-upstream|""]
+#
+# Y sirve el listado de TAGS, porque la comparación se ancla al último tag y no
+# a la rama por defecto: la rama se mueve con cada commit, así que compararse
+# contra ella reporta "hay update" por trabajo sin publicar. El tercer argumento
+# existe para el único caso donde tag y rama difieren legítimamente.
+stub_gh() {  # stub_gh <version-en-el-tag|""> [digest] [version-en-la-rama]
   if [ -z "$1" ]; then
     printf '#!/usr/bin/env bash\nexit 1\n' > "$WS/bin/gh"
   else
     cat > "$WS/bin/gh" <<EOF
 #!/usr/bin/env bash
 case "\$*" in
+  */tags*)    echo "v0.1.0"; echo "v$1"; echo "no-es-semver" ;;
   *MANIFEST*) [ -n "${2:-}" ] || exit 1
               echo "plugin_version: $1"; echo "digest: ${2:-}" ;;
-  *)          printf '{"version":"$1"}' ;;
+  *ref=*)     printf '{"version":"$1"}' ;;
+  *)          printf '{"version":"${3:-$1}"}' ;;
 esac
 EOF
   fi
   chmod +x "$WS/bin/gh"
 }
+# Un plugin instalado en disco: es DE AHÍ que un update copia, así que --verify
+# lo mira antes que nada.
+stub_plugin() {  # stub_plugin <version> <digest>
+  rm -rf "$WS/plugin"; mkdir -p "$WS/plugin/.claude-plugin" "$WS/plugin/templates"
+  printf '{"version":"%s"}\n' "$1" > "$WS/plugin/.claude-plugin/plugin.json"
+  # Con líneas por archivo ANTES del digest, a propósito: cada una empieza con
+  # un sha256, así que un lector que agarre "el primer hash que vea" se lleva el
+  # del primer template y compara cosas distintas. Pasó al escribir --verify.
+  { echo "1111111111111111111111111111111111111111111111111111111111111111  templates/a"
+    echo "digest: $2"; } > "$WS/plugin/templates/MANIFEST.sha256"
+}
+verify() { ( cd "$WS" && PATH="$WS/bin:$PATH" CLAUDE_PLUGIN_ROOT="$WS/plugin" \
+  bash scripts/harness-version.sh --verify ) 2>&1; }
+verify_rc() { ( cd "$WS" && PATH="$WS/bin:$PATH" CLAUDE_PLUGIN_ROOT="$WS/plugin" \
+  bash scripts/harness-version.sh --verify >/dev/null 2>&1; echo $?); }
 SET_A=aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888
 SET_B=9999ffff8888eeee7777dddd6666cccc5555bbbb4444aaaa3333999922221111
 run() { ( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/harness-version.sh "$@" ) 2>&1; }
@@ -185,5 +207,76 @@ assert_eq 1 "$(rc_of --check)" "--check: no la trata como sana"
 sk="$(cat "$ROOT/skills/harness-init/SKILL.md")"
 assert_contains "$sk" "plugin.json" "el instalador lee la version del plugin.json"
 assert_contains "$sk" "jamás se escribe de memoria" "y tiene prohibido escribirla de memoria"
+
+
+echo
+echo "── ... salvo que la rama por defecto diga lo mismo"
+# La otra cara: con la comparacion anclada al TAG, una instancia generada desde
+# un main sin taggear va legitimamente adelante del ultimo tag. Marcarla como
+# numero inventado seria un rojo falso en el peor lugar (esta comprobacion
+# existe para que un update no pueda mentir; mintiendo ella enseña a ignorarla).
+# La rama desempata: si el numero local EXISTE en main, se leyo de algun lado.
+stub_gh "0.48.0" "$SET_A" "0.49.0"
+echo "0.49.0" > "$WS/.harness-version"
+out="$(run)"
+assert_contains "$out" "main sin taggear" "adelantado del tag pero igual a main: se explica"
+assert_not_contains "$out" "MAYOR que su origen" "y NO se acusa de numero inventado"
+assert_eq 0 "$(rc_of --check)" "--check: no hay nada publicado a lo que ir"
+
+echo
+echo "── se compara contra el ULTIMO tag, no contra el primero que devuelva el API"
+# /tags devuelve por fecha de creacion: un tag de arreglo publicado tarde sobre
+# una version vieja quedaria primero. El stub sirve v0.1.0 ANTES que el bueno.
+stub_gh "0.48.0" "$SET_A"
+echo "0.40.0" > "$WS/.harness-version"
+out="$(run)"
+assert_contains "$out" "0.48.0" "toma el mayor, no el primero"
+assert_not_contains "$out" "upstream 0.1.0" "y no el mas viejo"
+assert_contains "$out" "tag v0.48.0" "y dice contra que punto comparo"
+
+echo
+echo "── --verify: el update aterrizo (numero Y contenido)"
+# Un update que termina diciendo "listo" no es evidencia de nada. Lo unico que
+# no se puede fingir es coincidir con el tag en los dos ejes.
+stub_gh "0.48.0" "$SET_A"
+stub_plugin "0.48.0" "$SET_A"
+echo "0.48.0" > "$WS/.harness-version"; echo "$SET_A" > "$WS/.harness-templates"
+out="$(verify)"
+assert_contains "$out" "aterrizó" "todo coincide: lo confirma"
+assert_eq 0 "$(verify_rc)" "y sale 0"
+# El de arriba tambien prueba que no se agarra el hash del primer archivo del
+# MANIFEST del plugin: si lo hiciera, este caso sano saldria rojo.
+
+echo
+echo "── --verify: el numero quedo bien y el CONTENIDO no"
+# EL fallo caro, y ya paso: '1 actualizado, 24 conflictos' con la version nueva
+# escrita sobre templates viejos. Ninguno de esos 24 traia los arreglos que el
+# numero prometia, y nada en la salida lo decia.
+echo "$SET_B" > "$WS/.harness-templates"
+out="$(verify)"
+assert_contains "$out" "CONTENIDO" "digest distinto: se nombra el fallo"
+assert_not_contains "$out" "aterrizó: instancia" "y NO se declara exito"
+assert_eq 1 "$(verify_rc)" "sale 1"
+
+echo
+echo "── --verify: mira el plugin EN DISCO, que es de donde el update copia"
+# Sin esto, /plugin marketplace update sin correr = regenerar desde templates
+# viejos, escribir el numero nuevo, y reportar exito. El bug de 0.60.0 visto un
+# paso antes.
+echo "$SET_A" > "$WS/.harness-templates"
+stub_plugin "0.45.2" "$SET_B"
+out="$(verify)"
+assert_contains "$out" "PLUGIN EN DISCO" "plugin viejo: se nombra"
+assert_contains "$out" "marketplace update" "con el comando que lo arregla"
+assert_eq 1 "$(verify_rc)" "y bloquea aunque la instancia coincida con el tag"
+
+echo
+echo "── --verify: no poder comprobar NO es exito"
+stub_plugin "0.48.0" "$SET_A"
+stub_gh ""
+out="$(verify)"
+assert_contains "$out" "SIN VERIFICAR" "sin upstream: se dice que no se verifico"
+assert_not_contains "$out" "aterrizó: instancia" "y no se declara exito"
+assert_eq 2 "$(verify_rc)" "exit 2: ni verde ni rojo, no se pudo mirar"
 
 t_done

@@ -9,6 +9,19 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
    (modo update) — son el mismo flujo; este comando es el atajo.
 1. Lee `.harness-version` y `harness-answers.yaml` del workspace. Si la
    versión coincide con la del plugin, dilo y termina.
+1a. **ANTES de copiar nada, comprueba que el plugin EN DISCO es el último
+   tag publicado.** El update copia desde `${CLAUDE_PLUGIN_ROOT}/templates/`,
+   así que un plugin sin actualizar produce una instancia vieja **que va a
+   reportar éxito igual**: se escribe el número nuevo sobre templates viejos.
+   Es el fallo de 2026-07 (`0.60.0`) visto desde un paso antes.
+   Compara contra el **tag**, no contra la rama por defecto: la rama se mueve
+   con cada commit y trae versiones que nadie publicó.
+   ```
+   gh api repos/andresgarcia29/harness-creator/tags --jq '.[].name'   # el mayor
+   jq -r .version ${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json    # lo instalado
+   ```
+   Si el disco está atrás: **para acá**, di el número exacto de los dos lados y
+   pide `/plugin marketplace update harness`. No sigas "por si acaso".
 1b. **Migra el esquema del answers** si esta versión agregó campos
    (ej. `scope:` por capacidad según el campo `cronjob:` del catálogo,
    `instance.repo`, `models.provider` — default `anthropic` si el
@@ -125,14 +138,36 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
    el diff contra `templates/gitignore.tmpl` CONSERVANDO lo que el humano
    haya añadido: aquí lo local suma, no compite. El doctor ya avisa de las
    tres entradas caras (issue #27).
-5. Al aplicar: re-corre el doctor de la instancia y actualiza
-   `.harness-version`. Si el update tocó models.yaml o agentes, corre
+5. Al aplicar: re-corre el doctor de la instancia y actualiza el rastro. Los
+   dos archivos se **copian de la fuente, nunca se escriben de memoria** — un
+   número recordado es exactamente cómo apareció el `0.60.0` que no existía:
+   ```
+   jq -r .version ${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json > .harness-version
+   sed -n 's/^digest: *//p' ${CLAUDE_PLUGIN_ROOT}/templates/MANIFEST.sha256 > .harness-templates
+   ```
+   Si el update tocó models.yaml o agentes, corre
    `bash scripts/stamp-models.sh` — el frontmatter de los agentes se
    estampa desde la política, nunca a mano. **Migración de esquema de
    models.yaml**: si la instancia trae el esquema viejo (roles con IDs
    crudos, sin `provider:` ni secciones `models.<provider>`), migra:
    `provider: anthropic`, traduce cada ID a su alias (fast|smart|deep)
    y muestra el diff.
+
+6. **CIERRE OBLIGATORIO: `bash scripts/harness-version.sh --verify`.** No
+   declares el update terminado sin esto, y no lo reemplaces por tu propio
+   resumen de lo que aplicaste. Compara la instancia contra el último tag en
+   los DOS ejes —número **y** digest de templates— y cada uno atrapa un fallo
+   distinto:
+   - **el número no coincide** → el rastro quedó mal escrito;
+   - **el digest no coincide** → el número quedó bien y el CONTENIDO no. Es el
+     fallo caro: archivos que se rechazaron o que no se llegaron a aplicar, con
+     una instancia que a partir de ahí se reporta al día. Ya pasó: "1
+     actualizado, 24 conflictos" y ninguno de esos 24 traía los arreglos que el
+     número prometía.
+
+   Si sale rojo, dilo **con esas palabras** — el update no aterrizó — y lista
+   qué quedó sin aplicar. Si sale exit 2 (no se pudo traer el tag), eso no es
+   éxito: es un update **sin verificar**, y se dice así.
 
 Presta atención especial a: scripts/doctor.sh (es COPIA del plugin —
 casi siempre conviene actualizarla), hooks, y ship.sh (gates nuevos).

@@ -554,18 +554,80 @@ run_lang_gates() {
     # se dice que ese tramo no se verifico, igual que hacen gitleaks,
     # import-linter y los seis stacks que pasan por need(). Un 127 rojo enseña
     # a desconfiar del gate tanto como un verde falso.
-    if command -v uv >/dev/null; then uv run ruff check .
-    elif command -v ruff >/dev/null; then ruff check .
+    #
+    # PERO `command -v uv` NO CONTESTA LA PREGUNTA QUE IMPORTA (issue #30).
+    # Con uv instalado y ruff ausente del venv, `uv run ruff` sale 2 ("Failed
+    # to spawn: ruff") y bajo `set -e` eso mata el gate ANTES de llegar al
+    # else honesto: la rama que explica cómo arreglarlo era inalcanzable justo
+    # cuando hacía falta, y el usuario veía un exit 2 pelado. La pregunta no es
+    # "¿existe uv?" sino "¿corre esta herramienta?", y eso se contesta
+    # corriéndola una vez, no deduciéndolo.
+    py_tool() {  # py_tool <bin> → cómo invocarlo, o nada si no corre
+      if command -v uv >/dev/null && uv run "$1" --version >/dev/null 2>&1; then
+        printf 'uv run %s' "$1"
+      elif command -v "$1" >/dev/null; then
+        printf '%s' "$1"
+      fi
+    }
+    RUFF="$(py_tool ruff)"
+    PYTEST="$(py_tool pytest)"
+    if [ -n "$RUFF" ]; then
+      # ── ruff: RATCHET, la misma forma que buf lint (issue #31) ───────
+      # ship.sh ya declaraba el principio abajo, en el gate de buf ("la deuda
+      # preexistente no secuestra shipping ajeno") y lo aplicaba a UN solo
+      # linter. El otro, ruff, bloqueaba con todo: medido en un repo real, 144
+      # violaciones heredadas en main dejaban a TODA tarea de ese repo sin
+      # poder llegar a review ni a main, aunque no tocara una sola de las 144.
+      # Un gate que castiga por deuda ajena se termina desactivando, y ahí se
+      # pierde también lo que sí servía.
+      #
+      # La baseline es un checkout de origin/$BASE_REF, no el clon canónico:
+      # ruff lintea un ÁRBOL DE TRABAJO, no una ref, y repos/<repo> puede estar
+      # en otra rama o sucio. buf puede darse el lujo de leer el clon porque
+      # compara refs; acá haría comparar contra un árbol cualquiera.
+      py_lint() {  # py_lint <dir> → "archivo\tcódigo\tmensaje" ordenado
+        local root; root="$(cd "$1" && pwd -P)"
+        # Se invoca SIEMPRE desde el worktree (ahí está el venv que uv resuelve)
+        # y se le pasa el árbol a mirar: ruff toma la config del árbol linteado.
+        # Salir 1 es "encontré violaciones", no "fallé": no puede abortar nada.
+        $RUFF check --output-format json "$root" 2>/dev/null \
+          | jq -r --arg r "$root/" '.[] | [(.filename | ltrimstr($r)), .code, .message] | @tsv' 2>/dev/null \
+          | sort || true
+      }
+      py_base="$(mktemp -d)"
+      if git -C "$WT" worktree add --detach --quiet "$py_base/base" "origin/$BASE_REF" 2>/dev/null; then
+        py_main_lint="$(py_lint "$py_base/base")"
+      else
+        echo "⚠️  no pude sacar un checkout de origin/$BASE_REF para la baseline de ruff."
+        echo "   Sin baseline no hay ratchet: bloqueo con TODA la deuda, y lo digo."
+        py_main_lint=""
+      fi
+      py_head_lint="$(py_lint .)"
+      git -C "$WT" worktree remove --force "$py_base/base" 2>/dev/null || true
+      rm -rf "$py_base"
+      py_new_lint="$(comm -13 <(printf '%s' "$py_main_lint") <(printf '%s' "$py_head_lint"))"
+      if [ -n "$py_new_lint" ]; then
+        echo "❌ ruff: violaciones NUEVAS introducidas por este cambio:"
+        printf '%s\n' "$py_new_lint" | awk -F'\t' '{print "   " $1 ": " $2 " " $3}'
+        echo "   ↳ remediación: corrige SOLO estas (la deuda preexistente de $BASE_REF no bloquea)"
+        exit 3
+      fi
+      if [ -n "$py_main_lint" ]; then
+        echo "⚠️  ruff: $(printf '%s\n' "$py_main_lint" | grep -c .) violaciones PREEXISTENTES en $BASE_REF (no bloquean; candidatas al ratchet-keeper)"
+      fi
     else
-      echo "⚠️  $REPO es Python pero no encuentro ruff (ni uv para invocarlo): el lint NO CORRIÓ."
-      echo "   ↳ instalá uv (y corré 'uv sync --extra dev'), o poné ruff en el PATH."
+      echo "⚠️  $REPO es Python pero no encuentro ruff (ni uv que sepa invocarlo): el lint NO CORRIÓ."
+      echo "   ↳ instalá uv y corré 'uv sync --extra dev' (ruff tiene que quedar EN el venv),"
+      echo "     o poné ruff en el PATH."
       emit assumption "$REPO (Python): lint NO ejecutado, falta ruff/uv"
     fi
-    if command -v uv >/dev/null; then uv run pytest -q; TESTS_RAN=1
-    elif command -v pytest >/dev/null; then pytest -q; TESTS_RAN=1
+    if [ -n "$PYTEST" ]; then
+      $PYTEST -q
+      TESTS_RAN=1
     else
-      echo "⚠️  $REPO es Python pero no encuentro pytest (ni uv para invocarlo): los tests NO CORRIERON."
-      echo "   ↳ instalá uv (y corré 'uv sync --extra dev'), o poné pytest en el PATH."
+      echo "⚠️  $REPO es Python pero no encuentro pytest (ni uv que sepa invocarlo): los tests NO CORRIERON."
+      echo "   ↳ instalá uv y corré 'uv sync --extra dev' (pytest tiene que quedar EN el venv),"
+      echo "     o poné pytest en el PATH."
       emit assumption "$REPO (Python): tests NO ejecutados, falta pytest/uv"
     fi
   fi

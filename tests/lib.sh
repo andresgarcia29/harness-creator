@@ -7,6 +7,35 @@ set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FAILS=0; CHECKS=0
 
+# ── Identidad de git, para TODOS los tests ────────────────────────────
+# Los tests commitean, y hasta acá daban por sentado que la máquina tenía una
+# identidad configurada. En una máquina de desarrollo la hay; en un runner
+# limpio no, y git muere con "fatal: empty ident name". El fallo no se ve como
+# lo que es: el commit falla, la variable que capturaba su sha queda vacía, y la
+# aserción de dos pasos más abajo reporta un exit code raro sin decir por qué.
+# Diez commits de CI en rojo por esto, verde en local todo el tiempo.
+# Se exporta acá y no en cada test: un test hermético no le pregunta nada al host.
+export GIT_AUTHOR_NAME="harness tests" GIT_AUTHOR_EMAIL="t@t"
+export GIT_COMMITTER_NAME="harness tests" GIT_COMMITTER_EMAIL="t@t"
+
+# ── Un PATH sin cierta herramienta ────────────────────────────────────
+# Para probar "no está instalado" no alcanza con recortar el PATH a /usr/bin:
+# en un runner `gh` VIVE en /usr/bin, así que el test probaba otra cosa y fallaba
+# solo ahí. Esto arma un bin con enlaces a todo lo que hay MENOS lo pedido.
+t_path_without() {  # t_path_without <cmd> → imprime un PATH sin ese comando
+  local drop="$1" dir="$WS/.nobin-$1" d f
+  mkdir -p "$dir"
+  printf '%s' "$PATH" | tr ':' '\n' | while IFS= read -r d; do
+    [ -d "$d" ] || continue
+    for f in "$d"/*; do
+      [ -x "$f" ] && [ ! -d "$f" ] || continue
+      [ "$(basename "$f")" = "$drop" ] && continue
+      [ -e "$dir/$(basename "$f")" ] || ln -s "$f" "$dir/" 2>/dev/null || true
+    done
+  done
+  printf '%s' "$dir"
+}
+
 t_ws() {  # workspace temporal auto-limpiado
   WS="$(mktemp -d)"
   trap 'rm -rf "$WS"' EXIT

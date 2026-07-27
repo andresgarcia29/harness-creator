@@ -32,7 +32,12 @@ bash "$WS/scripts/repo-brief.sh" vivo >/dev/null 2>&1
 assert_file "$WS/.cache/briefs/vivo.md" "el repo vivo sí tiene brief"
 
 echo "── el grafo lo salta, y lo dice"
-out="$( cd "$WS" && bash scripts/graph-refresh.sh 2>&1 )"
+# graph-refresh sale 0 en silencio si no encuentra `graphify`. Sin este stub el
+# test pasaba solo en máquinas que lo tienen instalado: en CI salía por la
+# primera línea sin llegar nunca al bucle que este bloque verifica.
+mkdir -p "$WS/bin"; printf '#!/usr/bin/env bash\nexit 0\n' > "$WS/bin/graphify"
+chmod +x "$WS/bin/graphify"
+out="$( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/graph-refresh.sh 2>&1 )"
 assert_contains "$out" "muerto" "nombra el repo que salta"
 assert_contains "$out" "archivado" "y por qué lo salta"
 

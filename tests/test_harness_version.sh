@@ -122,8 +122,14 @@ assert_not_contains "$out" "idénticos a upstream" "y NO afirma que coincidan"
 
 # gh ni siquiera instalado: hay que sacarlo del PATH, no solo borrar el stub
 # (el del sistema seguiría respondiendo y el test probaría otra cosa).
+# Y NO alcanza con recortar el PATH a /usr/bin: en un runner de CI `gh` vive
+# justo ahí, así que este test pasaba en local y fallaba solo en CI, probando
+# el camino equivocado. t_path_without arma un PATH con todo menos gh.
 rm -f "$WS/bin/gh"
-out="$( cd "$WS" && PATH="$WS/bin:/usr/bin:/bin" bash scripts/harness-version.sh 2>&1 )"
+NOGH="$(t_path_without gh)"
+command -v gh >/dev/null 2>&1 && { PATH="$NOGH" command -v gh >/dev/null 2>&1 \
+  && fail "el PATH sin gh todavía tiene gh" || pass "el PATH de prueba no tiene gh"; }
+out="$( cd "$WS" && PATH="$NOGH" bash scripts/harness-version.sh 2>&1 )"
 assert_contains "$out" "gh no está instalado" "sin gh: dice el motivo concreto"
 assert_not_contains "$out" "al día" "y tampoco inventa un veredicto"
 

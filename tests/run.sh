@@ -6,6 +6,18 @@
 #   ./tests/run.sh          → todo (~40s; el lock prueba la gracia de 15s real)
 #   ./tests/run.sh fast     → salta el test lento del lock
 set -u
+
+# Identidad de git para TODA la suite, bash y python. Los tests commitean, y
+# hasta acá se lo preguntaban al host: en un runner limpio git muere con
+# "fatal: empty ident name", el commit no ocurre, la variable que guardaba su
+# sha queda vacía y la aserción de más abajo falla por un motivo que no se
+# parece en nada a la causa. Diez commits de CI en rojo, verde en local.
+# Va acá además de en lib.sh porque las variables de entorno le GANAN a
+# `git config`: un test python que configura el repo igual se rompe si el
+# entorno trae un GIT_AUTHOR_NAME vacío.
+export GIT_AUTHOR_NAME="harness tests" GIT_AUTHOR_EMAIL="t@t"
+export GIT_COMMITTER_NAME="harness tests" GIT_COMMITTER_EMAIL="t@t"
+
 cd "$(dirname "$0")"
 
 command -v jq >/dev/null || { echo "falta jq (los hooks y el bus lo usan)"; exit 1; }

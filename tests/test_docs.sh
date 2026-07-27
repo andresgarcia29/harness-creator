@@ -137,4 +137,22 @@ assert_contains "$doc" "NO está en este PATH" "y lo dice como lo que es"
 assert_contains "$doc" "NO lo reinstales" "sin mandar a reinstalar lo que ya esta"
 assert_contains "$doc" "zshenv" "y explica donde va brew shellenv para que persista"
 
+echo
+echo "── la ley de reportes: escribir para que se lea"
+cl="$(cat "$ROOT/templates/CLAUDE.md.tmpl")"
+assert_contains "$cl" "Escribí para que se lea" "CLAUDE.md declara la ley"
+assert_contains "$cl" "una pantalla" "con un limite concreto, no 'se breve'"
+assert_contains "$cl" "no por el viaje" "y la regla de arrancar por el estado"
+assert_contains "$cl" "ejemplo concreto" "lo tecnico se explica con un caso"
+ag="$(cat "$ROOT/templates/AGENTS.md.tmpl")"
+assert_contains "$ag" "Escribí para que se lea" "y vale para las otras herramientas"
+au="$(cat "$ROOT/templates/commands/auto.md.tmpl")"
+assert_contains "$au" "Una pantalla" "el reporte final de /auto esta acotado"
+# La numeracion de las leyes no puede tener huecos ni repetidos: se citan por
+# numero desde los prompts ("Ley 6", "Ley 12"), y un salto manda a la ley
+# equivocada.
+nums="$(grep -oE '^[0-9]+\.' "$ROOT/templates/CLAUDE.md.tmpl" | tr -d '.' | sort -n | uniq)"
+dups="$(grep -oE '^[0-9]+\.' "$ROOT/templates/CLAUDE.md.tmpl" | tr -d '.' | sort -n | uniq -d)"
+[ -z "$dups" ] && pass "las leyes no tienen numeros repetidos" || fail "leyes duplicadas: $dups"
+
 t_done

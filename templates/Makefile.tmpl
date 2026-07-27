@@ -11,6 +11,9 @@ init: ## onboarding de una pasada: deps + token + secretos + doctor
 version: ## ¿estoy al día? versión de la instancia vs upstream + estado de las tareas
 	@bash scripts/harness-version.sh
 
+verify-update: ## DESPUÉS de actualizar: ¿la instancia quedó igual al último tag?
+	@bash scripts/harness-version.sh --verify
+
 doctor: ## salud del harness (CLIs, MCPs, hooks, links, secretos)
 	@bash scripts/doctor.sh .
 

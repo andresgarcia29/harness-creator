@@ -15,22 +15,35 @@
 # "no pude averiguar la versión de upstream" NO se reporta como "estás al
 # día". Silencio y verde no son lo mismo.
 #
+# CONTRA QUÉ SE COMPARA: contra el último TAG de upstream, no contra su rama
+# por defecto. La rama se mueve con cada commit, así que comparar contra ella
+# reporta "hay update" por trabajo que todavía no se publicó, y peor: el número
+# que trae puede no corresponder a ningún set de templates publicado. Un tag es
+# inmutable y es lo que el marketplace instala. Si upstream no tiene NINGÚN
+# tag se cae a la rama por defecto y se DICE, porque entonces la comparación
+# vale menos y quien la lee tiene que saberlo.
+#
 # Uso:
 #   scripts/harness-version.sh            todo: versión + sesión + trabajo
 #   scripts/harness-version.sh --check    solo el veredicto, por exit code
 #   scripts/harness-version.sh --quiet    solo versión y set de templates
+#   scripts/harness-version.sh --verify   DESPUÉS de actualizar: ¿aterrizó?
 set -u
 
 WS="$(cd "$(dirname "$0")/.." && pwd)"
 # Mismo patrón que harness-bug.sh: env con default, no un placeholder
 # que alguien tenga que acordarse de sustituir.
 UPSTREAM_REPO="${HARNESS_UPSTREAM_REPO:-andresgarcia29/harness-creator}"
+# El plugin EN DISCO: la fuente real de la que un update copia. Claude Code lo
+# exporta como CLAUDE_PLUGIN_ROOT dentro de los comandos.
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${HARNESS_PLUGIN_ROOT:-}}"
 MODE=full
 case "${1:-}" in
-  --check) MODE=check ;;
-  --quiet) MODE=quiet ;;
-  "")      MODE=full ;;
-  *) echo "uso: harness-version.sh [--check|--quiet]"; exit 1 ;;
+  --check)  MODE=check ;;
+  --quiet)  MODE=quiet ;;
+  --verify) MODE=verify ;;
+  "")       MODE=full ;;
+  *) echo "uso: harness-version.sh [--check|--quiet|--verify]"; exit 1 ;;
 esac
 
 ver_lt() {  # ver_lt <a> <b> → 0 si a < b (semver simple, sin pre-releases)
@@ -43,13 +56,41 @@ ver_lt() {  # ver_lt <a> <b> → 0 si a < b (semver simple, sin pre-releases)
     exit 1}'
 }
 
+# ── 0 · ¿contra qué punto de upstream comparo? ────────────────────────
+# El último tag semver. Se ordena acá y no se confía en el orden del API:
+# /tags devuelve por fecha de creación, y un tag de arreglo publicado tarde
+# sobre una versión vieja quedaría primero.
+UP_TAG=""
+if command -v gh >/dev/null 2>&1; then
+  UP_TAG="$(gh api "repos/$UPSTREAM_REPO/tags" --paginate --jq '.[].name' 2>/dev/null \
+    | awk '{ v=$0; sub(/^v/,"",v); if (v ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) print v"\t"$0 }' \
+    | sort -t. -k1,1n -k2,2n -k3,3n | tail -1 | cut -f2)"
+fi
+UP_WHERE="tag ${UP_TAG:-}"
+[ -n "$UP_TAG" ] || UP_WHERE="rama por defecto (upstream no publica tags)"
+
+gh_raw() {  # gh_raw <ruta> → el archivo tal cual, en el ref elegido
+  local q=""
+  [ -n "$UP_TAG" ] && q="?ref=$UP_TAG"
+  gh api "repos/$UPSTREAM_REPO/contents/$1$q" -H "Accept: application/vnd.github.raw" 2>/dev/null
+}
+
+# La version en la rama por defecto. Solo se consulta para desempatar el caso
+# "la instancia va adelante del ultimo tag", que tiene dos causas opuestas: una
+# instancia generada desde un main sin taggear (normal) o un numero escrito de
+# memoria (el bug de 0.60.0). Distinguirlas cuesta una llamada, en una rama rara.
+gh_head_ver() {
+  command -v gh >/dev/null 2>&1 || return 0
+  gh api "repos/$UPSTREAM_REPO/contents/.claude-plugin/plugin.json" \
+    -H "Accept: application/vnd.github.raw" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true
+}
+
 # ── 1 · versión ───────────────────────────────────────────────────────
-local_ver="$(tr -d ' \n' < "$WS/.harness-version" 2>/dev/null || true)"
+local_ver="$(cat "$WS/.harness-version" 2>/dev/null | tr -d ' \n' || true)"
 up_ver=""
 up_why=""
 if command -v gh >/dev/null 2>&1; then
-  up_ver="$(gh api "repos/$UPSTREAM_REPO/contents/.claude-plugin/plugin.json" \
-    -H "Accept: application/vnd.github.raw" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true)"
+  up_ver="$(gh_raw ".claude-plugin/plugin.json" | jq -r '.version // empty' 2>/dev/null || true)"
   [ -n "$up_ver" ] || up_why="gh no devolvió la versión (¿sin auth, sin red?)"
 else
   up_why="gh no está instalado"
@@ -63,7 +104,14 @@ elif [ -z "$up_ver" ]; then
   line="⚠️  instancia $local_ver · NO pude comparar contra upstream: $up_why"
 elif ver_lt "$local_ver" "$up_ver"; then
   verdict=1
-  line="⬆️  instancia $local_ver · upstream $up_ver: HAY UPDATE"
+  line="⬆️  instancia $local_ver · upstream $up_ver ($UP_WHERE): HAY UPDATE"
+elif ver_lt "$up_ver" "$local_ver" && [ "$(gh_head_ver)" = "$local_ver" ]; then
+  # Adelantado del ultimo TAG, pero exactamente igual a lo que hay en la rama
+  # por defecto: no es un numero inventado, es una instancia generada desde un
+  # main que todavia no se taggeo. Se dice, y no se marca update: no hay nada
+  # publicado a lo que ir.
+  line="✅ instancia $local_ver · último tag $up_ver: al día (generada desde main sin taggear)"
+  verdict=0
 elif ver_lt "$up_ver" "$local_ver"; then
   # UNA INSTANCIA NO PUEDE IR ADELANTE DE SU ORIGEN. Si dice una version mayor
   # que la de upstream, ese numero no salio de ningun lado: lo escribio alguien
@@ -118,12 +166,10 @@ read_digest() {  # read_digest <archivo> → sha256 en minusculas, o vacio
     "$1" 2>/dev/null | head -1 | tr 'A-Z' 'a-z'
 }
 local_tpl="$(read_digest "$WS/.harness-templates")"
-tpl_raw="$(tr -d ' \n' < "$WS/.harness-templates" 2>/dev/null || true)"
+tpl_raw="$(cat "$WS/.harness-templates" 2>/dev/null | tr -d ' \n' || true)"
 up_tpl=""
 if command -v gh >/dev/null 2>&1; then
-  up_tpl="$(gh api "repos/$UPSTREAM_REPO/contents/templates/MANIFEST.sha256" \
-    -H "Accept: application/vnd.github.raw" 2>/dev/null \
-    | sed -n 's/^digest: *//p' | head -1 || true)"
+  up_tpl="$(gh_raw "templates/MANIFEST.sha256" | sed -n 's/^digest: *//p' | head -1 || true)"
 fi
 
 if [ -z "$local_tpl" ] && [ -n "$tpl_raw" ]; then
@@ -156,6 +202,75 @@ fi
 
 [ "$MODE" = "quiet" ] && exit 0
 if [ "$MODE" = "check" ]; then exit "$verdict"; fi
+
+# ── 1c · --verify: DESPUÉS de actualizar, ¿aterrizó donde dijo? ───────
+# Un update que termina diciendo "listo" no es evidencia de nada: el modo de
+# fallo que este harness ya pagó es un generador que escribió la versión nueva
+# habiendo copiado templates viejos, y reportó éxito. Este modo comprueba lo
+# único que no se puede fingir: que la instancia coincide con el ÚLTIMO TAG en
+# los DOS ejes, número y contenido.
+#
+# Y comprueba antes lo que casi nadie mira: el plugin EN DISCO, que es de donde
+# el update copia. Si `/plugin marketplace update` no corrió, regenerar desde
+# ahí produce una instancia vieja... que va a reportar éxito igual.
+#   exit 0 = aterrizó · 1 = no · 2 = no pude comprobarlo
+if [ "$MODE" = "verify" ]; then
+  echo
+  echo "── ¿el update aterrizó? ──"
+  if [ -z "$up_ver" ] || [ -z "$up_tpl" ]; then
+    echo "⚠️  no pude traer el último tag de upstream: NO puedo confirmar el update."
+    echo "   Esto no es un update fallido, es un update SIN VERIFICAR."
+    exit 2
+  fi
+  [ -n "$UP_TAG" ] || echo "⚠️  upstream no publica tags: comparo contra su rama por defecto, que se mueve."
+
+  vrc=0
+  # El plugin en disco, la fuente del copiado.
+  if [ -n "$PLUGIN_ROOT" ] && [ -f "$PLUGIN_ROOT/.claude-plugin/plugin.json" ]; then
+    disk_ver="$(jq -r '.version // empty' "$PLUGIN_ROOT/.claude-plugin/plugin.json" 2>/dev/null)"
+    # OJO: acá NO sirve read_digest. MANIFEST.sha256 trae una línea por archivo
+    # que EMPIEZA con un sha256, así que read_digest devolvería el hash del
+    # primer template en vez del digest del set, y el chequeo compararía cosas
+    # distintas dando rojo siempre. El digest es su última línea, con prefijo.
+    disk_tpl="$(sed -n 's/^digest: *//p' "$PLUGIN_ROOT/templates/MANIFEST.sha256" 2>/dev/null | head -1)"
+    if [ "$disk_ver" != "$up_ver" ] || { [ -n "$disk_tpl" ] && [ "$disk_tpl" != "$up_tpl" ]; }; then
+      echo "❌ el PLUGIN EN DISCO ($disk_ver) no es el último tag ($up_ver)."
+      echo "   El update copia DESDE acá, así que regenerar produce una instancia"
+      echo "   vieja igual, y el número que escriba va a decir que está al día."
+      echo "   ↳ /plugin marketplace update harness   y volvé a correr el update"
+      vrc=1
+    else
+      echo "✅ plugin en disco $disk_ver: es el último tag"
+    fi
+  else
+    echo "⚠️  no sé qué plugin está instalado (sin CLAUDE_PLUGIN_ROOT): no puedo"
+    echo "   confirmar que el update copió desde la versión publicada."
+    [ "$vrc" -eq 0 ] && vrc=2
+  fi
+
+  if [ "$local_ver" = "$up_ver" ]; then
+    echo "✅ versión de la instancia $local_ver: coincide con el tag"
+  else
+    echo "❌ la instancia dice $local_ver y el último tag es $up_ver: el update NO aterrizó."
+    vrc=1
+  fi
+
+  if [ -z "$local_tpl" ]; then
+    echo "❌ la instancia no declara set de templates: el update no dejó rastro,"
+    echo "   así que el número de arriba no es evidencia de nada."
+    vrc=1
+  elif [ "$local_tpl" = "$up_tpl" ]; then
+    echo "✅ templates $(printf '%.12s' "$local_tpl"): idénticos al tag"
+  else
+    echo "❌ templates $(printf '%.12s' "$local_tpl") ≠ tag $(printf '%.12s' "$up_tpl")."
+    echo "   Este es EL fallo que importa: el número quedó bien y el CONTENIDO"
+    echo "   no. Faltan archivos por aplicar, o alguno se rechazó."
+    echo "   ↳ volvé a correr /harness-update y aplicá los diffs que queden."
+    vrc=1
+  fi
+  [ "$vrc" -eq 0 ] && echo "✅ el update aterrizó: instancia == ${UP_TAG:-upstream} en número y contenido"
+  exit "$vrc"
+fi
 
 if [ "$verdict" -eq 1 ]; then
   echo "   ↳ para actualizar:  /plugin marketplace update harness"

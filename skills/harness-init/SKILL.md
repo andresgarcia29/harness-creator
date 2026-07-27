@@ -40,7 +40,18 @@ pones juicio donde hace falta (topología, entrevista, generación).
      cron-runner.sh + re-estampado). La lista completa y las migraciones
      de esquema viven en `commands/harness-update.md`.
   6. Al final: `bash scripts/stamp-models.sh` si tocaste models.yaml o
-     agentes, re-corre el doctor, y actualiza `.harness-version`.
+     agentes, re-corre el doctor, y actualiza el rastro (`.harness-version`
+     y `.harness-templates`) COPIÁNDOLO de las fuentes de la tabla, nunca
+     de memoria.
+  7. **Y verificá que aterrizó: `bash scripts/harness-version.sh --verify`.**
+     No declares el update terminado sin esto. Compara la instancia contra el
+     último TAG de upstream en los dos ejes, número y digest de templates, y
+     el segundo es el que importa: el número puede quedar bien mientras el
+     contenido no, que es exactamente el fallo de los 24 conflictos. También
+     mira el plugin EN DISCO, porque si `/plugin marketplace update` no corrió,
+     regenerar desde ahí produce una instancia vieja que reporta éxito igual.
+     Rojo se dice como rojo: **el update no aterrizó**, y qué quedó sin
+     aplicar. Exit 2 no es éxito: es un update SIN VERIFICAR.
 - **Idempotencia por archivo** (también en instalación fresca): si un
   archivo existe, diff y pregunta. Nunca destruyas personalización local.
 - **Tokens**: no explores los repos a mano; el inventario ya lo hizo.

@@ -72,7 +72,20 @@ Dirección de dependencias (ley, referencia del DAG de shipping):
    lectura. Si una consulta te devuelve algo de un repo archivado, no es
    material: es ruido que nadie puede tocar. La lista la mantiene
    `scripts/archived-repos.sh refresh` (cacheada; el doctor avisa si envejece).
-14. **La recomendada es la que elimina la causa, jamás la más rápida.**
+14. **Escribí para que se lea, no para demostrar que trabajaste.** Todo
+   reporte tuyo (estado, plan, qué pasó) cabe en una pantalla. Reglas duras:
+   - **Empezá por el estado, no por el viaje.** "Shippeado en `a1b2c3d`, 2
+     rondas" antes que el relato de cómo llegaste.
+   - **Un dato real vale más que un párrafo describiéndolo.** Pegá la línea
+     de salida, el número, el sha. `exit 127: ruff: command not found` dice
+     más que tres oraciones sobre el gate de Python.
+   - **No narres lo que vas a hacer.** Hacelo y contá el resultado.
+   - **Si el lector no puede accionar con eso, sobra.** Sacalo.
+   - Lo técnico se explica con un ejemplo concreto, no con teoría. Tu lector
+     es técnico: no necesita el concepto, necesita el caso.
+   El costo de romper esta regla no es estético: un reporte que no se lee es
+   un reporte que no existe, y las decisiones se toman igual, peor informadas.
+15. **La recomendada es la que elimina la causa, jamás la más rápida.**
    Cuando presentes alternativas a un humano, la que marques como
    recomendada es la que deja el problema resuelto para siempre, aunque
    cueste más trabajo hoy. El atajo se puede listar, NUNCA como

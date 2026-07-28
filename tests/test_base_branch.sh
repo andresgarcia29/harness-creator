@@ -91,6 +91,43 @@ assert_eq 2 "$(rc_of "$m" "git push origin main")" "'main' se bloquea SIEMPRE (n
 assert_eq 0 "$(rc_of "$m" "git push origin task/T1")" "una rama de tarea sí pasa"
 
 echo
+echo "── issue #32: un origin/HEAD envenenado no manda al worktree a otra rama"
+# El ref local se escribe UNA vez al clonar; un `remote set-head` posterior
+# (cualquier flujo que trabaje el clon en otra rama) lo dejaba apuntando ahí
+# para siempre, en silencio. Ahora base_branch le pregunta AL REMOTO
+# (ls-remote --symref) y sana el ref local de paso; offline cae al local.
+
+mk_repo svc-trunk trunk
+# el veneno: una rama vieja publicada y el set-head local apuntándole
+git -C "$WS/repos/svc-trunk" checkout -qb task/vieja
+git -C "$WS/repos/svc-trunk" push -q origin task/vieja
+git -C "$WS/repos/svc-trunk" checkout -q trunk
+git -C "$WS/repos/svc-trunk" remote set-head origin task/vieja
+
+extract_bb() {  # extract_bb <archivo> → base_branch() a un archivo sourceable
+  awk '/^base_branch\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$1"
+}
+extract_bb "$WS/scripts/worktree-task.sh" > "$WS/bb-wt.sh"
+grep -q "ls-remote" "$WS/bb-wt.sh" || { echo "no pude extraer base_branch de worktree-task"; exit 1; }
+b="$( ( set -u; . "$WS/bb-wt.sh"; base_branch "$WS/repos/svc-trunk" ) )"
+assert_eq trunk "$b" "worktree-task: el remoto manda, el veneno local no"
+assert_eq "origin/trunk" "$(git -C "$WS/repos/svc-trunk" symbolic-ref --short refs/remotes/origin/HEAD)" \
+  "y el ref local quedó SANADO (los lectores sin red heredan el valor bueno)"
+
+git -C "$WS/repos/svc-trunk" remote set-head origin task/vieja   # re-envenena
+extract_bb "$WS/scripts/ship.sh" > "$WS/bb-ship.sh"
+grep -q "ls-remote" "$WS/bb-ship.sh" || { echo "no pude extraer base_branch de ship"; exit 1; }
+b="$( ( set -u; . "$WS/bb-ship.sh"; base_branch "$WS/repos/svc-trunk" ) )"
+assert_eq trunk "$b" "ship: misma autoridad, mismo resultado"
+
+# offline (sin remote alcanzable): cae al ref local, degradar no es inventar
+git -C "$WS/repos/svc-trunk" remote set-head origin task/vieja   # el caso ship lo había sanado
+git -C "$WS/repos/svc-trunk" remote set-url origin /ruta/inexistente.git
+b="$( ( set -u; . "$WS/bb-wt.sh"; base_branch "$WS/repos/svc-trunk" ) )"
+assert_eq "task/vieja" "$b" "offline: cae al ref local tal cual (sin inventar)"
+git -C "$WS/repos/svc-trunk" remote set-url origin "$WS/origins/svc-trunk.git"
+
+echo
 echo "── el gotcha de set -e que esto destapó"
 # `[ -n "$X" ] && VAR=...` devuelve 1 cuando X está vacío y MATA el script con
 # set -e. El precheck salía con exit 128 sin imprimir una línea. Se usa `if`.

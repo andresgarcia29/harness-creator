@@ -461,7 +461,10 @@ run_check_verdict() {  # run_check_verdict <verdict-json> [sin-qa] — salida + 
   # El fixture lo provee salvo que el caso pruebe justamente su ausencia.
   if [ "${2:-}" = "sin-qa" ]; then rm -f "$WS/tasks/T9/qa-svc.json"
   else printf '{"schema":1,"qa":"pass"}' > "$WS/tasks/T9/qa-svc.json"; fi
-  ( set -u; WS="$WS"; TASK=T9; REPO=svc; BASE_REF=main
+  # set -euo pipefail: el ENTORNO REAL de ship.sh. El issue #33 (grep -l sin
+  # matches + pipefail = muerte muda) era invisible justo porque este runner
+  # corría la función extraída sin pipefail: el test probaba otro shell.
+  ( set -euo pipefail; WS="$WS"; TASK=T9; REPO=svc; BASE_REF=main
     gate() { :; }
     . "$WS/check_verdict.sh"; check_verdict ) 2>&1
 }

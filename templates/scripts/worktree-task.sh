@@ -14,7 +14,17 @@ base_branch() {  # base_branch <dir-del-repo> → rama trunk, sin prefijo
   local b
   # `[ ... ] && cmd` bajo set -e mata el script si la condición es falsa.
   if [ -n "${HARNESS_BASE_BRANCH:-}" ]; then printf '%s' "$HARNESS_BASE_BRANCH"; return 0; fi
-  b="$(git -C "$1" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
+  # EL REMOTO ES LA AUTORIDAD (issue #32): origin/HEAD local se escribe UNA
+  # vez al clonar y un `remote set-head` posterior lo envenena en silencio y
+  # para siempre. Se consulta al remoto y se SANA el ref local de paso;
+  # offline se cae al ref local (degradar no es inventar).
+  b="$(git -C "$1" ls-remote --symref origin HEAD 2>/dev/null \
+    | awk '/^ref:/ { sub("refs/heads/", "", $2); print $2; exit }')"
+  if [ -n "$b" ]; then
+    git -C "$1" remote set-head origin "$b" >/dev/null 2>&1 || true
+  else
+    b="$(git -C "$1" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
+  fi
   [ -n "$b" ] || b=main
   printf '%s' "$b"
 }

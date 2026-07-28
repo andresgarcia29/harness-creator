@@ -19,6 +19,26 @@ contra una instalación real).
   /harness-update cierra publicando por ella.
 
 ### Fixed
+- **#39: el precheck no sella con árbol sucio**. El fix de 0.52.0 degradó la
+  EVIDENCIA honestamente pero el sello seguía grabando HEAD con ok:true: los
+  gates corrieron sobre el working tree y /review leía "los gates pasaron
+  sobre este commit" de un commit que no contiene lo validado. Los gates
+  corren igual (feedback); la afirmación falsa ya no se emite, con la
+  remediación exacta (commitea y re-corre).
+- **#33: check_verdict moría MUDO por pipefail** cuando la evidencia no traía
+  runner=qa: `grep -l | wc -l` sale 1 sin matches, pipefail lo hereda y set -e
+  mataba la función ANTES del if que acepta el qa-<repo>.json (la rama
+  prometida era inalcanzable; misma clase que el uv|ruff del #30). El runner
+  del test ahora corre la función extraída bajo `set -euo pipefail`, el
+  entorno real: el shell distinto del test era lo que escondía la clase
+  entera.
+- **#32: origin/HEAD envenenado ya no manda el worktree a otra rama**. El ref
+  local se escribe UNA vez al clonar y un `remote set-head` posterior lo
+  dejaba apuntando a una rama vieja para siempre, en silencio. base_branch
+  (worktree-task y ship) ahora le pregunta AL REMOTO (`ls-remote --symref`) y
+  SANA el ref local de paso, para los lectores que no pagan red (hooks,
+  change-id); offline cae al ref local (degradar no es inventar). pull-all
+  también sana el ref aprovechando la red del pull.
 - **deploy-watch no puede salir MUDO, por construcción** (caso de campo:
   "salió 0 con salida vacía", y la desconfianza aprendida de verificar a
   mano contra el CI). Tres capas: un trap garantiza al menos una línea

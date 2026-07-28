@@ -145,6 +145,24 @@ assert_contains "$out" "sin que ninguna suite haya corrido" "explicando por qué
 assert_not_contains "$out" "EVIDENCE_ID=" "y NO anuncia un EVIDENCE_ID que acaba de borrar"
 
 echo
+echo "── el sello afirma 'gates sobre ESTE commit': con árbol sucio NO se sella"
+# Issue #39: el fix de 0.52.0 degradó la EVIDENCIA con árbol sucio pero el
+# sello del precheck seguía grabando HEAD con ok:true, o sea que /review leía
+# "los gates pasaron sobre este commit" de un commit que no contiene lo que
+# se validó. Los gates corren igual (feedback); la afirmación falsa no.
+mkdir -p "$WS/worktrees/T11/svc" "$WS/tasks/T11"
+cp -R "$WS/repos/svc/." "$WS/worktrees/T11/svc/"
+( cd "$WS/worktrees/T11/svc"; echo base > f.txt; git add -A; git commit -qm "base
+
+Task: T11" )
+echo "cambio sin commitear" >> "$WS/worktrees/T11/svc/f.txt"
+out="$( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/ship.sh --precheck T11 svc 2>&1 )"; rc=$?
+assert_eq 0 "$rc" "árbol sucio con gates verdes: exit 0 (los gates sí corrieron)"
+assert_no_file "$WS/tasks/T11/precheck-svc.json" "pero NO deja sello: sellaría un commit que no contiene lo validado"
+assert_contains "$out" "SIN sello" "y lo dice"
+assert_contains "$out" "commitea" "con la remediación exacta"
+
+echo
 echo "── un gate rojo NO puede salir verde (el falso verde que encontró el demo)"
 # Encontrado pasando una feature REAL por el harness, no en los unitarios: el
 # precheck imprimia "✅ precheck verde", sellaba evidencia con exit_code 0 y

@@ -35,6 +35,10 @@ pull_one() {  # pull_one <dir> <slot>
   case "$branch" in main|master) ;; *) note="$note [rama: $branch]" ;; esac
   before="$(git -C "$d" rev-parse --short HEAD 2>/dev/null)"
   if out="$(git -C "$d" pull --rebase 2>&1)"; then
+    # Aprovechando que la red ya se pagó: sanar origin/HEAD local, que un
+    # remote set-head ajeno puede haber envenenado (issue #32); de él leen
+    # base_branch y change-id cuando no pueden pagar la red.
+    git -C "$d" remote set-head origin -a >/dev/null 2>&1 || true
     after="$(git -C "$d" rev-parse --short HEAD 2>/dev/null)"
     if [ "$before" = "$after" ]; then
       echo "✓ $name: ya al día ($after)$note" > "$OUT/$slot.txt"

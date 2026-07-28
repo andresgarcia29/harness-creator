@@ -104,6 +104,16 @@ esac
 LOCKDIR="$WS/locks/$REPO.lock.d"
 [ "$CI_MODE" -eq 1 ] || mkdir -p "$WS/locks" "$WS/tasks/$TASK"
 
+# El repo de la INSTANCIA (el workspace) no se shippea por acá: mandar a
+# worktree-task con "." producía un callejón sin salida (issue #37) y el
+# humano acababa pusheando a mano por fuera del harness.
+if [ ! -d "$WS/repos/$REPO/.git" ] && [ "$CI_MODE" -ne 1 ]; then
+  echo "❌ '$REPO' no está en repos/ (ver manifest.yaml)."
+  echo "   ↳ si intentas publicar el REPO DE LA INSTANCIA (el workspace: specs,"
+  echo "     scripts, answers), su puerta es: scripts/instance-ship.sh"
+  echo "     Para un repo de producto: clónalo bajo repos/ y regístralo en manifest.yaml"
+  exit 2
+fi
 [ -d "$WT" ] || { echo "❌ no existe el worktree $WT"; echo "   ↳ remediación: scripts/worktree-task.sh $TASK $REPO"; exit 2; }
 # En CI no hay clon canonico: el checkout ES el repo, y de ahi salen tanto el
 # diff como la baseline de buf. Exigir repos/<repo> ahi seria pedir un layout

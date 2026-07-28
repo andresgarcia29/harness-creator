@@ -6,6 +6,29 @@ contra una instalación real).
 
 ## [Sin publicar]
 
+### Added
+- **`scripts/instance-ship.sh`: la puerta a main del repo de la INSTANCIA**
+  (issue #37). El hook bloqueaba el push (Ley 1) y ship.sh solo opera sobre
+  repos/, así que el commit de cada /harness-update terminaba pusheado a mano
+  POR FUERA del harness: el caso de manual de la Ley 15 ("no existe camino
+  legítimo" es un bug del harness, no una regla). NO es una excepción al
+  hook: es una puerta con los gates que SÍ aplican a ese repo (árbol limpio,
+  rebase, gitleaks sobre el rango, doctor sin FAIL) y el push adentro del
+  script sancionado, igual que ship.sh. El hook ahora nombra las DOS puertas,
+  ship.sh deja de mandar al callejón de crear un worktree de la instancia, y
+  /harness-update cierra publicando por ella.
+
+### Fixed
+- **deploy-watch no puede salir MUDO, por construcción** (caso de campo:
+  "salió 0 con salida vacía", y la desconfianza aprendida de verificar a
+  mano contra el CI). Tres capas: un trap garantiza al menos una línea
+  SIEMPRE (si algún camino nuevo sale callado, se vuelve un bug
+  diagnosticable con contexto en vez de un silencio); gh ausente con driver
+  distinto de none se DICE y queda como supuesto (antes la etapa de Actions
+  entera se saltaba sin una palabra); y kargo CLI ausente se dice en una
+  línea (un pipeline sin Kargo es legítimo; lo que no es legítimo es que
+  ambos casos se lean igual).
+
 ### Added (tercera corrida de campo: matar el 30% de desperdicio mecánico)
 - **La evidencia sobrevive al rebase por identidad de contenido**: el
   manifiesto sella `patch_id` (change-id.sh, fail-open) y `verify` acepta la

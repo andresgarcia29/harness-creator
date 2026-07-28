@@ -155,6 +155,32 @@ out="$(run_watch terraform-core)"
 assert_contains "$out" "driver de deploy: actions" "y terraform-core conserva el suyo"
 
 echo
+echo "── un verificador ausente se DICE (el silencio se lee igual que un verde)"
+# Caso de campo: "deploy-watch salió 0 con salida vacía", y beads de verde
+# falso cuando no autentica. Dos capas: los saltos por CLI ausente ahora
+# hablan, y un trap garantiza que el script JAMÁS salga sin una línea.
+
+: > "$WS/.harness/events.jsonl"
+printf 'project: demo\ndeploy:\n  atlas:\n    driver: gitops\n' > "$WS/harness-answers.yaml"
+printf 'repos:\n  - name: atlas\n    kind: service\n' > "$WS/manifest.yaml"
+out="$( ( cd "$WS" && CLAUDE_PROJECT_DIR="$WS" PATH="$WS/bin:$(t_path_without gh)" \
+    bash scripts/deploy-watch.sh T1 atlas ) 2>&1 )" || true
+assert_contains "$out" "gh no está instalado" "gh ausente: la etapa de Actions lo DICE"
+assert_contains "$out" "no sé nada" "y no se disfraza de verde"
+assert_contains "$(bus)" "gh no está instalado" "y queda como supuesto en el bus"
+mv "$WS/bin/kargo" "$WS/bin/kargo.off"
+out="$( ( cd "$WS" && CLAUDE_PROJECT_DIR="$WS" PATH="$WS/bin:$(t_path_without kargo)" \
+    bash scripts/deploy-watch.sh T1 atlas ) 2>&1 )" || true
+mv "$WS/bin/kargo.off" "$WS/bin/kargo"
+assert_contains "$out" "kargo CLI no está" "kargo ausente: también se dice (una línea, sin supuesto)"
+
+# el cinturón estructural: el template garantiza salida no-muda por trap
+dwt="$(cat "$ROOT/templates/scripts/deploy-watch.sh.tmpl")"
+assert_contains "$dwt" "trap mute_guard EXIT" "existe el guard de salida muda"
+assert_contains "$dwt" "SIN haber dicho una palabra" "y su mensaje nombra el bug con el contexto"
+assert_contains "$dwt" 'say() { SAID=1' "say alimenta el guard (toda línea cuenta como habla)"
+
+echo
 echo "── verify declarado por repo: corre para TODOS los drivers, incluido none"
 # Caso de campo: un infra-live con driver none se verificó a mano dos veces,
 # las dos con errores (grep de un literal generado por template; curl sin

@@ -26,7 +26,9 @@ Dirección de dependencias (ley, referencia del DAG de shipping):
 
 ## Leyes globales (no negociables; las duras tienen hook o gate)
 
-1. **Push a main SOLO vía `scripts/ship.sh`** — hook lo bloquea.
+1. **Push a main SOLO vía `scripts/ship.sh`** — hook lo bloquea. El repo
+   de la INSTANCIA (este workspace) tiene su propia puerta con sus gates:
+   `scripts/instance-ship.sh` (árbol limpio, rebase, gitleaks, doctor).
 2. **Contratos expand/contract** — `buf breaking` es gate duro.
 3. **Ownership exclusivo de datos** — `docs/architecture/map.md`.
    En duda, RFC; nunca suposición.

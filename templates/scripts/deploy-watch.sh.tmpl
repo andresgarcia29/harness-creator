@@ -63,7 +63,25 @@ APP="$(resolve_argocd_app "$REPO")"
 TIMEOUT="${DEPLOY_TIMEOUT:-900}"
 ROLLBACK_MODE="{{ROLLBACK_MODE}}"   # auto | manual
 
-say() { echo "$1" | tee -a "$LOG"; }
+say() { SAID=1; echo "$1" | tee -a "$LOG"; }
+
+# ── ESTE SCRIPT NO PUEDE SALIR MUDO, POR CONSTRUCCIÓN ─────────────────
+# Caso de campo: "deploy-watch salió 0 con salida vacía". Un watcher que
+# sale sin decir UNA palabra es ilegible en las dos direcciones (¿verificó
+# todo? ¿no verificó nada?) y entrena al humano a no fiarse y verificar a
+# mano, que es lo que este script existe para evitar. El trap garantiza al
+# menos una línea SIEMPRE, con el exit code y el contexto: si algún camino
+# nuevo sale temprano y callado, se vuelve diagnosticable en vez de mudo.
+SAID=""
+mute_guard() {
+  local rc=$?
+  if [ -z "$SAID" ]; then
+    echo "⚠️  deploy-watch está saliendo (exit $rc) SIN haber dicho una palabra."
+    echo "   Eso es un bug del harness, no un estado del deploy: repórtalo con"
+    echo "   make bug (contexto: task=$TASK repo=$REPO driver=${DRIVER:-sin-resolver})."
+  fi
+}
+trap mute_guard EXIT
 
 # ── EL SHA QUE SE VIGILA SALE DE ship.log, NO DE UN WORKTREE ──────────
 # Bug de origen: este script usaba `git -C "$WT" rev-parse HEAD` y $WT NUNCA se
@@ -411,6 +429,15 @@ red() { # red <motivo>
 
 # 1 · GitHub Actions del push a main (driver none: no aplica; su señal es
 #     el verify declarado y/o el smoke, más abajo)
+# gh AUSENTE se DICE: antes la etapa entera se saltaba en silencio, y el
+# silencio de un verificador ausente se lee igual que un verde (la misma
+# clase que el tri-state de ArgoCD vino a matar).
+if [ "$DRIVER" != "none" ] && ! command -v gh >/dev/null; then
+  say "⚠️  gh no está instalado: la etapa de Actions NO se verifica."
+  say "   Esto no es un deploy verde: es un tramo del que no sé nada."
+  say "   ↳ instala gh (catálogo: gh) o verifica el workflow a mano."
+  emit assumption "Actions de $REPO NO verificado: gh no está instalado"
+fi
 if [ "$DRIVER" != "none" ] && command -v gh >/dev/null; then
   say "── actions: $ORG/$REPO@main ──"
   # EL RUN TIENE QUE SER EL DE NUESTRO COMMIT, NO "EL MÁS RECIENTE". Entre el
@@ -489,6 +516,12 @@ if command -v kargo >/dev/null; then
     say "   la promoción del freight NO se verificó; el deploy sigue por health de ArgoCD"
     emit assumption "promoción de Kargo NO verificada en $REPO: ${reason:-kargo no respondió}"
   fi
+else
+  # El CLI ausente se dice en una línea, sin supuesto: un pipeline sin Kargo
+  # es legítimo y este script no sabe cuál es el tuyo; lo que no puede es
+  # callarse y que ambos casos se lean igual.
+  say "ℹ️  kargo CLI no está: la promoción del freight no se verifica por aquí"
+  say "   (si tu pipeline no usa Kargo, esto no es un hueco; si lo usa, instálalo)"
 fi
 
 # ── SALUD DE ARGOCD: TRES ESTADOS, NO DOS ────────────────────────────

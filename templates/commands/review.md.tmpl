@@ -44,7 +44,13 @@ reporta el código de error.
    necesita el veredicto; serializarlos regala la fase entera al camino
    crítico:
    - `reviewer` sobre el worktree `worktrees/<task-id>/<repo>` → escribe
-     `verdict-<repo>.json` con `qa: "pending"`.
+     `verdict-<repo>.json` con `qa: "pending"`. **Lánzalo con identidad
+     estable (`reviewer-<repo>`, pásala como tercer argumento del scaffold:
+     queda en el campo `reviewer` del veredicto) y NO lo descartes al
+     recibir el veredicto: es TU reviewer de esta (tarea, repo) para todas
+     las rondas mientras su conversación viva.** Su ronda 1 de contexto
+     (70-150k tokens en campo) es un activo; tirarlo por ronda es pagarlo
+     una vez por ronda, ~20 veces en una corrida real.
    - QA (agente o determinista) → escribe su resultado en
      `tasks/<task-id>/qa-<repo>.json`: `{schema: 1, task_id, repo,
      commit, qa: "pass|fail", evidence: [...], notes, surface: [...]}`.
@@ -56,28 +62,47 @@ reporta el código de error.
      re-corre si sí. Sin `surface[]` se re-corre siempre: fail-closed, que es
      el comportamiento viejo. Antes esta promesa estaba solo en prosa y el
      scaffold la rompía, así que cada fix de una línea pagaba un ciclo de QA.
-3. **Merge mecánico** (tú, con jq — es fusión, no juicio): cuando ambos
-   archivos existen y su `commit` coincide, copia `qa`, `evidence` y
-   `notes` de `qa-<repo>.json` al veredicto. Si los commits difieren
-   (el implementer movió HEAD), la mitad obsoleta se repite — nunca
-   fusiones veredictos de commits distintos.
+3. **Merge mecánico** (comando, no prosa): cuando ambos archivos existen,
+   corre `scripts/verdict-scaffold.sh --merge-qa <task-id> <repo>`. Valida
+   que QA y veredicto hablen del MISMO cambio (commit igual, o evidencia
+   sellada con el mismo patch_id) y fusiona qa/evidencia/notas con jq. Si
+   falla, su mensaje dice exactamente qué re-correr. NUNCA edites el
+   veredicto a mano para "arreglar" la fusión: el copy-paste manual metía
+   al veredicto EVs de un TERCER commit y el gate de evidencia rebotaba en
+   el ship después de pagar la suite entera (caso de campo, 8-9 veces).
 4. **fail (de reviewer o de QA)** → regresa los items `blocking` (con su
    remediación) al implementer, **todos juntos y en una sola pasada**:
    el reviewer debe entregar su lista COMPLETA en la ronda 1, y los
-   `non_blocking` se convierten en beads de seguimiento, nunca en otra
-   ronda. Loop máx {{LOOP_BUDGET}}: implementer corrige SOLO blocking,
+   `non_blocking` se convierten en beads de seguimiento con
+   `scripts/verdict-beads.sh <task-id> <repo>`, nunca en otra ronda. Loop máx {{LOOP_BUDGET}}: implementer corrige SOLO blocking,
    re-corre el precheck → **re-review INCREMENTAL**, que ya es un
    mecanismo y no una intención: `scripts/verdict-scaffold.sh --rebase
    <task-id> <repo>`. Regenera la evidencia contra el HEAD nuevo
    (fail-closed: la prueba caduca con el commit) y ARRASTRA el
    `compliance[]` que el delta no tocó, marcado con `carried_from`. El
    reviewer juzga SOLO las entradas con `.rejudge` más el cierre de cada
-   blocking, no el cambio completo otra vez. **Nunca uses `--force` en el
+   blocking, no el cambio completo otra vez. **El scaffold imprime el
+   comando exacto del delta y lo persiste en `delta_files`: cópialo
+   VERBATIM en el mensaje al reviewer** (re-derivar qué cambió quemó el
+   presupuesto de la ronda en campo). **Ronda ≥2: NO lances un reviewer
+   nuevo.** Continúa el MISMO agente con un mensaje que contenga (a) ese
+   comando de delta y (b) la lista de blocking que el implementer atendió:
+   él ya tiene el contexto, juzga el delta. **Si el agente murió o el
+   watchdog lo mató**: lanza uno NUEVO con la MISMA identidad (el campo
+   `reviewer` del veredicto) y dile que opera SIN memoria: reviewer.md
+   sabe reconstruir su base desde `rebased_from`. Si tu runtime no puede
+   continuar a un agente terminado, el modo sin memoria es el camino:
+   correcto siempre, caro solo en tokens. Y si el reviewer reporta el
+   contexto casi lleno, retíralo y relanza en modo sin memoria (retiro
+   voluntario, no cuenta como muerte). **Nunca uses `--force` en el
    loop de rework**: borra la matriz de compliance entera y te cobra un
    re-review completo por un fix de una línea. QA solo se repite si el fix
    tocó la `surface[]` que QA declaró, y eso ahora lo decide el scaffold, no
-   la buena voluntad. Presupuesto agotado (el de ESE repo) → humano, con el
-   historial de veredictos.
+   la buena voluntad. **`--rebase` es para cuando HAY fix commiteado (el
+   patch_id cambió). En un rebase PURO (main se movió, el contenido no) no
+   corras nada: el scaffold lo detecta, no toca el veredicto, y `/ship` lo
+   reusa por patch_id sellando la prueba fresca él solo.** Presupuesto
+   agotado (el de ESE repo) → humano, con el historial de veredictos.
 5. Antes de anunciar, comprueba que el veredicto tiene `schema: 1`, task, repo,
    HEAD completo, reviewer, implementation_agents y al menos un ID en
    `evidence[]`.
@@ -85,7 +110,7 @@ reporta el código de error.
    `/ship <task-id> <repo>`.
 
 Reglas: tú no editas código ni emites juicio en el veredicto — el merge
-del paso 3 es mecánico (campos verbatim de qa-<repo>.json). Solo
+del paso 3 es un comando (verdict-scaffold.sh --merge-qa). Solo
 orquestas reviewer ∥ qa ↔ implementer y cuidas el presupuesto de loop.
 Al cerrar, cuenta cuántas rondas costó (`review_rounds` en state.json) y
 cuántos blocking llegaron marcados `[tardío]`: esa cifra es la que el

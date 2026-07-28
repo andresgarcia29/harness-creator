@@ -88,6 +88,21 @@ pol="$(cat "$root/templates/scripts/harness-policy.py")"
 assert_contains "$pol" "emit_bus" "y cada movimiento de fase se ve en el panel"
 
 echo
+echo "── las perillas nuevas de answers tienen consumidor (no nacen muertas)"
+pf="$(cat "$root/templates/scripts/port-forwards.sh")"
+assert_contains "$pf" "port_forwards:" "port-forwards.sh consume el bloque port_forwards"
+mk="$(cat "$root/templates/Makefile.tmpl")"
+assert_contains "$mk" "port-forwards.sh ensure" "y make forwards lo invoca"
+assert_contains "$(cat "$root/scripts/doctor.sh")" "port_forwards" "y el doctor lo vigila"
+dwv="$(cat "$root/templates/scripts/deploy-watch.sh.tmpl")"
+assert_contains "$dwv" "verify_cmd" "deploy-watch consume verify_cmd del bloque deploy"
+assert_contains "$dwv" "verify_expect" "y verify_expect"
+assert_contains "$(cat "$root/templates/scripts/ship-wave.sh")" "post_ship" "ship-wave consume post_ship"
+answ="$(cat "$root/templates/harness-answers.yaml.tmpl")"
+assert_contains "$answ" "post_ship" "y las tres claves están documentadas en el answers"
+assert_contains "$answ" "port_forwards:" "incluido el bloque de forwards"
+
+echo
 echo "── con PRs, archive no puede correr antes del merge"
 am="$(cat "$root/templates/commands/archive.md.tmpl")"
 assert_contains "$am" "landed" "archive exige que el cambio haya aterrizado"

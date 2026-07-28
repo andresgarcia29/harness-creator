@@ -6,6 +6,81 @@ contra una instalación real).
 
 ## [Sin publicar]
 
+### Added (tercera corrida de campo: matar el 30% de desperdicio mecánico)
+- **La evidencia sobrevive al rebase por identidad de contenido**: el
+  manifiesto sella `patch_id` (change-id.sh, fail-open) y `verify` acepta la
+  evidencia CITADA cuando su patch_id coincide con el del veredicto; la
+  FRESCA sigue SHA-estricta (el pilar del árbol integrado no se afloja). El
+  loop de campo (8-9 vueltas de re-sellar + re-scaffold + reviewer nuevo por
+  cada movimiento de main) queda en 0 agentes y 1 suite por intento.
+- **`verdict-scaffold.sh --merge-qa`**: la fusión qa→veredicto deja de ser
+  prosa; valida que hablen del MISMO cambio derivándolo de los EV sellados
+  (jamás de una declaración) y aborta con remediación en discrepancia real.
+  Era el paso que metía EVs de un TERCER commit al veredicto. El predicado de
+  elegibilidad es COMPARTIDO con la selección del scaffold.
+- **`--rebase` puro = no-op protector**: mismo patch_id y sin `--renew`, el
+  scaffold NO toca el veredicto (regenerarlo reseteaba PENDING_REVIEWER y
+  cobraba un reviewer por un movimiento que nadie miró); `--renew` fuerza el
+  camino viejo para la ventana vencida.
+- **Fase 0 de gates baratos en ship + preflight sin lock**: veredicto,
+  compliance, policy y tests-no-debilitados corren ANTES del fan-out caro
+  (todos los rojos juntos; un requirements_uncovered de 200ms ya no se
+  descubre tras pagar una suite de 10 minutos), y `gate_ship_preflight`
+  valida el veredicto ANTES de acquire_lock (un ship condenado ya no mata de
+  hambre al vecino, que moría a los 600s).
+- **evidence.py toma slot y sella contención**: la suite entra al MISMO
+  semáforo que los builds (`HARNESS_TEST_SLOTS`, default max(2, cores/3)) y
+  el manifiesto sella `contention` (procesos de test ajenos + load, sampler
+  cada 15s); `suspect: true` (ajenos > 0 Y load > cores) no satisface ningún
+  gate, con remediación escrita. Caso de campo: la misma suite 503s roja bajo
+  once vitest ajenos vs 106s verde, firmada como buena.
+- **Reviewer persistente por (tarea, repo)**: la ronda ≥2 es un mensaje al
+  MISMO agente con el delta que el scaffold ahora persiste (`delta_files`) e
+  imprime listo para pegar; reviewer.md gana el modo sin-memoria
+  (rebased_from + delta_files) y el watchdog queda acotado ("ronda siguiente
+  no es agente nuevo; el heartbeat sigue siendo ley"). En campo cada ronda
+  re-derivaba 70-150k tokens, ~20 veces.
+- **Aviso de última ronda del presupuesto de review** (por repo y global) por
+  stdout y al bus (kind decision), con el gasto acumulado; la ronda por fin
+  viaja al bus en el evento de fase.
+- **`scripts/verdict-beads.sh` + `POLICY-ARCHIVE-002`**: non_blocking → beads
+  como comando (idempotente, atómico por entrada, honesto sin bd); archive se
+  niega si quedan hallazgos sin bead cuando bd existe (tasks/ es gitignoreado:
+  archivado sin bead = no existe, Ley 7). La cadena estaba afirmada en cuatro
+  archivos y ejecutada en cero.
+- **Deploy verify por repo, para TODOS los drivers**: claves planas
+  `verify_cmd`/`verify_expect`/`verify_timeout` en el bloque deploy: de
+  answers (parser generalizado `answers_repo_key`), ejecutadas también con
+  driver none (el caso del infra-live verificado a mano con dos errores) y
+  con perl alarm de timeout; el smoke sale del if gitops (con actions no
+  corría NUNCA). Los dos primitivos de campo van de ejemplo: leer el asset
+  DESDE el pod y comparar pod vs CDN con curl --compressed.
+- **`harness-policy.py dag-order` + `scripts/ship-wave.sh`**: el orden del
+  DAG por fin ejecutable (dedupe por última aparición del repo, DAG-009
+  fail-closed si exige intercalar); la ola salta lo aterrizado, corre ship.sh
+  por repo y el hook `post_ship` declarado (publish/bump) bajo with-secrets;
+  con flow: prs difiere el post_ship hasta el merge con el retome exacto.
+  Caso de campo: la cadena token → publish → bump → deploy corrida a mano
+  dejó un eslabón a medias.
+- **`scripts/port-forwards.sh`** + bloque `port_forwards:` en answers:
+  túneles supervisados (ensure relevanta muertos) con sondas de IDENTIDAD:
+  un 200 donde se esperaba 401 se reporta como OTRO proceso en el puerto (el
+  port-forward viejo de otra cosa que costó tres specs casi diagnosticadas
+  como regresión); curl siempre --compressed. Makefile: forwards/status/down.
+- **`secrets.sh doctor`**: cruza lo que los repos declaran necesitar
+  (.env.example, process.env en config/, secretKeyRef en charts) contra lo
+  provisto (dump_*, .secrets, refs), nombrando quién requiere cada faltante y
+  el candidato exacto si la fuente es consultable. Convierte "bloqueado: sin
+  acceso" en "faltan tres líneas dump_kv", que en campo fue una diferencia de
+  horas.
+- **Hook `guard-ws-scripts.sh`**: `scripts/<x>.sh` relativo desde un worktree
+  se bloquea SOLO con doble existencia (el harness lo tiene, el worktree no)
+  y la línea corregida exacta; 6-8 round-trips perdidos en campo.
+- **evidence.py deja de crear task-dirs**: valida que exista y parezca uno, y
+  rechaza con la ruta absoluta resuelta (el `--task-dir` relativo desde el
+  worktree creaba `./<id>/evidence/` DENTRO del repo y un `git add -A` casi
+  commitea 147 líneas de vitest).
+
 ### Added (feedback de una corrida de campo de ~9h: 12 puntos, todos con gate o test)
 - **Lock de creación por (task, repo) en `worktree-task.sh`**: /auto lanza la
   creación en paralelo y dos procesos podían pasar juntos el chequeo "ya

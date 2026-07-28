@@ -1248,9 +1248,18 @@ gate_fresh_evidence() {
   [ -f "$v" ] || return 0
   head="$(git rev-parse HEAD)"
   reviewed="$(jq -r '.commit // ""' "$v" 2>/dev/null || true)"
-  # Solo aplica cuando el arbol que se pushea NO es el que se reviso: si son el
-  # mismo, la evidencia citada YA es la fresca.
-  [ -n "$reviewed" ] && [ "$reviewed" != "$head" ] || return 0
+  [ -n "$reviewed" ] || return 0
+  if [ "$reviewed" = "$head" ]; then
+    # "La citada YA es la fresca" solo vale si de verdad esta sellada en HEAD:
+    # con la equivalencia por patch_id, un EV citado puede ser de OTRO sha del
+    # mismo cambio, y entonces ninguna prueba citada toco este arbol.
+    local id c all_at_head=1
+    for id in $(jq -r '.evidence[]?' "$v" 2>/dev/null); do
+      c="$(jq -r '.commit // ""' "$WS/tasks/$TASK/evidence/$id.json" 2>/dev/null || true)"
+      [ "$c" = "$head" ] || { all_at_head=0; break; }
+    done
+    [ "$all_at_head" -eq 1 ] && return 0
+  fi
   want="$(python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" \
     evidence-policy --field require_fresh_evidence 2>/dev/null || echo true)"
   [ "$want" = "true" ] || return 0
@@ -1273,6 +1282,41 @@ gate_fresh_evidence() {
     --reviewed-commit "$reviewed" --verdict "$v" $flags
 }
 
+# ── Preflight del ship: lo HEAD-independiente, ANTES del lock ─────────
+# Un veredicto roto (JSON reescrito, EV de otro cambio, qa pending) se
+# descubría tras pagar lock + rebase + la suite completa EN PARALELO con el
+# slot de veredicto, y el vecino que esperaba el lock moría de hambre a los
+# 600s (exit 6). Todo esto se comprueba contra el commit del PROPIO
+# veredicto, así que no depende del rebase: cuesta segundos y cero lock.
+# NO es la autoridad: la corrida autoritativa es la fase 0 post-rebase (el
+# rebase puede cambiar el patch_id o borrar un artefacto citado). Es un
+# early-reject de cortesía, fail-closed igual.
+gate_ship_preflight() {
+  local v="$WS/tasks/$TASK/verdict-$REPO.json" vc kinds kind kind_flags=""
+  echo "── preflight (sin lock): el veredicto se valida ANTES de retener nada ──"
+  check_verdict
+  gate_evidence
+  vc="$(jq -r '.commit // ""' "$v" 2>/dev/null)"
+  [ -n "$vc" ] || { echo "❌ el veredicto no declara commit"
+    echo "   ↳ remediación: re-corre scripts/verdict-scaffold.sh $TASK $REPO"; exit 3; }
+  gate "preflight: policy + evidencia contra el commit revisado"
+  # validate-ship con --commit = verdict.commit: la rama de igualdad de
+  # check_verdict_commit, así corren fase/estado/rondas/roles/pass-pass con
+  # sus mensajes canónicos sin duplicar una línea de policy.
+  python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" \
+    validate-ship "$WS/tasks/$TASK" --commit "$vc" --verdict "$v" >/dev/null
+  kinds="$(python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" \
+    evidence-policy --field required_evidence_kinds 2>/dev/null || echo test)"
+  for kind in $kinds; do kind_flags="$kind_flags --require-kind $kind"; done
+  # shellcheck disable=SC2086
+  python3 "$WS/scripts/evidence.py" verify \
+    --task-dir "$WS/tasks/$TASK" --repo "$REPO" --commit "$vc" --verdict "$v" $kind_flags
+  if [ -z "$(jq -r '.patch_id // ""' "$v" 2>/dev/null)" ]; then
+    echo "⚠️  veredicto sin patch_id: si el trunk se movió, este ship exige SHA"
+    echo "   exacto. Suele ser un reviewer que reescribió el JSON (ver reviewer.md)."
+  fi
+}
+
 # ── Gates en paralelo ─────────────────────────────────────────────────
 # Los grupos no comparten orden real entre sí (cada uno es read-only sobre
 # el worktree o corre su propia toolchain); DENTRO de un grupo el orden se
@@ -1280,6 +1324,11 @@ gate_fresh_evidence() {
 # con su propio CURRENT_GATE y escribe su exit a un archivo: un rojo no
 # oculta a los demás, y el implementer recibe TODOS los errores en un solo
 # prompt de fix en vez de descubrirlos ronda por ronda.
+#
+# Y en DOS FASES: primero los baratos (subsegundo: tests-no-debilitados,
+# veredicto, compliance, policy), después los caros (suites, scanners).
+# Caso de campo: un requirements_uncovered=1 (200ms de jq) se descubría
+# tras pagar una suite de 10 minutos que corría en paralelo.
 GDIR=""; PAR_PIDS=""; PAR_SLOTS=""
 par() {  # par <slot> <gate-fn>... — corre un grupo de gates en background
   local slot="$1"; shift
@@ -1306,39 +1355,60 @@ par() {  # par <slot> <gate-fn>... — corre un grupo de gates en background
   PAR_SLOTS="$PAR_SLOTS $slot"
 }
 
-run_parallel_gates() {
+close_serial_gate() {
   # cierra el gate serial anterior (mismo contrato que gate())
   [ -n "${CURRENT_GATE:-}" ] && [ "$CURRENT_GATE" != "preflight" ] \
     && emit gate "$CURRENT_GATE" true
   CURRENT_GATE=""
-  GDIR="$(mktemp -d "${TMPDIR:-/tmp}/ship-gates.XXXXXX")"
-  PAR_PIDS=""; PAR_SLOTS=""
-  # En precheck no hay veredicto todavía (ese es justamente el punto: correr
-  # lo mecánico ANTES de gastar una ronda de reviewer). El resto es idéntico:
-  # mismo código, mismos umbrales, mismas remediaciones.
-  if [ "${PRECHECK:-0}" -eq 1 ]; then
-    echo "── gates en paralelo: lang ∥ security ∥ tests (sin veredicto: precheck) ──"
-  else
-    echo "── gates en paralelo: lang ∥ security ∥ tests ∥ veredicto ──"
-  fi
-  par lang      run_lang_gates_sealed
-  par security  run_security_gates
-  par tests     gate_tests_untouched
-  [ "${PRECHECK:-0}" -eq 1 ] || par veredicto check_verdict gate_evidence gate_policy_and_evidence
-  local pid; for pid in $PAR_PIDS; do wait "$pid" 2>/dev/null || true; done
-  local slot rc failed=""
+}
+
+collect_gate_slots() {  # collect_gate_slots <etiqueta>: espera, imprime TODO, agrega
+  local pid slot rc failed=""
+  for pid in $PAR_PIDS; do wait "$pid" 2>/dev/null || true; done
   for slot in $PAR_SLOTS; do
     cat "$GDIR/$slot.out"
     rc="$(cat "$GDIR/$slot.rc" 2>/dev/null || echo 1)"
     [ "$rc" -eq 0 ] || failed="$failed $slot"
   done
-  rm -rf "$GDIR"
+  rm -rf "$GDIR"; PAR_PIDS=""; PAR_SLOTS=""
   if [ -n "$failed" ]; then
-    CURRENT_GATE="gates paralelos:$failed"
-    echo "❌ gates rojos:$failed — TODOS los errores están arriba. Corrige TODO"
+    CURRENT_GATE="$1:$failed"
+    echo "❌ gates rojos ($1):$failed — TODOS los errores están arriba. Corrige TODO"
     echo "   en UNA iteración (cada gate trae su remediación) y re-corre ship.sh."
     exit 3
   fi
+}
+
+run_phase0_gates() {
+  close_serial_gate
+  GDIR="$(mktemp -d "${TMPDIR:-/tmp}/ship-gates.XXXXXX")"
+  PAR_PIDS=""; PAR_SLOTS=""
+  # En precheck no hay veredicto todavía (ese es justamente el punto: correr
+  # lo mecánico ANTES de gastar una ronda de reviewer). Los slots del
+  # veredicto van SEPARADOS: dentro de uno solo, set -e aborta en el primer
+  # die y se perdería el "todos los rojos juntos".
+  if [ "${PRECHECK:-0}" -eq 1 ]; then
+    echo "── fase 0: gates baratos: tests (sin veredicto: precheck) ──"
+  else
+    echo "── fase 0: gates baratos: tests ∥ veredicto ∥ compliance ∥ policy ──"
+  fi
+  par tests gate_tests_untouched
+  if [ "${PRECHECK:-0}" -ne 1 ]; then
+    par veredicto   check_verdict
+    par compliance  gate_evidence
+    par policy      gate_policy_and_evidence
+  fi
+  collect_gate_slots "fase 0 (ninguna suite corrió: esto costó segundos)"
+}
+
+run_parallel_gates() {
+  close_serial_gate
+  GDIR="$(mktemp -d "${TMPDIR:-/tmp}/ship-gates.XXXXXX")"
+  PAR_PIDS=""; PAR_SLOTS=""
+  echo "── gates caros en paralelo: lang ∥ security ──"
+  par lang      run_lang_gates_sealed
+  par security  run_security_gates
+  collect_gate_slots "gates paralelos"
 }
 
 # ── Modo interno --lang-gates ─────────────────────────────────────────
@@ -1363,10 +1433,11 @@ if [ "$CI_MODE" -eq 1 ]; then
   cd "$WT"
   echo "══ gates del harness sobre $REPO (modo CI) ══"
   echo "   base: origin/$BASE_REF · commit: $(git rev-parse --short HEAD)"
-  # PRECHECK=1 hace que run_parallel_gates omita el grupo de veredicto (que
-  # aqui no existe) y que el sellado de evidencia no intente escribir en
-  # tasks/. Se reusa esa bandera en vez de inventar una tercera.
+  # PRECHECK=1 hace que la fase 0 omita los slots de veredicto (que aqui no
+  # existen) y que el sellado de evidencia no intente escribir en tasks/.
+  # Se reusa esa bandera en vez de inventar una tercera.
   PRECHECK=1
+  run_phase0_gates
   run_parallel_gates
   echo "✅ gates verdes sobre el merge result. Este check es el que la cola de"
   echo "   merge exige, y corre en infra neutral: no depende de la laptop de nadie."
@@ -1400,6 +1471,7 @@ if [ "$PRECHECK" -eq 1 ]; then
   git fetch origin --quiet 2>/dev/null || true   # fail-open: sin red, compara contra el origin/$BASE_REF local
   echo "══ precheck $REPO (task $TASK) ══"
   gate_entry_precheck
+  run_phase0_gates
   run_parallel_gates
   stamp_precheck true
   emit gate "precheck de $REPO verde, listo para review" true
@@ -1409,8 +1481,9 @@ if [ "$PRECHECK" -eq 1 ]; then
 fi
 
 # ── Loop de ship ──────────────────────────────────────────────────────
-acquire_lock
 cd "$WT"
+gate_ship_preflight
+acquire_lock
 attempt=0
 while [ "$attempt" -lt "$PUSH_RETRY_BUDGET" ]; do
   attempt=$((attempt+1))
@@ -1444,6 +1517,7 @@ while [ "$attempt" -lt "$PUSH_RETRY_BUDGET" ]; do
   fi
   gate_trailer
   gate_lane
+  run_phase0_gates
   run_parallel_gates
   gate_fresh_evidence
   # ── flow: prs — la rama y el PR, NUNCA main ─────────────────────────

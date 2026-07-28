@@ -155,6 +155,74 @@ out="$(run_watch terraform-core)"
 assert_contains "$out" "driver de deploy: actions" "y terraform-core conserva el suyo"
 
 echo
+echo "── verify declarado por repo: corre para TODOS los drivers, incluido none"
+# Caso de campo: un infra-live con driver none se verificó a mano dos veces,
+# las dos con errores (grep de un literal generado por template; curl sin
+# --compressed que calla). El verify declarado es la señal que faltaba.
+
+cat > "$WS/manifest.yaml" <<'YAML'
+repos:
+  - name: agora
+    kind: infra-live
+YAML
+mk_answers_verify() {  # mk_answers_verify <verify_cmd> [expect] [timeout]
+  { echo "project: demo"
+    echo "deploy:"
+    echo "  agora:"
+    echo "    driver: none"
+    echo "    verify_cmd: \"$1\""
+    [ -n "${2:-}" ] && echo "    verify_expect: \"$2\""
+    [ -n "${3:-}" ] && echo "    verify_timeout: $3"; } > "$WS/harness-answers.yaml"
+}
+printf '#!/bin/sh\necho "hola data-testid=checkout gzip-ok"\n' > "$WS/bin/fake-verify"
+chmod +x "$WS/bin/fake-verify"
+
+# 1. driver none + verify: YA NO sale por "no se verifica con este watcher"
+: > "$WS/.harness/events.jsonl"
+mk_answers_verify "fake-verify" "data-testid=checkout"
+out="$(run_watch agora)"; rc=$?
+assert_eq 0 "$rc" "none + verify verde: exit 0"
+assert_not_contains "$out" "no se verifica con este watcher" "none con verify SÍ verifica"
+assert_contains "$out" "verify verde" "y lo declara"
+assert_contains "$out" "verify declarado" "el tramo entra a VERIFIED_PARTS"
+assert_contains "$out" "🟢" "el cierre es verde de verdad"
+
+# 2. mismatch del substring esperado: rojo con la causa
+: > "$WS/.harness/events.jsonl"
+mk_answers_verify "fake-verify" "texto-que-no-esta"
+out="$(run_watch agora)"; rc=$?
+[ "$rc" -ne 0 ] && pass "verify sin el substring: exit != 0" || fail "mismatch salió verde"
+assert_contains "$out" "NO contiene" "nombra la causa exacta"
+
+# 3. timeout: el comando colgado no cuelga al watcher
+: > "$WS/.harness/events.jsonl"
+printf '#!/bin/sh\nsleep 5\n' > "$WS/bin/fake-verify"
+chmod +x "$WS/bin/fake-verify"
+mk_answers_verify "fake-verify" "" 1
+out="$(run_watch agora)"; rc=$?
+[ "$rc" -ne 0 ] && pass "verify que excede el timeout: exit != 0" || fail "el timeout no cortó"
+assert_contains "$out" "excedió" "y lo dice"
+
+# 4. none pelado (sin verify ni smoke): el comportamiento honesto de siempre
+: > "$WS/.harness/events.jsonl"
+printf 'project: demo\ndeploy:\n  agora:\n    driver: none\n' > "$WS/harness-answers.yaml"
+out="$(run_watch agora)"; rc=$?
+assert_eq 0 "$rc" "none pelado: exit 0 (no aplica, no es fallo)"
+assert_contains "$out" "no se verifica con este watcher" "y lo dice como siempre"
+
+# 5. el smoke corre AHORA para driver actions (vivía dentro del if gitops)
+: > "$WS/.harness/events.jsonl"
+printf 'project: demo\ndeploy:\n  agora:\n    driver: actions\n' > "$WS/harness-answers.yaml"
+mkdir -p "$WS/scripts/smoke"
+printf '#!/bin/sh\necho smoke-corrio\nexit 0\n' > "$WS/scripts/smoke/agora.sh"
+chmod +x "$WS/scripts/smoke/agora.sh"
+out="$( ( cd "$WS" && CLAUDE_PROJECT_DIR="$WS" PATH="$WS/bin:$(t_path_without gh)" \
+    bash scripts/deploy-watch.sh T1 agora ) 2>&1 )"; rc=$?
+assert_contains "$out" "smoke verde" "driver actions: el smoke SÍ corre (antes jamás)"
+assert_contains "$out" "smoke del canary" "y entra a VERIFIED_PARTS"
+rm -rf "$WS/scripts/smoke"
+
+echo
 echo "── el prefijo es un prefijo, no una concatenación ciega"
 # Bug de campo P1: prefijo "acme" + repo "acme-landing" daba "acmeacme-landing",
 # una app que no existe en ningún cluster. El watcher esperó 900 s por ella y

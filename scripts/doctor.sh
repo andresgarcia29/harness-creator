@@ -373,6 +373,22 @@ if [ -d "$WS/repos" ]; then
   fi
 fi
 
+# · Port-forwards declarados: el bloque necesita su consumidor y su esquema.
+# La sonda de identidad en vivo es asunto de `make forwards-status` (red);
+# acá solo lo determinista: que lo declarado tenga con qué correrse.
+if [ -f "$ANSWERS" ] && sed 's/#.*//' "$ANSWERS" | awk '/^port_forwards:/{f=1;next} f&&/^[^[:space:]]/{f=0} f&&/^[[:space:]][[:space:]][a-zA-Z0-9_-]+:/{found=1} END{exit !found}'; then
+  if [ -x "$WS/scripts/port-forwards.sh" ]; then
+    if out="$(bash "$WS/scripts/port-forwards.sh" doctor 2>&1)"; then
+      ok "port-forwards: declaraciones completas"
+    else
+      warn "port-forwards declarados con huecos: $(printf '%s' "$out" | grep '❌' | head -2 | tr '\n' ' ') (corrige el bloque port_forwards de harness-answers.yaml)"
+    fi
+  else
+    fail "port_forwards declarado pero scripts/port-forwards.sh no existe o no es ejecutable" \
+         "corre el update de la instancia (harness update o /harness-init .)"
+  fi
+fi
+
 # · Eje deploy: un repo que SÍ deploya con driver=none es un hueco silencioso.
 # Caso de campo: deploy-watch dijo "driver: none, NO reviso nada" en repos que
 # sí deployan, y la única vez que importó (un apply de infra rojo) el watcher

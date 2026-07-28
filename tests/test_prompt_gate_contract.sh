@@ -82,4 +82,37 @@ assert_contains "$auto" "prosa no abre nada" "y que la palabra suelta en prosa n
 ship_src="$(cat "$root/templates/scripts/ship.sh.tmpl")"
 assert_contains "$ship_src" "MODIFIED|REMOVED" "el gate sigue aceptando exactamente esas dos secciones"
 
+echo
+echo "── reviewer persistente: prompt del loop, prompt del agente y mecanismo, alineados"
+revd="$(cat "$root/templates/agents/reviewer.md.tmpl")"
+scaffold="$(cat "$root/templates/scripts/verdict-scaffold.sh")"
+assert_contains "$(cmd review)" "MISMO agente" "/review ordena continuar el mismo reviewer en ronda ≥2"
+assert_contains "$(cmd review)" "MISMA identidad" "/review dice cómo relanzar tras una muerte"
+assert_contains "$revd" "SIN memoria" "reviewer.md tiene el modo agente-nuevo"
+assert_contains "$revd" "rebased_from" "y sabe de qué campo sale su base"
+assert_contains "$scaffold" "rebased_from" "el campo que el prompt promete lo persiste de verdad el scaffold"
+assert_contains "$(cmd auto)" "ronda siguiente ≠ agente nuevo" "la ley del watchdog quedó acotada, no derogada"
+assert_contains "$(cmd auto)" "~3 min" "y el heartbeat sigue siendo ley"
+
+echo
+echo "── el delta viaja al reviewer: prompt y mecanismo"
+assert_contains "$(cmd review)" "delta_files" "/review nombra el campo persistido"
+assert_contains "$scaffold" "delta_files" "y el scaffold lo escribe de verdad"
+assert_contains "$revd" "delta_files" "y el reviewer sin memoria sabe leerlo"
+
+echo
+echo "── merge-qa y rebase puro: los comandos que el prompt promete existen"
+assert_contains "$(cmd review)" "merge-qa" "/review invoca el merge mecánico por comando"
+assert_contains "$scaffold" "merge_qa" "y el scaffold lo implementa"
+assert_contains "$(cmd review)" "rebase PURO" "/review distingue el rebase puro (no corras nada)"
+assert_contains "$scaffold" "nada que rebasear" "y el scaffold lo detecta solo"
+
+echo
+echo "── non_blocking → beads: la cadena queda anclada en AMBOS extremos"
+assert_contains "$(cmd review)" "verdict-beads.sh" "/review nombra el comando"
+assert_contains "$(cmd archive)" "POLICY-ARCHIVE-002" "/archive nombra el gate"
+assert_contains "$revd" "bead" "reviewer.md documenta las dos formas de entrada"
+assert_contains "$(cat "$root/templates/scripts/harness-policy.py")" "POLICY-ARCHIVE-002" \
+  "y el gate existe en el motor (afirmada en 4 archivos, ejecutada en 1 por fin)"
+
 t_done

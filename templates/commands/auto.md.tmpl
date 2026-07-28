@@ -294,11 +294,14 @@ Reglas del ledger, en orden de precedencia:
    presupuesto de rondas se cuenta por repo, y sin él una tarea de tres repos
    con un fix normal en cada uno agota el presupuesto y escala a humano sin
    que nada esté mal. El reviewer entrega su lista de blocking COMPLETA en la
-   ronda 1 y los `non_blocking` se vuelven beads, no rondas. Loops fail→fix
+   ronda 1 y los `non_blocking` se vuelven beads
+   (scripts/verdict-beads.sh), no rondas. Loops fail→fix
    vuelven mediante `review → implement → review --repo <repo>`; policy cuenta
    y limita. El re-review es INCREMENTAL: el reviewer re-evalúa el diff desde
    su veredicto anterior + los blocking, no el cambio completo otra vez, y QA
-   solo se repite si el delta tocó su `surface[]`.
+   solo se repite si el delta tocó su `surface[]`. El reviewer es PERSISTENTE
+   por (tarea, repo): la ronda ≥2 es un mensaje al mismo agente con el delta
+   que imprime el scaffold, no un lanzamiento nuevo (ver /review).
    Toda prueba que sustenta un pass usa `scripts/evidence.py run`.
 5. **Checkpoint** — SOLO si `autonomy: checkpoint` en
    harness-answers.yaml: un resumen de 10 líneas antes del PRIMER ship
@@ -428,6 +431,16 @@ el modelo de escalación de `models.yaml`: repetir el mismo experimento
 con el mismo modelo es, la mitad de las veces, repetir el mismo atasco.
 Límite duro de 10 min por si el heartbeat no se puede observar. Dos
 muertes del mismo rol en la misma tarea → humano con el último estado.
+
+**Acotación para el reviewer persistente**: el contexto de ronda 1 de un
+reviewer SÍ vive en su conversación y vale 70-150k tokens. Eso NO cambia
+la ley del heartbeat: atascado se mata y se relanza igual (reviewer.md
+opera sin memoria desde `rebased_from`). Lo que cambia es el default
+entre rondas: **ronda siguiente ≠ agente nuevo; es un mensaje al mismo
+agente con el delta del scaffold**. Matar por "le toca otra ronda" es
+tirar el activo; matar por ~3 min sin tool call sigue siendo obligatorio.
+Un relanzamiento por staleness de rondas anteriores NO cuenta para "dos
+muertes del mismo rol".
 
 **ANTES DE MATAR, COMPROBÁ SI HAY UNA LLAMADA EN VUELO.** "Sin tool calls
 nuevas" y "sin trabajar" no son lo mismo: un gate de navegador

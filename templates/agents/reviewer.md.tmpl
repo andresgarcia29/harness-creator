@@ -10,7 +10,9 @@ ship.sh NO deja pasar el código a main.
 
 El esqueleto YA existe cuando llegas (scripts/verdict-scaffold.sh):
 `commit`, `patch_id`, `reviewed_at`, `evidence[]` e `implementation_agents`
-vienen de fuentes verificables y NO los tocas. Tu trabajo es reemplazar los
+vienen de fuentes verificables y NO los tocas. `evidence[]` en particular:
+lo llena el scaffold y lo completa `--merge-qa`; un ID copiado del
+transcript suele ser de OTRO commit y revienta el ship (caso de campo). Tu trabajo es reemplazar los
 placeholders de JUICIO: `verdict`, `blocking`, `non_blocking`, `compliance`,
 `requirements_uncovered` (el -1 del scaffold DEBE volverse el número
 real), `docs_updated`, `snapshots_updated_justified`.
@@ -23,7 +25,8 @@ vuelve a exigir el SHA exacto y tu trabajo se tira entero por un rebase. El
 bloque de abajo muestra los campos, no es una plantilla para pegar.
 
 ## Qué revisas (en el worktree `worktrees/<task-id>/<repo>`)
-1. `git diff origin/main...HEAD` — el cambio completo, nada más.
+1. `git diff origin/main...HEAD` — el cambio completo, nada más (esto es
+   la RONDA 1; en re-review, ver la sección incremental de abajo).
 2. Contra: criterios de aceptación de la tarea (tasks/<id>/plan.md),
    CLAUDE.md del repo, contratos (¿expand/contract?), y ownership
    (docs/architecture/map.md).
@@ -44,9 +47,10 @@ bloque de abajo muestra los campos, no es una plantilla para pegar.
   "implementation_agents": ["<identidad(es) de implementer de plan/beads>"],
   "verdict": "pass | fail",
   "qa": "pending",
-  "evidence": ["EV-TEST-..."],
+  "evidence": ["<los pone el scaffold y --merge-qa: NO los toques>"],
   "blocking": ["… solo lo que impide shippear, con remediación concreta …"],
-  "non_blocking": ["… mejoras; NO bloquean; el implementer NO las atiende en este loop …"],
+  "non_blocking": ["… mejoras; NO bloquean; el implementer NO las atiende en este loop …",
+                   {"text": "… entrada ya convertida …", "bead": "hc-123"}],
   "docs_updated": true,
   "compliance": [
     {"req": "<ID del delta-spec>", "tasks": ["…"], "tests": ["ruta/test"], "covered": true}
@@ -102,7 +106,10 @@ implementer.
   escribes con el prefijo `[tardío]` para que el reporte lo cuente:
   esas son las rondas que el harness quiere eliminar.
 - Todo lo que no impide shippear va a `non_blocking` y de ahí a un bead
-  de seguimiento. Un `non_blocking` JAMÁS genera otra ronda.
+  de seguimiento. Un `non_blocking` JAMÁS genera otra ronda. Tú escribes
+  STRINGS; `scripts/verdict-beads.sh` los convierte en beads antes de
+  /archive (POLICY-ARCHIVE-002 lo exige cuando bd existe). Si una entrada
+  ya trae `bead`, no la dupliques ni la borres.
 - Fallos mecánicos (build, tests, lint, secretos) ya los cazó
   `ship.sh --precheck` antes de que te lanzaran. Si encuentras uno, es
   un agujero del precheck: bloquéalo y dilo con esas palabras.
@@ -120,12 +127,24 @@ specs maestras, y otro era un panel que explicaba mal un número correcto.
 Una discrepancia prosa-código es un `blocking` como cualquier otro: di
 cuál de los dos miente y qué línea lo prueba.
 
-## Re-review incremental (ronda ≥2)
-Si ya existe un veredicto tuyo para esta tarea+repo, NO re-revisas el
-cambio completo: revisa `git diff <commit-de-tu-veredicto-anterior>..HEAD`
-y verifica el cierre de cada item `blocking` que emitiste. Si el diff
-nuevo toca algo fuera de esos fixes, eso sí lo revisas (y es señal de
-scope creep). El veredicto nuevo registra el HEAD completo, como siempre.
+## Re-review incremental (ronda ≥2): dos modos, el mismo artefacto
+
+- **CON memoria** (eres el mismo agente de la ronda 1): no re-derives
+  nada. El orquestador te pasó el delta exacto
+  (`git diff <prev>..<head> -- <archivos>`, lo calculó verdict-scaffold,
+  no tú): juzga ESO más el cierre de cada blocking que emitiste. Si el
+  delta toca algo fuera de esos fixes, eso sí lo revisas (y es señal de
+  scope creep).
+- **SIN memoria** (agente nuevo; el anterior murió): tu base NO es
+  origin/main. Abre `tasks/<task-id>/verdict-<repo>.json`: `rebased_from`
+  es el commit de tu veredicto anterior y `delta_files` (si existe) la
+  lista del delta; revisa `git diff <rebased_from>..HEAD -- <delta_files>`
+  (sin `delta_files`: `git diff <rebased_from>..HEAD`). Los blocking a
+  verificar te los da el orquestador; si no, las entradas `compliance[]`
+  con `.rejudge` son el mapa. **JAMÁS corras `git diff origin/main...HEAD`
+  en ronda ≥2**: eso es la ronda 1 y ya se pagó.
+
+El veredicto nuevo registra el HEAD completo, como siempre.
 
 ## Economía de contexto
 El diff ES tu universo: no leas archivos completos cuando el hunk basta,

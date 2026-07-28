@@ -10,6 +10,7 @@ import json
 import math
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -231,6 +232,28 @@ def repos_missing_verdict(task_dir: Path, extra_repos=()) -> list:
         for p in task_dir.glob("verdict-*.json")
     }
     return [r for r in planned if r not in verdicts]
+
+
+def non_blocking_without_bead(task_dir: Path) -> list:
+    """Veredictos con hallazgos non_blocking sin bead asociado.
+
+    La cadena "los non_blocking se vuelven beads" estaba afirmada en cuatro
+    prompts y ejecutada en cero. Caso de campo: una decisión de diferimiento
+    vivía solo en tasks/ (gitignoreado), o sea que por la Ley 7 no existía.
+    Las entradas valen como string (el reviewer las escribe así) o como
+    objeto {text, bead} (scripts/verdict-beads.sh las convierte)."""
+    out = []
+    for path in sorted(task_dir.glob("verdict-*.json")):
+        try:
+            items = json.loads(path.read_text(encoding="utf-8")).get("non_blocking") or []
+        except (OSError, json.JSONDecodeError, AttributeError):
+            continue   # un veredicto ilegible ya lo gatea validate-ship; acá no se duplica
+        for item in items:
+            if (isinstance(item, str) and item.strip()) or \
+                    (isinstance(item, dict) and not item.get("bead")):
+                out.append(path.name)
+                break
+    return out
 
 
 def stale_delta_spec(task_dir: Path) -> "str | None":
@@ -489,11 +512,17 @@ def cmd_record_cost(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_validate_dag(args: argparse.Namespace) -> int:
-    dag = load(Path(args.dag), "DAG")
+def load_dag_nodes(dag_path: Path) -> "tuple[dict, dict]":
+    """Valida el DAG completo (DAG-001..007) y devuelve (deps, repo) por id.
+
+    Es LA validación de cmd_validate_dag, extraída para que dag-order use
+    exactamente las mismas reglas: dos validadores del mismo artefacto es una
+    oportunidad de divergir."""
+    dag = load(dag_path, "DAG")
     if dag.get("schema") != 1 or not isinstance(dag.get("tasks"), list) or not dag["tasks"]:
         fail("POLICY-DAG-001", "dag.json requiere schema:1 y tasks[] no vacío")
     nodes: dict[str, list[str]] = {}
+    repos: dict[str, str] = {}
     for item in dag["tasks"]:
         if not isinstance(item, dict):
             fail("POLICY-DAG-002", "cada tarea del DAG debe ser un objeto")
@@ -505,12 +534,14 @@ def cmd_validate_dag(args: argparse.Namespace) -> int:
         if not isinstance(deps, list) or any(not isinstance(dep, str) for dep in deps):
             fail("POLICY-DAG-005", f"depends_on inválido para {task_id}")
         nodes[task_id] = deps
+        repos[task_id] = repo
     for task_id, deps in nodes.items():
         missing = [dep for dep in deps if dep not in nodes]
         if missing:
             fail("POLICY-DAG-006", f"{task_id} depende de IDs inexistentes: {missing}")
     visiting: set[str] = set()
     visited: set[str] = set()
+
     def visit(node: str) -> None:
         if node in visiting:
             fail("POLICY-DAG-007", f"ciclo detectado en {node}")
@@ -521,9 +552,68 @@ def cmd_validate_dag(args: argparse.Namespace) -> int:
             visit(dependency)
         visiting.remove(node)
         visited.add(node)
+
     for node in nodes:
         visit(node)
+    return nodes, repos
+
+
+def cmd_validate_dag(args: argparse.Namespace) -> int:
+    nodes, _ = load_dag_nodes(Path(args.dag))
     print(f"✅ DAG válido: {len(nodes)} tareas, sin ciclos")
+    return 0
+
+
+def cmd_dag_order(args: argparse.Namespace) -> int:
+    """El orden de shipping del DAG, EJECUTABLE: un repo por línea.
+
+    El dag: de answers dice literal "ship.sh no lo impone" y nadie lo
+    ejecutaba; el caso de campo fue una cadena publish/bump/deploy corrida a
+    mano donde un eslabón quedó a medias. ship-wave.sh consume esta salida.
+
+    Dedupe por ÚLTIMA aparición del repo: ship.sh shippea el worktree ENTERO
+    una vez; posicionar el repo en su primera tarea aterrizaría las tareas
+    posteriores antes que sus dependencias."""
+    task_dir = Path(args.task_dir).resolve()
+    dag_path = task_dir / "dag.json"
+    if not dag_path.exists():
+        fail("POLICY-DAG-008",
+             f"no existe tasks/{task_dir.name}/dag.json: sin plan no hay ola. "
+             "El carril express no genera DAG: shippea con ship.sh directo")
+    nodes, repos = load_dag_nodes(dag_path)
+    order: list = []
+    visited: set = set()
+
+    def visit(node: str) -> None:
+        if node in visited:
+            return
+        visited.add(node)
+        for dependency in nodes[node]:
+            visit(dependency)
+        order.append(node)
+
+    for node in nodes:
+        visit(node)
+    # dedupe por última aparición del repo
+    repo_seq = [repos[t] for t in order]
+    final = []
+    for index, repo in enumerate(repo_seq):
+        if repo not in repo_seq[index + 1:]:
+            final.append(repo)
+    # fail-closed: si una tarea de R depende de una de S y S quedó DESPUÉS de
+    # R en el orden final, el DAG exige intercalar ships del mismo repo, y la
+    # ola hace UN ship por repo.
+    position = {repo: index for index, repo in enumerate(final)}
+    for task_id, deps in nodes.items():
+        for dependency in deps:
+            r_task, r_dep = repos[task_id], repos[dependency]
+            if r_task != r_dep and position[r_dep] > position[r_task]:
+                fail("POLICY-DAG-009",
+                     f"el DAG exige intercalar ships del mismo repo "
+                     f"({r_task} ↔ {r_dep}): ship-wave hace UN ship por repo. "
+                     "Shippeá a mano por tarea, en el orden del DAG")
+    for repo in final:
+        print(repo)
     return 0
 
 
@@ -589,10 +679,48 @@ def cmd_transition(args: argparse.Namespace) -> int:
                  "afectado (scripts/verdict-scaffold.sh --rebase conserva el "
                  "juicio que el delta no tocó) para re-emitir el veredicto "
                  "sobre el delta vigente")
+        unbeaded = non_blocking_without_bead(task_dir)
+        if unbeaded:
+            if shutil.which("bd"):
+                fail("POLICY-ARCHIVE-002",
+                     "hallazgos non_blocking sin bead en "
+                     f"{', '.join(unbeaded)}: tasks/ es gitignoreado y al "
+                     "archivar dejan de existir (Ley 7). Corré "
+                     "scripts/verdict-beads.sh <task-id> <repo> por cada repo "
+                     "listado y reintentá la transición")
+            else:
+                print("⚠️  hay non_blocking sin bead y bd NO está en PATH: no "
+                      "se exige lo que la máquina no puede dar; esos hallazgos "
+                      "quedarán solo en el veredicto (gitignoreado)")
     rounds_by_repo = state.get("review_rounds_by_repo")
     if not isinstance(rounds_by_repo, dict):
         rounds_by_repo = {}
     rounds = state.get("review_rounds", 0)
+
+    def budget_warning(round_now: int, maximum: int, label: str) -> None:
+        """La última ronda del presupuesto se AVISA, no solo se cobra.
+
+        Caso de campo: ~20 rondas de review en una corrida y nadie miraba el
+        costo acumulado; el techo de rondas se sorteaba con rollback (que es
+        honesto) pero el goteo seguía. El aviso sale por stdout Y por el bus
+        (kind decision: es gobierno de presupuesto, no una verificación
+        faltante), para que el panel lo muestre."""
+        if round_now != maximum:
+            return
+        spent = state.get("spent_usd")
+        budget = state.get("budget_usd")
+        cost = ""
+        if isinstance(spent, (int, float)) and spent > 0:
+            cost = f" (gastado ${spent:.2f}"
+            if isinstance(budget, (int, float)):
+                cost += f" de ${budget:.2f}"
+            cost += ")"
+        warning = (f"última ronda del presupuesto de review{label} "
+                   f"({round_now}/{maximum}): considerá un pase profundo "
+                   f"en vez de goteo{cost}")
+        print(f"⚠️  {warning}")
+        emit_bus(task_dir, "decision", warning)
+
     if args.phase == "review":
         maximum = policy.get("limits", {}).get("max_review_rounds", 3)
         if args.repo:
@@ -604,6 +732,7 @@ def cmd_transition(args: argparse.Namespace) -> int:
                      f"{maximum}. Ese repo no converge: escala a humano con el "
                      "historial de veredictos (los otros repos de la tarea no se "
                      "ven afectados)")
+            budget_warning(this_repo, maximum, f" de {args.repo}")
             rounds = max([rounds] + list(rounds_by_repo.values()))
         else:
             rounds += 1
@@ -612,6 +741,7 @@ def cmd_transition(args: argparse.Namespace) -> int:
                      f"review round {rounds} excede el máximo {maximum}. Si es una "
                      "tarea multi-repo, pasá --repo <repo> para que el presupuesto "
                      "se cuente por repo y no castigue a los que sí convergieron")
+            budget_warning(rounds, maximum, "")
     history = state.setdefault("history", [])
     entry = {"from": current, "to": args.phase, "actor": args.actor}
     if args.repo:
@@ -623,7 +753,10 @@ def cmd_transition(args: argparse.Namespace) -> int:
         state["review_rounds_by_repo"] = rounds_by_repo
     atomic(path, state)
     detail = f" (repo {args.repo}: ronda {rounds_by_repo.get(args.repo)})" if args.repo and args.phase == "review" else ""
-    emit_bus(task_dir, "phase", f"{current} → {args.phase}" + (f" ({args.repo})" if args.repo else ""))
+    # la ronda viaja al bus: el panel antes no tenía forma de contar rondas
+    emit_bus(task_dir, "phase", f"{current} → {args.phase}"
+             + (f" ({args.repo}{': ronda ' + str(rounds_by_repo.get(args.repo)) if args.phase == 'review' else ''})"
+                if args.repo else ""))
     print(f"✅ {task_dir.name}: {current} → {args.phase}{detail}")
     return 0
 
@@ -879,6 +1012,10 @@ def build_parser() -> argparse.ArgumentParser:
     dag = sub.add_parser("validate-dag")
     dag.add_argument("dag")
     dag.set_defaults(func=cmd_validate_dag)
+    dago = sub.add_parser("dag-order",
+                          help="orden topológico de repos para ship-wave")
+    dago.add_argument("task_dir")
+    dago.set_defaults(func=cmd_dag_order)
     ship = sub.add_parser("validate-ship")
     ship.add_argument("task_dir")
     ship.add_argument("--commit", required=True,

@@ -16,8 +16,10 @@ extract() {  # extract <nombre-funcion> — de 'nombre() {' a su '}' de 1er nive
 }
 extract gate_lane > "$WS/gate_lane.sh"
 grep -q 'LANE_GUARD_PATTERN' "$WS/gate_lane.sh" || { echo "no pude extraer gate_lane"; exit 1; }
-{ extract par; extract run_parallel_gates; } > "$WS/pargates.sh"
+{ extract par; extract close_serial_gate; extract collect_gate_slots
+  extract run_phase0_gates; extract run_parallel_gates; } > "$WS/pargates.sh"
 grep -q 'GDIR' "$WS/pargates.sh" || { echo "no pude extraer par/run_parallel_gates"; exit 1; }
+grep -q 'fase 0' "$WS/pargates.sh" || { echo "no pude extraer run_phase0_gates"; exit 1; }
 
 echo "── gate_lane: el carril lo verifica el diff, no la fe"
 
@@ -66,41 +68,75 @@ rm -f "$WS/tasks/T1/state.json"
   . "$WS/gate_lane.sh"; gate_lane ) \
   && pass "sin state.json: default full, no bloquea" || fail "sin state.json: bloqueó"
 
-echo "── gates en paralelo: un rojo no esconde a los demás"
+echo "── gates en dos fases: baratos primero, y un rojo no esconde a los demás"
+# Caso de campo: un requirements_uncovered=1 (200ms de jq) se descubría tras
+# pagar una suite de 10 minutos que corría en paralelo con el slot veredicto.
 
-run_pargates() {  # run_pargates <security-rc> [precheck]: grupos stub, security parametrizado
-  ( set -eu; WS="$WS"; REPO=test; CURRENT_GATE=""; sec_rc="$1"; PRECHECK="${2:-0}"
+run_pargates() {  # run_pargates <security-rc> [precheck] [verdict-rc]
+  ( set -eu; WS="$WS"; REPO=test; CURRENT_GATE=""
+    sec_rc="$1"; PRECHECK="${2:-0}"; verdict_rc="${3:-0}"
     emit() { :; }; gate() { CURRENT_GATE="$1"; }
-    # run_parallel_gates llama al envoltorio que sella la corrida como
-    # evidencia; el stub va sobre ESE nombre. La distinción importa: es la
-    # pieza que elimina una corrida entera de la suite por tarea.
+    # la fase cara llama al envoltorio que sella la corrida como evidencia;
+    # el stub va sobre ESE nombre. La distinción importa: es la pieza que
+    # elimina una corrida entera de la suite por tarea.
     run_lang_gates() { echo LANG-EVIDENCIA; }
     run_lang_gates_sealed() { run_lang_gates; }
     run_security_gates() { echo SEC-EVIDENCIA; return "$sec_rc"; }
     gate_tests_untouched() { echo TESTS-EVIDENCIA; }
-    check_verdict() { echo VERDICT-EVIDENCIA; }
-    gate_evidence() { :; }
-    gate_policy_and_evidence() { :; }
-    . "$WS/pargates.sh"; run_parallel_gates )
+    check_verdict() { echo VERDICT-EVIDENCIA; return "$verdict_rc"; }
+    gate_evidence() { echo COMPLIANCE-EVIDENCIA; }
+    gate_policy_and_evidence() { echo POLICY-EVIDENCIA; }
+    . "$WS/pargates.sh"; run_phase0_gates; run_parallel_gates )
 }
 
 out="$(run_pargates 0 2>&1)"; rc=$?
-assert_eq 0 "$rc" "todos los grupos verdes → verde agregado"
+assert_eq 0 "$rc" "todo verde → verde agregado en las dos fases"
 assert_contains "$out" "LANG-EVIDENCIA" "el output de cada grupo aparece"
+assert_contains "$out" "VERDICT-EVIDENCIA" "la fase 0 corre el veredicto"
 
 out="$(run_pargates 3 2>&1)"; rc=$?
-assert_eq 3 "$rc" "un grupo rojo → rojo agregado (exit 3)"
+assert_eq 3 "$rc" "un grupo caro rojo → rojo agregado (exit 3)"
 assert_contains "$out" "SEC-EVIDENCIA" "el output del grupo rojo aparece"
 assert_contains "$out" "LANG-EVIDENCIA" "el rojo NO esconde el output de los verdes"
 assert_contains "$out" "security" "el resumen nombra el grupo que falló"
 
-# precheck: mismos grupos mecánicos, sin el de veredicto (todavía no existe).
+# LA PROPIEDAD NUEVA: un veredicto roto (200ms) corta ANTES de pagar suites
+out="$(run_pargates 0 0 3 2>&1)"; rc=$?
+assert_eq 3 "$rc" "veredicto rojo en fase 0: rojo agregado"
+assert_contains "$out" "VERDICT-EVIDENCIA" "el rojo de fase 0 se reporta"
+assert_not_contains "$out" "LANG-EVIDENCIA" "y los gates CAROS jamás llegaron a correr"
+assert_not_contains "$out" "SEC-EVIDENCIA" "ninguno de ellos"
+assert_contains "$out" "ninguna suite corrió" "y el resumen lo dice con esas palabras"
+
+# todos los rojos de fase 0 JUNTOS (slots separados: set -e no los esconde)
+out="$( ( set -eu; WS="$WS"; REPO=test; CURRENT_GATE=""; PRECHECK=0
+    emit() { :; }; gate() { CURRENT_GATE="$1"; }
+    gate_tests_untouched() { echo TESTS-EVIDENCIA; }
+    check_verdict() { echo VERDICT-RED; exit 3; }
+    gate_evidence() { echo COMPLIANCE-RED; exit 3; }
+    gate_policy_and_evidence() { echo POLICY-EVIDENCIA; }
+    . "$WS/pargates.sh"; run_phase0_gates ) 2>&1 )"; rc=$?
+assert_eq 3 "$rc" "dos slots de fase 0 rojos: rojo agregado"
+assert_contains "$out" "VERDICT-RED" "el primer rojo se reporta"
+assert_contains "$out" "COMPLIANCE-RED" "y el segundo TAMBIÉN (no se esconden entre sí)"
+
+# precheck: fase 0 sin slots de veredicto (todavía no existe).
 # El detalle importa: si el precheck exigiera veredicto, jamás podría correr
 # ANTES del review, que es toda su razón de ser.
 out="$(run_pargates 0 1 2>&1)"; rc=$?
 assert_eq 0 "$rc" "precheck: verde sin veredicto"
 assert_contains "$out" "LANG-EVIDENCIA" "precheck: corre los gates mecánicos"
+assert_contains "$out" "TESTS-EVIDENCIA" "precheck: la fase 0 corre tests-no-debilitados"
 assert_not_contains "$out" "VERDICT-EVIDENCIA" "precheck: NO corre el grupo de veredicto"
+
+# el preflight existe y precede estructuralmente al lock
+extract gate_ship_preflight > "$WS/preflight.sh"
+grep -q "sin lock" "$WS/preflight.sh" || { echo "no pude extraer gate_ship_preflight"; exit 1; }
+pf_line="$(grep -n '^gate_ship_preflight$' "$TMPL" | head -1 | cut -d: -f1)"
+lk_line="$(grep -n '^acquire_lock$' "$TMPL" | head -1 | cut -d: -f1)"
+[ -n "$pf_line" ] && [ -n "$lk_line" ] && [ "$pf_line" -lt "$lk_line" ] \
+  && pass "gate_ship_preflight se invoca ANTES de acquire_lock (un ship condenado no retiene el lock)" \
+  || fail "el preflight no precede al lock (pf=$pf_line lock=$lk_line)"
 
 
 echo "── gate_tests_untouched v2: neto real, escape que declara"

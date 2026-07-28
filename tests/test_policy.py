@@ -40,6 +40,10 @@ class PolicyTest(unittest.TestCase):
     def transition(self, phase):
         return self.run_policy("transition", self.task, phase, "--actor", "orchestrator")
 
+    def transition_repo(self, phase, repo):
+        return self.run_policy("transition", self.task, phase,
+                               "--actor", "orchestrator", "--repo", repo)
+
     def test_state_machine_rejects_skips(self):
         self.assertEqual(self.run_policy("init", self.task).returncode, 0)
         result = self.transition("ship")
@@ -505,6 +509,175 @@ class PolicyTest(unittest.TestCase):
         r = self.run_policy("init", task, "--lane", "express",
                             "--repos", "terraform-core")
         self.assertEqual(r.returncode, 0, r.stderr)   # aviso, no bloqueo
+
+    # ── el presupuesto de rondas POR REPO (primer test que pasa --repo) ──
+
+    def test_review_rounds_counted_per_repo(self):
+        self.reach("rfc", "implement")
+        for _ in range(3):
+            self.assertEqual(self.transition_repo("review", "atlas").returncode, 0)
+            self.assertEqual(self.transition("implement").returncode, 0)
+        blocked = self.transition_repo("review", "atlas")
+        self.assertEqual(blocked.returncode, 3)
+        self.assertIn("POLICY-LIMIT-001", blocked.stderr)
+        self.assertIn("atlas", blocked.stderr)
+        # el presupuesto es por repo: proto arranca su ronda 1 sin castigo
+        allowed = self.transition_repo("review", "proto")
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        state = self.state()
+        self.assertEqual(state["review_rounds_by_repo"]["atlas"], 3)
+        self.assertEqual(state["review_rounds_by_repo"]["proto"], 1)
+        self.assertEqual(state["review_rounds"], 3)   # el máximo entre repos
+
+    def test_last_round_warns_with_repo_and_only_then(self):
+        self.reach("rfc", "implement")
+        first = self.transition_repo("review", "atlas")
+        self.assertNotIn("última ronda", first.stdout)
+        self.assertEqual(self.transition("implement").returncode, 0)
+        second = self.transition_repo("review", "atlas")
+        self.assertNotIn("última ronda", second.stdout)
+        self.assertEqual(self.transition("implement").returncode, 0)
+        third = self.transition_repo("review", "atlas")
+        self.assertIn("última ronda", third.stdout)
+        self.assertIn("atlas", third.stdout)
+        self.assertIn("pase profundo", third.stdout)
+
+    def test_last_round_warning_reaches_the_bus_with_cost(self):
+        # emit_bus exige ws/scripts/emit.sh (ws = task_dir.parent.parent)
+        ws = Path(self.tmp.name)
+        task = ws / "tasks" / "AUTO-20260728-bus-test"
+        task.mkdir(parents=True)
+        (ws / "scripts").mkdir(exist_ok=True)
+        import shutil as _sh
+        _sh.copy(ROOT / "templates/scripts/emit.sh", ws / "scripts/emit.sh")
+        self.assertEqual(self.run_policy("init", task, "--budget-usd", "5").returncode, 0)
+        self.assertEqual(self.run_policy("record-cost", task,
+                                         "--total-usd", "1.25").returncode, 0)
+        def t(phase, repo=None):
+            args = ["transition", task, phase, "--actor", "orch"]
+            if repo:
+                args += ["--repo", repo]
+            return self.run_policy(*args)
+        for phase in ("rfc", "implement"):
+            self.assertEqual(t(phase).returncode, 0)
+        for _ in range(2):
+            self.assertEqual(t("review", "atlas").returncode, 0)
+            self.assertEqual(t("implement").returncode, 0)
+        third = t("review", "atlas")
+        self.assertIn("gastado $1.25 de $5.00", third.stdout)
+        bus = (ws / ".harness/events.jsonl").read_text()
+        self.assertIn('"decision"', bus)
+        self.assertIn("ltima ronda", bus)   # sin la tilde: el bus escapa unicode
+
+    # ── ARCHIVE-002: non_blocking sin bead no se archiva (si hay motor) ──
+
+    def _bd_stub_env(self, present=True):
+        bindir = Path(self.tmp.name) / ("bin-con-bd" if present else "bin-sin-bd")
+        bindir.mkdir(exist_ok=True)
+        if present:
+            stub = bindir / "bd"
+            stub.write_text("#!/bin/sh\necho 'Created hc-001'\n")
+            stub.chmod(0o755)
+        env = dict(os.environ)
+        env["PATH"] = f"{bindir}:{env['PATH']}" if present else "/usr/bin:/bin"
+        return env
+
+    def run_policy_env(self, env, *args):
+        return subprocess.run(
+            ["python3", str(SCRIPT), "--policy", str(POLICY), *map(str, args)],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            check=False, env=env)
+
+    def _reach_deploy_with_unbeaded(self):
+        self.reach("rfc", "implement", "review")
+        self.mk_verdict("atlas")
+        verdict = self.task / "verdict-atlas.json"
+        data = json.loads(verdict.read_text())
+        data["non_blocking"] = ["nombre de variable pobre"]
+        verdict.write_text(json.dumps(data))
+        self.mk_shipped("atlas")
+        self.assertEqual(self.transition("ship").returncode, 0)
+        self.assertEqual(self.transition("deploy").returncode, 0)
+
+    def test_archive_blocks_unbeaded_non_blocking_when_bd_exists(self):
+        self._reach_deploy_with_unbeaded()
+        env = self._bd_stub_env(present=True)
+        blocked = self.run_policy_env(env, "transition", self.task, "archive",
+                                      "--actor", "orch")
+        self.assertEqual(blocked.returncode, 3)
+        self.assertIn("POLICY-ARCHIVE-002", blocked.stderr)
+        self.assertIn("verdict-atlas.json", blocked.stderr)
+        self.assertIn("verdict-beads.sh", blocked.stderr)
+
+    def test_archive_warns_without_bd(self):
+        self._reach_deploy_with_unbeaded()
+        env = self._bd_stub_env(present=False)
+        done = self.run_policy_env(env, "transition", self.task, "archive",
+                                   "--actor", "orch")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("no se exige lo que la máquina no puede dar", done.stdout)
+
+    def test_archive_accepts_beaded_entries(self):
+        self.reach("rfc", "implement", "review")
+        self.mk_verdict("atlas")
+        verdict = self.task / "verdict-atlas.json"
+        data = json.loads(verdict.read_text())
+        data["non_blocking"] = [{"text": "mejora menor", "bead": "hc-042"}]
+        verdict.write_text(json.dumps(data))
+        self.mk_shipped("atlas")
+        self.assertEqual(self.transition("ship").returncode, 0)
+        self.assertEqual(self.transition("deploy").returncode, 0)
+        env = self._bd_stub_env(present=True)
+        done = self.run_policy_env(env, "transition", self.task, "archive",
+                                   "--actor", "orch")
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    # ── dag-order: el orden de shipping por fin EJECUTABLE ──
+
+    def test_dag_order_topological_dedup_last_occurrence(self):
+        # atlas tiene T1 (independiente) y T3 (depende de T2 de proto): la ola
+        # hace UN ship por repo, así que atlas va DESPUÉS de proto (última
+        # aparición; posicionarlo en T1 aterrizaría T3 antes que su dependencia)
+        self.mk_dag_items([
+            {"id": "T1", "repo": "atlas", "depends_on": []},
+            {"id": "T2", "repo": "proto", "depends_on": []},
+            {"id": "T3", "repo": "atlas", "depends_on": ["T2"]},
+        ])
+        result = self.run_policy("dag-order", self.task)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split(), ["proto", "atlas"])
+
+    def test_dag_order_cycle_fails(self):
+        self.mk_dag_items([
+            {"id": "T1", "repo": "atlas", "depends_on": ["T2"]},
+            {"id": "T2", "repo": "proto", "depends_on": ["T1"]},
+        ])
+        result = self.run_policy("dag-order", self.task)
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("POLICY-DAG-007", result.stderr)
+
+    def test_dag_order_missing_dag_fails(self):
+        result = self.run_policy("dag-order", self.task)
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("POLICY-DAG-008", result.stderr)
+        self.assertIn("express", result.stderr)   # la remediación nombra el camino
+
+    def test_dag_order_interleaved_repo_fails_closed(self):
+        # T1:atlas ← T2:proto ← T3:atlas es ordenable; pero si ADEMÁS proto
+        # depende de una tarea de atlas que va después, exige intercalar
+        self.mk_dag_items([
+            {"id": "T1", "repo": "atlas", "depends_on": ["T2"]},
+            {"id": "T2", "repo": "proto", "depends_on": []},
+            {"id": "T3", "repo": "proto", "depends_on": ["T1"]},
+        ])
+        result = self.run_policy("dag-order", self.task)
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("POLICY-DAG-009", result.stderr)
+        self.assertIn("a mano", result.stderr)
+
+    def mk_dag_items(self, items):
+        (self.task / "dag.json").write_text(json.dumps({
+            "schema": 1, "tasks": items}))
 
     def test_dag_rejects_cycles_and_accepts_parallel_branches(self):
         dag = self.task / "dag.json"

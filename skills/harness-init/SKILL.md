@@ -170,6 +170,18 @@ harness; cada agente es contexto y mantenimiento.
    (deploy/release/apply en el nombre o un `on: push` a la trunk) son los
    candidatos; `kind: service|frontend|mobile` ya caen a gitops solos y
    no hace falta declararlos.
+   **Y por cada repo con driver, el verify post-deploy** (claves planas a
+   4 espacios: `verify_cmd`/`verify_expect`/`verify_timeout`): un comando
+   que interroga al ARTEFACTO desplegado, para TODOS los drivers (con
+   `none` es la única señal). Ofrece los dos primitivos de campo: leer el
+   asset DESDE el pod (no del CDN que cachea) y comparar pod vs CDN con
+   `curl --compressed`. Si la tarea encadena publish/bump entre repos,
+   pregunta también `post_ship` (lo ejecuta ship-wave tras aterrizar el
+   repo). Y si el flujo usa túneles locales (port-forward a un cluster),
+   llena el bloque `port_forwards:` (`{{PORT_FORWARDS_LIST}}`; sin
+   túneles, déjalo solo con los ejemplos comentados): puerto, cmd y la
+   sonda de IDENTIDAD (el status esperado SIN credenciales; un 401
+   esperado ES identidad válida).
 10. **Modelos**: primero el PROVEEDOR (anthropic | vertex | bedrock |
     kimi | minimax | openrouter; default anthropic; si eligió otro,
     recuérdale verificar los IDs de la sección `models.<provider>`
@@ -290,8 +302,12 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `.claude/hooks/guard-build-slot.sh` | hooks/ | siempre (fail-OPEN: bloquea `docker build/run` pelado, Ley 8; ya registrado en settings.json.tmpl junto a block-direct-push) |
 | `.claude/hooks/{track-read,ui-emit}.sh` | hooks/ | siempre (fail-OPEN: observan, `async: true`). track-read alimenta `gate_evidence` de ship.sh; ui-emit alimenta `make ui` |
 | `.claude/hooks/guard-worktree.sh` | hooks/ | siempre (registrado junto a guard-canonical en Edit\|Write\|MultiEdit). Un worktree tiene UN dueño: la primera sesión que escribe lo reclama y otra sesión que intente escribir ahí se bloquea. Es la única guarda del tramo de edición concurrente (el lock de ship.sh es por repo y solo cubre el push; build-slot es por máquina y solo cubre builds). Fail-OPEN a diferencia de los otros guards: coordina, no prohíbe, y una colisión es recuperable con git |
+| `.claude/hooks/guard-ws-scripts.sh` | hooks/ | siempre (fail-CLOSED con remediación exacta, registrado en PreToolUse Bash). `scripts/<x>.sh` relativo desde un worktree no resuelve (6-8 round-trips perdidos en campo); bloquea SOLO con doble existencia (el harness tiene el script y el worktree no) y da la línea corregida con `$CLAUDE_PROJECT_DIR`. Fail-open ante todo lo demás |
 | `.claude/hooks/on-compact.sh` | hooks/ | siempre (fail-OPEN: observa, registrado en `PreCompact`, `async: true`). La señal de contexto agotado: deja `tasks/<id>/.compacted` (derivando la tarea del puntero por sesión de track-read) y emite el evento al bus. record-cost mide dólares; sin esto nada medía ventana, y en campo el humano tuvo que avisar a mano |
 | `.claude/hooks/session-summary.sh` | hooks/ | siempre (fail-OPEN: observa, registrado en `SessionEnd`). Al cerrar la sesión escribe `.harness/sessions/<id>.md` con lo que el harness decidió, derivado de `.harness/events.jsonl`. Es determinista a propósito: el agente que resume de memoria omite justo el gate rojo y el supuesto sin confirmar |
+| `scripts/verdict-beads.sh` | scripts/ | siempre. non_blocking → beads como comando: por cada entrada sin bead, `bd create` + reescritura a `{text, bead}` (idempotente, atómico por entrada; sin bd sale honesto). `POLICY-ARCHIVE-002` lo exige antes de archivar cuando bd existe: tasks/ es gitignoreado y un hallazgo archivado sin bead deja de existir (Ley 7) |
+| `scripts/ship-wave.sh` | scripts/ | siempre. La tarea entera en orden del DAG (`harness-policy.py dag-order`): salta lo aterrizado, ship.sh por repo, y el hook `deploy.<repo>.post_ship` de answers tras cada uno (bajo with-secrets). Con flow: prs difiere el post_ship hasta el merge. Antes el orden del DAG era prosa que nadie ejecutaba y las cadenas publish/bump se corrían a mano |
+| `scripts/port-forwards.sh` | scripts/ | siempre. Túneles supervisados con sondas de IDENTIDAD (no de vida): puertos declarados UNA vez en answers (`port_forwards:`), `ensure` relevanta muertos, y un 200 donde se esperaba 401 se reporta como OTRO proceso en el puerto (el port-forward viejo de otra cosa). curl siempre con --compressed |
 | `scripts/mark-read.sh` | scripts/ | siempre. El registro de lecturas para agentes SIN el hook track-read (Cursor, Kimi Code: AGENTS.md promete que pueden operar el harness): apunta en `tasks/<id>/evidence.log` un artefacto que se abrió de verdad, verificando que exista bajo el workspace o el worktree. Sin esto, gate_evidence era impasable fuera de Claude Code y la única salida era editar el log a mano, que anula el gate |
 | `scripts/harness-version.sh` | scripts/ | siempre (`make version`). Contesta las dos preguntas que se hacen juntas: si la instancia está al día contra upstream, y qué está pasando ahora (tareas con su fase, sesiones, worktrees tomados, supuestos sin confirmar). Marca las tareas cuya fase no coincide con su historial, que es lo que hace fallar el ship tras un update. Si no puede comparar contra upstream lo DICE: no reporta "al día" |
 | `scripts/forge.sh` | scripts/ | siempre. La capa de forge: `forge_ci_failed`, `forge_issue_create`, `forge_pr_create`, con drivers github (gh) y gitlab (glab). Los 13 cronjobs entregan por aquí; antes tenían `gh` cableado y en cualquier otro forge entregaban a la nada, en silencio |
@@ -333,7 +349,7 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `scripts/build-slot.sh` | scripts/ | siempre (semáforo de builds pesados, Ley 8; universal — perl/flock) |
 | `scripts/{gowork,py,fe}.sh` | scripts/ | siempre (loop interno nativo, Ley 9; no-op limpio si el stack no está: Go/Python/frontend) |
 | `scripts/emit.sh` | scripts/emit.sh | siempre — el bus del harness: lo que ship.sh y /auto DECIDEN. Fail-open, redacta antes de escribir. Sin esto el panel solo ve agentes y tokens (la mitad prestada), nunca las decisiones ni los gates (la nuestra) |
-| `scripts/secrets.sh` | scripts/secrets.sh.tmpl | siempre (fuente según answers) |
+| `scripts/secrets.sh` | scripts/secrets.sh.tmpl | siempre (fuente según answers; subcomandos pull\|check\|doctor: doctor cruza lo que los repos declaran necesitar contra lo provisto, con candidato best-effort desde la fuente) |
 | `scripts/ticket-pull.sh`, `scripts/ticket-close.sh` | scripts/ticket-*.tmpl | tickets=linear (github: adapta los mismos contratos a `gh issue`) |
 | `scripts/deploy-watch.sh` | scripts/deploy-watch.sh.tmpl | si hay CD (gha/argocd/kargo en inventory) |
 | `semgrep/rules.yaml` | semgrep-rules.yaml.tmpl | si semgrep elegido |

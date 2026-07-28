@@ -17,9 +17,156 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import uuid
 
 SCHEMA = 1
+
+# ── Contención: la máquina compartida es parte del resultado ──────────
+# Caso de campo: once procesos de vitest en seis núcleos; la misma suite tardó
+# 503s y salió roja bajo contención, 106s y verde en máquina libre. La
+# evidencia contaminada se firmó como buena y nada distinguía un rojo real de
+# un rojo por RAM. Medir acá y SELLAR la medición es lo que da esa
+# distinción; build-slot.sh no puede medirla (es exec puro, sin padre).
+
+_TEST_TOKENS = ("test", "spec", "pytest", "jest", "vitest", "rspec",
+                "go test", "gradle", "mvn", "cargo")   # espejo de track-read.sh
+
+
+def _cores() -> int:
+    return os.cpu_count() or 1
+
+
+def _load1() -> float:
+    try:
+        return os.getloadavg()[0]
+    except (OSError, AttributeError):
+        return -1.0     # plataforma sin loadavg: sin sello de contención
+
+
+def _looks_like_test_cmd(cmd: str) -> bool:
+    return any(tok in cmd for tok in _TEST_TOKENS)
+
+
+def _ps_rows() -> list:
+    try:
+        out = subprocess.run(["ps", "-axo", "pid,ppid,command"], text=True,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             check=False).stdout
+    except OSError:
+        return []
+    rows = []
+    for line in out.splitlines()[1:]:
+        parts = line.strip().split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            rows.append((int(parts[0]), int(parts[1]), parts[2]))
+    return rows
+
+
+def _excluded_pids(rows, me: int) -> set:
+    """El propio árbol (descendientes por ppid) MÁS los ancestros (mi sesión)."""
+    children, parent = {}, {}
+    for pid, ppid, _ in rows:
+        children.setdefault(ppid, []).append(pid)
+        parent[pid] = ppid
+    excluded, stack = set(), [me]
+    while stack:
+        pid = stack.pop()
+        if pid in excluded:
+            continue
+        excluded.add(pid)
+        stack.extend(children.get(pid, []))
+    pid = me
+    while pid in parent and parent[pid] not in excluded and parent[pid] > 1:
+        pid = parent[pid]
+        excluded.add(pid)
+    return excluded
+
+
+def _foreign_test_procs(rows, excluded) -> int:
+    return sum(1 for pid, _, cmd in rows
+               if pid not in excluded and _looks_like_test_cmd(cmd))
+
+
+def _suspect(foreign_peak: int, load_max: float, cores: int) -> bool:
+    """Cada señal sola da falsos positivos (load alto en corridas sanas con
+    make -j; procesos ajenos con máquina que da abasto). Juntas describen el
+    régimen exacto donde los timeouts mienten."""
+    return foreign_peak > 0 and load_max > float(cores)
+
+
+def _test_slots(cores: int):
+    """HARNESS_TEST_SLOTS > HARNESS_BUILD_SLOTS del usuario (se respeta: None)
+    > default max(2, cores//3): los tests son más livianos que un docker build."""
+    value = os.environ.get("HARNESS_TEST_SLOTS", "")
+    if value.isdigit() and int(value) >= 1:
+        return int(value)
+    if os.environ.get("HARNESS_BUILD_SLOTS", "").isdigit():
+        return None
+    return max(2, cores // 3)
+
+
+class ContentionSampler:
+    """Muestrea cada 15s en un daemon-thread: solo inicio/fin pierde el caso
+    de campo (el docker build ajeno que arranca a mitad de una suite de 10
+    minutos). Fail-open total: la telemetría jamás tumba la corrida."""
+
+    def __init__(self, interval: float = 15.0):
+        self.interval = interval
+        self.foreign_start = None
+        self.foreign_peak = 0
+        self.load_start = -1.0
+        self.load_max = -1.0
+        self.ok = False
+        self._stop = threading.Event()
+        self._thread = None
+
+    def _sample(self) -> None:
+        rows = _ps_rows()
+        if not rows:
+            return
+        foreign = _foreign_test_procs(rows, _excluded_pids(rows, os.getpid()))
+        load = _load1()
+        if self.foreign_start is None:
+            self.foreign_start = foreign
+            self.load_start = load
+        self.foreign_peak = max(self.foreign_peak, foreign)
+        self.load_max = max(self.load_max, load)
+        self.ok = self.ok or load >= 0.0
+
+    def start(self) -> None:
+        try:
+            self._sample()
+        except Exception:
+            return
+
+        def loop():
+            while not self._stop.wait(self.interval):
+                try:
+                    self._sample()
+                except Exception:
+                    return
+
+        self._thread = threading.Thread(target=loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> dict:
+        self._stop.set()
+        try:
+            self._sample()
+        except Exception:
+            pass
+        if not self.ok or self.foreign_start is None:
+            return {}    # ausencia honesta: sin ps o sin loadavg no se inventa
+        cores = _cores()
+        return {
+            "cores": cores,
+            "foreign_test_procs_start": self.foreign_start,
+            "foreign_test_procs_peak": self.foreign_peak,
+            "load_avg_start": round(self.load_start, 2),
+            "load_avg_max": round(self.load_max, 2),
+            "suspect": _suspect(self.foreign_peak, self.load_max, cores),
+        }
 
 
 def die(message: str, code: int = 2) -> "None":
@@ -74,12 +221,54 @@ def atomic_json(path: Path, value: dict) -> None:
             os.unlink(tmp_name)
 
 
+TASK_DIR_MARKERS = ("task.md", "plan.md", "state.json")
+
+
+def require_task_dir(task_dir: Path) -> None:
+    """El task-dir se valida, JAMÁS se crea.
+
+    Caso de campo: un --task-dir RELATIVO corrido desde el worktree creó
+    ./<id>/evidence/ DENTRO del repo, un git add -A lo barrió y el árbol
+    quedó limpio: todos los gates en verde con 147 líneas de vitest a punto
+    de entrar a la raíz del repo. Lo encontró un reviewer leyendo git show,
+    no un gate. Crear en silencio un directorio que parece válido es lo que
+    convierte un error de ruta en un commit sucio."""
+    if not task_dir.is_dir():
+        die(f"task-dir inexistente: {task_dir}\n"
+            "EVIDENCE: evidence.py no crea task-dirs (los crea worktree-task.sh).\n"
+            f"  ↳ remediación: pasa la ruta absoluta real, normalmente "
+            f"<workspace>/tasks/{task_dir.name}")
+    if not (task_dir.parent.name == "tasks"
+            or any((task_dir / m).is_file() for m in TASK_DIR_MARKERS)
+            or (task_dir / "evidence").is_dir()):
+        die(f"esto no parece un task-dir: {task_dir}\n"
+            "EVIDENCE: sin task.md/plan.md/state.json/evidence/ y su padre no se "
+            "llama tasks. Un sello en un directorio arbitrario acaba commiteado "
+            "dentro de un repo.\n"
+            "  ↳ remediación: usa <workspace>/tasks/<task-id> (lo crea "
+            "scripts/worktree-task.sh)")
+
+
+def change_id(cwd: Path) -> str:
+    """Identidad del CAMBIO (scripts/change-id.sh), fail-open.
+
+    Sin identidad (no hay origin/<base>, diff vacío, script ausente) el campo
+    queda AUSENTE y verify exige SHA exacto: degradar jamás afloja el gate."""
+    script = Path(__file__).resolve().parent / "change-id.sh"
+    if not script.is_file():
+        return ""
+    result = subprocess.run(
+        ["bash", str(script), str(cwd)], text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
 def command_run(args: argparse.Namespace) -> int:
     cwd = Path(args.cwd).resolve()
     task_dir = Path(args.task_dir).resolve()
     if not cwd.is_dir():
         die(f"cwd inexistente: {cwd}")
-    task_dir.mkdir(parents=True, exist_ok=True)
+    require_task_dir(task_dir)
     before = git(cwd, "rev-parse", "HEAD")
 
     # EL ÁRBOL TIENE QUE ESTAR LIMPIO, Y ESTO NO ES CEREMONIA.
@@ -120,6 +309,15 @@ def command_run(args: argparse.Namespace) -> int:
         print(f"EVIDENCE: {untracked_n} archivo(s) sin trackear en el árbol; "
               "no bloquean, pero quedan anotados en el manifiesto.", file=sys.stderr)
 
+    # Identidad de CONTENIDO del cambio, la misma que el veredicto (caso de
+    # campo: 8-9 vueltas del ciclo re-sellar/re-scaffold/re-review porque el
+    # veredicto sobrevivía al rebase por patch_id y la evidencia no).
+    patch_id = change_id(cwd)
+    if not patch_id:
+        print("EVIDENCE: sin patch_id (no pude identificar el cambio): esta "
+              "evidencia solo valdrá por SHA exacto si el trunk se mueve.",
+              file=sys.stderr)
+
     evidence_id = f"EV-{args.kind.upper()}-{uuid.uuid4().hex[:12]}"
     evidence_dir = task_dir / "evidence"
     evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -131,9 +329,30 @@ def command_run(args: argparse.Namespace) -> int:
     if not command:
         die("falta el comando después de --")
 
+    # ── Semáforo: la suite toma un slot del MISMO pool que los builds ────
+    # Caso de campo: once vitest en seis núcleos (503s y rojo vs 106s y verde
+    # en máquina libre). El pool es el de build-slot a propósito: dos pools
+    # sumarían presupuestos y la máquina se funde igual. La cadena no
+    # re-lockea: build-slot exporta HARNESS_BUILD_SLOT_HELD=1 al hijo, y un
+    # docker build interior hace exec directo.
+    build_slot = Path(__file__).resolve().parent / "build-slot.sh"
+    child_env = os.environ.copy()
+    slot_wrapped = False
+    test_slots = None
+    if (not getattr(args, "no_slot", False) and build_slot.is_file()
+            and os.environ.get("HARNESS_BUILD_SLOT_HELD") != "1"):
+        test_slots = _test_slots(_cores())
+        if test_slots is not None:
+            child_env["HARNESS_BUILD_SLOTS"] = str(test_slots)
+        command = ["bash", str(build_slot), *command]
+        slot_wrapped = True
+
+    sampler = ContentionSampler()
+    sampler.start()
     with log_path.open("wb") as log:
         process = subprocess.Popen(
-            command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+            command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=child_env,
         )
         assert process.stdout is not None
         for chunk in iter(lambda: process.stdout.read(8192), b""):
@@ -143,6 +362,10 @@ def command_run(args: argparse.Namespace) -> int:
         return_code = process.wait()
         log.flush()
         os.fsync(log.fileno())
+    contention = sampler.stop()
+    if contention:
+        contention["test_slots"] = test_slots
+        contention["slot_wrapped"] = slot_wrapped
 
     after = git(cwd, "rev-parse", "HEAD")
     manifest = {
@@ -167,6 +390,10 @@ def command_run(args: argparse.Namespace) -> int:
         "output": f"evidence/{evidence_id}.log",
         "output_sha256": sha256(log_path),
     }
+    if patch_id:
+        manifest["patch_id"] = patch_id
+    if contention:
+        manifest["contention"] = contention
     atomic_json(evidence_dir / f"{evidence_id}.json", manifest)
     # Un sello que no va a servir se anuncia AHORA, no dos gates después.
     # Caso de campo: se selló evidencia con exit_code=1 y log vacío; verify la
@@ -176,6 +403,13 @@ def command_run(args: argparse.Namespace) -> int:
               "queda en disco, pero verify exige exit_code 0: un veredicto que "
               "cite este ID va a rebotar en el ship. Corré el comando en verde "
               "y sellá de nuevo.", file=sys.stderr)
+        if contention.get("suspect"):
+            print(f"EVIDENCE: y ojo doble: el rojo pudo ser CONTENCIÓN, no el código "
+                  f"({contention.get('foreign_test_procs_peak')} procesos de test "
+                  f"ajenos, load {contention.get('load_avg_max')} con "
+                  f"{contention.get('cores')} cores). Re-corre con "
+                  "HARNESS_TEST_SLOTS=1 antes de diagnosticar nada.",
+                  file=sys.stderr)
     try:
         if log_path.stat().st_size == 0:
             print("EVIDENCE: ojo: el comando no produjo NI UNA línea de salida. "
@@ -207,20 +441,55 @@ def load_json(path: Path, label: str) -> dict:
     return value
 
 
-def verify_one(task_dir: Path, evidence_id: str, repo: str, commit: str) -> dict:
+def verify_one(task_dir: Path, evidence_id: str, repo: str, commit: str,
+               verdict_patch_id: "str | None" = None) -> dict:
     if not evidence_id.startswith("EV-") or "/" in evidence_id or ".." in evidence_id:
         die(f"ID de evidencia inválido: {evidence_id}", 3)
     manifest_path = contained(task_dir, task_dir / "evidence" / f"{evidence_id}.json")
     data = load_json(manifest_path, "manifiesto de evidencia")
     expected = {
         "schema": SCHEMA, "id": evidence_id, "task_id": task_dir.name,
-        "repo": repo, "commit": commit, "commit_after": commit, "exit_code": 0,
+        "repo": repo, "exit_code": 0,
     }
     for field, wanted in expected.items():
         if data.get(field) != wanted:
             die(f"{evidence_id}: {field}={data.get(field)!r}; se esperaba {wanted!r}", 3)
+    ev_commit = data.get("commit")
+    if data.get("commit_after") != ev_commit:
+        die(f"{evidence_id}: commit_after={data.get('commit_after')!r}; se esperaba "
+            f"{ev_commit!r} (HEAD se movió durante la corrida)", 3)
+    if ev_commit != commit:
+        # La evidencia citada sobrevive al rebase por IDENTIDAD DE CONTENIDO,
+        # igual que el veredicto que la cita (caso de campo: "veredicto
+        # reusado" convivía con "evidencia rechazada" por los mismos SHAs, y
+        # cada vuelta costaba suite + scaffold + reviewer nuevo). Lo que ESTA
+        # equivalencia jamás cubre (que el árbol integrado funcione) lo cubre
+        # la evidencia FRESCA, que sigue siendo SHA-estricta.
+        ev_pid = data.get("patch_id")
+        if isinstance(verdict_patch_id, str) and verdict_patch_id \
+                and isinstance(ev_pid, str) and ev_pid == verdict_patch_id:
+            print(f"↻ reuso: {evidence_id} se selló sobre {str(ev_commit)[:12]} y el "
+                  f"veredicto declara {commit[:12]}, pero es el MISMO cambio "
+                  f"(patch_id {ev_pid[:12]}): se acepta")
+        elif not ev_pid:
+            die(f"{evidence_id}: commit={ev_commit!r}; se esperaba {commit!r}. "
+                "El manifiesto no lleva patch_id (evidencia de una versión vieja "
+                "de evidence.py): re-sella sobre el commit revisado con "
+                "evidence.py run", 3)
+        else:
+            die(f"{evidence_id}: commit={ev_commit!r}; se esperaba {commit!r}, y su "
+                f"patch_id ({str(ev_pid)[:12]}) tampoco es el del veredicto: la "
+                "evidencia prueba OTRO cambio. Re-corre la prueba sobre el HEAD "
+                "actual y después scripts/verdict-scaffold.sh --rebase y /review", 3)
     if not isinstance(data.get("runner"), str) or not data["runner"].strip():
         die(f"{evidence_id}: runner vacío", 3)
+    contention = data.get("contention")
+    if isinstance(contention, dict) and contention.get("suspect") is True:
+        die(f"{evidence_id}: sellada bajo contención (suspect: "
+            f"{contention.get('foreign_test_procs_peak')} procesos de test ajenos, "
+            f"load {contention.get('load_avg_max')} con {contention.get('cores')} "
+            "cores). Un resultado bajo esa carga no prueba nada: re-corre con "
+            "menos contención (HARNESS_TEST_SLOTS=N) y sella de nuevo.", 3)
     output = data.get("output")
     if not isinstance(output, str) or not output:
         die(f"{evidence_id}: output inválido", 3)
@@ -248,11 +517,15 @@ def fresh_evidence(task_dir: Path, repo: str, commit: str) -> list:
 
     Confundirlas obligaba a re-revisar (juicio de LLM, minutos) cada vez que se
     movía el trunk, cuando lo único que hacía falta era re-correr los tests
-    (determinista, gratis en tokens)."""
+    (determinista, gratis en tokens).
+
+    Devuelve (found, suspect_kinds): los kinds que EXISTEN pero solo sellados
+    bajo contención, para que el mensaje del gap diga la causa real."""
     found = []
+    suspect_kinds = set()
     evidence_dir = task_dir / "evidence"
     if not evidence_dir.is_dir():
-        return found
+        return found, suspect_kinds
     for path in sorted(evidence_dir.glob("EV-*.json")):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -279,8 +552,12 @@ def fresh_evidence(task_dir: Path, repo: str, commit: str) -> list:
             continue
         if not output_path.is_file() or sha256(output_path) != data.get("output_sha256"):
             continue          # el log no respalda al manifiesto
+        contention = data.get("contention")
+        if isinstance(contention, dict) and contention.get("suspect") is True:
+            suspect_kinds.add(data.get("kind"))
+            continue          # sellada bajo contención: no prueba nada
         found.append(data)
-    return found
+    return found, suspect_kinds
 
 
 def command_verify(args: argparse.Namespace) -> int:
@@ -301,13 +578,19 @@ def command_verify(args: argparse.Namespace) -> int:
     evidence_ids = verdict.get("evidence")
     if not isinstance(evidence_ids, list) or not evidence_ids:
         die("el veredicto no referencia evidence[]", 3)
+    # La identidad de contenido viaja en el PROPIO veredicto: cero flags
+    # nuevos, cero oportunidad de que policy y evidence vean patch_ids
+    # distintos del mismo archivo.
+    verdict_pid = verdict.get("patch_id")
+    if not isinstance(verdict_pid, str) or not verdict_pid:
+        verdict_pid = None
     seen: set[str] = set()
     manifests = []
     for evidence_id in evidence_ids:
         if not isinstance(evidence_id, str) or evidence_id in seen:
             die("evidence[] contiene IDs inválidos o duplicados", 3)
         seen.add(evidence_id)
-        manifests.append(verify_one(task_dir, evidence_id, args.repo, reviewed))
+        manifests.append(verify_one(task_dir, evidence_id, args.repo, reviewed, verdict_pid))
     required = set(args.require_kind)
     present = {item.get("kind") for item in manifests}
     missing = sorted(required - present)
@@ -319,15 +602,22 @@ def command_verify(args: argparse.Namespace) -> int:
     # quien llama lo pide explícito).  Fail-closed: sin ella no se pushea.
     fresh_required = set(args.require_fresh_kind)
     if fresh_required:
-        fresh = fresh_evidence(task_dir, args.repo, args.commit)
+        fresh, suspect_kinds = fresh_evidence(task_dir, args.repo, args.commit)
         fresh_kinds = {item.get("kind") for item in fresh}
         gaps = sorted(fresh_required - fresh_kinds)
         if gaps:
+            tainted = sorted(set(gaps) & suspect_kinds)
+            extra = ""
+            if tainted:
+                extra = (f" OJO: hay evidencia de {', '.join(tainted)} pero está "
+                         "marcada suspect (se selló bajo contención): re-corre "
+                         "con menos contención (HARNESS_TEST_SLOTS=N).")
             die(f"falta evidencia FRESCA sobre el árbol que se pushea "
                 f"({args.repo}@{args.commit[:12]}): {', '.join(gaps)}. "
                 "El veredicto se revisó sobre otro commit, así que la prueba de "
                 "que ESTE árbol pasa la suite tiene que producirse ahora: "
-                "evidence.py run --runner ship --kind test ... sobre el HEAD actual", 3)
+                "evidence.py run --runner ship --kind test ... sobre el HEAD "
+                f"actual.{extra}", 3)
         print(f"✅ evidencia fresca sobre {args.repo}@{args.commit[:12]}: "
               f"{', '.join(sorted(k for k in fresh_kinds if k in fresh_required))} "
               f"(runners: {', '.join(sorted({str(i.get('runner')) for i in fresh}))})")
@@ -348,6 +638,9 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--runner", required=True)
     run.add_argument("--kind", required=True, choices=("test", "lint", "build", "security", "canary"))
     run.add_argument("--cwd", default=".")
+    run.add_argument("--no-slot", action="store_true",
+                     help="no envolver el comando en build-slot.sh (para "
+                          "llamadores que ya gestionan el semáforo)")
     run.add_argument("command", nargs=argparse.REMAINDER)
     run.set_defaults(func=command_run)
     verify = sub.add_parser("verify", help="verifica evidencia citada por un veredicto")

@@ -88,4 +88,67 @@ branch_exists roto T4 \
   && pass "ante la duda, la rama se conserva" \
   || fail "se borró la rama de un worktree que no se pudo inspeccionar"
 
+echo
+echo "── modo creación: dos creadores del mismo (task, repo) no se pisan"
+# Caso de campo: /auto lanza la creación en paralelo; entre el chequeo "ya
+# existe" y el worktree add hay un fetch de por medio, y dos procesos pasaban
+# juntos. El segundo moría mudo a mitad del bucle (el error iba a /dev/null) o,
+# peor, dos implementers terminaban compartiendo árbol y un git add se llevaba
+# el trabajo del otro.
+
+mk_origin_base() {  # <repo>: canónico con origin REAL (el modo creación fetchea)
+  local o="$WS/origins/$1" r="$WS/repos/$1"
+  mkdir -p "$o" && git init -q "$o"
+  git -C "$o" config user.email t@t; git -C "$o" config user.name t
+  echo base > "$o/f.txt"; git -C "$o" add -A; git -C "$o" commit -qm init
+  git clone -q "$o" "$r" 2>/dev/null
+}
+
+# 1. camino feliz: crea worktree y rama, y no deja lock atrás
+mk_origin_base repoC
+out="$(bash "$WS/scripts/worktree-task.sh" T10 repoC 2>&1)"; rc=$?
+assert_eq 0 "$rc" "creación normal: sale 0"
+[ -d "$WS/worktrees/T10/repoC" ] && pass "el worktree existe" || fail "no creó el worktree"
+branch_exists repoC T10 && pass "la rama task/T10 existe" || fail "no creó la rama"
+assert_no_file "$WS/locks/wt-T10__repoC.lock.d" "el lock de creación se libera al terminar"
+
+# 2. re-entrada: ya existe, no revienta
+out="$(bash "$WS/scripts/worktree-task.sh" T10 repoC 2>&1)"; rc=$?
+assert_eq 0 "$rc" "re-correr con el worktree ya creado: sale 0"
+assert_contains "$out" "ya existe" "y lo dice"
+
+# 3. lock tomado por un proceso VIVO: el segundo creador se niega con mensaje
+mk_origin_base repoD
+mkdir -p "$WS/locks/wt-T11__repoD.lock.d"
+echo $$ > "$WS/locks/wt-T11__repoD.lock.d/pid"     # este shell: bien vivo
+out="$(HARNESS_WT_LOCK_WAIT=2 bash "$WS/scripts/worktree-task.sh" T11 repoD 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && pass "lock ocupado por proceso vivo: el segundo claim se RECHAZA" \
+  || fail "dos creadores concurrentes pasaron a la vez"
+assert_contains "$out" "está creando el worktree" "nombra la causa"
+assert_contains "$out" "rm -rf" "y da la salida manual exacta si el dueño murió"
+rm -rf "$WS/locks/wt-T11__repoD.lock.d"
+
+# 4. lock huérfano (pid muerto): se reclama solo y la creación sigue
+sh -c 'exit 0' & dead_pid=$!; wait "$dead_pid" 2>/dev/null
+mkdir -p "$WS/locks/wt-T12__repoD.lock.d"
+echo "$dead_pid" > "$WS/locks/wt-T12__repoD.lock.d/pid"
+out="$(bash "$WS/scripts/worktree-task.sh" T12 repoD 2>&1)"; rc=$?
+assert_eq 0 "$rc" "lock huérfano: se reclama y la creación termina"
+assert_contains "$out" "huérfano" "y lo dice"
+
+# 5. concurrencia real: dos procesos a la vez, cero muertes mudas
+mk_origin_base repoE
+bash "$WS/scripts/worktree-task.sh" T13 repoE >"$WS/c1.out" 2>&1 & p1=$!
+bash "$WS/scripts/worktree-task.sh" T13 repoE >"$WS/c2.out" 2>&1 & p2=$!
+wait "$p1"; rc1=$?; wait "$p2"; rc2=$?
+assert_eq "0 0" "$rc1 $rc2" "dos creadores en paralelo: ambos salen 0 (uno crea, el otro ve 'ya existe' o espera)"
+[ -d "$WS/worktrees/T13/repoE" ] && pass "el worktree quedó creado una sola vez" || fail "no quedó worktree"
+n="$(ls -d "$WS/locks/wt-T13__"*.lock.d 2>/dev/null | wc -l | tr -d ' ')"
+assert_eq 0 "$n" "sin locks huérfanos después de la carrera"
+
+# 6. --rm limpia también los locks de creación de la tarea
+mkdir -p "$WS/locks/wt-T13__repoE.lock.d"
+bash "$WS/scripts/worktree-task.sh" --rm T13 >/dev/null 2>&1
+assert_no_file "$WS/locks/wt-T13__repoE.lock.d" "--rm purga los locks de creación de la tarea"
+
 t_done

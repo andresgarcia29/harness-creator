@@ -621,4 +621,122 @@ sh="$(cat "$TMPL")"
 assert_contains "$sh" "TESTS_RAN" "el gate distingue 'corri tests' de 'reconoci el stack'"
 assert_not_contains "$sh" 'printf ../%s.. "${LANG_SEEN:-0}" > "$WS/tasks' "y el sello ya no usa LANG_SEEN como prueba"
 
+echo
+echo "── terraform: el repo infra deja de pasar el precheck sin validar nada"
+# Caso de campo: los repos terraform pasaban el precheck sin verificar NADA
+# (caian al aviso de stack no reconocido, que no bloquea) y son justo los que
+# auto-aplican produccion al mergear.
+
+# 1. tf en raiz, CLI stubbeada: corre fmt + init + validate, stack reconocido
+# El stub deja rastro en un log (mismo patron que UVLOG): el init manda su
+# stdout a /dev/null en el template, asi que el rastro no puede ir por stdout.
+mk_stack "$WS/st-tf" main.tf
+export TFLOG="$WS/tf-calls.log"; : > "$TFLOG"
+out="$( ( cd "$WS/st-tf"; WT="$WS/st-tf"; REPO=r; TASK=T1; BASE_REF=main
+          gate() { :; }; emit() { :; }
+          terraform() { echo "TF $* pwd=${PWD##*/}" >> "$TFLOG"; echo "TF $* pwd=${PWD##*/}"; }
+          . "$WS/lang.sh"; run_lang_gates; echo "TESTS_RAN=$TESTS_RAN" ) 2>&1 )"
+calls="$(cat "$TFLOG")"
+assert_contains "$calls" "TF fmt -check -recursive" "tf raiz: corre fmt -check"
+assert_contains "$calls" "TF init -backend=false" "tf raiz: init sin backend"
+assert_contains "$calls" "TF validate" "tf raiz: corre validate"
+assert_not_contains "$out" "no reconozco el stack" "tf: el stack se reconoce"
+assert_contains "$out" "TESTS_RAN=0" "validate NO cuenta como suite de tests"
+
+# 2. tf sin CLI: degrada honesto (patron need), no finge ni revienta.
+# t_path_without y no PATH=/nonexistent: la deteccion usa git ls-files, y un
+# PATH vacio mata a git ANTES de llegar a la rama que se quiere probar.
+out="$( ( cd "$WS/st-tf"; WT="$WS/st-tf"; REPO=r; TASK=T1; BASE_REF=main
+          gate() { :; }; emit() { :; }; PATH="$(t_path_without terraform)"
+          . "$WS/lang.sh"; run_lang_gates ) 2>&1 )"; rc=$?
+assert_eq 0 "$rc" "tf sin terraform CLI: degrada, no bloquea"
+assert_contains "$out" "no está instalado" "tf sin CLI: lo dice"
+assert_not_contains "$out" "no reconozco el stack" "tf sin CLI: el stack igual se reconoce"
+
+# 3. tf SOLO en subdir (envs/prod): validate corre CON cd a ese dir
+mk_stack "$WS/st-tf-sub" README.md
+( cd "$WS/st-tf-sub"; mkdir -p envs/prod; : > envs/prod/main.tf
+  git add -A && git commit -qm tf )
+out="$( ( cd "$WS/st-tf-sub"; WT="$WS/st-tf-sub"; REPO=r; TASK=T1; BASE_REF=main
+          gate() { :; }; emit() { :; }
+          terraform() { echo "TF $* pwd=${PWD##*/}"; }
+          . "$WS/lang.sh"; run_lang_gates ) 2>&1 )"
+assert_contains "$out" "envs/prod" "tf subdir: nombra el dir que valida"
+assert_contains "$out" "TF validate pwd=prod" "tf subdir: validate corre EN el subdir"
+
+# 4. validate rojo bloquea (fail-closed con la CLI presente). El set -e es el
+# del entorno real: ship.sh corre bajo set -euo pipefail.
+( set -e; cd "$WS/st-tf"; WT="$WS/st-tf"; REPO=r; TASK=T1; BASE_REF=main
+  gate() { :; }; emit() { :; }
+  terraform() { if [ "$1" = "validate" ]; then return 1; fi; return 0; }
+  . "$WS/lang.sh"; run_lang_gates ) >/dev/null 2>&1
+rc=$?
+[ "$rc" -ne 0 ] && pass "validate rojo: el gate bloquea" || fail "validate rojo salio verde"
+
+echo
+echo "── go en subdir con package.json en la raiz (bug de campo del controller/)"
+mk_fe "$WS/go-sub"; cd "$WS/go-sub"
+mkdir -p controller && : > controller/go.mod
+rm -f tsconfig.json
+echo '{"name":"x","scripts":{"typecheck":"true","test":"true"}}' > package.json
+git add -A && git commit -qm gosub; mkdir -p node_modules; cd "$WS"
+out="$( ( cd "$WS/go-sub"; WT="$WS/go-sub"; REPO=r; TASK=T1; BASE_REF=main
+          gate() { :; }; emit() { :; }; npm() { :; }; npx() { :; }
+          go() { echo "GO $* pwd=${PWD##*/}"; }
+          . "$WS/lang.sh"; run_lang_gates; echo "TESTS_RAN=$TESTS_RAN" ) 2>&1 )"
+assert_contains "$out" "GO test ./... pwd=controller" "go.mod en controller/: los tests Go SI corren"
+assert_contains "$out" "TESTS_RAN=1" "y cuentan como suite"
+
+# go.mod vendored NO dispara la rama
+mk_stack "$WS/go-vendor" README.md
+( cd "$WS/go-vendor"; mkdir -p vendor/dep; : > vendor/dep/go.mod
+  git add -A && git commit -qm vendor )
+out="$(run_lang_bare "$WS/go-vendor")"
+assert_contains "$out" "no reconozco el stack" "go.mod de vendor/ no cuenta como stack"
+cd "$WS"
+
+echo
+echo "── gate_evidence: juzga el fondo (el archivo), no la forma de la cita"
+# Caso de campo: cuatro ships frenados con el review CORRECTO porque la cita
+# venia como tests/x.py::caso (pytest) o archivo:NN y el -e se aplicaba a la
+# cadena entera, que jamas existe en disco. El gate rechazaba exactamente la
+# conducta que el prompt del reviewer pide: citar el caso concreto que abrio.
+
+extract gate_evidence > "$WS/gate_evidence.sh"
+grep -q 'NADIE LO LEYÓ' "$WS/gate_evidence.sh" || { echo "no pude extraer gate_evidence"; exit 1; }
+
+mkdir -p "$WS/tasks/TEV" "$WS/wt-ev/tests"
+printf 'def test_caso():\n    assert True\n' > "$WS/wt-ev/tests/test_a.py"
+: > "$WS/wt-ev/main.go"
+
+run_gate_evidence() {  # run_gate_evidence <compliance-json> [evidence-log]
+  printf '{"schema":1,"compliance":%s}' "$1" > "$WS/tasks/TEV/verdict-ev.json"
+  if [ -n "${2:-}" ]; then printf '%s\n' "$2" > "$WS/tasks/TEV/evidence.log"
+  else rm -f "$WS/tasks/TEV/evidence.log"; fi
+  ( set -u; WS="$WS"; WT="$WS/wt-ev"; TASK=TEV; REPO=ev
+    gate() { :; }
+    . "$WS/gate_evidence.sh"; gate_evidence ) 2>&1
+}
+
+# 1. cita pytest archivo::caso, con el archivo leido tal cual la corrio el reviewer
+ts="2026-07-27T10:00:00Z	sid	ran	pytest tests/test_a.py::test_caso"
+out="$(run_gate_evidence '[{"req":"R1","covered":true,"tests":["tests/test_a.py::test_caso"]}]' "$ts")"
+assert_eq 0 $? "cita archivo::caso con el archivo real: PASA"
+assert_not_contains "$out" "NO EXISTE" "el ::caso no se lee como parte de la ruta"
+
+# 2. cita archivo:NN, con la lectura registrada solo como archivo pelado
+ts="2026-07-27T10:00:00Z	sid	read	main.go"
+out="$(run_gate_evidence '[{"req":"R2","covered":true,"tests":["main.go:42"]}]' "$ts")"
+assert_eq 0 $? "cita archivo:NN leida como archivo pelado: PASA"
+
+# 3. el gate sigue vivo: archivo inexistente bloquea aunque traiga ::caso
+out="$(run_gate_evidence '[{"req":"R3","covered":true,"tests":["tests/no_existe.py::caso"]}]' "x")"
+assert_eq 3 $? "archivo inexistente con ::caso: sigue bloqueando"
+assert_contains "$out" "NO EXISTE" "y nombra la causa real"
+
+# 4. y archivo existente que nadie leyo sigue bloqueando
+out="$(run_gate_evidence '[{"req":"R4","covered":true,"tests":["main.go"]}]' "otra-cosa")"
+assert_eq 3 $? "archivo jamas leido: sigue bloqueando"
+assert_contains "$out" "NADIE LO LEYÓ" "con el mensaje de siempre"
+
 t_done

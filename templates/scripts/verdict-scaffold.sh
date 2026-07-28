@@ -208,8 +208,11 @@ if [ "$REBASE" -eq 1 ]; then
   # menos arrastraría un covered:true que ya no se sostiene.
   jq -nS --slurpfile fresh "$tmp" --slurpfile prev "$OUT" \
      --arg prevc "$PREV_COMMIT" --argjson changed "$changed" '
+    def norm: sub("::.*$"; "") | sub("#[A-Za-z_][A-Za-z0-9_]*$"; "")
+              | sub(":[0-9]+(-[0-9]+)?$"; "");
     def arts: [ if (.tests? | type) == "array" then .tests[]
-                else (.evidence_path // .test // empty) end ];
+                else (.evidence_path // .test // empty) end ]
+              | map(norm) | map(select(length > 0));
     def touched($cs): (arts) as $a
       | if ($a | length) == 0 then true
         else ($a | any(. as $x | ($cs | any(. as $c

@@ -84,6 +84,23 @@ class EvidenceTest(unittest.TestCase):
 
 
 
+    def test_moved_head_announces_discarded_not_a_usable_id(self):
+        # Caso de campo: el ID se imprimía ANTES de decidir la publicabilidad,
+        # y un agente que parsea stdout se llevaba un EVIDENCE_ID que dos
+        # líneas después se declaraba no publicable. El anuncio ahora dice lo
+        # que es: EVIDENCE_DISCARDED, y ningún parser de EVIDENCE_ID= matchea.
+        result = subprocess.run(
+            ["python3", str(SCRIPT), "run", "--task-dir", str(self.task),
+             "--repo", "atlas", "--runner", "qa-atlas", "--kind", "test",
+             "--cwd", str(self.repo), "--", "git", "commit",
+             "--allow-empty", "-qm", "mueve HEAD durante la corrida"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("EVIDENCE_DISCARDED=", result.stdout)
+        self.assertNotIn("EVIDENCE_ID=", result.stdout)
+        self.assertIn("no es publicable", result.stderr)
+
     def test_refuses_to_seal_a_dirty_tree(self):
         """El contrato de la evidencia es "este resultado pertenece a ESTE
         commit". before == after solo prueba que HEAD no se movió mientras

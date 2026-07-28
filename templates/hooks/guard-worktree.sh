@@ -47,8 +47,13 @@ claim="$claims/${task}__${repo}.json"
 now="$(date -u +%s)"
 
 write_claim() {
+  # tmp + mv: dos hooks concurrentes escribiendo el mismo claim no pueden
+  # dejar un JSON a medias (el mv es atómico dentro del mismo directorio).
+  local tmp
+  tmp="$(mktemp "$claims/.${task}__${repo}.XXXXXX" 2>/dev/null)" || return 0
   printf '{"session":"%s","task":"%s","repo":"%s","at":%s}\n' \
-    "$session" "$task" "$repo" "$now" > "$claim" 2>/dev/null || true
+    "$session" "$task" "$repo" "$now" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+  mv -f "$tmp" "$claim" 2>/dev/null || rm -f "$tmp"
 }
 
 if [ ! -f "$claim" ]; then

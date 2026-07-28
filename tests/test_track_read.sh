@@ -90,4 +90,69 @@ assert_contains "$(cat "$WS/tasks/COR-9/evidence.log")" "go test" "un test que c
 echo "esto no es json" | "$HOOK"
 assert_eq "0" "$?" "payload roto: exit 0 (observa, jamás bloquea)"
 
+echo
+echo "── leer por Bash también es leer (caso de campo)"
+# El reviewer inspecciona con git show / rg / cat / sed -n, que es exactamente
+# lo que la economía de tokens le pide, y nada quedaba en evidence.log:
+# gate_evidence lo acusaba de no leer lo que sí leyó. El criterio nuevo es que
+# el token resuelva a un archivo REAL, no la extensión ni que huela a test.
+
+mkdir -p "$WS/worktrees/COR-12/atlas/docs"
+echo 'x' > "$WS/worktrees/COR-12/atlas/docs/esquema.sql"
+echo 'y' > "$WS/worktrees/COR-12/atlas/nota.md"
+
+# 7. cat de un .sql (extensión que el filtro viejo ignoraba) → ran-file
+payload Bash "{\"command\":\"cat worktrees/COR-12/atlas/docs/esquema.sql\"}" "$WS" | "$HOOK"
+assert_contains "$(cat "$WS/tasks/COR-12/evidence.log" 2>/dev/null)" "esquema.sql" \
+  "cat de un archivo real: queda como ran-file (aunque sea .sql)"
+
+# 8. grep -n sobre un .md → ran-file (los flags no se confunden con rutas)
+payload Bash "{\"command\":\"grep -n titulo worktrees/COR-12/atlas/nota.md\"}" "$WS" | "$HOOK"
+assert_contains "$(cat "$WS/tasks/COR-12/evidence.log")" "nota.md" \
+  "grep sobre un archivo real: queda registrado"
+
+# 9. pytest con archivo::caso → el ARCHIVO queda registrado
+mkdir -p "$WS/worktrees/COR-12/atlas/tests"
+printf 'def test_a():\n    pass\n' > "$WS/worktrees/COR-12/atlas/tests/test_a.py"
+payload Bash "{\"command\":\"pytest worktrees/COR-12/atlas/tests/test_a.py::test_a\"}" "$WS" | "$HOOK"
+assert_contains "$(cat "$WS/tasks/COR-12/evidence.log")" "tests/test_a.py" \
+  "cita pytest archivo::caso: el archivo base queda en el log"
+
+# 10. un token que NO resuelve a archivo no inventa evidencia
+payload Bash "{\"command\":\"cat worktrees/COR-12/atlas/no-existe.txt\"}" "$WS" | "$HOOK"
+assert_not_contains "$(cat "$WS/tasks/COR-12/evidence.log")" "no-existe.txt" \
+  "un archivo inexistente no deja rastro (leer de verdad es el criterio)"
+
+echo
+echo "── mark-read.sh: el registro de lecturas SIN el hook (otros agentes)"
+# Caso de campo: operando el harness desde otro agente (AGENTS.md lo promete),
+# evidence.log no existía jamás y gate_evidence era impasable; la salida era
+# editar el log a mano, que anula el gate. Este es el camino legítimo.
+
+MARK="$ROOT/templates/scripts/mark-read.sh"
+mkdir -p "$WS/scripts"; cp "$MARK" "$WS/scripts/mark-read.sh"
+
+# 11. archivo real del worktree, citado con ::caso: se registra tal cual
+out="$(bash "$WS/scripts/mark-read.sh" COR-12 "tests/test_a.py::test_a" 2>&1)"; rc=$?
+assert_eq 0 "$rc" "cita con ::caso de un archivo real del worktree: sale 0"
+assert_contains "$(cat "$WS/tasks/COR-12/evidence.log")" "tests/test_a.py::test_a" \
+  "la cita queda registrada TAL CUAL (gate_evidence la matchea directa)"
+
+# 12. archivo del workspace por ruta relativa
+echo x > "$WS/docs-adr.md"
+bash "$WS/scripts/mark-read.sh" COR-12 "docs-adr.md" >/dev/null 2>&1
+assert_contains "$(cat "$WS/tasks/COR-12/evidence.log")" "docs-adr.md" \
+  "un archivo del workspace también se puede registrar"
+
+# 13. ruta inexistente: se niega con exit 3 y lo dice
+out="$(bash "$WS/scripts/mark-read.sh" COR-12 "no/existe.go" 2>&1)"; rc=$?
+assert_eq 3 "$rc" "ruta inexistente: exit 3"
+assert_contains "$out" "NO existe" "y nombra la ruta rechazada"
+assert_not_contains "$(cat "$WS/tasks/COR-12/evidence.log")" "no/existe.go" \
+  "y NO queda registrada (registrar fantasmas anularía el gate)"
+
+# 14. task-id hostil: rechazado sin construir rutas
+out="$(bash "$WS/scripts/mark-read.sh" "../evil" "x.go" 2>&1)"; rc=$?
+assert_eq 2 "$rc" "task-id con traversal: rechazado"
+
 t_done

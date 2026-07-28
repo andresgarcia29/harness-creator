@@ -121,6 +121,22 @@ secrets:
 #    - env://<NOMBRE_DE_LA_VARIABLE>
 #    - vault://<proyecto>/harness/argocd
 
+# Driver de verificación de deploy POR REPO. Lo lee deploy-watch.sh, con esta
+# precedencia: lo declarado aquí > el kind del repo en manifest.yaml (service/
+# frontend/mobile → gitops; el resto → none) > gitops por compatibilidad.
+#   gitops   → Actions + Kargo + health de ArgoCD + smoke del canary
+#   actions  → solo la conclusión del workflow de CI (el más universal)
+#   none     → este repo no se verifica tras el ship, y el watcher lo DICE
+# Declara los repos cuyo kind no cuenta la historia completa: una library con
+# workflow de release, un infra-live que aplica al mergear. doctor.sh avisa si
+# un repo tiene workflows de deploy y su driver resuelve a none.
+deploy:
+{{DEPLOY_LIST}}
+#  atlas:
+#    driver: gitops
+#  terraform-core:
+#    driver: actions
+
 # Dónde viven los repos. Normalmente se detecta del remote; se declara solo
 # si es un self-hosted con dominio propio. Lo lee scripts/forge.sh, que es por
 # donde los cronjobs entregan PRs e issues.

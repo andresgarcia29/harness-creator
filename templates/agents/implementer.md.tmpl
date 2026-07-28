@@ -64,6 +64,16 @@ heredas conversaciones.
 ## Prohibido
 - Tocar repos fuera de tu worktree (hook guard-canonical te bloquea el
   clon base).
+- **Explorar o auditar código en `repos/` en vez de tu worktree.** El
+  clon canónico puede estar N commits atrás (caso de campo: 16, y la
+  auditoría inventarió código que ya no existía). Toda lectura de código
+  de tu tarea va contra `worktrees/<id>/<repo>/`; `repos/` es solo la
+  fuente de los worktrees.
+- **Regenerar a mano el lockfile de un registry privado.** `npm pack`
+  local NO reproduce los hashes del registry (caso de campo: una hora,
+  un lockfile inventado y un CI roto). Ese lockfile solo lo genera una
+  máquina con acceso real al registry: CI, o el humano. Si te falta el
+  token, repórtalo como bloqueo; no lo escribas a mano.
 - Cambiar contratos proto sin que el plan lo autorice.
 - Editar docs/ transversal salvo que tu tarea lo incluya.
 - "Mejorar" código fuera del scope de la tarea.

@@ -156,9 +156,9 @@ def repos_pending_ship(task_dir: Path) -> list:
     ship"). La prosa no frena a nadie. Las dos fuentes son artefactos que ya
     existen: verdict-<repo>.json y ship.log (una línea por repo shippeado).
 
-    Límite: un repo de la tarea que todavía no tiene veredicto no se cuenta.
-    Cubre el caso que duele (repo revisado y listo) sin inventar un inventario
-    de repos que el estado de la tarea no guarda."""
+    Límite: un repo de la tarea que todavía no tiene veredicto no se cuenta
+    AQUÍ. Ese caso lo cierra repos_missing_verdict, que lee el inventario que
+    sí existe cuando hay DAG: tasks/<id>/dag.json."""
     verdicts = sorted(
         p.name[len("verdict-"):-len(".json")]
         for p in task_dir.glob("verdict-*.json")
@@ -174,6 +174,96 @@ def repos_pending_ship(task_dir: Path) -> list:
             except json.JSONDecodeError:
                 continue   # una línea corrupta no debe fingir que un repo shippeó
     return [r for r in verdicts if r not in shipped]
+
+
+def repos_planned(task_dir: Path) -> list:
+    """Repos que el DAG de la tarea declara como parte del trabajo.
+
+    Sin dag.json (el carril express no genera DAG) devuelve []: el gate se
+    comporta como siempre. Un dag ILEGIBLE en cambio bloquea: ignorarlo sería
+    fail-open (los repos planificados desaparecen del conteo y la fase avanza
+    en verde), que es exactamente el agujero que esta función cierra. Caso de
+    campo: shippear el primer repo movió la tarea entera a ship y el review
+    del segundo, planificado en el DAG pero aún sin veredicto, quedó sin
+    camino; hubo que hacer rollback."""
+    dag_path = task_dir / "dag.json"
+    if not dag_path.exists():
+        return []
+    try:
+        dag = json.loads(dag_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        fail("POLICY-SHIP-004",
+             f"tasks/{task_dir.name}/dag.json ilegible ({exc}): no puedo saber qué "
+             "repos planificó esta tarea, y avanzar a ciegas deja repos sin camino. "
+             "Regenerá el DAG (fase rfc) y validalo con 'harness-policy.py "
+             f"validate-dag tasks/{task_dir.name}/dag.json'")
+    tasks = dag.get("tasks") if isinstance(dag, dict) else None
+    if not isinstance(dag, dict) or dag.get("schema") != 1 or not isinstance(tasks, list):
+        fail("POLICY-SHIP-004",
+             f"tasks/{task_dir.name}/dag.json no cumple schema:1 con tasks[]: "
+             "corré 'harness-policy.py validate-dag' y regeneralo antes de "
+             "pedir review → ship")
+    repos = []
+    for item in tasks:
+        if isinstance(item, dict):
+            repo = item.get("repo")
+            if isinstance(repo, str) and repo and repo not in repos:
+                repos.append(repo)
+    return repos
+
+
+def repos_missing_verdict(task_dir: Path, extra_repos=()) -> list:
+    """Repos planificados que ni siquiera tienen veredicto todavía.
+
+    Dos fuentes, en unión: el DAG de la tarea (tasks/<id>/dag.json) y lo que
+    init registró en state.repos (issue #34: el carril express no genera DAG,
+    y una tarea express de DOS repos avanzó a ship al shippear el primero;
+    el segundo rebotó con TRANSITION-001/SHIP-001 y costó tres rollbacks).
+    Sin ninguna de las dos fuentes, comportamiento de siempre."""
+    planned = repos_planned(task_dir)
+    for repo in extra_repos:
+        if isinstance(repo, str) and repo and repo not in planned:
+            planned.append(repo)
+    if not planned:
+        return []
+    verdicts = {
+        p.name[len("verdict-"):-len(".json")]
+        for p in task_dir.glob("verdict-*.json")
+    }
+    return [r for r in planned if r not in verdicts]
+
+
+def stale_delta_spec(task_dir: Path) -> "str | None":
+    """delta-spec.md más nuevo que TODOS los veredictos: nadie revisó ese texto.
+
+    Caso de campo: el delta-spec se enmendó a mitad de corrida porque el review
+    cambió la semántica, y nada impedía que /archive fusionara a las specs
+    maestras un texto que ningún reviewer vio (dos reviewers tuvieron que
+    avisarlo a mano). Se compara por mtime: la señal es imperfecta (un touch o
+    un rsync la disparan), pero el falso positivo cuesta un re-veredicto barato
+    y el falso negativo costaría spec rot con firma de reviewer.
+
+    Follow-up más sólido: un campo delta_spec_sha256 dentro del veredicto
+    (identidad de contenido, inmune a relojes); exige tocar verdict-scaffold.sh
+    y el prompt del reviewer, y los veredictos viejos caerían a este mtime
+    igual, así que el mtime es el piso que hay que construir de todas formas.
+
+    Fail-open cuando falta una de las dos partes: sin delta no hay nada que
+    fusionar; sin veredictos no hay juicio contra el cual comparar."""
+    delta = task_dir / "delta-spec.md"
+    verdicts = list(task_dir.glob("verdict-*.json"))
+    if not delta.exists() or not verdicts:
+        return None
+    delta_m = delta.stat().st_mtime
+    newest = max(v.stat().st_mtime for v in verdicts)
+    if delta_m <= newest:
+        return None
+
+    def fmt(ts: float) -> str:
+        return dt.datetime.fromtimestamp(ts, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return (f"delta-spec.md se modificó ({fmt(delta_m)}) DESPUÉS del último "
+            f"veredicto ({fmt(newest)})")
 
 
 def repos_not_landed(task_dir: Path) -> list:
@@ -226,6 +316,33 @@ def lane_transitions(policy: dict, state: dict) -> dict:
     return lane_cfg.get("allowed_transitions") or workflow.get("allowed_transitions", {})
 
 
+def repo_kinds(ws: Path) -> dict:
+    """name → kind desde manifest.yaml, parseado a mano (sin dependencia yaml).
+
+    El formato lo emite el propio harness (manifest.yaml.tmpl): items
+    '- name:' con su 'kind:' dentro del bloque repos. Se cortan los
+    comentarios primero, así los ejemplos comentados del template no
+    ensucian, y un key top-level (sin indentación) resetea el item en curso
+    para que un 'kind:' huérfano de otra lista no se atribuya al último repo.
+
+    Fail-open: sin manifest, o ilegible, devuelve {} y el chequeo carril/kind
+    no aplica (el backstop sigue siendo gate_lane en ship.sh)."""
+    try:
+        text = (ws / "manifest.yaml").read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    kinds, current = {}, None
+    for raw in text.splitlines():
+        if raw and not raw[0].isspace() and ":" in raw:
+            current = None
+        line = raw.split("#", 1)[0].strip()
+        if line.startswith("- name:"):
+            current = line[len("- name:"):].strip().strip("'\"")
+        elif current and line.startswith("kind:"):
+            kinds[current] = line[len("kind:"):].strip().strip("'\"")
+    return kinds
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     path = state_path(task_dir)
@@ -240,6 +357,27 @@ def cmd_init(args: argparse.Namespace) -> int:
     known_lanes = policy.get("workflow", {}).get("lanes", {"full": {}})
     if args.lane not in known_lanes:
         fail("POLICY-LANE-001", f"carril desconocido: {args.lane} (permitidos: {sorted(known_lanes)})")
+    repos = [r.strip() for r in (getattr(args, "repos", "") or "").split(",") if r.strip()]
+    if repos:
+        # El aviso temprano que faltaba: gate_lane frena un express que toca
+        # infra, pero recién en el precheck, DESPUÉS de que el implementer
+        # trabajó. Caso de campo: un carril se clasificó por el tamaño del
+        # cambio en vez de por lo que toca, y el error se pagó al final.
+        kinds = repo_kinds(task_dir.parent.parent)   # tasks/<id> vive bajo el WS
+        if args.lane == "express":
+            infra = [r for r in repos if kinds.get(r) in ("infra-live", "infra-module")]
+            if infra:
+                fail("POLICY-LANE-004",
+                     f"carril express con repos de infra: {', '.join(infra)} "
+                     "(kind infra-module/infra-live en manifest.yaml). Express "
+                     "promete cero infra y gate_lane lo va a bloquear DESPUÉS "
+                     "de que el implementer trabaje. Remediación: iniciá con "
+                     "--lane standard (o full), o quitá ese repo de la tarea")
+        unknown = [r for r in repos if kinds and r not in kinds]
+        if unknown:
+            print(f"⚠️  repos fuera de manifest.yaml (sin kind conocido): "
+                  f"{', '.join(unknown)}; el chequeo carril/kind no los cubre",
+                  file=sys.stderr)
     state = {
         "schema": 1,
         "task_id": task_dir.name,
@@ -250,6 +388,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         "spent_usd": 0.0,
         "history": [],
     }
+    if repos:
+        state["repos"] = repos
     atomic(path, state)
     print(f"✅ {task_dir.name}: phase={state['phase']} lane={args.lane}")
     return 0
@@ -399,6 +539,18 @@ def cmd_transition(args: argparse.Namespace) -> int:
         lane = state.get("lane", "full")
         fail("POLICY-TRANSITION-001", f"transición no permitida ({lane}): {current} → {args.phase}")
     if args.phase == "ship":
+        unreviewed = repos_missing_verdict(task_dir, state.get("repos") or ())
+        if unreviewed:
+            fail("POLICY-SHIP-004",
+                 f"el plan de la tarea (dag.json o state.repos) incluye repos "
+                 f"que todavía NO tienen veredicto: "
+                 f"{', '.join(unreviewed)}. El plan dijo que son parte de esta "
+                 "tarea y nadie los revisó: avanzar ahora los deja sin camino "
+                 "(desde ship solo se va a deploy). Corré /review de cada uno "
+                 "(produce verdict-<repo>.json), shippealo con scripts/ship.sh "
+                 "y recién entonces pedí review → ship. Si el plan cambió y un "
+                 "repo ya no participa, regenerá tasks/<id>/dag.json y "
+                 "re-corré validate-dag")
         pending = repos_pending_ship(task_dir)
         if pending:
             fail("POLICY-SHIP-004",
@@ -425,6 +577,18 @@ def cmd_transition(args: argparse.Namespace) -> int:
                  f"no hay deploy que vigilar y archivar fusionaría el delta-spec de algo "
                  f"que todavía no existe. Esperá el merge y re-corré deploy-watch, que "
                  f"resuelve el commit real")
+    if args.phase == "archive":
+        # Solo archive: el daño es la FUSIÓN a las specs maestras. Un delta
+        # enmendado no invalida un deploy ya aterrizado, y bloquear deploy
+        # crearía paradas falsas durante operación.
+        stale = stale_delta_spec(task_dir)
+        if stale:
+            fail("POLICY-ARCHIVE-001",
+                 f"{stale}: ningún reviewer vio ese texto y /archive lo "
+                 "fusionaría a las specs maestras. Re-corré /review del repo "
+                 "afectado (scripts/verdict-scaffold.sh --rebase conserva el "
+                 "juicio que el delta no tocó) para re-emitir el veredicto "
+                 "sobre el delta vigente")
     rounds_by_repo = state.get("review_rounds_by_repo")
     if not isinstance(rounds_by_repo, dict):
         rounds_by_repo = {}
@@ -673,6 +837,10 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("task_dir")
     init.add_argument("--budget-usd", type=float)
     init.add_argument("--lane", default="full")
+    init.add_argument("--repos", default="",
+                      help="repos de la tarea separados por coma; habilita el "
+                           "chequeo carril vs kind (manifest.yaml) y queda en "
+                           "state.repos")
     init.set_defaults(func=cmd_init)
     escalate = sub.add_parser("escalate")
     escalate.add_argument("task_dir")

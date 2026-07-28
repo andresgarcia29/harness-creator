@@ -116,6 +116,41 @@ grep -qE '^#.*env://[A-Za-z_][A-Za-z0-9_]*$' "$ROOT/templates/harness-answers.ya
   || pass "el ejemplo del template no es un literal parseable"
 rm -f "$WS/harness-answers.yaml"
 
+echo "── doctor: un repo que deploya con driver=none se marca (eje deploy)"
+# Caso de campo: deploy-watch dijo "driver: none, NO reviso nada" en repos
+# que sí deployan, y tras cada ship hubo que verificar a mano con gh run
+# view. El doctor es quien vigila el eje (CONTRIBUTING regla 1).
+
+mkdir -p "$WS/repos/tf-live/.github/workflows" "$WS/repos/quieto"
+printf 'name: apply\non: push\njobs:\n  a:\n    steps:\n      - run: terraform apply\n' \
+  > "$WS/repos/tf-live/.github/workflows/deploy.yml"
+cat > "$WS/manifest.yaml" <<'EOF'
+project: t
+repos:
+  - name: tf-live
+    kind: infra-live
+    agent: infra
+  - name: quieto
+    kind: docs
+    agent: docs
+EOF
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_contains "$out" "tf-live tiene workflows de deploy y su driver resuelve a none" \
+  "repo con workflow de deploy y driver none: warn"
+assert_contains "$out" "deploy.tf-live.driver" "la remediación nombra la clave exacta del answers"
+assert_not_contains "$out" "quieto tiene workflows" "un repo sin workflows no genera ruido"
+
+# declarado en answers → el mismo repo pasa a verificable
+cat > "$WS/harness-answers.yaml" <<'EOF'
+deploy:
+  tf-live:
+    driver: actions
+EOF
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_contains "$out" "deploy de tf-live verificable (driver: actions)" \
+  "con el driver declarado: el check queda en verde"
+rm -f "$WS/harness-answers.yaml" "$WS/manifest.yaml"; rm -rf "$WS/repos/tf-live" "$WS/repos/quieto"
+
 echo "── doctor: los checks de cadena-completa existen"
 
 # los checks añadidos por la auditoría anti-consejo-vacío deben estar en el

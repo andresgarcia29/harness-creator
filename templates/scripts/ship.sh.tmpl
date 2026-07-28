@@ -429,6 +429,25 @@ run_lang_gates() {
     TESTS_RAN=1
     LANG_SEEN=1
   fi
+  # Go FUERA de la raíz. Caso de campo: repo con package.json en la raíz y
+  # toda la lógica de orquestación en controller/ con su go.mod; la rama de
+  # arriba solo mira la raíz, así que los tests Go jamás corrían en el
+  # precheck y en cada ronda hubo que sellar evidencia a mano. Cada go.mod es
+  # un módulo autocontenido: el gate corre POR subdirectorio. Profundidad
+  # acotada (2 niveles) y sin vendored: un go.mod de vendor/ no es un stack.
+  local gomod gomoddir
+  for gomod in $(git ls-files '*/go.mod' 2>/dev/null \
+      | grep -v -E '(^|/)(vendor|node_modules|third_party|testdata)/' \
+      | awk -F/ 'NF<=3'); do
+    gomoddir="${gomod%/go.mod}"
+    LANG_SEEN=1
+    gate "go ($gomoddir)"
+    ( cd "$gomoddir"
+      go vet ./...
+      go build ./...
+      go test ./... )
+    TESTS_RAN=1
+  done
   # Repo TS cuyo package.json NO está en la raíz (monorepo, apps/, packages/):
   # el bloque entero se saltaba EN SILENCIO, el precheck salía verde y el
   # commit roto viajaba hasta el gate de ship. Un gate que no encuentra qué
@@ -698,6 +717,35 @@ run_lang_gates() {
     LANG_SEEN=1
     if need mix Elixir; then gate elixir; mix compile --warnings-as-errors; mix test; TESTS_RAN=1; fi
   fi
+  # ── Terraform: lo único que valida ANTES del auto-apply ──────────────
+  # Caso de campo: los repos de infra pasaban el precheck sin verificar NADA
+  # (caían al aviso de stack no reconocido, que no bloquea) y son justo los
+  # que auto-aplican producción al mergear. Para un repo infra este es el
+  # único gate entre un typo de HCL y el apply. Detección espejo de
+  # discover.sh: *.tf en la raíz o subdirs hasta profundidad 4.
+  local tf_files tf_dir
+  tf_files="$(git ls-files '*.tf' 2>/dev/null \
+    | grep -v -E '(^|/)\.terraform/' | awk -F/ 'NF<=4' || true)"
+  if [ -n "$tf_files" ]; then
+    LANG_SEEN=1
+    if need terraform Terraform; then
+      gate terraform
+      # fmt es recursivo desde la raíz: una pasada cubre todos los subdirs.
+      terraform fmt -check -recursive
+      # init/validate van POR directorio con .tf (cada uno es un root/módulo).
+      for tf_dir in $(printf '%s\n' "$tf_files" \
+          | awk -F/ '{ if (NF == 1) print "."; else { sub("/[^/]*$", ""); print } }' \
+          | sort -u); do
+        echo "  → terraform validate: $tf_dir"
+        ( cd "$tf_dir"
+          terraform init -backend=false -input=false >/dev/null
+          terraform validate )
+      done
+      # validate NO es una suite: TESTS_RAN queda como esté, igual que squawk
+      # y buf. El sello de evidencia no puede afirmar "corrí tests" porque un
+      # HCL parseó.
+    fi
+  fi
   # Gates de arquitectura y SQL: la CONFIG del repo es el opt-in (sin config,
   # silencio). Con config presente son gates duros — igual que go/ts. Config
   # sin herramienta instalada = warning honesto, no un gate fingido.
@@ -765,9 +813,10 @@ run_lang_gates() {
   # pasar callado: queda como supuesto arriba del resumen de sesión.
   if [ "$LANG_SEEN" -eq 0 ]; then
     echo "⚠️  no reconozco el stack de $REPO: este gate NO compiló ni testeó nada."
-    echo "   Marcadores que busco: go.mod, package.json, pyproject.toml,"
-    echo "   pubspec.yaml, Cargo.toml, pom.xml, build.gradle, Gemfile,"
-    echo "   composer.json, *.csproj/*.sln, mix.exs, buf.yaml."
+    echo "   Marcadores que busco: go.mod (raíz o subdirs, prof. 2),"
+    echo "   package.json, pyproject.toml, pubspec.yaml, Cargo.toml, pom.xml,"
+    echo "   build.gradle, Gemfile, composer.json, *.csproj/*.sln, mix.exs,"
+    echo "   buf.yaml y *.tf (raíz o subdirs, prof. 4)."
     echo "   Si este repo SÍ se construye, agregá su rama en run_lang_gates:"
     echo "   un eje sin implementación es un vendor cableado (CONTRIBUTING #8)."
     emit assumption "$REPO NO compilado ni testeado: run_lang_gates no reconoce su stack"
@@ -841,7 +890,6 @@ run_lang_gates_sealed() {
     --task-dir "$WS/tasks/$TASK" --repo "$REPO" --runner "$runner" \
     --kind test --cwd "$WT" \
     -- bash "$WS/scripts/ship.sh" --lang-gates "$TASK" "$REPO" 2>&1)" || evrc=$?
-  printf '%s\n' "$out"
 
   # ── UN SELLO QUE NO PROBÓ NADA ES PEOR QUE NO TENER SELLO ───────────
   # Si run_lang_gates no reconoció el stack, no compiló ni testeó NADA, y aun
@@ -849,17 +897,23 @@ run_lang_gates_sealed() {
   # satisface `--require-fresh-kind test`, o sea que el gate de frescura
   # pasaría sin que ningún test haya corrido: el verde silencioso exacto que
   # este archivo persigue en todos lados. Se borra y se declara.
-  if [ "$(cat "$WS/tasks/$TASK/.langseen-$REPO" 2>/dev/null || echo 1)" = "0" ]; then
-    local evid
-    evid="$(printf '%s\n' "$out" | sed -n 's/^EVIDENCE_ID=//p' | tail -1)"
-    if [ -n "$evid" ]; then
-      rm -f "$WS/tasks/$TASK/evidence/$evid.json" "$WS/tasks/$TASK/evidence/$evid.log"
-      echo "⚠️  NO sello evidencia de $REPO: ninguna suite de tests llegó a correr"
-      echo "   (stack no reconocido, o su herramienta de test no está). Un EV-TEST"
-      echo "   de una corrida sin tests diría"
-      echo "   'este árbol pasa la suite' sin que ninguna suite haya corrido."
-      emit assumption "$REPO sin evidencia de test: ninguna suite llegó a correr"
-    fi
+  #
+  # Y el anuncio va DESPUÉS de la decisión: esto imprimía EVIDENCE_ID= y dos
+  # líneas más abajo decía que no sellaba. Caso de campo: cuatro agentes
+  # distintos parsearon ese stdout y se llevaron un ID que apuntaba a
+  # archivos ya borrados, y el fallo apareció recién en el ship.
+  local evid
+  evid="$(printf '%s\n' "$out" | sed -n 's/^EVIDENCE_ID=//p' | tail -1)"
+  if [ "$(cat "$WS/tasks/$TASK/.langseen-$REPO" 2>/dev/null || echo 1)" = "0" ] && [ -n "$evid" ]; then
+    rm -f "$WS/tasks/$TASK/evidence/$evid.json" "$WS/tasks/$TASK/evidence/$evid.log"
+    printf '%s\n' "$out" | grep -v '^EVIDENCE_ID=' || true
+    echo "⚠️  NO sello evidencia de $REPO: ninguna suite de tests llegó a correr"
+    echo "   (stack no reconocido, o su herramienta de test no está). Un EV-TEST"
+    echo "   de una corrida sin tests diría"
+    echo "   'este árbol pasa la suite' sin que ninguna suite haya corrido."
+    emit assumption "$REPO sin evidencia de test: ninguna suite llegó a correr"
+  else
+    printf '%s\n' "$out"
   fi
   return $evrc
 }
@@ -1031,13 +1085,21 @@ gate_evidence() {
   jq -e 'has("compliance")' "$v" >/dev/null 2>&1 || return 0
   gate "evidencia de compliance"
   local log="$WS/tasks/$TASK/evidence.log"
-  local missing=0 unread=0 row art
+  local missing=0 unread=0 art base
   while IFS= read -r art; do
     [ -n "$art" ] || continue
-    if [ ! -e "$WS/$art" ] && [ ! -e "$WT/$art" ]; then
+    # La cita puede traer el CASO además del archivo: tests/x.py::caso
+    # (pytest), archivo.go:42, rango :10-20, Clase#metodo. Caso de campo:
+    # cuatro ships frenados con el review correcto porque el -e se aplicaba
+    # a la cadena entera y "tests/x.py::caso" jamás existe en disco. La
+    # existencia se comprueba sobre la base (el archivo); la lectura acepta
+    # ambas grafías, porque el log registra lo que el comando dijo.
+    base="$(printf '%s' "$art" | sed -e 's/::.*$//' -e 's/#[A-Za-z_][A-Za-z0-9_]*$//' -e 's/:[0-9][0-9]*\(-[0-9][0-9]*\)*$//')"
+    [ -n "$base" ] || base="$art"
+    if [ ! -e "$WS/$base" ] && [ ! -e "$WT/$base" ]; then
       echo "   ✗ citado pero NO EXISTE: $art"; missing=$((missing+1)); continue
     fi
-    if [ -f "$log" ] && grep -qF -- "$art" "$log"; then :; else
+    if [ -f "$log" ] && { grep -qF -- "$art" "$log" || grep -qF -- "$base" "$log"; }; then :; else
       echo "   ✗ citado pero NADIE LO LEYÓ: $art"; unread=$((unread+1))
     fi
   done <<EOF
@@ -1051,6 +1113,9 @@ EOF
     echo "     ABRIÓ el artefacto que lo prueba (test, log, screenshot). Corre el"
     echo "     test, lee su salida, y cita la ruta real en .compliance[].evidence."
     echo "     'Confía en mí' no es evidencia — por eso existe este gate."
+    echo "     Si operas el harness FUERA de Claude Code (sin el hook track-read),"
+    echo "     el registro legítimo de una lectura real es:"
+    echo "       bash scripts/mark-read.sh $TASK <ruta-del-artefacto>"
     exit 3
   fi
 }

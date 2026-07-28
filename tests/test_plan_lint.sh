@@ -135,4 +135,46 @@ mk_task LANE5 express "proto/api.proto"; rm -f "$WS/tasks/LANE5/state.json"
 bash "$WS/scripts/plan-lint.sh" LANE5 >/dev/null 2>&1 \
   && pass "sin state.json: no asume carril (compat)" || fail "sin state.json bloqueó"
 
+echo
+echo "── los números de línea envejecen: el plan ancla por símbolo"
+# Caso de campo, cuatro veces en una corrida: el arquitecto escribió
+# render.mjs:44, una tarea hermana shippeó y movió el archivo, y el
+# implementer siguió coordenadas muertas. Y un :NN de regalo esquiva los
+# patrones anclados a $ del guard de carril (schema.sql:12 vs \.sql$).
+
+delta_ok; plan_ok
+sed 's|internal/ratelimit/limiter.go|internal/ratelimit/limiter.go:42|' \
+  "$WS/tasks/T1/plan.md" > "$WS/p.tmp" && mv "$WS/p.tmp" "$WS/tasks/T1/plan.md"
+out="$(run T1)"; rc=$?
+assert_eq 3 "$rc" "archivos: con sufijo :NN: rojo"
+assert_contains "$out" "limiter.go:42" "nombra la referencia envejecible"
+assert_contains "$out" "SÍMBOLO" "la remediación pide anclar por símbolo"
+
+delta_ok; plan_ok
+printf '\nEl bug está en render.mjs:44 y se propaga.\n' >> "$WS/tasks/T1/plan.md"
+out="$(run T1)"; rc=$?
+assert_eq 3 "$rc" "referencia archivo:NN en la prosa: rojo"
+assert_contains "$out" "render.mjs:44" "la nombra"
+
+delta_ok; plan_ok
+printf '\nReunión a las 12:30 en http://localhost:8080 con el equipo.\n' >> "$WS/tasks/T1/plan.md"
+out="$(run T1)"; rc=$?
+assert_eq 0 "$rc" "una hora (12:30) y un host:puerto NO son referencias a archivos"
+
+# y el agujero del guard de carril queda cerrado: schema.sql:12 en express
+mk_task LANE6 express "db/schema.sql:12"
+out="$(bash "$WS/scripts/plan-lint.sh" LANE6 2>&1)"; rc=$?
+assert_eq 3 "$rc" "express con schema.sql:12: rojo (antes el :12 esquivaba \\.sql\$)"
+
+echo
+echo "── LANE_GUARD_PATTERN: un solo criterio en dos archivos"
+# El patrón está duplicado literal entre plan-lint.sh (chequeo temprano) y
+# gate_lane de ship.sh.tmpl (la ley). Si divergen, el plan aprueba lo que el
+# ship rechaza y el retroceso caro vuelve. El del template escapa \$ (la
+# generación lo exige); se normaliza antes de comparar.
+pat_lint="$(sed -n 's/.*LANE_GUARD_PATTERN:-\(.*\)}"$/\1/p' "$ROOT/templates/scripts/plan-lint.sh")"
+pat_ship="$(sed -n 's/.*LANE_GUARD_PATTERN:-\(.*\)}"$/\1/p' "$ROOT/templates/scripts/ship.sh.tmpl" | sed 's/\\\$/$/g')"
+[ -n "$pat_lint" ] && [ -n "$pat_ship" ] || fail "no pude extraer los dos patrones"
+assert_eq "$pat_ship" "$pat_lint" "el patrón de plan-lint es EL MISMO que el de gate_lane (normalizado el escape del template)"
+
 t_done

@@ -139,6 +139,10 @@ assert_eq "0" "$(ls "$WS/tasks/T9/evidence/"EV-*.json 2>/dev/null | wc -l | tr -
   "sin stack: NO queda evidencia acuñada"
 assert_contains "$out" "NO sello evidencia" "y lo dice explícitamente"
 assert_contains "$out" "sin que ninguna suite haya corrido" "explicando por qué sería una mentira"
+# Caso de campo: el precheck imprimía EVIDENCE_ID= y dos líneas después
+# borraba el sello; cuatro agentes distintos parsearon ese ID fantasma y
+# fallaron recién en el ship. El anuncio ahora va después de la decisión.
+assert_not_contains "$out" "EVIDENCE_ID=" "y NO anuncia un EVIDENCE_ID que acaba de borrar"
 
 echo
 echo "── un gate rojo NO puede salir verde (el falso verde que encontró el demo)"

@@ -89,6 +89,10 @@ verifica y sin verde no hay implement):
 - `archivos` es lo que justifica el paralelo: mismo repo con archivos
   disjuntos = tareas PARALELAS. Sale del grafo y de las probes, no de
   una corazonada.
+- **Ancla por SÍMBOLO, jamás por número de línea** (`render.mjs:44` está
+  prohibido y plan-lint lo rechaza): una tarea hermana que shippea
+  primero mueve el archivo y el implementer queda siguiendo coordenadas
+  muertas. Nombra la función, la clase o la sección.
 - `criterios` binarios y ejercitables. Si no se puede escribir el test
   que lo prueba, no es un criterio.
 - `deps` solo por conflicto REAL (archivo compartido o dependencia de

@@ -207,7 +207,10 @@ answers_driver() {  # answers_driver <repo> → driver declarado, o vacío
     ind && cur && /^[[:space:]]+driver:[[:space:]]*/ {
       d=$0; sub(/^[^:]*:[[:space:]]*/,"",d); gsub(/["\047]/,"",d)
       sub(/[[:space:]]+$/,"",d); print d; exit }
-    ind && cur && /^[[:space:]]{2}[a-zA-Z0-9_-]+:/ { cur=0 }
+    # [[:space:]][[:space:]] y no {2}: el awk BSD de macOS no habilita
+    # intervalos ERE sin --re-interval, y si esta regla no matchea, cur nunca
+    # se resetea y el driver de OTRO repo más abajo se leería como el propio.
+    ind && cur && /^[[:space:]][[:space:]][a-zA-Z0-9_-]+:/ { cur=0 }
   ' "$WS/harness-answers.yaml" 2>/dev/null
 }
 
@@ -453,6 +456,11 @@ if command -v kargo >/dev/null; then
   # inexistente) era justo lo que no se veía.
   if kargo_out="$(kargo get promotions --project "{{KARGO_PROJECT}}" 2>&1)"; then
     printf '%s\n' "$kargo_out" | tail -5 | tee -a "$LOG"
+    # Caso de campo: el warehouse no refresca solo tras el push y el freight
+    # nuevo no aparece hasta que alguien lo pide. Si la lista no muestra nada
+    # reciente, la remediación exacta es pedir el refresh, no esperar más.
+    say "   (si el freight nuevo no aparece, pedí el refresh del warehouse:"
+    say "    kubectl annotate warehouse <warehouse> -n {{KARGO_PROJECT}} kargo.akuity.io/refresh=\"\$(date +%s)\" --overwrite)"
   else
     printf '%s\n' "$kargo_out" >> "$LOG"
     reason="$(printf '%s' "$kargo_out" | head -1 | cut -c1-160)"

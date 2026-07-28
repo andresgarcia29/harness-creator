@@ -18,10 +18,39 @@ case "$cmd" in
   *build-slot.sh*) exit 0 ;;
 esac
 
-# ¿`docker` seguido (en el MISMO comando, sin cruzar |, ; o &) de la palabra `build`
-# o `run`? Cubre `docker build`, `docker buildx build`, `docker compose … build`,
-# `docker run`. NO toca ps/logs/images/inspect/stop/kill/rm/exec/compose logs, etc.
-if printf '%s' "$cmd" | grep -Eq 'docker[[:space:]]+([^[:space:]|&;]+[[:space:]]+)*(build|run)([[:space:]]|$)'; then
+# El hook juzga COMANDOS, no texto. Caso de campo: un `git commit` cuyo
+# mensaje mencionaba "docker run" quedaba bloqueado, porque el grep corría
+# sobre el string entero. Antes de mirar, se descartan (a) los cuerpos de
+# heredoc (un mensaje de commit por -F- no es un comando) y (b) los tramos
+# entrecomillados (un -m "fix docker run flags" tampoco). El orden importa:
+# heredoc primero, porque su delimitador suele venir entrecomillado (<<'EOF').
+sanitized="$(printf '%s\n' "$cmd" | awk '
+  BEGIN { q = sprintf("%c", 39); skip = 0 }
+  skip == 1 {
+    t = $0; gsub(/^[[:space:]]+/, "", t)
+    if (t == delim) skip = 0
+    next
+  }
+  {
+    line = $0
+    if (match(line, "<<-?[[:space:]]*[\"" q "]?[A-Za-z_][A-Za-z0-9_]+")) {
+      delim = substr(line, RSTART, RLENGTH)
+      sub("^<<-?[[:space:]]*", "", delim)
+      gsub("[\"" q "]", "", delim)
+      skip = 1
+      line = substr(line, 1, RSTART - 1)
+    }
+    gsub("\"[^\"]*\"", "", line)
+    gsub(q "[^" q "]*" q, "", line)
+    print line
+  }
+' 2>/dev/null)" || sanitized="$cmd"
+
+# ¿`docker` EN POSICIÓN DE COMANDO (inicio de línea o tras ;, |, & o paréntesis,
+# con sudo o asignaciones de entorno delante) seguido, sin cruzar |, ; o &, de la
+# palabra `build` o `run`? Cubre `docker build`, `docker buildx build`,
+# `docker compose … build`, `docker run`. NO toca ps/logs/images/inspect/exec.
+if printf '%s' "$sanitized" | grep -Eq '(^|[;&|(])[[:space:]]*(sudo[[:space:]]+|[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*docker[[:space:]]+([^[:space:]|&;]+[[:space:]]+)*(build|run)([[:space:]]|$)'; then
   echo "🚫 BLOQUEADO (Ley 8): 'docker build/run' pelado funde la máquina compartida entre sesiones (load 286 con 6 núcleos fue real)." >&2
   echo "→ Envuélvelo en el semáforo:  bash scripts/build-slot.sh docker <build|run> …" >&2
   echo "  Serializa cross-sesión con bloqueo de kernel (cero polling); límite max(1, núcleos/4), override HARNESS_BUILD_SLOTS." >&2

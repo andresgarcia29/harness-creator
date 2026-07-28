@@ -373,6 +373,57 @@ if [ -d "$WS/repos" ]; then
   fi
 fi
 
+# · Eje deploy: un repo que SÍ deploya con driver=none es un hueco silencioso.
+# Caso de campo: deploy-watch dijo "driver: none, NO reviso nada" en repos que
+# sí deployan, y la única vez que importó (un apply de infra rojo) el watcher
+# se declaró incompetente y hubo que verificar a mano con gh run view. La
+# precedencia acá es la MISMA que deploy-watch.sh: deploy.<repo>.driver en
+# answers > kind del manifest (service/frontend/mobile → gitops; resto → none).
+if [ -f "$WS/manifest.yaml" ] && [ -d "$WS/repos" ]; then
+  for name in $(grep -E '^[[:space:]]+- name:' "$WS/manifest.yaml" | awk '{print $3}'); do
+    wfdir="$WS/repos/$name/.github/workflows"
+    [ -d "$wfdir" ] || continue
+    has_deploy=""
+    for wf in "$wfdir"/*.yml "$wfdir"/*.yaml; do
+      [ -f "$wf" ] || continue
+      case "$(basename "$wf")" in
+        *deploy*|*release*|*apply*|*publish*) has_deploy=1; break ;;
+      esac
+      grep -qiE '(terraform[[:space:]]+apply|kubectl[[:space:]]+apply|helm[[:space:]]+(upgrade|install)|docker[[:space:]]+push|npm[[:space:]]+publish|deploy)' "$wf" 2>/dev/null \
+        && { has_deploy=1; break; }
+    done
+    [ -n "$has_deploy" ] || continue
+    drv="$(awk -v r="$name" '
+      /^[[:space:]]*#/ { next }
+      /^deploy:/ { ind=1; next }
+      ind && /^[^[:space:]]/ { ind=0 }
+      ind && $0 ~ "^[[:space:]]+" r ":" { cur=1; next }
+      ind && cur && /^[[:space:]]+driver:[[:space:]]*/ {
+        d=$0; sub(/^[^:]*:[[:space:]]*/,"",d); gsub(/["\047]/,"",d)
+        sub(/[[:space:]]+$/,"",d); print d; exit }
+      ind && cur && /^[[:space:]][[:space:]][a-zA-Z0-9_-]+:/ { cur=0 }
+    ' "$ANSWERS" 2>/dev/null)"
+    if [ -z "$drv" ]; then
+      kind="$(awk -v r="$name" '
+        /^[[:space:]]*#/ { next }
+        /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/ {
+          n=$0; sub(/^[^:]*:[[:space:]]*/,"",n); gsub(/["\047]/,"",n)
+          sub(/[[:space:]]+$/,"",n); cur=(n==r)
+        }
+        cur && /^[[:space:]]*kind:[[:space:]]*/ {
+          k=$0; sub(/^[^:]*:[[:space:]]*/,"",k); gsub(/["\047]/,"",k)
+          sub(/[[:space:]]+$/,"",k); print k; exit
+        }' "$WS/manifest.yaml" 2>/dev/null)"
+      case "${kind:-}" in service|frontend|mobile|"") drv=gitops ;; *) drv=none ;; esac
+    fi
+    if [ "$drv" = "none" ]; then
+      warn "repos/$name tiene workflows de deploy y su driver resuelve a none: deploy-watch NO lo va a verificar tras el ship; declara deploy.$name.driver (gitops|actions) en harness-answers.yaml"
+    else
+      ok "deploy de $name verificable (driver: $drv)"
+    fi
+  done
+fi
+
 # 10 · Capa SDD y modelos
 [ -f "$WS/docs/constitution.md" ] && ok "constitution.md presente" || warn "sin docs/constitution.md — los agentes no tienen tie-breaker"
 [ -f "$WS/models.yaml" ] && ok "models.yaml presente" || warn "sin models.yaml — sin política de ruteo/escalación de modelos"

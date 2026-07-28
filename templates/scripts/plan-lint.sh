@@ -115,6 +115,34 @@ if [ -n "$vague" ]; then
   red=1
 fi
 
+# ── 2b. Los números de línea envejecen: se ancla por símbolo ──────────
+# Caso de campo, cuatro veces en una corrida: el arquitecto escribe
+# render.mjs:44, una tarea hermana shippea y mueve el archivo, y el
+# implementer sigue coordenadas muertas (hubo que avisarlo a mano en cada
+# prompt). Y de regalo, un sufijo :NN rompe los patrones anclados a $ del
+# guard de carril: schema.sql:12 no matchea \.sql$ y un express que tocaba
+# SQL pasaba de largo (falso negativo del check 4).
+lineref_archivos="$(awk '
+  /^[ \t]*[-*][ \t]+[Aa]rchivos[ \t]*:/ {
+    line = $0; sub(/^[^:]*:[ \t]*/, "", line)
+    n = split(line, arr, /[,;]/)
+    for (i = 1; i <= n; i++) { f = arr[i]; gsub(/^[ \t]+|[ \t]+$/, "", f)
+      if (f ~ /:[0-9]+([-,][0-9]+)*$/) print f }
+  }' "$PLAN")"
+# En la prosa solo cuenta lo que parece ruta de código (extensión conocida):
+# una hora 12:30 o un host:puerto no son referencias a archivos.
+lineref_prosa="$(grep -noE '[A-Za-z0-9_./-]+\.(go|py|ts|tsx|js|jsx|mjs|cjs|rs|java|rb|php|tf|sql|sh|bash|kt|cs|swift|vue|svelte|astro|proto|yaml|yml|toml|md):[0-9]+([-,][0-9]+)*' "$PLAN" 2>/dev/null || true)"
+linerefs="$( { printf '%s\n' "$lineref_archivos"; printf '%s\n' "$lineref_prosa"; } | grep -v '^$' | sort -u || true)"
+if [ -n "$linerefs" ]; then
+  echo "❌ el plan ancla por número de línea, y los números mueren con el primer rebase:"
+  printf '%s\n' "$linerefs" | while IFS= read -r l; do [ -n "$l" ] && say "$l"; done
+  echo "   ↳ remediación: cita el SÍMBOLO (función, clase, sección), no la línea."
+  echo "     Una tarea hermana que shippea primero mueve el archivo y el implementer"
+  echo "     queda siguiendo coordenadas muertas. Además, un sufijo :NN esquiva los"
+  echo "     patrones del guard de carril (schema.sql:12 no matchea \\.sql\$)."
+  red=1
+fi
+
 # ── 3. Trazabilidad: cada req citado existe en el delta-spec ──────────
 if [ -f "$DELTA" ]; then
   if ! grep -qiE '^#+[ \t]*(ADDED|MODIFIED|REMOVED)' "$DELTA"; then

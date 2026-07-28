@@ -332,6 +332,180 @@ class PolicyTest(unittest.TestCase):
                 capture_output=True, text=True).returncode, 0)
         os.unlink(generous.name)
 
+    # ── SHIP-004 desde el DAG ──
+    # Caso de campo: la fase saltó a ship con repos del DAG sin veredicto.
+    # El gate contaba repos CON veredicto, no repos PLANIFICADOS: shippear
+    # proto movió la tarea entera y bloqueó el review de video-forge (hubo
+    # que hacer rollback).
+
+    def mk_dag(self, *repos):
+        (self.task / "dag.json").write_text(json.dumps({
+            "schema": 1,
+            "tasks": [{"id": f"T{i+1}", "repo": r, "depends_on": []}
+                      for i, r in enumerate(repos)],
+        }))
+
+    def test_ship_refuses_while_a_dag_repo_has_no_verdict(self):
+        self.reach("rfc", "implement", "review")
+        self.mk_dag("proto", "video-forge")
+        self.mk_verdict("proto")
+        self.mk_shipped("proto")
+        blocked = self.transition("ship")
+        self.assertEqual(blocked.returncode, 3)
+        self.assertIn("POLICY-SHIP-004", blocked.stderr)
+        self.assertIn("video-forge", blocked.stderr)
+        self.assertIn("/review", blocked.stderr)      # la remediación nombra el paso
+        self.assertEqual(self.state()["phase"], "review")
+        # con veredicto pero sin ship sigue bloqueado (la rama pendiente de hoy)
+        self.mk_verdict("video-forge")
+        self.assertEqual(self.transition("ship").returncode, 3)
+        # shippeado, pasa
+        self.mk_shipped("video-forge")
+        self.assertEqual(self.transition("ship").returncode, 0)
+
+    def test_ship_without_dag_behaves_like_today(self):
+        # el carril express no genera DAG: cero regresión
+        self.reach("rfc", "implement", "review")
+        self.assertEqual(self.transition("ship").returncode, 0)
+
+    def test_corrupt_dag_blocks_ship_instead_of_vanishing_repos(self):
+        self.reach("rfc", "implement", "review")
+        (self.task / "dag.json").write_text("esto no es json")
+        blocked = self.transition("ship")
+        self.assertEqual(blocked.returncode, 3)
+        self.assertIn("POLICY-SHIP-004", blocked.stderr)
+        self.assertIn("validate-dag", blocked.stderr)
+        self.assertEqual(self.state()["phase"], "review")
+
+    def test_ship_refuses_while_a_state_repo_has_no_verdict(self):
+        # issue #34: el carril express NO genera DAG, y una tarea de dos repos
+        # avanzó a ship al shippear el primero; el segundo rebotó con
+        # TRANSITION-001/SHIP-001 y costó tres rollbacks. La fuente que sí
+        # existe siempre que init recibió --repos es state.repos.
+        self.assertEqual(self.run_policy("init", self.task,
+                                         "--repos", "proto,video-forge").returncode, 0)
+        for phase in ("rfc", "implement", "review"):
+            self.assertEqual(self.transition(phase).returncode, 0)
+        self.mk_verdict("proto")
+        self.mk_shipped("proto")
+        blocked = self.transition("ship")
+        self.assertEqual(blocked.returncode, 3)
+        self.assertIn("POLICY-SHIP-004", blocked.stderr)
+        self.assertIn("video-forge", blocked.stderr)
+        self.assertEqual(self.state()["phase"], "review")
+        self.mk_verdict("video-forge")
+        self.mk_shipped("video-forge")
+        self.assertEqual(self.transition("ship").returncode, 0)
+
+    def test_verdict_outside_the_dag_still_counts_as_pending(self):
+        # la unión: un repo con veredicto que el DAG no lista sigue exigiendo ship
+        self.reach("rfc", "implement", "review")
+        self.mk_dag("proto")
+        self.mk_verdict("proto")
+        self.mk_shipped("proto")
+        self.mk_verdict("extra")             # fuera del DAG, sin ship
+        blocked = self.transition("ship")
+        self.assertEqual(blocked.returncode, 3)
+        self.assertIn("extra", blocked.stderr)
+
+    # ── ARCHIVE-001: el delta-spec que ningún reviewer vio ──
+    # Caso de campo: el delta-spec se enmendó a mitad de corrida y dos
+    # reviewers tuvieron que avisar a mano "no archives el texto viejo". Si
+    # ninguno lo nota, las specs maestras heredan una regla que nadie revisó.
+
+    def reach_deploy(self):
+        self.reach("rfc", "implement", "review")
+        self.mk_verdict("atlas")
+        self.mk_shipped("atlas")
+        self.assertEqual(self.transition("ship").returncode, 0)
+        self.assertEqual(self.transition("deploy").returncode, 0)
+
+    def test_archive_refuses_a_delta_spec_amended_after_the_verdicts(self):
+        self.reach_deploy()
+        (self.task / "delta-spec.md").write_text("## ADDED\n- R1: enmendado\n")
+        base = 1_800_000_000
+        os.utime(self.task / "verdict-atlas.json", (base, base))
+        os.utime(self.task / "delta-spec.md", (base + 60, base + 60))
+        blocked = self.transition("archive")
+        self.assertEqual(blocked.returncode, 3)
+        self.assertIn("POLICY-ARCHIVE-001", blocked.stderr)
+        self.assertIn("/review", blocked.stderr)      # remediación nombrada
+        self.assertEqual(self.state()["phase"], "deploy")
+        # veredicto re-emitido (más nuevo que el delta): pasa
+        os.utime(self.task / "verdict-atlas.json", (base + 120, base + 120))
+        self.assertEqual(self.transition("archive").returncode, 0)
+
+    def test_archive_without_delta_spec_keeps_working(self):
+        self.reach_deploy()
+        self.assertEqual(self.transition("archive").returncode, 0)
+
+    def test_deploy_is_not_blocked_by_a_stale_delta(self):
+        # la decisión: el gate protege la FUSIÓN de specs, no el deploy
+        self.reach("rfc", "implement", "review")
+        self.mk_verdict("atlas")
+        self.mk_shipped("atlas")
+        self.assertEqual(self.transition("ship").returncode, 0)
+        (self.task / "delta-spec.md").write_text("x")
+        base = 1_800_000_000
+        os.utime(self.task / "verdict-atlas.json", (base, base))
+        os.utime(self.task / "delta-spec.md", (base + 60, base + 60))
+        self.assertEqual(self.transition("deploy").returncode, 0)
+
+    # ── LANE-004: el carril se valida contra lo que TOCA, no contra el tamaño ──
+    # Caso de campo: express asignado a una tarea que tocaba terraform/; el
+    # gate_lane la frenó, pero DESPUÉS de que el implementer hiciera el trabajo.
+
+    MANIFEST = (
+        "project: t\n"
+        "repos:\n"
+        "  - name: atlas\n    kind: service\n    agent: svc\n"
+        "  - name: terraform-core\n    kind: infra-module\n    agent: infra\n"
+        "  - name: net-live\n    kind: infra-live\n    agent: infra\n"
+    )
+
+    def ws_task(self, manifest=MANIFEST):
+        ws = Path(self.tmp.name)
+        task = ws / "tasks" / "AUTO-20260727-lane-kind"
+        task.mkdir(parents=True)
+        if manifest is not None:
+            (ws / "manifest.yaml").write_text(manifest)
+        return task
+
+    def test_express_with_infra_repo_is_refused_at_init(self):
+        task = self.ws_task()
+        r = self.run_policy("init", task, "--lane", "express",
+                            "--repos", "terraform-core")
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("POLICY-LANE-004", r.stderr)
+        self.assertIn("terraform-core", r.stderr)
+        self.assertIn("standard", r.stderr)           # la remediación nombra el carril
+        self.assertFalse((task / "state.json").exists())   # no dejó estado a medias
+
+    def test_express_with_service_repo_records_repos(self):
+        task = self.ws_task()
+        r = self.run_policy("init", task, "--lane", "express", "--repos", "atlas")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        state = json.loads((task / "state.json").read_text())
+        self.assertEqual(state["repos"], ["atlas"])
+
+    def test_standard_lane_accepts_infra_repos(self):
+        task = self.ws_task()
+        r = self.run_policy("init", task, "--lane", "standard",
+                            "--repos", "net-live,atlas")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_init_without_repos_flag_is_unchanged(self):
+        # compat: prompts viejos que no pasan --repos
+        self.assertEqual(self.run_policy("init", self.task,
+                                         "--lane", "express").returncode, 0)
+        self.assertNotIn("repos", self.state())
+
+    def test_missing_manifest_fails_open(self):
+        task = self.ws_task(manifest=None)
+        r = self.run_policy("init", task, "--lane", "express",
+                            "--repos", "terraform-core")
+        self.assertEqual(r.returncode, 0, r.stderr)   # aviso, no bloqueo
+
     def test_dag_rejects_cycles_and_accepts_parallel_branches(self):
         dag = self.task / "dag.json"
         dag.write_text(json.dumps({"schema": 1, "tasks": [

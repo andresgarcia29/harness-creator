@@ -140,6 +140,28 @@ case "$tool" in
         done
         ;;
     esac
+    # ── LEER POR BASH TAMBIÉN ES LEER ──
+    # Caso de campo: el reviewer inspecciona con git show, rg, cat o sed -n
+    # (exactamente lo que la economía de tokens le pide: la ventana, no el
+    # archivo entero) y NADA quedaba en evidence.log, así que gate_evidence
+    # lo acusaba de no leer lo que sí leyó. El gate castigaba la conducta que
+    # la constitución recomienda. El criterio ya no es la extensión ni que el
+    # comando parezca de tests: es que el token RESUELVA a un archivo real
+    # bajo el workspace. Acotado (40 tokens) y fail-open, como todo el hook.
+    n=0
+    for tok in $cmd; do
+      n=$((n+1)); [ "$n" -gt 40 ] && break
+      case "$tok" in
+        -*|*=*) continue ;;           # flags y asignaciones no son artefactos
+        *[/.]*) : ;;                  # solo tokens que parecen ruta/archivo
+        *) continue ;;
+      esac
+      base="${tok%%::*}"              # pytest cita archivo::caso; el archivo es la base
+      t="$base"; case "$t" in /*) : ;; *) t="$cwd/$base" ;; esac
+      if [ -f "$t" ]; then
+        emit ran-file "${base#"$WS"/}" "$t"
+      fi
+    done
     ;;
 esac
 exit 0

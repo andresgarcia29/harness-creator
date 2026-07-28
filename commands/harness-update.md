@@ -41,7 +41,7 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
      repo-brief,stamp-models,change-id,verdict-scaffold,plan-lint,build-slot,
      deploy-watch,emit,forge,gowork,graph-refresh,minion-probe,pull-all,
      ticket-close,ticket-pull,harness-bug,harness-version,skills-sync,
-     pipeline-steps,py,fe,archived-repos}.sh,
+     pipeline-steps,py,fe,archived-repos,mark-read}.sh,
      scripts/{harness-policy,evidence}.py, `harness-policy.json`,
      hooks, y **el panel**:
      `scripts/ui/{panel.sh,server.py,pricing.json,dist/}`): upstream gana por

@@ -30,23 +30,29 @@ done
 skill_gi="$(grep '^| `.gitignore`' "$root/skills/harness-init/SKILL.md")"
 assert_contains "$skill_gi" "gitignore.tmpl" "la tabla de generación apunta al template, no a una lista inline"
 
-# ── Ley 13: la recomendada es la duradera, nunca la rápida.
+# ── Ley 15: la recomendada es la duradera, nunca la rápida.
 # Caso real: un agente marcó "editar state.json a mano (recomendado)" porque no
 # había vuelta atrás por CLI. Era lo rápido, violaba una ley del propio
 # CLAUDE.md, y el hueco real (falta un rollback) quedó sin reportar.
+# (Este bloque la llamaba "Ley 13": la 13 real es la de repos archivados, y
+# citar el número equivocado manda al agente a la ley que no es. El assert de
+# abajo ata número Y texto para que no vuelva a derivar.)
 claude_md="$root/templates/CLAUDE.md.tmpl"
 const="$root/templates/docs/constitution.md.tmpl"
-assert_contains "$(cat "$claude_md")" "elimina la causa" "CLAUDE.md tiene la Ley 13"
-assert_contains "$(cat "$claude_md")" "NUNCA como" "Ley 13: el atajo nunca va como recomendado"
-assert_contains "$(cat "$claude_md")" "Ley 12" "Ley 13: un camino que falta es un bug del harness, no un permiso"
+assert_contains "$(cat "$claude_md")" "15. **La recomendada es la que elimina la causa" \
+  "la ley 'elimina la causa' es la 15, con número y texto atados"
+assert_contains "$(cat "$claude_md")" "NUNCA como" "Ley 15: el atajo nunca va como recomendado"
+assert_contains "$(cat "$claude_md")" "Ley 12" "Ley 15: un camino que falta es un bug del harness, no un permiso"
 assert_contains "$(cat "$const")" "2b." "la constitución tiene la sección de lo correcto sobre lo rápido"
 # La tensión con "código mínimo" tiene que quedar resuelta EN EL TEXTO: sin
 # esto, un agente lee la ley nueva como permiso para sobre-construir, que es
 # justo lo que §2 y §3 existen para impedir.
-assert_contains "$(cat "$claude_md")" "constitución §2" "Ley 13 aclara que no afloja el código mínimo"
+assert_contains "$(cat "$claude_md")" "constitución §2" "Ley 15 aclara que no afloja el código mínimo"
 assert_contains "$(cat "$const")" "ALCANCE" "la constitución separa alcance (§2) de clase de arreglo (§2b)"
 assert_contains "$(cat "$root/templates/commands/auto.md.tmpl")" "elimina la causa" \
-  "/auto aplica la Ley 13 al ADR que propone al humano"
+  "/auto aplica la Ley 15 al ADR que propone al humano"
+assert_contains "$(cat "$root/templates/commands/auto.md.tmpl")" "(Ley 15)" \
+  "y la cita por su número real (era 'Ley 13', que es la de repos archivados)"
 
 # ── Enrichment: la única interacción con el humano, al principio.
 # Concentrar ahí lo que solo el humano sabe es lo que permite que el resto

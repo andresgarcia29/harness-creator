@@ -168,10 +168,32 @@ def command_run(args: argparse.Namespace) -> int:
         "output_sha256": sha256(log_path),
     }
     atomic_json(evidence_dir / f"{evidence_id}.json", manifest)
-    print(f"\nEVIDENCE_ID={evidence_id}")
+    # Un sello que no va a servir se anuncia AHORA, no dos gates después.
+    # Caso de campo: se selló evidencia con exit_code=1 y log vacío; verify la
+    # rechazó recién en el ship, con un mensaje que hablaba de otra cosa.
+    if return_code != 0:
+        print(f"EVIDENCE: ojo: el comando salió con exit {return_code}. El sello "
+              "queda en disco, pero verify exige exit_code 0: un veredicto que "
+              "cite este ID va a rebotar en el ship. Corré el comando en verde "
+              "y sellá de nuevo.", file=sys.stderr)
+    try:
+        if log_path.stat().st_size == 0:
+            print("EVIDENCE: ojo: el comando no produjo NI UNA línea de salida. "
+                  "Un log vacío suele ser una suite que no corrió nada; como "
+                  "evidencia no prueba gran cosa y un reviewer lo va a rechazar.",
+                  file=sys.stderr)
+    except OSError:
+        pass
+    # La decisión de publicabilidad va ANTES del anuncio. Caso de campo:
+    # cuatro agentes distintos parsearon un EVIDENCE_ID que dos líneas más
+    # abajo se declaraba no publicable, y el fallo aparecía recién en el
+    # ship. Un ID solo se anuncia como EVIDENCE_ID si el sello vale; si no,
+    # sale como EVIDENCE_DISCARDED y ningún parser de stdout se lo lleva.
     if before != after:
+        print(f"\nEVIDENCE_DISCARDED={evidence_id}")
         print("EVIDENCE: el comando cambió HEAD; la evidencia no es publicable", file=sys.stderr)
         return 3
+    print(f"\nEVIDENCE_ID={evidence_id}")
     return return_code
 
 

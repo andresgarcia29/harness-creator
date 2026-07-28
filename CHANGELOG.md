@@ -6,6 +6,108 @@ contra una instalación real).
 
 ## [Sin publicar]
 
+### Added (feedback de una corrida de campo de ~9h: 12 puntos, todos con gate o test)
+- **Lock de creación por (task, repo) en `worktree-task.sh`**: /auto lanza la
+  creación en paralelo y dos procesos podían pasar juntos el chequeo "ya
+  existe" (TOCTOU con un fetch en medio); el único punto con riesgo de
+  pérdida de datos del feedback. mkdir atómico con reclamo de huérfanos por
+  pid, colisión con mensaje y exit en vez de muerte muda (se quitó el
+  `2>/dev/null` que la silenciaba), `--rm` purga los locks, y el claim de
+  `guard-worktree.sh` ahora se publica con mv (atómico).
+- **Rama Terraform en `run_lang_gates`**: `fmt -check -recursive` +
+  `init -backend=false` + `validate` por directorio con `.tf` (prof. 4). Los
+  repos infra pasaban el precheck sin validar NADA y son los que auto-aplican
+  producción al mergear. Sin CLI degrada honesto (patrón `need`); validate no
+  cuenta como suite (`TESTS_RAN` intacto).
+- **Go en subdirectorios**: `*/go.mod` (prof. 2, sin vendored) corre
+  vet/build/test POR módulo. Caso de campo: package.json en la raíz y toda la
+  lógica en `controller/`; los tests Go jamás corrían.
+- **`POLICY-SHIP-004` ahora cuenta desde `dag.json`**: un repo planificado en
+  el DAG sin veredicto bloquea `review → ship` nombrándolo (antes solo
+  contaban los repos que YA tenían veredicto y la fase saltaba, dejando al
+  resto sin camino). DAG corrupto bloquea (fail-closed); sin DAG (express),
+  cero cambio.
+- **`init --repos` + `POLICY-LANE-004`**: un carril express que incluye repos
+  `infra-module`/`infra-live` (kind del manifest) se rechaza EN EL INIT, antes
+  de gastar un implementer en trabajo que `gate_lane` devolvería al final.
+  `state.repos` queda registrado.
+- **`POLICY-ARCHIVE-001`**: `/archive` se rechaza si `delta-spec.md` es
+  posterior al último veredicto: un delta enmendado que ningún reviewer vio no
+  se fusiona a las specs maestras (antes dependía de que un reviewer avisara a
+  mano).
+- **Señal de contexto agotado**: hook `on-compact.sh` (PreCompact, fail-open)
+  deja `tasks/<id>/.compacted` y emite al bus; `/auto` checkpointea al verla.
+  `record-cost` medía dólares y nada medía ventana.
+- **Eje deploy por fin cableado de punta a punta**: bloque `deploy:` por repo
+  en harness-answers (antes `answers_driver()` leía una clave que ningún
+  generador escribía), la entrevista lo pregunta con evidencia de los
+  workflows, y `doctor.sh` marca repos con workflows de deploy cuyo driver
+  resuelve a `none` (el hueco que dejó un apply de infra rojo sin vigilar).
+- **plan-lint rechaza anclas por número de línea** (`archivo:NN` en
+  `archivos:` o en la prosa): los números mueren con el primer rebase (4 veces
+  en la corrida de campo), y un sufijo `:NN` esquivaba los patrones `\.sql$`
+  del guard de carril. El arquitecto ancla por símbolo.
+- **Regla nueva del reviewer**: la prosa normativa (delta-spec, ADR, panel) se
+  verifica contra el código con el mismo rigor que el código; una
+  discrepancia es blocking. Los tres errores de spec de la corrida salieron de
+  leer el código, no el documento.
+- **`scripts/mark-read.sh`** (segunda corrida de campo, operada desde otro
+  agente): el registro de lecturas para quien NO tiene el hook track-read.
+  gate_evidence era impasable fuera de Claude Code (evidence.log no existía
+  jamás) y la única salida era editar el log a mano, que anula el gate. El
+  script verifica que el archivo exista bajo el workspace o el worktree y
+  registra la cita con el formato del hook. El mensaje del gate y el prompt
+  del reviewer lo nombran, y el formato de citación (rutas, no IDs; el
+  sufijo ::caso se normaliza) quedó documentado en reviewer.md, que antes
+  solo se descubría leyendo el source de ship.sh.
+- **Reglas nuevas del implementer** (errores de la segunda corrida que una
+  regla previene): explorar y auditar SIEMPRE contra el worktree de la tarea,
+  nunca contra `repos/` (un canónico 16 commits atrás produjo una auditoría
+  de código inexistente); y el lockfile de un registry privado solo lo genera
+  CI o el humano, jamás un `npm pack` local (no reproduce los hashes).
+
+### Fixed (misma corrida)
+- **`gate_evidence` rechazaba por forma, no por fondo** (4 ships frenados con
+  el review correcto): las citas `archivo::caso` (pytest), `:NN` y `#metodo`
+  se normalizan antes del chequeo de existencia, y `track-read.sh` registra
+  las lecturas hechas por Bash (cat, grep, sed, git show, rg) cuando el token
+  resuelve a un archivo real, sin filtro de extensión. El gate castigaba
+  exactamente la conducta que la economía de tokens pide. Misma normalización
+  en el arrastre de compliance de `verdict-scaffold.sh`.
+- **EVIDENCE_ID fantasma** (4 agentes lo pisaron en un día): el ID solo se
+  anuncia si el sello sobrevive. `evidence.py` imprime `EVIDENCE_DISCARDED=`
+  cuando HEAD se movió, y el precheck filtra la línea cuando borra el sello
+  de una corrida sin tests.
+- **`guard-build-slot.sh` bloqueaba TEXTO, no comandos**: un `git commit -m
+  "fix docker run flags"` o un heredoc que mencionara "docker build" quedaban
+  bloqueados. Ahora descarta cuerpos de heredoc y tramos entrecomillados y
+  exige `docker` en posición de comando. Estrena test (no tenía ninguno).
+- **`answers_driver()` usaba un intervalo ERE `{2}`** que el awk BSD de macOS
+  no habilita: si la regla de reset no matchea, el driver de OTRO repo del
+  bloque se leía como el propio. Test con dos repos en el bloque.
+- **La ley "elimina la causa" se citaba como "Ley 13"** (que es la de repos
+  archivados) en /auto y en la suite; es la 15, y el assert ahora ata número y
+  texto. Y `LANE_GUARD_PATTERN`, duplicado literal entre plan-lint y
+  gate_lane, estrena test de coherencia.
+- **#34: `POLICY-SHIP-004` ahora también cuenta desde `state.repos`**: el
+  carril express no genera DAG, y una tarea express de dos repos avanzó a
+  ship al shippear el primero; el segundo rebotó con TRANSITION-001/SHIP-001
+  y costó tres rollbacks. La unión es dag.json + lo que `init --repos`
+  registró.
+- **`pull-all.sh` decía "todo al día" con repos salteados** (segunda corrida:
+  un artefacto untracked dejó un repo 16 commits atrás y el resumen lo tapó).
+  El resumen final nombra en rojo los repos NO actualizados con su
+  remediación, y la mugre solo-untracked ya no impide el pull (el rebase no
+  la toca; se pullea con nota).
+- **`evidence.py run` avisa en el acto** cuando el sello no va a servir:
+  exit_code distinto de 0 (verify lo exige en 0) o log vacío. Antes se
+  sellaba mudo y explotaba dos gates después con un mensaje que hablaba de
+  otra cosa.
+- **deploy-watch da la remediación del warehouse de Kargo**: si el freight
+  nuevo no aparece tras el push, el comando exacto de la anotación
+  `kargo.akuity.io/refresh` está en la salida (caso de campo: se descubrió a
+  mano).
+
 ### Added
 - **`scripts/plan-lint.sh`**: el plan es ejecutable o no es plan. Por tarea
   exige repo/req/archivos/criterios/complexity/deps, prohíbe decisiones

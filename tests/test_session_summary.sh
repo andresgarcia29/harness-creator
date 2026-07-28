@@ -141,4 +141,38 @@ rm -rf "$WS/.harness"
 run_hook sess-actual >/dev/null 2>&1
 assert_eq 0 $? "sin .harness/: sale 0 (fail-open)"
 
+echo
+echo "── on-compact.sh: la señal de contexto agotado"
+# record-cost mide dólares; nada medía ventana. Caso de campo: en un /auto de
+# nueve horas el humano avisó a mano varias veces "te estás quedando sin
+# contexto". La compactación es el único evento determinista de eso.
+
+COMPACT="$ROOT/templates/hooks/on-compact.sh"
+
+# la tarea sale del puntero por sesión que mantiene track-read
+mkdir -p "$WS/.harness/session-task" "$WS/tasks/T7"
+printf 'T7\n' > "$WS/.harness/session-task/sess-larga"
+printf '{"session_id":"sess-larga","trigger":"auto"}' \
+  | CLAUDE_PROJECT_DIR="$WS" bash "$COMPACT" 2>/dev/null
+assert_eq 0 $? "payload válido: sale 0"
+assert_file "$WS/tasks/T7/.compacted" "deja la marca en la tarea de la sesión"
+assert_contains "$(cat "$WS/tasks/T7/.compacted")" "auto" "y registra el trigger"
+
+# sesión sin tarea conocida: no inventa a quién atribuirle la compactación
+printf '{"session_id":"sess-sin-tarea","trigger":"manual"}' \
+  | CLAUDE_PROJECT_DIR="$WS" bash "$COMPACT" 2>/dev/null
+assert_eq 0 $? "sesión sin puntero: sale 0 y no escribe nada"
+
+# fail-open: sin jq y con payload roto
+printf '{"session_id":"x"}' | CLAUDE_PROJECT_DIR="$WS" PATH="$(t_path_without jq)" bash "$COMPACT" 2>/dev/null
+assert_eq 0 $? "sin jq: sale 0 (fail-open)"
+printf 'roto' | CLAUDE_PROJECT_DIR="$WS" bash "$COMPACT" 2>/dev/null
+assert_eq 0 $? "payload roto: sale 0 (fail-open)"
+
+# id malicioso en el puntero: no construye rutas con él
+printf '../../etc\n' > "$WS/.harness/session-task/sess-evil"
+printf '{"session_id":"sess-evil","trigger":"auto"}' \
+  | CLAUDE_PROJECT_DIR="$WS" bash "$COMPACT" 2>/dev/null
+assert_no_file "$WS/tasks/../../etc/.compacted" "un id de tarea raro no crea rutas fuera de tasks/"
+
 t_done

@@ -29,6 +29,15 @@ sm="$(cat "$root/templates/scripts/stamp-models.sh")"
 assert_contains "$sm" '"$f.$$.tmp"' "stamp-models usa un temporal por proceso"
 assert_not_contains "$sm" '> "$f.tmp" &&' "y no el nombre fijo que dos make models compartían"
 
+gw="$(cat "$root/templates/hooks/guard-worktree.sh")"
+assert_contains "$gw" 'mv -f "$tmp" "$claim"' "guard-worktree publica el claim con mv (dos hooks concurrentes no dejan JSON a medias)"
+assert_not_contains "$gw" '"$now" > "$claim"' "y ya no escribe el claim directo al definitivo"
+
+wt="$(cat "$root/templates/scripts/worktree-task.sh")"
+assert_contains "$wt" 'until mkdir "$dir" 2>/dev/null' "worktree-task serializa la CREACIÓN con un lock mkdir por (task, repo)"
+assert_not_contains "$wt" 'worktree add -b "task/$TASK" "$wt" "origin/$bb" 2>/dev/null' \
+  "y una colisión de worktree add ya no muere muda a /dev/null"
+
 echo
 echo "── el lock del grafo es real, no decorativo"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT

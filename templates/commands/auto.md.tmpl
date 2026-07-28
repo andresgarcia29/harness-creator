@@ -124,7 +124,12 @@ mal clasificado: escalá, no pienses más fuerte.
 
 Toda tarea nueva se inicializa una sola vez con
 `scripts/harness-policy.py init tasks/<id> --lane <express|standard|full>
-[--budget-usd <valor-del-panel>]`. Al retomar, lee `state.json` (incluido su
+--repos <repo1,repo2> [--budget-usd <valor-del-panel>]`. Los repos son los
+mismos del paso 0 que usaste para clasificar el carril: con ellos `init`
+rechaza en el acto un express que incluya un repo de infra
+(`POLICY-LANE-004`, kind `infra-module`/`infra-live` en manifest.yaml),
+ANTES de gastar un implementer en trabajo que `gate_lane` va a devolver.
+Al retomar, lee `state.json` (incluido su
 `lane`) y continúa desde su fase; no infieras la fase por conversación. Cada
 avance se solicita con `scripts/harness-policy.py transition tasks/<id> <fase>
 --actor orchestrator`. Una transición rechazada es un gate: no edites
@@ -358,7 +363,7 @@ no edites el estado. Al cerrar cada fase registra el total monotónico de
   de un dato entre servicios. Redactas el ADR en `docs/adr/` como
   `status: PROPOSED` con opciones y tu recomendación — y paras. La ley
   la ratifican humanos (constitución). **Tu recomendación es siempre la
-  que elimina la causa, no la más barata de ejecutar** (Ley 13): el
+  que elimina la causa, no la más barata de ejecutar** (Ley 15): el
   atajo se lista con su deuda declarada y jamás como recomendado.
   *Reversible y dentro de un ownership existente NO cae aquí: eso se
   decide y se anota en el ledger.*
@@ -466,6 +471,15 @@ Reglas:
 
 - Estado SIEMPRE en `tasks/<id>/`. Si la sesión muere, `/auto <task-id>`
   retoma donde quedó.
+- **Contexto compactado = checkpoint YA.** El hook on-compact deja
+  `tasks/<id>/.compacted` cuando tu ventana se resumió: si al retomar el
+  archivo existe (o acabas de ver el aviso de compactación), tu memoria
+  fina ya no es de fiar. Antes de seguir: volcá a `tasks/<id>/notes.md`
+  toda decisión pendiente que solo viva en conversación, re-leé
+  `state.json` y el plan, y NO afirmes nada del historial que no puedas
+  releer de un artefacto. En corridas largas, no esperes la señal:
+  cerrá cada fase dejando el estado completo en disco, que es lo que
+  hace barato sobrevivir a la compactación.
 - Una línea por evento ("T2 hermes: review pass, encolando ship"). No
   narres: el humano lee el reporte final.
 - Escalación de modelos según `models.yaml`. Escalar modelo NUNCA

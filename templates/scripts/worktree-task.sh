@@ -61,6 +61,8 @@ if [ "${1:-}" = "--rm" ]; then
   # sesión que ya no existe (caducarían solos, pero tras una hora de espera
   # que nadie tiene por qué pagar).
   rm -f "$WS/.harness/claims/${TASK}__"*.json 2>/dev/null || true
+  # Y los locks de creación huérfanos de esta tarea, por la misma razón.
+  rm -rf "$WS/locks/wt-${TASK}__"*.lock.d 2>/dev/null || true
   if ! ls -d "$WS/worktrees/$TASK"/*/ >/dev/null 2>&1; then
     rm -rf "$WS/worktrees/$TASK"
   else
@@ -72,11 +74,62 @@ fi
 TASK="${1:?uso: worktree-task.sh <task-id> <repo> [repo...]}"; shift
 [ $# -gt 0 ] || { echo "❌ indica al menos un repo"; exit 1; }
 
+# ── Lock de CREACIÓN por (task, repo) ─────────────────────────────────
+# Caso de campo: /auto lanza este script en paralelo y dos procesos pasaron
+# juntos el chequeo "ya existe": el segundo moría a mitad del bucle con un
+# error de git silenciado, o peor, dos implementers acababan escribiendo el
+# mismo worktree y un `git add` se llevaba el trabajo del otro. El lock de
+# ship.sh es por repo y solo cubre el push; el semáforo de build-slot es por
+# máquina y solo cubre builds. La CREACIÓN no la cubría nadie.
+# mkdir es atómico (mismo patrón que acquire_lock de ship.sh); la vida del
+# worktree ya creado la protege el claim de guard-worktree.sh, no esto.
+WT_LOCKDIR=""
+trap 'if [ -n "$WT_LOCKDIR" ]; then rm -rf "$WT_LOCKDIR"; fi' EXIT
+
+acquire_create_lock() {  # acquire_create_lock <task> <repo> → 0 si es nuestro
+  local dir="$WS/locks/wt-${1}__${2}.lock.d" lpid="" tries=0
+  local max_wait="${HARNESS_WT_LOCK_WAIT:-10}"   # segundos antes de rendirse
+  mkdir -p "$WS/locks"
+  until mkdir "$dir" 2>/dev/null; do
+    lpid="$(cat "$dir/pid" 2>/dev/null || true)"
+    if [ -n "$lpid" ] && ! kill -0 "$lpid" 2>/dev/null; then
+      echo "⚠️  lock de creación huérfano (pid $lpid ya no existe); lo reclamo"
+      rm -rf "$dir"
+      continue
+    fi
+    tries=$((tries+1))
+    if [ "$tries" -ge "$max_wait" ]; then
+      echo "❌ otro proceso${lpid:+ (pid $lpid)} está creando el worktree de $2 para $1."
+      echo "   Dos creadores concurrentes del mismo (task, repo) es exactamente el"
+      echo "   accidente que este lock existe para impedir: espera a que termine y"
+      echo "   re-corre. Si estás SEGURO de que no queda ningún proceso vivo:"
+      echo "   rm -rf $dir"
+      return 1
+    fi
+    sleep 1
+  done
+  echo $$ > "$dir/pid"
+  WT_LOCKDIR="$dir"
+  return 0
+}
+
+release_create_lock() {
+  if [ -n "$WT_LOCKDIR" ]; then rm -rf "$WT_LOCKDIR"; WT_LOCKDIR=""; fi
+}
+
 for repo in "$@"; do
   base="$WS/repos/$repo"
   wt="$WS/worktrees/$TASK/$repo"
   [ -d "$base/.git" ] || { echo "❌ repo desconocido: $repo (ver manifest.yaml)"; exit 1; }
-  [ -d "$wt" ] && { echo "→ ya existe: $wt"; continue; }
+  # El lock va ANTES del chequeo de existencia: entre este [ -d ] y el
+  # worktree add hay un fetch con red de por medio, y esa ventana es la que
+  # dejaba pasar a dos procesos a la vez (TOCTOU).
+  acquire_create_lock "$TASK" "$repo" || exit 1
+  if [ -d "$wt" ]; then
+    echo "→ ya existe: $wt"
+    release_create_lock
+    continue
+  fi
   mkdir -p "$(dirname "$wt")"
   git -C "$base" fetch origin
   # Refresca el clon canónico ANTES de crear el worktree: los worktrees nacen frescos de
@@ -91,9 +144,17 @@ for repo in "$@"; do
   else
     echo "⚠️  repos/$repo no está limpio en $bb${cur:+ (rama: $cur)} — no lo refresco (el worktree nace de origin/$bb igual)."
   fi
-  git -C "$base" worktree add -b "task/$TASK" "$wt" "origin/$bb" 2>/dev/null \
-    || git -C "$base" worktree add "$wt" "task/$TASK"
+  # Sin 2>/dev/null: silenciar el primer intento convertía cualquier colisión
+  # (rama ya tomada por otro worktree, index.lock ajeno) en una muerte muda a
+  # mitad del bucle multi-repo. El fallback aplica SOLO al caso legítimo: la
+  # rama de la tarea ya existe (retoma) y ningún worktree la tiene.
+  if git -C "$base" show-ref --verify --quiet "refs/heads/task/$TASK"; then
+    git -C "$base" worktree add "$wt" "task/$TASK"
+  else
+    git -C "$base" worktree add -b "task/$TASK" "$wt" "origin/$bb"
+  fi
   echo "✅ worktree: $wt (rama task/$TASK)"
+  release_create_lock
 done
 
 # Loop interno nativo de Go: regenera el go.work de la tarea (worktree ∪ canónico como

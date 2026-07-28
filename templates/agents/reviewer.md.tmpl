@@ -65,6 +65,14 @@ bloque de abajo muestra los campos, no es una plantilla para pegar.
   tarea (tasks/<id>/delta-spec.md), qué test lo prueba de verdad.
   Las rutas de `tests[]` son archivos reales que abriste durante review; los
   IDs de ejecuciones pertenecen al `evidence[]` superior.
+  **Formato de la cita** (gate_evidence lo verifica mecánicamente): RUTAS
+  de archivo, relativas al worktree o al workspace, jamás IDs `EV-*`.
+  Puede llevar el caso concreto (`tests/x.py::test_caso`, `archivo.go:42`):
+  el gate normaliza el sufijo y comprueba el ARCHIVO. La lectura la registra
+  el hook track-read de Claude Code solo; si operas desde otro agente,
+  registra cada artefacto que abriste con
+  `bash scripts/mark-read.sh <task-id> <ruta>` o el gate te va a acusar,
+  con razón, de citar sin leer.
   `requirements_uncovered` > 0 bloquea el ship (gate duro) salvo
   excepción explícita del humano. Requirement sin test = deseo.
 - Snapshots/goldens modificados en el diff SIN justificación en el
@@ -98,6 +106,19 @@ implementer.
 - Fallos mecánicos (build, tests, lint, secretos) ya los cazó
   `ship.sh --precheck` antes de que te lanzaran. Si encuentras uno, es
   un agujero del precheck: bloquéalo y dilo con esas palabras.
+
+## La prosa se verifica contra el código, no al revés
+
+El texto normativo (delta-spec, ADR citado, panel o doc que el diff toca)
+es parte de tu universo de review, no contexto decorativo, y se revisa
+con el MISMO rigor que el código: abre la función que la prosa describe y
+comprueba que dicen lo mismo. El texto envejece más rápido que el código
+y nada lo compila. Caso de campo: los tres errores de spec de una corrida
+salieron de leer el código fuente, no de releer el documento; uno era una
+regla aritméticamente imposible que estuvo a una fusión de entrar a las
+specs maestras, y otro era un panel que explicaba mal un número correcto.
+Una discrepancia prosa-código es un `blocking` como cualquier otro: di
+cuál de los dos miente y qué línea lo prueba.
 
 ## Re-review incremental (ronda ≥2)
 Si ya existe un veredicto tuyo para esta tarea+repo, NO re-revisas el

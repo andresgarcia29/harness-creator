@@ -159,6 +159,17 @@ harness; cada agente es contexto y mantenimiento.
 9. **Deploy** (si hay CD): org de GitHub, prefijo de apps ArgoCD,
    proyecto Kargo, tenant canary, y ROLLBACK_MODE auto|manual
    (recomienda auto: rollback primero, diagnóstico después).
+   **Y el driver POR REPO que deploya**: `gitops` | `actions` | `none`,
+   al bloque `deploy:` del answers (`{{DEPLOY_LIST}}`; sin declaraciones,
+   deja el bloque solo con los ejemplos comentados). Sin esta respuesta
+   `answers_driver()` de deploy-watch es código muerto y el driver sale
+   solo del `kind` del manifest, que manda a `none` seis de nueve kinds:
+   una library con workflow de release o un infra-live que auto-aplica
+   quedan SIN verificación post-ship y nadie lo dice. Recomienda desde la
+   evidencia: los repos con workflows de deploy en `.github/workflows/`
+   (deploy/release/apply en el nombre o un `on: push` a la trunk) son los
+   candidatos; `kind: service|frontend|mobile` ya caen a gitops solos y
+   no hace falta declararlos.
 10. **Modelos**: primero el PROVEEDOR (anthropic | vertex | bedrock |
     kimi | minimax | openrouter; default anthropic; si eligió otro,
     recuérdale verificar los IDs de la sección `models.<provider>`
@@ -279,7 +290,9 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `.claude/hooks/guard-build-slot.sh` | hooks/ | siempre (fail-OPEN: bloquea `docker build/run` pelado, Ley 8; ya registrado en settings.json.tmpl junto a block-direct-push) |
 | `.claude/hooks/{track-read,ui-emit}.sh` | hooks/ | siempre (fail-OPEN: observan, `async: true`). track-read alimenta `gate_evidence` de ship.sh; ui-emit alimenta `make ui` |
 | `.claude/hooks/guard-worktree.sh` | hooks/ | siempre (registrado junto a guard-canonical en Edit\|Write\|MultiEdit). Un worktree tiene UN dueño: la primera sesión que escribe lo reclama y otra sesión que intente escribir ahí se bloquea. Es la única guarda del tramo de edición concurrente (el lock de ship.sh es por repo y solo cubre el push; build-slot es por máquina y solo cubre builds). Fail-OPEN a diferencia de los otros guards: coordina, no prohíbe, y una colisión es recuperable con git |
+| `.claude/hooks/on-compact.sh` | hooks/ | siempre (fail-OPEN: observa, registrado en `PreCompact`, `async: true`). La señal de contexto agotado: deja `tasks/<id>/.compacted` (derivando la tarea del puntero por sesión de track-read) y emite el evento al bus. record-cost mide dólares; sin esto nada medía ventana, y en campo el humano tuvo que avisar a mano |
 | `.claude/hooks/session-summary.sh` | hooks/ | siempre (fail-OPEN: observa, registrado en `SessionEnd`). Al cerrar la sesión escribe `.harness/sessions/<id>.md` con lo que el harness decidió, derivado de `.harness/events.jsonl`. Es determinista a propósito: el agente que resume de memoria omite justo el gate rojo y el supuesto sin confirmar |
+| `scripts/mark-read.sh` | scripts/ | siempre. El registro de lecturas para agentes SIN el hook track-read (Cursor, Kimi Code: AGENTS.md promete que pueden operar el harness): apunta en `tasks/<id>/evidence.log` un artefacto que se abrió de verdad, verificando que exista bajo el workspace o el worktree. Sin esto, gate_evidence era impasable fuera de Claude Code y la única salida era editar el log a mano, que anula el gate |
 | `scripts/harness-version.sh` | scripts/ | siempre (`make version`). Contesta las dos preguntas que se hacen juntas: si la instancia está al día contra upstream, y qué está pasando ahora (tareas con su fase, sesiones, worktrees tomados, supuestos sin confirmar). Marca las tareas cuya fase no coincide con su historial, que es lo que hace fallar el ship tras un update. Si no puede comparar contra upstream lo DICE: no reporta "al día" |
 | `scripts/forge.sh` | scripts/ | siempre. La capa de forge: `forge_ci_failed`, `forge_issue_create`, `forge_pr_create`, con drivers github (gh) y gitlab (glab). Los 13 cronjobs entregan por aquí; antes tenían `gh` cableado y en cualquier otro forge entregaban a la nada, en silencio |
 | `scripts/ui/{panel.sh,server.py,pricing.json,dist/}` | ui/ | siempre — el panel (`make ui`). `panel.sh` prefiere el **daemon Go `harnessd`** (multi-máquina, terminales en vivo, sonda de MCP, archivar, liveness) y lo baja del release privado si falta; cae a `server.py` (Python stdlib) si no hay binario. El frontend React viaja COMPILADO en dist/ (la fuente vive en el plugin, `templates/ui/web/`) — el usuario jamás necesita Node |

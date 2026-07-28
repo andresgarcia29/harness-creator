@@ -129,6 +129,31 @@ out="$(run_watch terraform-core)"
 assert_contains "$out" "driver de deploy: actions" "answers gana sobre el kind inferido"
 assert_not_contains "$out" "no se verifica con este watcher" "y por lo tanto SÍ se verifica"
 
+# DOS repos en el bloque deploy: el parser tiene que resetear el repo actual
+# al ver la clave del siguiente. Con el intervalo ERE {2} (que el awk BSD no
+# habilita sin --re-interval) la regla de reset no matcheaba nunca y el
+# driver del segundo repo se leía como si fuera del primero.
+cat > "$WS/harness-answers.yaml" <<'YAML'
+project: demo
+deploy:
+  atlas:
+    memo: sin-driver-declarado
+  terraform-core:
+    driver: actions
+YAML
+cat > "$WS/manifest.yaml" <<'YAML'
+repos:
+  - name: atlas
+    kind: service
+  - name: terraform-core
+    kind: infra-module
+YAML
+out="$(run_watch atlas)"
+assert_contains "$out" "driver de deploy: gitops" \
+  "el driver de terraform-core NO se le atribuye a atlas (reset del parser, awk BSD)"
+out="$(run_watch terraform-core)"
+assert_contains "$out" "driver de deploy: actions" "y terraform-core conserva el suyo"
+
 echo
 echo "── el prefijo es un prefijo, no una concatenación ciega"
 # Bug de campo P1: prefijo "acme" + repo "acme-landing" daba "acmeacme-landing",

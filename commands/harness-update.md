@@ -42,7 +42,7 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
      deploy-watch,emit,forge,gowork,graph-refresh,minion-probe,pull-all,
      ticket-close,ticket-pull,harness-bug,harness-version,skills-sync,
      pipeline-steps,py,fe,archived-repos,mark-read,verdict-beads,ship-wave,
-     port-forwards}.sh,
+     port-forwards,instance-ship}.sh,
      scripts/{harness-policy,evidence}.py, `harness-policy.json`,
      hooks, y **el panel**:
      `scripts/ui/{panel.sh,server.py,pricing.json,dist/}`): upstream gana por
@@ -169,6 +169,12 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
    Si sale rojo, dilo **con esas palabras** — el update no aterrizó — y lista
    qué quedó sin aplicar. Si sale exit 2 (no se pudo traer el tag), eso no es
    éxito: es un update **sin verificar**, y se dice así.
+
+7. **Publica el commit del update por la puerta**: commitea los cambios del
+   workspace y corre `bash scripts/instance-ship.sh` (árbol limpio, rebase,
+   gitleaks, doctor, push). El repo de la instancia tiene su propia puerta a
+   main desde el issue #37: pushearlo a mano por fuera del harness era el
+   único camino y eso era un bug, no una regla.
 
 Presta atención especial a: scripts/doctor.sh (es COPIA del plugin —
 casi siempre conviene actualizarla), hooks, y ship.sh (gates nuevos).

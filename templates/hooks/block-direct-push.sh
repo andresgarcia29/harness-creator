@@ -31,7 +31,9 @@ prot="${HARNESS_BASE_BRANCH:-$(git symbolic-ref --short refs/remotes/origin/HEAD
 pat="main"
 [ "$prot" = "main" ] || pat="main|$prot"
 if printf '%s' "$cmd" | grep -qE "git push[^|;&]*[[:space:]](($pat)|[^ ]*:($pat))([[:space:]]|\$)"; then
-  echo "⛔ push directo a la rama protegida ($prot) bloqueado (Ley 1). Única puerta: scripts/ship.sh <task-id> <repo>" >&2
+  echo "⛔ push directo a la rama protegida ($prot) bloqueado (Ley 1). Las puertas:" >&2
+  echo "   · repos de producto: scripts/ship.sh <task-id> <repo>" >&2
+  echo "   · el repo de la INSTANCIA (el workspace): scripts/instance-ship.sh" >&2
   exit 2
 fi
 # push sin refspec: bloqueado si no estamos en una rama task/*

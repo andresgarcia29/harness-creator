@@ -90,7 +90,12 @@ start_one() {  # start_one <name> <port> <cmd> <method> <path> <exp_s> <exp_b>
     echo "· $1 ya corre (pid $(cat "$PIDDIR/$1.pid"))"
   else
     [ -n "$3" ] || { echo "❌ $1 no declara cmd:"; return 1; }
-    nohup sh -c "$3" >> "$PIDDIR/$1.log" 2>&1 &
+    # exec EXPLICITO: sin él, que $! sea el listener o un wrapper sh
+    # depende del optimizador del shell (dash y bash difieren), y matar al
+    # wrapper dejaba al forward HUERFANO y escuchando: el down mentía.
+    # Consecuencia declarada: el cmd debe SER el proceso del forward, no un
+    # wrapper que forkea y sale.
+    nohup sh -c "exec $3" >> "$PIDDIR/$1.log" 2>&1 &
     echo $! > "$PIDDIR/$1.pid"
     echo "→ $1 lanzado (pid $!, puerto $2): $3"
   fi
@@ -110,8 +115,8 @@ start_one() {  # start_one <name> <port> <cmd> <method> <path> <exp_s> <exp_b>
   return 1
 }
 
-stop_one() {  # stop_one <name>
-  local pid
+stop_one() {  # stop_one <name> <port>
+  local pid i
   pid="$(cat "$PIDDIR/$1.pid" 2>/dev/null || true)"
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     kill "$pid" 2>/dev/null || true
@@ -120,6 +125,19 @@ stop_one() {  # stop_one <name>
     echo "🧹 $1 detenido (pid $pid)"
   fi
   rm -f "$PIDDIR/$1.pid"
+  # La postcondición de down es "NADIE escucha en el puerto", no "maté un
+  # pid": un huérfano que sobrevive es exactamente el impostor que la sonda
+  # de identidad existe para cazar. Se drena hasta 5s y, si sigue ocupado,
+  # se dice (fail-closed: un down que miente vale menos que ninguno).
+  [ -n "${2:-}" ] || return 0
+  i=0
+  while [ "$i" -lt 5 ]; do
+    curl -sS -m 1 -o /dev/null "http://127.0.0.1:$2/" 2>/dev/null || return 0
+    sleep 1; i=$((i+1))
+  done
+  echo "⚠️  $1: el puerto $2 SIGUE ocupado tras el down (¿proceso huérfano?)"
+  echo "   ↳ lsof -nP -iTCP:$2 -sTCP:LISTEN  (Linux: ss -ltnp)"
+  return 1
 }
 
 check_ports_unique() {
@@ -156,7 +174,7 @@ EOF
     while IFS="$(printf '\t')" read -r name port cmd method path exps expb; do
       [ -n "$name" ] || continue
       [ -n "$ONLY" ] && [ "$name" != "$ONLY" ] && continue
-      stop_one "$name"
+      stop_one "$name" "$port" || rc=1
     done <<EOF
 $rows
 EOF

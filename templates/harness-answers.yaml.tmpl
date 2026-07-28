@@ -165,7 +165,9 @@ deploy:
 # declara qué respuesta ES tu servicio. probe_expect_status es el código
 # esperado SIN credenciales (un 401 es identidad válida: prueba que el que
 # contesta es tu servicio y no el port-forward viejo de otra cosa). El cmd lo
-# pone la instancia (kubectl port-forward, ssh -L, cloud-sql-proxy...).
+# pone la instancia (kubectl port-forward, ssh -L, cloud-sql-proxy...) y se
+# lanza con exec: debe SER el proceso del forward, no un wrapper que forkea
+# y sale (ssh: usa -N sin -f), o el supervisor no podría matarlo.
 port_forwards:
 {{PORT_FORWARDS_LIST}}
 #  atlas:

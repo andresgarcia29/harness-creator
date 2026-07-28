@@ -21,7 +21,11 @@ las transiciones a `deploy` y a `archive` con `POLICY-SHIP-005` mientras quede
 un repo con `landed: false`, y te nombra cuáles. Y rechaza `archive` con
 `POLICY-ARCHIVE-001` si `delta-spec.md` se modificó DESPUÉS del último
 veredicto: un delta que ningún reviewer vio no se fusiona; re-corré `/review`
-para re-emitir el veredicto sobre el texto vigente.
+para re-emitir el veredicto sobre el texto vigente. Y con
+`POLICY-ARCHIVE-002` si quedan `non_blocking` sin bead (cuando `bd` existe):
+corré `scripts/verdict-beads.sh <task-id> <repo>` por cada repo con
+veredicto ANTES de pedir la transición; `tasks/` es gitignoreado y un
+hallazgo archivado sin bead deja de existir (Ley 7).
 
 
 > **La fase se mueve con `harness-policy.py`, siempre.** Este comando es un

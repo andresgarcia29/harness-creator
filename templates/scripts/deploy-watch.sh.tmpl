@@ -197,21 +197,34 @@ repo_kind() {  # repo_kind <repo> → kind declarado en manifest.yaml, o vacío
 #   1. deploy.<repo>.driver en harness-answers.yaml (lo que el humano dijo)
 #   2. el kind del repo en manifest.yaml
 #   3. gitops, por compatibilidad con instancias previas a esta regla
-answers_driver() {  # answers_driver <repo> → driver declarado, o vacío
+answers_repo_key() {  # answers_repo_key <repo> <clave> → valor plano declarado, o vacío
+  # Claves PLANAS a 4 espacios bajo el repo a 2 (driver, verify_cmd,
+  # verify_expect, verify_timeout, post_ship). Un bloque anidado NO se
+  # soporta a propósito: este parser es awk línea a línea.
   [ -f "$WS/harness-answers.yaml" ] || return 0
-  awk -v r="$1" '
+  awk -v r="$1" -v k="$2" '
+    BEGIN { q = sprintf("%c", 39) }
     /^[[:space:]]*#/ { next }
     /^deploy:/ { ind=1; next }
     ind && /^[^[:space:]]/ { ind=0 }
     ind && $0 ~ "^[[:space:]]+" r ":" { cur=1; next }
-    ind && cur && /^[[:space:]]+driver:[[:space:]]*/ {
-      d=$0; sub(/^[^:]*:[[:space:]]*/,"",d); gsub(/["\047]/,"",d)
-      sub(/[[:space:]]+$/,"",d); print d; exit }
+    ind && cur && $0 ~ "^[[:space:]]+" k ":[[:space:]]*" {
+      d=$0; sub(/^[^:]*:[[:space:]]*/,"",d); sub(/[[:space:]]+$/,"",d)
+      # SOLO el par envolvente: un verify_cmd con comillas internas se
+      # despedazaria con un gsub global de comillas
+      if ((substr(d,1,1) == "\"" && substr(d,length(d),1) == "\"") ||
+          (substr(d,1,1) == q    && substr(d,length(d),1) == q))
+        d = substr(d, 2, length(d)-2)
+      print d; exit }
     # [[:space:]][[:space:]] y no {2}: el awk BSD de macOS no habilita
     # intervalos ERE sin --re-interval, y si esta regla no matchea, cur nunca
     # se resetea y el driver de OTRO repo más abajo se leería como el propio.
     ind && cur && /^[[:space:]][[:space:]][a-zA-Z0-9_-]+:/ { cur=0 }
   ' "$WS/harness-answers.yaml" 2>/dev/null
+}
+
+answers_driver() {  # answers_driver <repo> → driver declarado, o vacío
+  answers_repo_key "$1" driver
 }
 
 KIND="$(repo_kind "$REPO")"
@@ -230,7 +243,13 @@ say "── driver de deploy: $DRIVER${KIND:+ (kind=$KIND)} ──"
 VERIFIED_PARTS=""
 verified() { VERIFIED_PARTS="${VERIFIED_PARTS:+$VERIFIED_PARTS + }$1"; }
 
-if [ "$DRIVER" = "none" ]; then
+# driver none SIN verify ni smoke: no hay nada que este watcher pueda mirar.
+# Con verify_cmd o smoke declarados, none salta las etapas de CI/gitops pero
+# SÍ verifica: caso de campo, un infra-live con driver none se verificó a
+# mano dos veces y las dos con errores (grep de un literal que el bundle
+# genera por template, y curl sin --compressed que falla en silencio).
+if [ "$DRIVER" = "none" ] && [ -z "$(answers_repo_key "$REPO" verify_cmd)" ] \
+    && [ ! -x "$WS/scripts/smoke/$REPO.sh" ]; then
   say "ℹ️  $REPO no se verifica con este watcher."
   say "   NO reviso nada, y por lo tanto tampoco propongo revertir nada:"
   say "   un modelo que no aplica no puede declarar un deploy rojo."
@@ -238,6 +257,7 @@ if [ "$DRIVER" = "none" ]; then
   say "     deploy:"
   say "       $REPO:"
   say "         driver: actions   # o gitops"
+  say "         verify_cmd: \"<comando que interroga al artefacto desplegado>\""
   emit assumption "deploy de $REPO NO verificado: driver=none${KIND:+ (kind=$KIND)}"
   exit 0
 fi
@@ -389,8 +409,9 @@ red() { # red <motivo>
   exit 1
 }
 
-# 1 · GitHub Actions del push a main
-if command -v gh >/dev/null; then
+# 1 · GitHub Actions del push a main (driver none: no aplica; su señal es
+#     el verify declarado y/o el smoke, más abajo)
+if [ "$DRIVER" != "none" ] && command -v gh >/dev/null; then
   say "── actions: $ORG/$REPO@main ──"
   # EL RUN TIENE QUE SER EL DE NUESTRO COMMIT, NO "EL MÁS RECIENTE". Entre el
   # push y la creación del run hay una ventana de segundos a minutos en la que
@@ -534,7 +555,11 @@ case "$health_rc" in
      emit assumption "health de $REPO NO verificado: no pude observar la app $APP" ;;
 esac
 
-# 4 · Smoke del canary tenant (si existe para el repo)
+fi   # ← fin de las etapas exclusivas de gitops
+
+# 4 · Smoke del canary tenant, para TODOS los drivers. Vivía DENTRO del if
+#     gitops, así que con driver actions no corría NUNCA: la última defensa
+#     dependía de la tecnología de deploy, que no tiene nada que ver.
 if [ -x "$WS/scripts/smoke/$REPO.sh" ]; then
   say "── smoke: $REPO ──"
   "$WS/scripts/smoke/$REPO.sh" >>"$LOG" 2>&1 || red "smoke del canary falló"
@@ -543,7 +568,35 @@ else
   say "⚠️ sin smoke para $REPO (scripts/smoke/$REPO.sh) — agrégalo; el canary es la última defensa"
 fi
 
-fi   # ← fin de las etapas exclusivas de gitops
+# 5 · verify declarado por el usuario (TODOS los drivers, incluido none).
+#     Los dos primitivos que en campo se escribieron a mano cada vez van de
+#     ejemplo en el bloque deploy: del answers: leer el asset DESDE EL POD
+#     (no del CDN, que cachea) y comparar pod contra CDN con curl SIEMPRE
+#     --compressed (sin eso el body llega gzip y el grep calla).
+VERIFY_CMD="$(answers_repo_key "$REPO" verify_cmd)"
+if [ -n "$VERIFY_CMD" ]; then
+  VERIFY_EXPECT="$(answers_repo_key "$REPO" verify_expect)"
+  VERIFY_TIMEOUT="$(answers_repo_key "$REPO" verify_timeout)"
+  case "$VERIFY_TIMEOUT" in ''|*[!0-9]*) VERIFY_TIMEOUT=120 ;; esac
+  say "── verify: $REPO (timeout ${VERIFY_TIMEOUT}s) ──"
+  # perl alarm y no timeout(1): BSD no lo trae (precedente: build-slot.sh)
+  vrc=0
+  vout="$(perl -e 'alarm shift @ARGV; exec "bash","-c",$ARGV[0]' \
+    "$VERIFY_TIMEOUT" "$VERIFY_CMD" 2>&1)" || vrc=$?
+  printf '%s\n' "$vout" >> "$LOG"
+  if [ "$vrc" -ne 0 ]; then
+    red "verify de $REPO falló o excedió ${VERIFY_TIMEOUT}s (exit $vrc; salida en $LOG)"
+  elif [ -n "$VERIFY_EXPECT" ]; then
+    case "$vout" in
+      *"$VERIFY_EXPECT"*)
+        say "✅ verify verde (contiene '$VERIFY_EXPECT')"; verified "verify declarado" ;;
+      *)
+        red "verify de $REPO: la salida NO contiene '$VERIFY_EXPECT' (salida en $LOG)" ;;
+    esac
+  else
+    say "✅ verify verde (exit 0; sin verify_expect)"; verified "verify declarado"
+  fi
+fi
 
 # El mensaje final dice QUÉ se verificó, no una lista fija: con driver
 # `actions` no hubo argocd ni smoke, y afirmarlo seria mentir en el bus.

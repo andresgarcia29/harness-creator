@@ -130,12 +130,51 @@ secrets:
 # Declara los repos cuyo kind no cuenta la historia completa: una library con
 # workflow de release, un infra-live que aplica al mergear. doctor.sh avisa si
 # un repo tiene workflows de deploy y su driver resuelve a none.
+# Claves PLANAS por repo (el parser es awk línea a línea; nada anidado):
+#   driver          gitops | actions | none
+#   verify_cmd      comando post-deploy que interroga al ARTEFACTO desplegado;
+#                   corre para TODOS los drivers (con none es tu única señal),
+#                   bajo with-secrets. Dos primitivos que salieron del campo:
+#                   1) lee el asset DESDE EL POD, no del CDN que cachea:
+#                      "kubectl exec deploy/web -- cat /usr/share/nginx/html/index.html"
+#                   2) compara pod vs CDN; curl SIEMPRE con --compressed (sin
+#                      eso el body llega gzip y el grep calla):
+#                      "curl -sS --compressed https://cdn.example.com/app.js"
+#                   OJO: si el bundle genera el literal por template, el
+#                   substring puede no existir tal cual en el fuente; verifica
+#                   contra el artefacto desplegado, no contra el código.
+#   verify_expect   substring esperado en la salida (opcional; sin él, exit 0)
+#   verify_timeout  segundos (default 120)
+#   post_ship       comando que ship-wave corre tras aterrizar el repo
+#                   (publish/bump del consumidor); con flow: prs se difiere
+#                   hasta el merge
 deploy:
 {{DEPLOY_LIST}}
 #  atlas:
 #    driver: gitops
+#    verify_cmd: "curl -sS --compressed https://cdn.example.com/app.js"
+#    verify_expect: "data-testid=checkout"
 #  terraform-core:
 #    driver: actions
+#  design-system:
+#    driver: actions
+#    post_ship: "npm publish --tag latest"
+
+# Port-forwards supervisados (scripts/port-forwards.sh up|ensure|down|status).
+# Los puertos se declaran UNA vez, acá; la sonda es de IDENTIDAD, no de vida:
+# declara qué respuesta ES tu servicio. probe_expect_status es el código
+# esperado SIN credenciales (un 401 es identidad válida: prueba que el que
+# contesta es tu servicio y no el port-forward viejo de otra cosa). El cmd lo
+# pone la instancia (kubectl port-forward, ssh -L, cloud-sql-proxy...).
+port_forwards:
+{{PORT_FORWARDS_LIST}}
+#  atlas:
+#    port: 9090
+#    cmd: "kubectl -n prod port-forward svc/atlas 9090:8080"
+#    probe_method: POST
+#    probe_path: /test/tenancy/create
+#    probe_expect_status: 401
+#    probe_expect_body: "invalid or missing X-E2E-Secret"
 
 # Dónde viven los repos. Normalmente se detecta del remote; se declara solo
 # si es un self-hosted con dominio propio. Lo lee scripts/forge.sh, que es por

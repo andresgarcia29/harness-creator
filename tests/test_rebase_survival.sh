@@ -209,6 +209,39 @@ mk_ev EV-TEST-aaaaaaaaaaaa impl-atlas "bbbb222"
 out="$(EV --commit "bbbb222" --verdict "$TD/verdict-atlas.json" --require-kind test)"; rc=$?
 assert_eq 0 "$rc" "sin --reviewed-commit: comportamiento histórico intacto"
 
+echo "── los TRES SHAs del caso de campo: la citada sobrevive por patch_id"
+# EV sellado en C1 (precheck del implementer), veredicto en R, HEAD en H.
+# Antes: 'commit=C1; se esperaba R' tras pagar lock y suite, 8-9 veces por
+# corrida. Ahora: mismo cambio (patch_id) => la citada pasa; la FRESCA la
+# aporta el EV runner=ship sobre H, y sigue siendo SHA-estricta.
+mk_ev_pid() {  # mk_ev_pid <id> <runner> <commit> <patch-id>
+  printf 'salida del test\n' > "$TD/evidence/$1.log"
+  local h; h="$(shasum -a 256 "$TD/evidence/$1.log" | cut -d' ' -f1)"
+  jq -n --arg id "$1" --arg r "$2" --arg c "$3" --arg h "$h" --arg p "$4" \
+    '{schema:1, id:$id, task_id:"T1", repo:"atlas", kind:"test", runner:$r,
+      commit:$c, commit_after:$c, exit_code:0, patch_id:$p,
+      output:("evidence/"+$id+".log"), output_sha256:$h}' > "$TD/evidence/$1.json"
+}
+jq -n --arg t "$NOW" \
+  '{schema:1, task_id:"T1", repo:"atlas", commit:"523767e", patch_id:"PID-CAMPO",
+    reviewed_at:$t, reviewer:"reviewer", implementation_agents:["impl-atlas"],
+    verdict:"pass", qa:"pass", evidence:["EV-TEST-cd4552b00001"],
+    blocking:[], non_blocking:[], docs_updated:true, compliance:[],
+    requirements_uncovered:0, snapshots_updated_justified:true}' > "$TD/verdict-atlas.json"
+mk_ev_pid EV-TEST-cd4552b00001 impl-atlas "cd4552b" "PID-CAMPO"   # el tercer SHA
+mk_ev_pid EV-TEST-a4a851000001 ship       "a4a8510" "PID-CAMPO"   # la fresca en HEAD
+out="$(EV --commit "a4a8510" --reviewed-commit "523767e" \
+        --verdict "$TD/verdict-atlas.json" --require-kind test --require-fresh-kind test)"; rc=$?
+assert_eq 0 "$rc" "EV@C1 + verdict@R + HEAD@H con el mismo patch_id: PASA de punta a punta"
+assert_contains "$out" "MISMO cambio" "y lo anuncia como reuso, no en silencio"
+
+# con patch_id DISTINTO en el EV citado: rechazo legítimo con remediación
+mk_ev_pid EV-TEST-cd4552b00001 impl-atlas "cd4552b" "PID-OTRO"
+out="$(EV --commit "a4a8510" --reviewed-commit "523767e" \
+        --verdict "$TD/verdict-atlas.json" --require-kind test)"; rc=$?
+assert_eq 3 "$rc" "EV de OTRO cambio: sigue rechazando"
+assert_contains "$out" "OTRO cambio" "y el mensaje ya dice la causa real"
+
 echo "── las perillas de evidencia del policy dejaron de estar muertas"
 out="$(python3 "$POLICY_PY" --policy "$POL" evidence-policy --field required_evidence_kinds)"
 assert_eq "test" "$out" "required_evidence_kinds se LEE del policy"

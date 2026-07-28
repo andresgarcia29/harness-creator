@@ -128,6 +128,64 @@ out="$(run_pull)"
 assert_contains "$out" "no pude consultar" "token ilegible: 'no pude mirar', distinto de las otras tres"
 
 echo
+echo "── secrets doctor: lo requerido por los repos contra lo provisto"
+# Caso de campo: tres secretos existían en la fuente desde siempre y nadie
+# los había registrado en secrets.sh; el reporte decía "bloqueado: sin
+# acceso" cuando la verdad era "faltan tres líneas dump_kv". Horas de
+# diferencia entre esas dos frases.
+
+mkdir -p "$WS/repos/app/config" "$WS/repos/svc/chart"
+printf 'API_KEY=\nDB_URL=\n' > "$WS/repos/app/.env.example"
+printf 'const dsn = process.env.SENTRY_DSN;\n' > "$WS/repos/app/config/index.js"
+cat > "$WS/repos/svc/chart/values.yaml" <<'YAML'
+env:
+  - name: REDIS_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: svc-secrets
+        key: REDIS_PASSWORD
+YAML
+printf 'secrets:\n  refs:\n    - env://GH_TOKEN\n' > "$WS/harness-answers.yaml"
+gen vault    # VAULT_KEYS ya inyecta dump_kv GH_TOKEN kv/harness/github pat
+printf 'DB_URL=x\nAPI_KEY=y\n' > "$WS/.secrets"
+
+# sin CLI de vault utilizable (sin token): degrada honesto y nombra faltantes
+out="$( ( cd "$WS" && PATH="$(t_path_without vault)" bash scripts/secrets.sh doctor 2>&1 ) )"; rc=$?
+assert_eq 1 "$rc" "hay faltantes: exit 1"
+assert_contains "$out" "SENTRY_DSN" "caza el process.env de config/"
+assert_contains "$out" "repos/app/config/index.js" "y nombra QUIÉN la requiere"
+assert_contains "$out" "REDIS_PASSWORD" "caza el secretKeyRef del chart"
+assert_contains "$out" "values.yaml" "con su origen"
+assert_not_contains "$out" "FALTA API_KEY" "lo provisto por .secrets no es faltante"
+assert_not_contains "$out" "FALTA DB_URL" "ídem"
+assert_not_contains "$out" "FALTA GH_TOKEN" "lo provisto por dump_kv tampoco"
+assert_contains "$out" "dump_kv SENTRY_DSN" "la remediación da la línea exacta a agregar"
+assert_contains "$out" "no pude buscar candidatos" "sin CLI/token: degrada honesto"
+
+# con vault stub + token: sugiere el candidato por nombre de campo
+cat > "$WS/bin/vault" <<'SH'
+#!/bin/sh
+if [ "$1" = "kv" ] && [ "$2" = "get" ]; then
+  echo '{"data":{"data":{"pat":"x","sentry_dsn":"y","redis_password":"z"}}}'
+  exit 0
+fi
+exit 0
+SH
+chmod +x "$WS/bin/vault"
+printf 'tok\n' > "$WS/.vault-token"
+out="$( ( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/secrets.sh doctor 2>&1 ) )"; rc=$?
+assert_eq 1 "$rc" "sigue habiendo faltantes: exit 1"
+assert_contains "$out" "dump_kv SENTRY_DSN kv/harness/github sentry_dsn" \
+  "el candidato viene con path y campo exactos (búsqueda case-insensitive)"
+
+# todo provisto → verde
+printf 'DB_URL=x\nAPI_KEY=y\nSENTRY_DSN=s\nREDIS_PASSWORD=r\n' > "$WS/.secrets"
+out="$( ( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/secrets.sh doctor 2>&1 ) )"; rc=$?
+assert_eq 0 "$rc" "todo provisto: exit 0"
+assert_contains "$out" "está provisto" "y lo dice"
+rm -f "$WS/.vault-token" "$WS/harness-answers.yaml"
+
+echo
 echo "── el mensaje del bootstrap no vende Vault como unica opcion"
 bs="$(cat "$ROOT/templates/scripts/bootstrap.sh.tmpl")"
 assert_contains "$bs" "secrets.source: {{SECRETS_SOURCE}}" "dice QUE fuente declaro la instancia"

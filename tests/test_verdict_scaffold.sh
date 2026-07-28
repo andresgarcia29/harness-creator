@@ -194,8 +194,11 @@ bash "$WS/scripts/verdict-scaffold.sh" T1 atlas revisor-1 >/dev/null 2>&1
 assert_contains "$(jq -r '.implementation_agents|join(",")' "$V")" "impl-atlas" \
   "base: el scaffold registra al implementer"
 
-# Ahora el caso: nuevo commit y SOLO evidencia de ship en el HEAD nuevo
-NEW2="$(cd "$WT1" && git commit -q --allow-empty -m fix2 && git rev-parse HEAD)"
+# Ahora el caso: nuevo commit CON contenido (un empty dejaría el patch_id
+# idéntico y dispararía el no-op de rebase puro, que es otro camino) y SOLO
+# evidencia de ship en el HEAD nuevo
+NEW2="$(cd "$WT1" && echo fix2 > fix2.txt && git add -A \
+  && git -c user.email=t@t -c user.name=t commit -q -m fix2 && git rev-parse HEAD)"
 rm -f "$WS/tasks/T1/evidence/"EV-*.json
 mk_ev EV-TEST-eeeeeeeeeeee ship test "$NEW2"
 out="$(bash "$WS/scripts/verdict-scaffold.sh" --rebase T1 atlas revisor-1 2>&1)"; rc=$?
@@ -203,5 +206,98 @@ assert_eq 0 "$rc" "rebase con solo evidencia de ship: no se traba"
 agents="$(jq -r '.implementation_agents | join(",")' "$V")"
 assert_contains "$agents" "impl-atlas" "arrastra al implementer del veredicto previo"
 assert_not_contains "$agents" "ship" "y NO deja que ship figure como implementador"
+
+echo
+echo "── delta_files: el delta viaja al reviewer, no se re-deriva"
+assert_eq '["fix2.txt"]' "$(jq -c .delta_files "$V")" "rebase: persiste la lista del delta en el veredicto"
+assert_contains "$out" "diff " "imprime el comando del delta"
+assert_contains "$out" "fix2.txt" "y el comando restringe a los archivos del delta"
+
+echo
+echo "── rebase PURO: mismo cambio sobre otra base no cobra reviewer"
+# El caso de campo: main se movió, el contenido no; --rebase regeneraba el
+# scaffold, reseteaba a PENDING_REVIEWER y cobraba un reviewer por un
+# movimiento que nadie miró. Simulación con un commit --allow-empty (el diff
+# contra la base no cambia, o sea patch_id idéntico: un rebase puro).
+jq '.verdict="pass" | .qa="pass" | .requirements_uncovered=0' "$V" > "$V.tmp" && mv "$V.tmp" "$V"
+before_hash="$(shasum "$V" | cut -d' ' -f1)"
+( cd "$WT1" && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m "rebase puro simulado" )
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --rebase T1 atlas revisor-1 2>&1)"; rc=$?
+assert_eq 0 "$rc" "rebase puro: exit 0"
+after_hash="$(shasum "$V" | cut -d' ' -f1)"
+assert_eq "$before_hash" "$after_hash" "el veredicto queda BYTE-IDÉNTICO (no se toca)"
+assert_contains "$out" "sigue vigente" "dice que el veredicto sigue vigente"
+assert_contains "$out" "NO corras review" "y que NO hay que correr review ni QA"
+assert_contains "$out" "--renew" "nombra la válvula para la ventana vencida"
+
+# --renew fuerza el re-scaffold aunque el cambio sea el mismo
+mk_ev EV-TEST-renew0000001 impl-atlas test "$(git -C "$WT1" rev-parse HEAD)"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --rebase --renew T1 atlas revisor-1 2>&1)"; rc=$?
+assert_eq 0 "$rc" "--rebase --renew: exit 0"
+assert_eq "PENDING_REVIEWER" "$(jq -r .verdict "$V")" "--renew: el re-scaffold real ocurre (PENDING_REVIEWER)"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --renew T1 atlas 2>&1)"; rc=$?
+assert_eq 1 "$rc" "--renew sin --rebase: exit 1"
+
+echo
+echo "── --merge-qa: la fusión es un comando, no prosa (mata el tercer SHA)"
+HEADQ="$(git -C "$WT1" rev-parse HEAD)"
+VPID="$(jq -r .patch_id "$V")"
+
+# qa determinista del MISMO commit: fusiona qa + su evidencia
+mk_ev EV-TEST-qa000000001 qa test "$HEADQ"
+jq -n --arg c "$HEADQ" '{schema:1, task_id:"T1", repo:"atlas", qa:"pass",
+  commit:$c, evidence:["EV-TEST-qa000000001"], notes:"flujo ejercitado"}' \
+  > "$WS/tasks/T1/qa-atlas.json"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --merge-qa T1 atlas 2>&1)"; rc=$?
+assert_eq 0 "$rc" "merge-qa mismo commit: exit 0"
+assert_eq "pass" "$(jq -r .qa "$V")" "qa fusionado"
+assert_contains "$(jq -c .evidence "$V")" "EV-TEST-qa000000001" "la evidencia de QA se apendea"
+assert_eq "flujo ejercitado" "$(jq -r .qa_notes "$V")" "las notas viajan a qa_notes"
+assert_eq "PENDING_REVIEWER" "$(jq -r .verdict "$V")" "los campos de JUICIO quedan intactos"
+
+# idempotencia a bytes
+h1="$(shasum "$V" | cut -d' ' -f1)"
+bash "$WS/scripts/verdict-scaffold.sh" --merge-qa T1 atlas >/dev/null 2>&1
+h2="$(shasum "$V" | cut -d' ' -f1)"
+assert_eq "$h1" "$h2" "segunda corrida: byte-idéntico (idempotente)"
+
+# QA de OTRO sha del MISMO cambio: liga por patch_id del EV sellado
+OTHER_SHA="1111111111111111111111111111111111111111"
+jq -n --arg id EV-TEST-qaequiv0001 --arg c "$OTHER_SHA" --arg p "$VPID" \
+  '{schema:1, id:$id, task_id:"T1", repo:"atlas", kind:"test", runner:"qa",
+    commit:$c, commit_after:$c, exit_code:0, patch_id:$p,
+    output:("evidence/"+$id+".log"), output_sha256:"deadbeef"}' \
+  > "$WS/tasks/T1/evidence/EV-TEST-qaequiv0001.json"
+jq -n --arg c "$OTHER_SHA" '{schema:1, task_id:"T1", repo:"atlas", qa:"pass",
+  commit:$c, evidence:["EV-TEST-qaequiv0001"]}' > "$WS/tasks/T1/qa-atlas.json"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --merge-qa T1 atlas 2>&1)"; rc=$?
+assert_eq 0 "$rc" "QA de otro sha con EV del MISMO cambio: fusiona por equivalencia"
+
+# discrepancia REAL: otro commit sin ningún EV que los ligue → exit 3
+jq -n --arg c "$OTHER_SHA" '{schema:1, task_id:"T1", repo:"atlas", qa:"pass",
+  commit:$c, evidence:[]}' > "$WS/tasks/T1/qa-atlas.json"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --merge-qa T1 atlas 2>&1)"; rc=$?
+assert_eq 3 "$rc" "commits distintos sin EV que los ligue: exit 3"
+assert_contains "$out" "re-corre QA" "con la remediación exacta"
+
+# EV citado por QA de OTRO cambio → exit 3 nombrando la causa
+jq -n --arg id EV-TEST-qaotro00001 --arg c "$OTHER_SHA" \
+  '{schema:1, id:$id, task_id:"T1", repo:"atlas", kind:"test", runner:"qa",
+    commit:$c, commit_after:$c, exit_code:0, patch_id:"OTRO-CAMBIO",
+    output:("evidence/"+$id+".log"), output_sha256:"deadbeef"}' \
+  > "$WS/tasks/T1/evidence/EV-TEST-qaotro00001.json"
+jq -n --arg c "$OTHER_SHA" '{schema:1, task_id:"T1", repo:"atlas", qa:"pass",
+  commit:$c, evidence:["EV-TEST-qaotro00001"]}' > "$WS/tasks/T1/qa-atlas.json"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --merge-qa T1 atlas 2>&1)"; rc=$?
+assert_eq 3 "$rc" "EV de QA de OTRO cambio: exit 3"
+assert_contains "$out" "OTRO cambio" "nombra la causa"
+
+# exclusión de flags y qa:"fail" también mecánico
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --merge-qa --force T1 atlas 2>&1)"; rc=$?
+assert_eq 1 "$rc" "--merge-qa --force: exit 1"
+jq -n --arg c "$HEADQ" '{schema:1, task_id:"T1", repo:"atlas", qa:"fail",
+  commit:$c, evidence:["EV-TEST-qa000000001"]}' > "$WS/tasks/T1/qa-atlas.json"
+bash "$WS/scripts/verdict-scaffold.sh" --merge-qa T1 atlas >/dev/null 2>&1
+assert_eq "fail" "$(jq -r .qa "$V")" "qa fail se fusiona igual de mecánico"
 
 t_done

@@ -56,6 +56,21 @@ plan-lint: ## el plan es ejecutable o no es plan: make plan-lint TASK=<id>
 ship: ## gates + push: make ship TASK=<id> REPO=<repo>
 	@bash scripts/ship.sh $(TASK) $(REPO)
 
+ship-wave: ## la tarea entera en orden del DAG: make ship-wave TASK=<id> [ARGS='--from <repo>']
+	@bash scripts/ship-wave.sh $(TASK) $(ARGS)
+
+secrets-doctor: ## lo que los repos requieren vs lo que secrets.sh provee
+	@bash scripts/secrets.sh doctor
+
+forwards: ## levanta/relanza los port-forwards declarados (answers: port_forwards)
+	@bash scripts/with-secrets.sh bash scripts/port-forwards.sh ensure
+
+forwards-status: ## estado + sonda de IDENTIDAD de cada forward
+	@bash scripts/port-forwards.sh status
+
+forwards-down: ## baja todos los forwards supervisados
+	@bash scripts/port-forwards.sh down
+
 watch: ## vigila el deploy: make watch TASK=<id> REPO=<repo>
 	@bash scripts/with-secrets.sh bash scripts/deploy-watch.sh $(TASK) $(REPO)
 
@@ -77,4 +92,4 @@ ui-bg: ## panel en background (para VPS/ssh): arranca el daemon y sale; make ui-
 ui-stop: ## baja el daemon del panel
 	@fuser -k $(if $(PORT),$(PORT),7180)/tcp 2>/dev/null && echo "panel detenido" || echo "no había panel corriendo"
 
-.PHONY: help init doctor secrets wt wt-rm gowork py fe ship watch bug bugs usage ui ui-bg ui-stop
+.PHONY: help init version verify-update doctor secrets secrets-doctor models pull skills graph wt wt-rm gowork py fe precheck plan-lint ship ship-wave forwards forwards-status forwards-down watch bug bugs usage ui ui-bg ui-stop

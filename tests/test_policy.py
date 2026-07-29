@@ -842,6 +842,238 @@ class PolicyTest(unittest.TestCase):
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
         )
 
+    # ── la ENTREGA: un dato que declara la invocación, no una pregunta al final ──
+    # Caso de campo: el agente terminaba de implementar y preguntaba en el chat
+    # "no commiteé ni shippeé, ¿lo llevo por /review + ship?". La respuesta ya
+    # estaba dada cuando se abrió la tarea; lo que faltaba era escribirla donde
+    # los gates la puedan leer, y que subirla sea una transición con actor.
+
+    def init_with(self, delivery, task=None):
+        task = self.task if task is None else task
+        created = self.run_policy("init", task, "--delivery", delivery)
+        self.assertEqual(created.returncode, 0, created.stderr)
+        return task
+
+    def state_of(self, task):
+        return json.loads((Path(task) / "state.json").read_text())
+
+    def test_init_records_the_declared_delivery(self):
+        for mode in ("review", "prs", "trunk"):
+            with self.subTest(delivery=mode):
+                task = Path(self.tmp.name) / f"AUTO-20260728-{mode}"
+                created = self.run_policy("init", task, "--delivery", mode)
+                self.assertEqual(created.returncode, 0, created.stderr)
+                self.assertEqual(self.state_of(task)["delivery"], mode)
+                self.assertIn(f"delivery={mode}", created.stdout)
+
+    def test_a_task_without_delivery_keeps_todays_conduct(self):
+        # compat: sin campo, ship usa el flow del workspace y nada cambia para
+        # las tareas viejas ni para /quick
+        self.assertEqual(self.run_policy("init", self.task).returncode, 0)
+        self.assertNotIn("delivery", self.state())
+        for phase in ("rfc", "implement", "review"):
+            self.assertEqual(self.transition(phase).returncode, 0)
+        commit = "e" * 40
+        ok = self.run_policy("validate-ship", self.task, "--commit", commit,
+                             "--verdict", self.valid_verdict(commit))
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+
+    def test_init_refuses_an_entrega_nobody_implements(self):
+        task = Path(self.tmp.name) / "AUTO-20260728-entrega-rara"
+        refused = self.run_policy("init", task, "--delivery", "main")
+        self.assertEqual(refused.returncode, 3)
+        self.assertIn("POLICY-DELIVERY-001", refused.stderr)
+        for valid in ("review", "prs", "trunk"):
+            self.assertIn(valid, refused.stderr)      # el error dice cuáles sirven
+        self.assertFalse((task / "state.json").exists())   # sin estado a medias
+
+    def test_delivery_only_promotes_towards_publication(self):
+        for origin, target in (("review", "prs"), ("review", "trunk"),
+                               ("prs", "trunk")):
+            with self.subTest(promocion=f"{origin}->{target}"):
+                task = self.init_with(
+                    origin, Path(self.tmp.name) / f"AUTO-sube-{origin}-{target}")
+                done = self.run_policy("delivery", task, "--to", target,
+                                       "--actor", "andres")
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual(self.state_of(task)["delivery"], target)
+                mode = self.run_policy("delivery-mode", task)
+                self.assertEqual(mode.stdout.strip(), target)
+
+    def test_delivery_never_degrades(self):
+        # bajar el campo no despublica una rama, un PR ni un commit en la trunk:
+        # solo deja el state.json mintiendo sobre lo que hay afuera
+        for origin, target in (("trunk", "prs"), ("trunk", "review"),
+                               ("prs", "review"), ("review", "review"),
+                               ("prs", "prs")):
+            with self.subTest(retroceso=f"{origin}->{target}"):
+                task = self.init_with(
+                    origin, Path(self.tmp.name) / f"AUTO-baja-{origin}-{target}")
+                refused = self.run_policy("delivery", task, "--to", target,
+                                          "--actor", "andres")
+                self.assertEqual(refused.returncode, 3, refused.stdout)
+                self.assertIn("POLICY-DELIVERY-002", refused.stderr)
+                self.assertIn("no se despublica", refused.stderr)
+                state = self.state_of(task)
+                self.assertEqual(state["delivery"], origin)   # el campo, intacto
+                self.assertEqual(state["history"], [])        # y sin registro falso
+
+    def test_delivery_to_an_unknown_target_is_typed(self):
+        task = self.init_with("review")
+        refused = self.run_policy("delivery", task, "--to", "main", "--actor", "andres")
+        self.assertEqual(refused.returncode, 3)
+        self.assertIn("POLICY-DELIVERY-001", refused.stderr)
+        self.assertIn("prs", refused.stderr)
+        self.assertIn("trunk", refused.stderr)
+
+    def test_delivery_refuses_a_task_that_never_declared_one(self):
+        # sin peldaño de origen no hay promoción posible: declarar uno ahora
+        # podría BAJAR lo que el flow del workspace ya prometía
+        self.assertEqual(self.run_policy("init", self.task).returncode, 0)
+        refused = self.run_policy("delivery", self.task, "--to", "trunk",
+                                  "--actor", "andres")
+        self.assertEqual(refused.returncode, 3)
+        self.assertIn("POLICY-DELIVERY-004", refused.stderr)
+        self.assertNotIn("delivery", self.state())
+        # y hacia review no se promueve NUNCA, declare lo que declare la tarea:
+        # review es el peldaño más bajo de la escalera
+        down = self.run_policy("delivery", self.task, "--to", "review",
+                               "--actor", "andres")
+        self.assertEqual(down.returncode, 3)
+        self.assertIn("POLICY-DELIVERY-002", down.stderr)
+        self.assertNotIn("delivery", self.state())
+
+    def test_the_go_leaves_who_authorised_it_and_why(self):
+        task = self.init_with("review")
+        done = self.run_policy("delivery", task, "--to", "trunk", "--actor", "andres",
+                               "--reason", "el owner lo pidió tras leer el diff")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        entry = self.state_of(task)["history"][-1]
+        self.assertEqual(entry["kind"], "delivery")
+        self.assertEqual(entry["delivery"], "review→trunk")
+        self.assertEqual(entry["actor"], "andres")
+        self.assertEqual(entry["reason"], "el owner lo pidió tras leer el diff")
+        self.assertIn("andres", done.stdout)
+
+    def test_the_go_is_visible_in_the_bus_as_a_decision(self):
+        # autorizar publicar es gobierno, no telemetría de fase: va al bus como
+        # decision, que es lo que el panel enseña
+        ws = Path(self.tmp.name)
+        task = ws / "tasks" / "AUTO-20260728-entrega-bus"
+        task.mkdir(parents=True)
+        (ws / "scripts").mkdir(exist_ok=True)
+        import shutil as _sh
+        _sh.copy(ROOT / "templates/scripts/emit.sh", ws / "scripts/emit.sh")
+        self.assertEqual(self.run_policy("init", task, "--delivery", "review").returncode, 0)
+        self.assertEqual(self.run_policy("delivery", task, "--to", "prs",
+                                         "--actor", "andres").returncode, 0)
+        bus = (ws / ".harness/events.jsonl").read_text()
+        self.assertIn('"decision"', bus)
+        self.assertIn("entrega", bus)
+        self.assertIn("prs", bus)
+
+    def test_delivery_mode_answers_in_one_line_and_invents_no_default(self):
+        task = self.init_with("prs")
+        declared = self.run_policy("delivery-mode", task)
+        self.assertEqual(declared.returncode, 0, declared.stderr)
+        self.assertEqual(declared.stdout.strip(), "prs")
+        # sin campo: la palabra que manda al caller al flow del workspace
+        plain = Path(self.tmp.name) / "AUTO-20260728-sin-entrega"
+        self.assertEqual(self.run_policy("init", plain).returncode, 0)
+        compat = self.run_policy("delivery-mode", plain)
+        self.assertEqual(compat.returncode, 0, compat.stderr)
+        self.assertEqual(compat.stdout.strip(), "flow")
+        # el tercer estado: no poder mirar NO es "flow"
+        (plain / "state.json").write_text("{esto no es json")
+        broken = self.run_policy("delivery-mode", plain)
+        self.assertEqual(broken.returncode, 3, broken.stdout)
+        self.assertIn("POLICY-SCHEMA-001", broken.stderr)
+        self.assertEqual(broken.stdout.strip(), "")
+
+    def test_an_unreadable_delivery_is_never_read_as_the_workspace_flow(self):
+        task = self.init_with("review")
+        state = self.state_of(task)
+        state["delivery"] = "main"          # state.json editado a mano
+        (Path(task) / "state.json").write_text(json.dumps(state))
+        mode = self.run_policy("delivery-mode", task)
+        self.assertEqual(mode.returncode, 3, mode.stdout)
+        self.assertIn("POLICY-DELIVERY-001", mode.stderr)
+        self.assertEqual(mode.stdout.strip(), "")
+
+    def test_ship_refuses_a_task_whose_entrega_is_review(self):
+        self.init_with("review")
+        for phase in ("rfc", "implement", "review"):
+            self.assertEqual(self.transition(phase).returncode, 0)
+        commit = "f" * 40
+        verdict = self.valid_verdict(commit)
+        blocked = self.run_policy("validate-ship", self.task, "--commit", commit,
+                                  "--verdict", verdict)
+        self.assertEqual(blocked.returncode, 3)
+        self.assertIn("POLICY-DELIVERY-003", blocked.stderr)
+        self.assertIn(f"delivery tasks/{self.task.name}", blocked.stderr)
+        self.assertIn("--to prs|trunk", blocked.stderr)   # el camino exacto
+        # el "go", y el MISMO veredicto ya pasa: lo que faltaba era la
+        # autorización, no una verificación
+        go = self.run_policy("delivery", self.task, "--to", "prs",
+                             "--actor", "andres", "--reason", "revisado en vivo")
+        self.assertEqual(go.returncode, 0, go.stderr)
+        ok = self.run_policy("validate-ship", self.task, "--commit", commit,
+                             "--verdict", verdict)
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+
+    def test_prs_and_trunk_ship_without_asking_anything(self):
+        for mode in ("prs", "trunk"):
+            with self.subTest(delivery=mode):
+                task = Path(self.tmp.name) / f"AUTO-20260728-ship-{mode}"
+                task.mkdir()
+                self.assertEqual(self.run_policy("init", task,
+                                                 "--delivery", mode).returncode, 0)
+                for phase in ("rfc", "implement", "review"):
+                    self.assertEqual(self.run_policy(
+                        "transition", task, phase, "--actor", "orch").returncode, 0)
+                commit = "9" * 40
+                verdict = task / "verdict-atlas.json"
+                verdict.write_text(json.dumps({
+                    "schema": 1, "commit": commit, "verdict": "pass", "qa": "pass",
+                    "reviewer": "reviewer-atlas", "implementation_agents": ["agent-a"],
+                }))
+                ok = self.run_policy("validate-ship", task, "--commit", commit,
+                                     "--verdict", verdict)
+                self.assertEqual(ok.returncode, 0, ok.stderr)
+
+    def test_a_delivery_entry_neither_forges_nor_masks_a_phase(self):
+        # history[] es un control, no prosa: la entrada de entrega NO es un
+        # movimiento de fase (si contara, validate-ship acusaría de edición a
+        # mano a quien usó el CLI), y tampoco puede tapar una edición de verdad
+        self.init_with("review")
+        for phase in ("rfc", "implement", "review", "ship"):
+            self.assertEqual(self.transition(phase).returncode, 0)
+        self.assertEqual(self.run_policy("delivery", self.task, "--to", "trunk",
+                                         "--actor", "andres").returncode, 0)
+        self.assertEqual(self.state()["phase"], "ship")   # la fase no se movió
+        commit = "1" * 40
+        verdict = self.valid_verdict(commit)
+        state = self.state()
+        state["phase"] = "review"          # la edición a mano de siempre
+        (self.task / "state.json").write_text(json.dumps(state))
+        forged = self.run_policy("validate-ship", self.task, "--commit", commit,
+                                 "--verdict", verdict)
+        self.assertEqual(forged.returncode, 3)
+        self.assertIn("POLICY-STATE-003", forged.stderr)
+
+    def test_a_history_entry_that_is_not_a_movement_still_smells_like_a_hand_edit(self):
+        # el salteo de las entradas kind=delivery no puede volverse un colador:
+        # lo que NO es un objeto sigue delatando la edición a mano de siempre
+        self.reach("rfc", "implement", "review")
+        state = self.state()
+        state["history"].append("shippeado a mano")
+        (self.task / "state.json").write_text(json.dumps(state))
+        commit = "2" * 40
+        forged = self.run_policy("validate-ship", self.task, "--commit", commit,
+                                 "--verdict", self.valid_verdict(commit))
+        self.assertEqual(forged.returncode, 3)
+        self.assertIn("POLICY-STATE-003", forged.stderr)
+
     def test_dag_rejects_cycles_and_accepts_parallel_branches(self):
         dag = self.task / "dag.json"
         dag.write_text(json.dumps({"schema": 1, "tasks": [

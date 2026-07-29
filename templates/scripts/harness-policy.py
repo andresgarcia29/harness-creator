@@ -133,12 +133,56 @@ def phase_is_declared(state: dict, policy: dict) -> bool:
     rollback) hace append a `history`, así que el invariante es: o la tarea
     nunca se movió y sigue en initial_phase, o history[-1].to == phase. Una
     edición a mano de state.json rompe el invariante y por eso se detecta:
-    el `history` dejó de ser prosa y pasó a ser un control."""
+    el `history` dejó de ser prosa y pasó a ser un control.
+
+    Las entradas kind=delivery NO son movimientos de fase: promover la entrega
+    no mueve la tarea de fase. Se saltean para buscar el último movimiento real,
+    porque si contaran, un `delivery --to prs` en fase review dejaría un
+    history[-1].to inexistente y validate-ship acusaría de edición a mano a
+    quien usó el CLI. El resto de la regla queda igual: una entrada que no es
+    un objeto sigue delatando la edición manual."""
     history = state.get("history")
-    if not isinstance(history, list) or not history:
+    if not isinstance(history, list):
+        history = []
+    moves = [e for e in history
+             if not (isinstance(e, dict) and e.get("kind") == "delivery")]
+    if not moves:
         return state.get("phase") == policy.get("workflow", {}).get("initial_phase")
-    last = history[-1]
+    last = moves[-1]
     return isinstance(last, dict) and last.get("to") == state.get("phase")
+
+
+# ENTREGA: qué se publica al final del run, DECLARADO por el comando que abrió
+# la tarea, no preguntado en el chat al terminar. El vocabulario es el mismo de
+# `flow` (harness-answers.yaml) a propósito: una sola palabra para una sola
+# idea. El orden de la tupla ES la escalera de publicación, y cada peldaño
+# publica más que el anterior:
+#   review → no se publica nada (commits locales del worktree sí; push, PR y
+#            trunk jamás). Es donde termina /smart si nadie autoriza más.
+#   prs    → rama publicada y PR abierto.
+#   trunk  → ship directo a la trunk.
+# AUSENTE en state.json es el cuarto caso y NO es un peldaño: significa que la
+# tarea es de antes de esta decisión (o de /quick), y entonces ship usa el flow
+# del workspace, como siempre.
+DELIVERY_MODES = ("review", "prs", "trunk")
+
+
+def delivery_of(state: dict) -> "str | None":
+    """La entrega declarada en state.json, o None si la tarea no declara ninguna.
+
+    Un valor fuera del catálogo muere tipado: es state.json editado a mano, y
+    adivinar (o caer al flow del workspace) convertiría una entrega ilegible en
+    una publicación que nadie autorizó."""
+    value = state.get("delivery")
+    if value is None:
+        return None
+    if value not in DELIVERY_MODES:
+        fail("POLICY-DELIVERY-001",
+             f"entrega desconocida en state.json: {value!r} "
+             f"(válidas: {', '.join(DELIVERY_MODES)}). No puedo tratar una "
+             "entrega ilegible como 'sin declarar': eso publicaría por el flow "
+             "del workspace algo que quizá se declaró como review")
+    return value
 
 
 def repos_pending_ship(task_dir: Path) -> list:
@@ -449,6 +493,12 @@ def cmd_init(args: argparse.Namespace) -> int:
         fail("POLICY-SCHEMA-003", "policy requiere schema: 1")
     if args.budget_usd is not None and (not math.isfinite(args.budget_usd) or args.budget_usd <= 0):
         fail("POLICY-BUDGET-003", "budget_usd debe ser finito y mayor que cero")
+    if args.delivery is not None and args.delivery not in DELIVERY_MODES:
+        fail("POLICY-DELIVERY-001",
+             f"entrega desconocida: {args.delivery} "
+             f"(válidas: {', '.join(DELIVERY_MODES)}). review no publica nada "
+             "(commits locales del worktree sí; push, PR y trunk jamás), prs "
+             "publica la rama y abre el PR, trunk shippea a la trunk")
     known_lanes = policy.get("workflow", {}).get("lanes", {"full": {}})
     if args.lane not in known_lanes:
         fail("POLICY-LANE-001", f"carril desconocido: {args.lane} (permitidos: {sorted(known_lanes)})")
@@ -497,8 +547,14 @@ def cmd_init(args: argparse.Namespace) -> int:
     }
     if repos:
         state["repos"] = repos
+    # El campo solo existe si el comando lo declaró: una tarea SIN delivery es
+    # la compatibilidad (ship usa el flow del workspace, como siempre), y
+    # escribir un default acá se la comería en silencio.
+    if args.delivery is not None:
+        state["delivery"] = args.delivery
     atomic(path, state)
-    print(f"✅ {task_dir.name}: phase={state['phase']} lane={args.lane}")
+    print(f"✅ {task_dir.name}: phase={state['phase']} lane={args.lane}"
+          + (f" delivery={args.delivery}" if args.delivery is not None else ""))
     return 0
 
 
@@ -541,6 +597,86 @@ def cmd_escalate(args: argparse.Namespace) -> int:
     atomic(path, state)
     emit_bus(task_dir, "decision", f"carril {current_lane} → {args.to}: vuelve a {destination}")
     print(f"⤴️  {task_dir.name}: carril {current_lane} → {args.to}, fase {destination}")
+    return 0
+
+
+def cmd_delivery(args: argparse.Namespace) -> int:
+    """El "go" del humano, tipado: promueve la entrega declarada de la tarea.
+
+    POR QUÉ EXISTE: la entrega la declara la invocación (/smart abre en review,
+    /smart-pr en prs, /smart-main en trunk), así que preguntar en el chat "¿lo
+    llevo a main?" al terminar es preguntar algo YA contestado. Lo que sí puede
+    cambiar después es la decisión del humano, y esa autorización no puede vivir
+    en una frase de chat: se ejecuta acá y queda en history[] con actor, o no
+    ocurrió.
+
+    SOLO SUBE. Degradar la entrega no es una decisión simétrica: `prs` y `trunk`
+    ya PUBLICARON (rama, PR o commits en la trunk) y bajar el campo no
+    despublica nada, solo deja el state.json mintiendo sobre lo que hay afuera.
+    Para no publicar, no se publica: se deja la tarea en review y se termina
+    ahí, que es un final legítimo y no un error."""
+    task_dir = Path(args.task_dir).resolve()
+    path = state_path(task_dir)
+    if args.to not in DELIVERY_MODES:
+        fail("POLICY-DELIVERY-001",
+             f"entrega desconocida: {args.to} "
+             f"(promovibles: {', '.join(DELIVERY_MODES[1:])}). prs publica la "
+             "rama y abre el PR; trunk shippea a la trunk")
+    if args.to == "review":
+        fail("POLICY-DELIVERY-002",
+             "la entrega no se degrada: una tarea ya publicada no se despublica; "
+             "para no publicar, no la publiques. review es el peldaño más bajo, "
+             "así que nada se 'promueve' hacia él: si querés que esta tarea no "
+             "salga, dejala donde está y no corras ship.sh")
+    lock_state(task_dir)
+    state = load(path, "estado")
+    current = delivery_of(state)
+    if current is None:
+        fail("POLICY-DELIVERY-004",
+             f"tasks/{task_dir.name}/state.json no declara entrega: esta tarea "
+             "corre con el flow del workspace (compatibilidad), o sea que no hay "
+             "peldaño desde el cual promover y declarar uno ahora podría BAJAR lo "
+             "que el flow ya prometía. Si querés una entrega tipada, abrí la tarea "
+             "con el comando que la declara (/smart, /smart-pr, /smart-main) o con "
+             "'harness-policy.py init --delivery'")
+    if DELIVERY_MODES.index(args.to) <= DELIVERY_MODES.index(current):
+        fail("POLICY-DELIVERY-002",
+             f"la entrega no se degrada: una tarea ya publicada no se despublica; "
+             f"para no publicar, no la publiques. Esta tarea está en "
+             f"{current} y pediste {args.to}"
+             + ("" if current != args.to else " (ya está ahí: no hay nada que promover)"))
+    state["delivery"] = args.to
+    # kind=delivery: NO es un movimiento de fase, y phase_is_declared lo saltea
+    # justamente por eso. Lo que registra es QUIÉN autorizó publicar más.
+    state.setdefault("history", []).append({
+        "kind": "delivery", "delivery": f"{current}→{args.to}",
+        "actor": args.actor, "reason": args.reason,
+    })
+    atomic(path, state)
+    emit_bus(task_dir, "decision",
+             f"entrega {current} → {args.to} (autoriza {args.actor})"
+             + (f": {args.reason}" if args.reason else ""))
+    print(f"🚦 {task_dir.name}: entrega {current} → {args.to} "
+          f"(autoriza {args.actor})")
+    return 0
+
+
+def cmd_delivery_mode(args: argparse.Namespace) -> int:
+    """El modo EFECTIVO de entrega en una línea, para que nadie parsee state.json.
+
+    Mismo motivo que lane-limits: harness-policy.py es LA autoridad sobre el
+    estado de la tarea, y un `jq .delivery` en ship.sh sería una segunda lectura
+    del mismo dato justo en el gate que decide si algo se publica.
+
+    Contrato para quien lo consume, con los tres estados separados:
+      · `review|prs|trunk` + exit 0: la tarea DECLARÓ su entrega y manda ella.
+      · `flow` + exit 0: no declara ninguna, y el caller usa el flow del
+        workspace (las tareas viejas y /quick no cambian de conducta).
+      · exit 3: no pude mirar (state ilegible o entrega fuera del catálogo), y
+        eso no se puede leer como `flow`."""
+    task_dir = Path(args.task_dir).resolve()
+    state = load(state_path(task_dir), "estado")
+    print(delivery_of(state) or "flow")
     return 0
 
 
@@ -1022,6 +1158,20 @@ def cmd_validate_ship(args: argparse.Namespace) -> int:
              f"phase={state.get('phase')} no corresponde al último movimiento registrado "
              f"({last}): state.json se editó a mano. Reconstruye el movimiento con "
              "'harness-policy.py rollback|transition', que deja registro en history[]")
+    # La entrega se comprueba ANTES que el veredicto: con delivery=review no hay
+    # publicación que validar, y leer el verdict para negarse igual solo cambia
+    # el motivo del rojo por uno que no es el verdadero.
+    delivery = delivery_of(state)
+    if delivery == "review":
+        fail("POLICY-DELIVERY-003",
+             f"esta tarea declaró entrega review: no se publica nada (los commits "
+             f"locales del worktree sí; push, PR y trunk jamás), así que no hay "
+             f"ship que validar. La autorización para publicar es una transición "
+             f"auditable, no una frase en el chat: "
+             f"'scripts/harness-policy.py delivery tasks/{task_dir.name} "
+             f"--to prs|trunk --actor <quien-autoriza>' y volvé a correr ship.sh. "
+             f"Si nadie la promueve, la tarea termina en review y ese es el "
+             f"resultado correcto")
     maximum = policy.get("limits", {}).get("max_review_rounds", 3)
     if not isinstance(state.get("review_rounds"), int) or state["review_rounds"] > maximum:
         fail("POLICY-LIMIT-001", "review_rounds inválido o excedido")
@@ -1068,6 +1218,12 @@ def build_parser() -> argparse.ArgumentParser:
                       help="repos de la tarea separados por coma; habilita el "
                            "chequeo carril vs kind (manifest.yaml) y queda en "
                            "state.repos")
+    # Sin choices= a propósito: argparse mataría con exit 2 y un mensaje suyo,
+    # y el contrato de este CLI es un código tipado con la remediación adentro.
+    init.add_argument("--delivery", default=None,
+                      help="qué se publica al terminar: review (nada), prs "
+                           "(rama + PR) o trunk (ship a la trunk). Ausente = la "
+                           "tarea usa el flow del workspace, como siempre")
     init.set_defaults(func=cmd_init)
     escalate = sub.add_parser("escalate")
     escalate.add_argument("task_dir")
@@ -1089,6 +1245,19 @@ def build_parser() -> argparse.ArgumentParser:
     rollback.add_argument("--actor", required=True)
     rollback.add_argument("--reason", required=True)
     rollback.set_defaults(func=cmd_rollback)
+    deliv = sub.add_parser("delivery",
+                           help="promueve la entrega declarada de la tarea "
+                                "(review → prs → trunk): el 'go' auditable")
+    deliv.add_argument("task_dir")
+    deliv.add_argument("--to", required=True)
+    deliv.add_argument("--actor", required=True)
+    deliv.add_argument("--reason", default="")
+    deliv.set_defaults(func=cmd_delivery)
+    dmode = sub.add_parser("delivery-mode",
+                           help="entrega efectiva en una línea: review|prs|trunk, "
+                                "o 'flow' si la tarea no declara ninguna")
+    dmode.add_argument("task_dir")
+    dmode.set_defaults(func=cmd_delivery_mode)
     pause = sub.add_parser("pause")
     pause.add_argument("task_dir")
     pause.add_argument("--reason", required=True)

@@ -48,15 +48,13 @@ MISMA ley, entres por donde entres. Cuerpos abreviados: el largo, allá.
    reportes, commits, specs): delata texto de IA, usa coma, dos puntos o
    paréntesis. *Style rule: never write the em dash in any produced text;
    it reads as AI-generated.*
-12. **Un bug del HARNESS se verifica y se reporta upstream, siempre.** Si
-   un artefacto del PLUGIN (`scripts/`, `.claude/hooks/`, comandos, gates,
-   panel, cronjobs, en su repo aparte) falla o contradice lo que su propia
-   cabecera documenta: repro mínimo dos veces con `bash -c`, descartá que
-   sea tu personalización o una versión atrasada, y corré
-   `scripts/harness-bug.sh report --title … --file … --repro … --impact …`
-   (verifica, redacta secretos, deduplica y levanta el issue en el repo del
-   plugin). Lo que falla en tu código o tu configuración NO va upstream, y
-   un workaround silencioso es deuda para todos los demás. Protocolo:
+12. **Un bug del HARNESS se verifica y se reporta upstream, siempre.** Si un artefacto
+   del PLUGIN (`scripts/`, `.claude/hooks/`, comandos, gates, panel, cronjobs, en su
+   repo aparte) falla o contradice lo que su propia cabecera documenta: repro mínimo dos
+   veces con `bash -c`, descartá que sea tu personalización o una versión atrasada, y
+   corré `scripts/harness-bug.sh report --title … --file … --repro … --impact …`
+   (verifica, redacta secretos, deduplica y levanta el issue). Lo que falla en TU código
+   NO va upstream y un workaround silencioso es deuda de todos. Protocolo:
    `.claude/skills/harness-bug-report/SKILL.md`.
 13. **Un repo ARCHIVADO en el forge se ignora SIEMPRE.** No entra al
    grafo, ni al inventario, ni a los briefs, ni lo cites como referencia:
@@ -75,27 +73,26 @@ MISMA ley, entres por donde entres. Cuerpos abreviados: el largo, allá.
    Si el único camino corto rompe una ley de este archivo, lo que falta es
    un camino legítimo en el harness: eso es un bug (Ley 12), no un permiso.
 
-Estas dos no están numeradas en `CLAUDE.md` (viven allí como sección), así
-que aquí tampoco: un número inventado manda a la ley equivocada.
+Estas dos no se numeran (en `CLAUDE.md` viven como sección) y el doctor caza
+al que les invente un número: mandaría a la ley equivocada.
 
 - **Secretos**: sus valores jamás tocan chat, commits ni logs. Solo
   `scripts/with-secrets.sh <cmd>` inyecta; `.secrets` no se lee ni se
   imprime.
-- **Fases de la tarea**: las mueve `scripts/harness-policy.py`
-  (`transition`, `pause`, `escalate`, `rollback`); el estado vive en
-  `tasks/<id>/state.json` y no se edita a mano. ¿Avanzaste una fase por
+- **Fases y entrega de la tarea**: las mueve `scripts/harness-policy.py`
+  (`transition`, `pause`, `escalate`, `rollback`, `delivery`); el estado vive
+  en `tasks/<id>/state.json` y no se edita a mano. ¿Avanzaste una fase por
   error? El camino de vuelta es
   `harness-policy.py rollback <task-dir> <fase> --actor <quien> --reason <por qué>`:
   solo va hacia atrás, no cobra una ronda de review y deja registro en
   `history[]`. Editarlo a mano no es "lo mismo pero rápido": `validate-ship`
-  compara `phase` contra el último movimiento registrado y una fase que
-  nadie declaró muere en `POLICY-STATE-003`.
+  compara `phase` contra el último movimiento registrado y una fase que nadie
+  declaró muere en `POLICY-STATE-003`.
 
-⚠️ **Enforcement por herramienta**: en Claude Code, hooks locales
-(`.claude/hooks/`) bloquean el push directo y la edición de `repos/`
-ANTES de que ocurran. En otras herramientas esos hooks NO corren: las
-leyes siguen siendo obligatorias, pero el freno automático local no
-existe: actívale branch protection a `main` en el remoto como red
+⚠️ **Enforcement por herramienta**: en Claude Code, hooks locales (`.claude/hooks/`)
+bloquean el push directo y la edición de `repos/` ANTES de que ocurran. En otras
+herramientas esos hooks NO corren: las leyes siguen siendo obligatorias, pero el freno
+automático local no existe: actívale branch protection a `main` en el remoto como red
 equivalente, y trata las leyes 1 y 4 como si el hook estuviera mirando.
 
 ## El pipeline (y cómo correrlo sin Claude Code)
@@ -106,6 +103,10 @@ tu herramienta no soporta slash-commands, abre el archivo y sigue sus pasos.
 - `smart.md`: el pipeline completo (ticket o prompt → producción): intake →
   carril → [rfc] → implement → review → ship → deploy → archive. El `auto.md`
   que sobrevive un ciclo solo redirige aquí: está deprecado.
+- La ENTREGA la declara la invocación (`delivery` en `state.json`): `smart.md` no
+  publica, `smart-pr.md` deja rama y PR, `smart-main.md` aterriza en main. El go
+  posterior es `harness-policy.py delivery <task-dir> --to prs|trunk`; pedir permiso
+  para commitear o publicar está PROHIBIDO. Sin campo, ship usa el `flow` del workspace.
 - `rfc.md`, `implement.md`, `review.md`, `ship.md`, `archive.md`: las
   fases sueltas. `feature.md` = intake con humano.
 - `quick.md`: carril quick (1 repo, cambio chico): cero deliberación, mismos gates.
@@ -120,12 +121,11 @@ matchee tu tarea. `skill-creator/SKILL.md` es la guía para crear nuevas.
 
 ## Modelos: una sola perilla
 
-`models.yaml` es la única fuente: aliases `fast | smart | deep` por
-proveedor (`anthropic | vertex | bedrock | kimi | openrouter`), rol →
-alias, y overrides por agente. Cambiar modelo o proveedor = editar UNA
-línea + `make models`. Para resolver un alias al ID real de tu
-proveedor: `scripts/stamp-models.sh resolve <alias|rol>`. Por tarea:
-`model: <alias>` en el frontmatter de `tasks/<id>/task.md`.
+`models.yaml` es la única fuente: aliases `fast | smart | deep` por proveedor
+(`anthropic | vertex | bedrock | kimi | openrouter`), rol → alias, y overrides por
+agente. Cambiar modelo o proveedor = editar UNA línea + `make models`. Para resolver un
+alias al ID real de tu proveedor: `scripts/stamp-models.sh resolve <alias|rol>`. Por
+tarea: `model: <alias>` en el frontmatter de `tasks/<id>/task.md`.
 
 ## Dónde está la verdad
 

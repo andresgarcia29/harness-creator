@@ -1,5 +1,5 @@
 ---
-description: Ticket o prompt → producción, sin intervención humana. Tú decides todo lo decidible; solo paras donde el DISEÑO exige un humano.
+description: Ticket o prompt → veredicto verde, sin intervención humana y sin publicar nada. Tú decides todo lo decidible; solo paras donde el DISEÑO exige un humano. Para publicar, /smart-pr o /smart-main.
 argument-hint: <TICKET-ID | url | task-id | "prompt literal entre comillas"> [--hasta rfc|implement|review|ship] [--model fast|smart|deep]
 ---
 
@@ -13,6 +13,15 @@ con el criterio del harness (constitución, specs, ADRs vigentes,
 inventario) y REGISTRAR. Preguntar aquí es un fallo de diseño, no
 prudencia. La red que te protege no es el humano: son los gates
 deterministas, el canary y el rollback.
+
+**La entrega ya está decidida, y no la decidís vos: la declaró la invocación.**
+`/smart` registra `delivery: review` en `state.json` (paso 0.2), y eso significa
+que este comando NO PUBLICA NADA. Commits locales en el worktree SÍ, y son
+obligatorios: sin ellos no hay precheck, ni evidencia sellada, ni review. Push,
+PR o trunk JAMÁS. Si el trabajo tenía que publicarse solo, la invocación era
+`/smart-pr` (rama + PR) o `/smart-main` (directo a la trunk); cambiar de entrega
+después es una transición REGISTRADA (`harness-policy.py delivery`), no una
+frase en el chat.
 
 Tú orquestas: JAMÁS implementas ni editas código tú mismo.
 
@@ -135,13 +144,24 @@ mal clasificado: escalá, no pienses más fuerte.
 
 Toda tarea nueva se inicializa una sola vez con
 `scripts/harness-policy.py init tasks/<id> --lane <express|standard|full>
---repos <repo1,repo2> [--budget-usd <valor-del-panel>]`. Los repos son los
-mismos del paso 0 que usaste para clasificar el carril: con ellos `init`
+--repos <repo1,repo2> --delivery review [--budget-usd <valor-del-panel>]`.
+
+**`--delivery review` no es un default tuyo: es lo que declara ESTE comando**, y
+por eso se registra ANTES de trabajar. El campo `delivery` de `state.json` es el
+dato tipado que gobierna la entrega, con el vocabulario del knob `flow`:
+`review` (nada se publica), `prs` (rama + PR) y `trunk` (ship a la trunk). Lo
+lee `ship.sh`, así que la declaración es ejecutable y no una intención. En una
+tarea retomada cuyo `state.json` NO trae el campo, no se lo inventes: ausente
+significa compatibilidad y el ship publica con el `flow` del workspace, como
+siempre.
+
+Los repos son los mismos del paso 0 que usaste para clasificar el carril:
+con ellos `init`
 rechaza en el acto un express que incluya un repo de infra
 (`POLICY-LANE-004`, kind `infra-module`/`infra-live` en manifest.yaml),
 ANTES de gastar un implementer en trabajo que `gate_lane` va a devolver.
-Al retomar, lee `state.json` (incluido su
-`lane`) y continúa desde su fase; no infieras la fase por conversación. Cada
+Al retomar, lee `state.json` (incluido su `lane` y su `delivery`) y continúa
+desde su fase; no infieras la fase por conversación. Cada
 avance se solicita con `scripts/harness-policy.py transition tasks/<id> <fase>
 --actor orchestrator`. Una transición rechazada es un gate: no edites
 `state.json` a mano. (El carril express permite `intake → implement`; los
@@ -314,10 +334,30 @@ Reglas del ledger, en orden de precedencia:
    por (tarea, repo): la ronda ≥2 es un mensaje al mismo agente con el delta
    que imprime el scaffold, no un lanzamiento nuevo (ver /review).
    Toda prueba que sustenta un pass usa `scripts/evidence.py run`.
-5. **Checkpoint** — SOLO si `autonomy: checkpoint` en
-   harness-answers.yaml: un resumen de 10 líneas antes del PRIMER ship
-   a main y esperas un "go". Con `autonomy: full` este paso no existe.
-6. **Ship**. Por orden del DAG, repo por repo, vía `ship.sh`. Entre
+5. **Checkpoint** (SOLO si `autonomy: checkpoint` en harness-answers.yaml): un
+   resumen de 10 líneas antes del PRIMER ship a main y esperas un "go". Con
+   `autonomy: full` este paso no existe.
+   **La entrega declarada NO deroga este knob**: `autonomy` es política del
+   WORKSPACE y `delivery` es dato de la invocación, así que el checkpoint se
+   respeta siempre, también en `/smart-pr` y en `/smart-main`: con checkpoint,
+   incluso `/smart-main` hace esta única parada legítima antes de publicar. Al
+   revés no aplica: con `delivery: review` no hay nada que publicar, esta parada
+   se queda sin objeto y el reporte final ES la entrega.
+6. **Ship, o el final del camino**. Lo primero es leer `delivery` de
+   `state.json`, ANTES de invocar nada:
+   - **`delivery: review`** (lo que registra `/smart`): el pipeline TERMINA acá,
+     con el veredicto verde y el reporte final, que lleva el bloque de entrega
+     (ver abajo). El único `ship.sh` de esta corrida es el `--precheck` del paso
+     3, que no publica nada y sí tiene que correr: es el que sella la evidencia.
+     No publiques rama, no toques la trunk, y no sigas a deploy ni a archive: no
+     hay nada aterrizado que mirar. Si igual invocás el ship, se niega y sale 8;
+     ese 8 no es un gate rojo que se autofixea, es la entrega declarada
+     funcionando.
+   - **`delivery: prs` o `delivery: trunk`** (`/smart-pr`, `/smart-main`), o el
+     campo AUSENTE en una tarea vieja (manda el `flow` del workspace): seguís
+     con el ship de siempre, que es todo lo de abajo.
+
+   Por orden del DAG, repo por repo, vía `ship.sh`. Entre
    repos NO pausas: expand/contract hace seguro el orden. Gate rojo →
    máx 2 rondas de autofix (el error del gate ES el prompt del fix).
    La transición `review → ship` **ya no la pides vos**: la registra `ship.sh`
@@ -368,6 +408,17 @@ códigos permitidos viven en `harness-policy.json`; al continuar usa `resume`,
 no edites el estado. Al cerrar cada fase registra el total monotónico de
 `ccusage` con `record-cost --total-usd <n>`; exceder presupuesto es un gate.
 
+- **PEDIR AUTORIZACIÓN PARA COMMITEAR, SHIPPEAR O PUBLICAR NO ES UNA PARADA
+  VÁLIDA**, y por eso entra en esta lista: para quedar fuera por escrito. La
+  entrega ya la declaró el comando que te lanzó y está REGISTRADA en el campo
+  `delivery` de `state.json` (paso 0.2). Volver a preguntarla ("¿commiteo?",
+  "¿lo llevo por review y ship?", "¿lo mando a main?") es re-litigar una
+  decisión tomada, que es exactamente la clase que este catálogo rechaza: si
+  `delivery` es `review`, la respuesta ya es "no publiques, terminá en el
+  reporte"; si es `prs` o `trunk`, ya es "publicá así". Lo que sí hacés con
+  `review` es dejar en el reporte los dos comandos de la transición, para que el
+  humano publique cuando mire. Ninguna de esas preguntas tiene código en
+  `harness-policy.json`, así que ni siquiera se puede registrar como pausa.
 - **Un abogado afectado sigue `status: DRAFT`** — su ley no está
   ratificada; litigar con una constitución sin ratificar es litigar con
   algo que nadie firmó. Pide ratificación y para.
@@ -516,7 +567,9 @@ cada uno. Si algo necesita más, va a un archivo y acá va el link: un reporte
 que no se lee no existe, y la decisión se toma igual pero peor informada
 (Ley 14).
 
-1. Qué se shippeó, por repo, con commits y estado del canary.
+1. Qué se shippeó, por repo, con commits y estado del canary. Con
+   `delivery: review` no se shippeó nada A PROPÓSITO: ese punto lo ocupa el
+   bloque de entrega de abajo, que es obligatorio.
 2. **El ledger de supuestos completo** — es lo primero que va a auditar.
 3. Paradas y por qué (si las hubo).
 4. **Cuánto costó en vueltas**: rondas de review por tarea
@@ -530,3 +583,30 @@ que no se lee no existe, y la decisión se toma igual pero peor informada
    único lugar del harness donde el carril quick se propone: no lo eliges tú,
    se lo ofreces al humano con la evidencia de esta corrida delante. Si no dio
    trivial, ni lo menciones.
+
+### El bloque de entrega (obligatorio con `delivery: review`)
+
+El humano no pidió un resumen de lo que no publicaste: pidió poder publicarlo
+sin reconstruir nada. Tres cosas, en este orden:
+
+1. **Qué quedó listo**: los criterios cumplidos y el veredicto verde, por repo.
+2. **Dónde está**: `worktrees/<id>/<repo>`, la rama y el sha del último commit.
+   Sin eso el humano busca a mano lo que vos ya sabés.
+3. **Los DOS comandos literales para publicar**, ya sustituidos con el id y el
+   repo de verdad (no con placeholders):
+
+   ```bash
+   # rama + PR
+   python3 scripts/harness-policy.py delivery tasks/<id> --to prs --actor humano
+   bash scripts/ship.sh <id> <repo>
+
+   # directo a la trunk
+   python3 scripts/harness-policy.py delivery tasks/<id> --to trunk --actor humano
+   bash scripts/ship.sh <id> <repo>
+   ```
+
+Esa transición es la ÚNICA forma de cambiar la entrega, y es también la
+remediación del `exit 8` de `ship.sh` ("delivery: review, no publico nada"):
+primero se declara la entrega nueva, después se shippea. Queda en `state.json`
+y en el historial, que es lo que la vuelve auditable; editar el campo a mano es
+lo mismo que editar la fase a mano, y vale la misma prohibición.

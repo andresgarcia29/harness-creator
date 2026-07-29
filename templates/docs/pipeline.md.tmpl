@@ -12,7 +12,9 @@ quieres inspeccionar el trabajo entre pasos. O **`/smart <ticket |
 pipeline, mismos gates, mismas paradas — lo único que cambia es que no
 hay humano entre fase y fase. El intake de `/smart` no rebota (no hay a
 quién): redacta los criterios faltantes y declara cada ambigüedad
-resuelta en `tasks/<id>/assumptions.md`.
+resuelta en `tasks/<id>/assumptions.md`. Hasta dónde llega la corrida (si
+publica algo y cómo) NO se decide en el chat: lo declara la invocación,
+en el campo `delivery` (más abajo).
 
 ```
 /feature (intake)          valida el ticket o lo rebota (needs-spec)
@@ -85,6 +87,53 @@ escalera (quick → express → standard → full) es barata y conserva el
 worktree. quick es promesa del humano, no clasificación: `/smart`
 jamás lo elige por su cuenta, solo lo SUGIERE en el reporte final si la
 tarea resultó trivial.
+
+## La entrega la declara la invocación (`delivery`)
+
+El carril dice cuánta deliberación merece la tarea; **`delivery` dice qué
+se publica al final**, y lo declara el comando con el que entraste. Es un
+dato de `tasks/<id>/state.json`, no una frase de chat a mitad de vuelo:
+
+| Invocación | `delivery` | Qué entrega |
+|---|---|---|
+| `/smart` | `review` | nada publicado: commits del worktree sí; push, PR y main JAMÁS. El trabajo queda listo y auditable |
+| `/smart-pr` | `prs` | rama publicada y PR abierto |
+| `/smart-main` | `trunk` | ship directo a main por `ship.sh`, con todos sus gates |
+
+El vocabulario es el del knob `flow` del workspace a propósito: `prs` y
+`trunk` significan aquí exactamente lo mismo que allá.
+
+Un `/smart` terminado se autoriza a publicar con una transición
+registrada, no con un "dale, shippealo":
+
+```bash
+scripts/harness-policy.py delivery tasks/<task-id> --to prs --actor humano
+```
+
+Queda en `history[]` (con `kind: delivery`, actor y motivo), y la entrega
+**solo sube**: `review → prs → trunk`. Bajarla no despublicaría nada, solo
+dejaría a `state.json` mintiendo sobre lo que ya hay afuera; para no
+publicar, no se publica, y una tarea que termina en `review` es un final
+legítimo, no un error. Códigos: `POLICY-DELIVERY-001` (entrega
+desconocida: solo `review`, `prs`, `trunk`), `-002` (degradar la entrega,
+o promoverla a donde ya está), `-003` (`validate-ship` con `delivery:
+review`, que `ship.sh` devuelve como **exit 8**: no es un gate rojo, es lo
+que pidió la invocación) y `-004` (promover una tarea que no declara
+entrega: esa corre con el `flow` del workspace y no hay peldaño desde el
+cual subir).
+
+Dos consecuencias que valen más que la tabla:
+
+- **Pedir autorización para commitear o publicar está PROHIBIDO** dentro
+  de una corrida con entrega declarada: no está en la lista cerrada de
+  paradas de `/smart` y la invocación ya contestó esa pregunta.
+- **Compatibilidad**: una tarea SIN campo `delivery` (las viejas, y las de
+  `/quick`) no cambia de conducta: `ship.sh` usa el `flow` de
+  `harness-answers.yaml`, como siempre.
+
+`autonomy: checkpoint` manda por encima de todo esto, porque es política
+del workspace y no de la tarea: con checkpoint, hasta `/smart-main` hace
+su única parada legítima antes de publicar.
 
 ## Roles
 

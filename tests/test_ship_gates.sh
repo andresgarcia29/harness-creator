@@ -923,4 +923,182 @@ out="$(run_gate_evidence '[{"req":"R4","covered":true,"tests":["main.go"]}]' "ot
 assert_eq 3 $? "archivo jamas leido: sigue bloqueando"
 assert_contains "$out" "NADIE LO LEYÓ" "con el mensaje de siempre"
 
+echo
+echo "── la entrega la declara la invocación: ship.sh obedece, no pregunta"
+# El dolor de campo: el implementer terminaba y preguntaba en el chat "no
+# commiteé ni shippeé, ¿lo llevo por /review + ship?". La respuesta ya la dio
+# quien invocó (/smart = review, /smart-pr = prs, /smart-main = trunk) y viaja
+# como dato en state.json. Lo que se fija acá es que ship.sh la LEA y la
+# obedezca: que se niegue a publicar cuando la entrega dice que no, que la
+# entrega de la tarea gane al flow del workspace, y que un dato ilegible no se
+# disfrace de "lo de siempre".
+
+# El bloque REAL del template: desde el default de DELIVERY hasta el marcador
+# que cierra la puerta efectiva. Es código de nivel superior (no una función),
+# así que se extrae por marcadores en vez de por firma.
+awk '/^DELIVERY=flow$/{f=1} f{print} /^# fin-puerta-efectiva/{if(f) exit}' "$TMPL" \
+  > "$WS/puerta-raw.sh"
+grep -q 'delivery-mode' "$WS/puerta-raw.sh" || { echo "no pude extraer la consulta de delivery-mode"; exit 1; }
+grep -q 'FLOW_MODE=trunk' "$WS/puerta-raw.sh" || { echo "no pude extraer el case del flow"; exit 1; }
+grep -q 'fin-puerta-efectiva' "$WS/puerta-raw.sh" || { echo "la extracción no llegó al marcador de cierre"; exit 1; }
+
+puerta() {  # puerta <flow-workspace> <salida-delivery-mode> [rc] [precheck] → salida + exit
+  # DMOUT/DMRC en mayúsculas: bash tiene scope dinámico y un `dm_out` acá lo
+  # pisaría el `local` de resolve_delivery (misma lección que LIMOUT/LIMRC).
+  sed "s/{{FLOW}}/$1/" "$WS/puerta-raw.sh" > "$WS/puerta.sh"
+  ( set -euo pipefail
+    WS="$WS"; TASK=T1; REPO=svc
+    PRECHECK="${4:-0}"; LANG_ONLY=0; CI_MODE=0
+    DMOUT="$2"; DMRC="${3:-0}"
+    python3() { printf '%b' "$DMOUT"; return "$DMRC"; }
+    . "$WS/puerta.sh"
+    echo "FLOW_MODE=$FLOW_MODE" ) 2>&1
+}
+
+# (b) delivery=trunk con flow prs del workspace → gana la tarea
+out="$(puerta prs trunk)"; rc=$?
+assert_eq 0 "$rc" "delivery trunk sobre flow prs: la puerta se resuelve sin negarse"
+assert_contains "$out" "FLOW_MODE=trunk" "delivery trunk OVERRIDEA el flow prs del workspace"
+assert_contains "$out" "manda sobre flow: prs" "y lo dice, en vez de cambiar la puerta en silencio"
+
+# (c) delivery=prs con flow trunk del workspace → gana la tarea, del otro lado
+out="$(puerta trunk prs)"; rc=$?
+assert_eq 0 "$rc" "delivery prs sobre flow trunk: se resuelve"
+assert_contains "$out" "FLOW_MODE=prs" "delivery prs OVERRIDEA el flow trunk (la simétrica)"
+
+# (d) sin campo delivery (el subcomando contesta 'flow') → conducta de HOY
+out="$(puerta prs flow)"
+assert_contains "$out" "FLOW_MODE=prs" "sin delivery declarado: manda el flow prs del workspace"
+assert_not_contains "$out" "entrega declarada" "y no anuncia una entrega que nadie declaró"
+out="$(puerta trunk flow)"
+assert_contains "$out" "FLOW_MODE=trunk" "sin delivery declarado: manda el flow trunk (compat con tareas viejas y /quick)"
+
+# ...y la entrega que coincide con el flow no inventa un override que anunciar
+out="$(puerta prs prs)"
+assert_contains "$out" "FLOW_MODE=prs" "delivery prs con flow prs: misma puerta"
+assert_not_contains "$out" "manda sobre" "sin anunciar un override que no ocurrió"
+
+# (e) delivery-mode ilegible → tercer estado honesto, NUNCA el flow del workspace
+out="$(puerta prs "harness-policy.py: error: argument action: invalid choice: 'delivery-mode'" 3)"; rc=$?
+assert_eq 2 "$rc" "delivery-mode que no responde: ship se niega (exit 2)"
+assert_contains "$out" "no pude leer la entrega declarada" "y nombra el motivo real"
+assert_contains "$out" "invalid choice" "citando lo que contestó el subcomando"
+assert_contains "$out" "la instancia está atrasada" "con SU remediación (actualizar la instancia)"
+assert_not_contains "$out" "FLOW_MODE=" "y NO cae callado al flow del workspace"
+assert_not_contains "$out" "delivery: review" "sin disfrazarse del rechazo de review (otra causa, otro mensaje)"
+
+# salida vacía con exit 0 tampoco es una respuesta: sin dato no se publica
+out="$(puerta prs "" 0)"; rc=$?
+assert_eq 2 "$rc" "delivery-mode mudo (exit 0 sin salida): se niega igual"
+assert_contains "$out" "no imprimió nada" "y dice exactamente qué pasó"
+
+# una respuesta que no está en el vocabulario no se aproxima: se declara ilegible
+out="$(puerta prs "staging" 0)"; rc=$?
+assert_eq 2 "$rc" "modo desconocido ('staging'): se niega en vez de adivinar la puerta"
+
+# (5) --precheck NO cambia: no publica, así que la entrega no le concierne.
+# Con el subcomando ROTO (rc 3), un precheck que preguntara moriría acá.
+out="$(puerta prs "invalid choice: 'delivery-mode'" 3 1)"; rc=$?
+assert_eq 0 "$rc" "--precheck con delivery-mode roto: sigue como siempre"
+assert_contains "$out" "FLOW_MODE=prs" "el precheck resuelve por el flow del workspace"
+assert_not_contains "$out" "no pude leer la entrega" "y ni siquiera le pregunta a la entrega"
+
+echo
+echo "── delivery=review: el ship se niega ANTES del lock, y no es un rojo"
+# End-to-end contra el script REAL instanciado: lo que importa no es solo el
+# código de salida, es DÓNDE se niega. Si la negación viviera después del
+# preflight o del lock, un /smart dejaría el repo serializado y la historia
+# rebaseada por una tarea que pidió no publicar nada.
+DWS="$WS/dws"
+mkdir -p "$DWS/scripts" "$DWS/tasks/T1" "$DWS/repos" "$DWS/worktrees/T1"
+sed 's/{{LOOP_BUDGET}}/3/g; s/{{FLOW}}/trunk/g' "$TMPL" > "$DWS/scripts/ship.sh"
+# harness-policy.py de palo que implementa el CONTRATO de delivery-mode (una
+# línea con review|prs|trunk|flow). El productor real es del carril D1; lo que
+# este test mide es el consumidor.
+cat > "$DWS/scripts/harness-policy.py" <<'PY'
+import json, os, sys
+argv = sys.argv[1:]
+if "delivery-mode" not in argv:
+    sys.exit(0)
+p = os.path.join(argv[argv.index("delivery-mode") + 1], "state.json")
+try:
+    d = json.load(open(p)).get("delivery", "")
+except Exception as e:                       # noqa: BLE001
+    print("POLICY-DELIVERY-002: no pude leer %s: %s" % (p, e))
+    sys.exit(3)
+print(d if d else "flow")
+PY
+printf '{"lane":"full","phase":"review","delivery":"review"}' > "$DWS/tasks/T1/state.json"
+mk_repo "$DWS/repos/svc"
+cp -R "$DWS/repos/svc" "$DWS/worktrees/T1/svc"
+( cd "$DWS/worktrees/T1/svc"; echo nuevo > feature.go; git add .; git commit -qm "feat
+
+Task: T1" )
+cd "$WS"
+out="$( cd "$DWS" && bash scripts/ship.sh T1 svc 2>&1 )"; rc=$?
+assert_eq 8 "$rc" "delivery review: exit 8 propio (no 3: no es un gate rojo)"
+assert_contains "$out" "SIN publicación (delivery: review)" "nombra la entrega declarada"
+assert_contains "$out" "No es un rojo" "y dice que esto es lo pedido, no una falla"
+assert_contains "$out" "harness-policy.py delivery tasks/T1 --to prs --actor humano" \
+  "con la remediación EXACTA de promoción (transición auditable, no una frase de chat)"
+assert_contains "$out" "scripts/ship.sh T1 svc" "y el comando para re-correr después"
+assert_no_file "$DWS/locks/svc.lock.d" "se niega SIN tomar el lock del repo"
+assert_not_contains "$out" "══ ship svc" "jamás entra al loop de ship (ni fetch, ni rebase, ni push)"
+assert_not_contains "$out" "ship.sh implementa dos" "y NO se confunde con el rechazo de flow no implementado (exit 7)"
+
+# Y el ORDEN es estructural, no una casualidad de este fixture: la consulta de
+# la entrega precede al lock y al loop de ship en el archivo. Mismo método que
+# usa el preflight más arriba, porque la propiedad es la misma (no retener nada
+# que después haya que soltar).
+rd_line="$(grep -n '^  resolve_delivery$' "$TMPL" | head -1 | cut -d: -f1)"
+lk_line="$(grep -n '^acquire_lock$' "$TMPL" | head -1 | cut -d: -f1)"
+[ -n "$rd_line" ] && [ -n "$lk_line" ] && [ "$rd_line" -lt "$lk_line" ] \
+  && pass "resolve_delivery se invoca ANTES de acquire_lock (estructural)" \
+  || fail "la consulta de la entrega no precede al lock (delivery=$rd_line lock=$lk_line)"
+# ...y DESPUÉS de la puerta de la instancia: un ship mal invocado (el repo de la
+# instancia) tiene que seguir recibiendo SU error, no uno sobre la entrega.
+is_line="$(grep -n 'scripts/instance-ship.sh' "$TMPL" | head -1 | cut -d: -f1)"
+[ -n "$is_line" ] && [ "$is_line" -lt "$rd_line" ] \
+  && pass "y DESPUÉS del '¿existe el repo?' (el error real no queda tapado)" \
+  || fail "la entrega se consulta antes de saber si el repo existe (repo=$is_line delivery=$rd_line)"
+
+# La otra mitad: el MISMO workspace con la entrega promovida a trunk deja de
+# negarse acá y sigue su camino. Sin esto, un ship que se negara SIEMPRE pasaría
+# la mitad de arriba.
+printf '{"lane":"full","phase":"review","delivery":"trunk"}' > "$DWS/tasks/T1/state.json"
+out="$( cd "$DWS" && bash scripts/ship.sh T1 svc 2>&1 )"; rc=$?
+assert_not_contains "$out" "delivery: review" "promovida a trunk: ya no se niega por entrega"
+[ "$rc" -ne 8 ] && pass "promovida a trunk: el ship avanza (falla más adelante por lo suyo, no por la entrega)" \
+  || fail "con delivery trunk sigue saliendo 8"
+
+echo
+echo "── contra el harness-policy.py REAL: el contrato de delivery-mode, entero"
+# Mismo motivo que el caso de lane-limits contra el policy real: los casos de
+# arriba miden el DIENTE (qué hace ship.sh con cada respuesta) con un productor
+# de palo. Si el contrato cambia de forma, esto muerde antes que producción.
+cp "$ROOT/templates/scripts/harness-policy.py" "$DWS/scripts/harness-policy.py"
+
+printf '{"schema":1,"lane":"full","phase":"review","delivery":"review"}' > "$DWS/tasks/T1/state.json"
+out="$( cd "$DWS" && bash scripts/ship.sh T1 svc 2>&1 )"; rc=$?
+assert_eq 8 "$rc" "productor real + delivery review: exit 8"
+assert_contains "$out" "SIN publicación (delivery: review)" "y el mismo mensaje de dos partes"
+
+# Sin campo delivery: la tarea es de antes de esta decisión (o de /quick) y
+# ship.sh no cambia de conducta. Falla más adelante por lo suyo (no hay
+# veredicto en este fixture), que es exactamente lo de siempre.
+printf '{"schema":1,"lane":"full","phase":"review"}' > "$DWS/tasks/T1/state.json"
+out="$( cd "$DWS" && bash scripts/ship.sh T1 svc 2>&1 )"; rc=$?
+assert_not_contains "$out" "no pude leer la entrega declarada" \
+  "productor real sin campo delivery: NO es un ilegible (es 'flow', compat)"
+[ "$rc" -ne 8 ] && pass "sin campo delivery: no se niega por entrega (conducta de hoy)" \
+  || fail "una tarea sin delivery recibió el rechazo de review"
+
+# state.json editado a mano con una entrega fuera del catálogo: el productor
+# sale 3 y ship.sh lo trata como el tercer estado, no como 'flow'.
+printf '{"schema":1,"lane":"full","phase":"review","delivery":"staging"}' > "$DWS/tasks/T1/state.json"
+out="$( cd "$DWS" && bash scripts/ship.sh T1 svc 2>&1 )"; rc=$?
+assert_eq 2 "$rc" "productor real + entrega fuera del catálogo: ship se niega (exit 2)"
+assert_contains "$out" "no pude leer la entrega declarada" "con el rechazo honesto"
+assert_contains "$out" "POLICY-DELIVERY-001" "citando el código real del productor"
+
 t_done

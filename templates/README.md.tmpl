@@ -51,13 +51,28 @@ Sesión de Claude Code en esta carpeta. El día a día es UNA línea:
 ```
 
 `/smart` corre el pipeline entero sin preguntarte: intake → RFC →
-implement → review → ship → deploy → archive — **dimensionado al blast
-radius**: una tarea de 1 repo sin contratos va por el carril express
-(salta el RFC; 2 sesiones LLM) y `gate_lane` en ship.sh verifica que el
-diff cumpla la promesa del carril. Resuelve la ambigüedad con
-evidencia y te deja el rastro en `tasks/<id>/assumptions.md` — léelo:
-son las decisiones que se tomaron por ti. Solo para donde una ley del
-harness lo exige (ver `docs/harness/pipeline.md`).
+implement → review (y ship → deploy → archive solo si la entrega
+declarada lo autoriza), **dimensionado al blast radius**: una tarea de 1
+repo sin contratos va por el carril express (salta el RFC; 2 sesiones LLM)
+y `gate_lane` en ship.sh verifica que el diff cumpla la promesa del
+carril. Resuelve la ambigüedad con evidencia y te deja el rastro en
+`tasks/<id>/assumptions.md`: léelo, son las decisiones que se tomaron
+por ti. Solo para donde una ley del harness lo exige (ver
+`docs/harness/pipeline.md`).
+
+**La entrega la declara la invocación**, no una charla a mitad de vuelo:
+`/smart` NO publica nada (commits del worktree sí; push, PR y `main`
+jamás: el trabajo queda listo y auditable), `/smart-pr` entrega rama y PR,
+`/smart-main` aterriza en `main` por `ship.sh`. Queda como dato en
+`tasks/<id>/state.json` (`delivery: review|prs|trunk`, el vocabulario del
+knob `flow`), así que un agente tiene PROHIBIDO preguntarte si commitea o
+publica: la invocación ya contestó. ¿Querés publicar un `/smart` que ya
+terminó? El "go" es un comando registrado, no una frase:
+`scripts/harness-policy.py delivery tasks/<id> --to prs --actor <vos>`
+(o `--to trunk`). Una tarea sin campo `delivery` (las viejas y las de
+`/quick`) se comporta como siempre: `ship.sh` usa el `flow` de
+`harness-answers.yaml`. Y `autonomy: checkpoint` manda por encima: con
+checkpoint, hasta `/smart-main` para una vez antes de publicar.
 
 Si quieres conducir fase por fase, los comandos sueltos siguen ahí:
 `/feature <ticket>` → `/rfc` → `/implement` → `/review` → `/ship` →

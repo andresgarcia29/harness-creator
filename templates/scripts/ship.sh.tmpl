@@ -12,7 +12,9 @@
 # decir lo que un script dice en segundos y gratis. El implementer lo corre
 # antes de entregar; /review no lanza a nadie si el precheck no está verde.
 # Deja el sello en tasks/<task>/precheck-<repo>.json (commit + ok +
-# verificado, que dice cuánto se miró de verdad: ver stamp_precheck).
+# verificado, que dice cuánto se miró de verdad: ver stamp_precheck), y avisa
+# si la evidencia citable del repo quedó apuntando a otro commit
+# (aviso_evidencia_desalineada: observador, no gate, jamás pone rojo).
 #
 # Opera sobre el WORKTREE de la tarea (worktrees/<task>/<repo>), nunca
 # sobre el clon canónico. Serie solo lo que tiene orden real:
@@ -361,6 +363,52 @@ stamp_precheck() {  # stamp_precheck <ok:true|false>: sello que /review lee
   printf '{"schema":1,"task_id":"%s","repo":"%s","commit":"%s","ok":%s,"verificado":"%s","at":"%s"}\n' \
     "$TASK" "$REPO" "$head" "$ok" "$verificado" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     > "$WS/tasks/$TASK/precheck-$REPO.json"
+}
+# ── LA EVIDENCIA DEL REPO, ¿MIRA AL COMMIT QUE ESTOY SELLANDO? ────────
+# Caso de campo, dos veces en la misma sesión: el precheck selló ok:true sobre
+# el hijo mientras las ÚNICAS evidencias del repo apuntaban al padre. El
+# desalineamiento lo cazaba recién verdict-scaffold.sh, o sea DESPUÉS de lanzar
+# la ronda de review: cuando se veía, la ronda ya estaba pagada. Y con
+# --allow-empty el scaffold pasa igual, así que el aviso llegaba a veces nunca.
+#
+# ES UN OBSERVADOR, NO UN GATE: avisa y el precheck sigue verde. Ponerlo en rojo
+# sería la mitad simétrica del defecto que este script ya rechazó más arriba (un
+# repo sin stack no puede sellar evidencia en HEAD y eso es legítimo). Por la
+# misma ley de familias, acá TODO va dentro de `if` o con `|| true`: un
+# observador que mata el precheck mezcla las dos familias que CONTRIBUTING
+# separa a propósito.
+#
+# El rebase puro NO cuenta como desalineamiento: la evidencia sellada sobre otra
+# base con el MISMO patch_id es la misma prueba del mismo cambio (es lo que
+# acepta evidence.py y lo que mira el predicado del scaffold). Avisar ahí sería
+# fabricar una falsa alarma justo en el caso que el harness ya resolvió.
+aviso_evidencia_desalineada() {
+  local dir="$WS/tasks/$TASK/evidence" f head pid c p en_head=0 viejas=0
+  [ -d "$dir" ] || return 0
+  head="$(git -C "$WT" rev-parse HEAD 2>/dev/null || true)"
+  [ -n "$head" ] || return 0
+  pid="$(bash "$WS/scripts/change-id.sh" "$WT" "$BASE_REF" 2>/dev/null || true)"
+  for f in "$dir"/EV-*.json; do
+    [ -f "$f" ] || continue
+    c="$(jq -r --arg t "$TASK" --arg r "$REPO" \
+      'select(.task_id==$t and .repo==$r) | .commit // ""' "$f" 2>/dev/null || true)"
+    [ -n "$c" ] || continue
+    p="$(jq -r '.patch_id // ""' "$f" 2>/dev/null || true)"
+    if [ "$c" = "$head" ] || { [ -n "$pid" ] && [ "$p" = "$pid" ]; }; then
+      en_head=$((en_head+1))
+    else
+      viejas=$((viejas+1))
+    fi
+  done
+  [ "$viejas" -gt 0 ] && [ "$en_head" -eq 0 ] || return 0
+  echo "   ⚠️  las $viejas evidencia(s) de $REPO NO apuntan al HEAD que acabo de sellar"
+  echo "      (${head}): son de otro commit y ninguna es del cambio actual."
+  echo "      El sello dice que los gates pasaron acá, pero la prueba citable es de antes."
+  echo "      Si entregás así, verdict-scaffold.sh lo caza DESPUÉS, con la ronda pagada."
+  echo "      ↳ remediación: re-sellá la prueba sobre este HEAD:"
+  echo "        python3 scripts/evidence.py run --task-dir tasks/$TASK --repo $REPO \\"
+  echo "          --runner <implementer> --kind test --cwd worktrees/$TASK/$REPO -- <comando de test>"
+  emit assumption "precheck de $REPO: $viejas evidencia(s) de otro commit y ninguna del HEAD sellado"
 }
 # ── Procedencia: qué harness, de qué máquina, con qué gates ───────────
 # Con varios workspaces, los gates corren en la laptop del que pushea y NADA
@@ -2129,6 +2177,7 @@ if [ "$PRECHECK" -eq 1 ]; then
         echo "      llegó a correr: falta el marcador que deja la corrida sellada."
         echo "      Va así en el sello, sin disfrazarlo de verde ni de rojo." ;;
     esac
+    aviso_evidencia_desalineada
     echo "→ siguiente: /review $TASK $REPO"
   fi
   exit 0

@@ -102,6 +102,21 @@ contra una instalación real).
   funcionando mientras el puntero esté.
 
 ### Fixed
+- **El precheck avisa cuando la evidencia del repo no apunta al HEAD que está
+  sellando.** Caso de campo, dos veces en la misma sesión: sello `ok:true`
+  sobre el hijo con las únicas evidencias del repo apuntando al padre. El
+  desalineamiento lo cazaba recién `verdict-scaffold.sh`, o sea después de
+  lanzar la ronda de review, y con `--allow-empty` podía no verse nunca:
+  cuando se veía, la ronda ya estaba pagada. Ahora
+  `aviso_evidencia_desalineada` lo dice en el precheck, con la MISMA
+  remediación que da el scaffold para que las dos puertas no se contradigan.
+  Es un observador, no un gate: sigue verde, porque ponerlo en rojo sería la
+  mitad simétrica del defecto que el script ya rechazó (un repo sin stack no
+  puede sellar evidencia en HEAD y eso es legítimo). El rebase puro no dispara
+  falsa alarma: una evidencia de otra base con el mismo `patch_id` prueba el
+  mismo cambio, igual que para `evidence.py` y para el predicado del scaffold.
+  La regla viaja también en el prompt de `/implement`, porque un aviso que
+  ningún prompt explica se ignora.
 - **El cable que hace sobrevivir el review al rebase pasó a tener diente, y
   el gate dejó de ser mudo cuando no hay identidad de cambio.** Los tres
   eslabones que permiten que un rebase NO tire veredicto ni evidencia

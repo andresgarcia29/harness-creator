@@ -31,6 +31,44 @@ base_branch() {  # base_branch <dir-del-repo> → rama trunk, sin prefijo
 
 if [ "${1:-}" = "--rm" ]; then
   TASK="${2:?uso: worktree-task.sh --rm <task-id>}"
+  # ── El pin de review (.review-<repo>) TAMBIÉN es un worktree ──────────
+  # verdict-scaffold.sh clava ahí un checkout DESACOPLADO del commit que el
+  # reviewer juzga. Al no tener rama no puede esconder trabajo sin publicar
+  # (que es lo único que este --rm cuida), así que se quita sin ceremonia. Lo
+  # que NO puede es quedar huérfano: si el dir se va con el de la tarea y la
+  # metadata sobrevive en el repo, el próximo `worktree add` en esa ruta muere
+  # con "missing but already registered" y la tarea siguiente nace trabada.
+  # Va ANTES del bucle de worktrees vivos porque le pide el repo al que todavía
+  # existe. Y recorre los DOS globs porque hay dos formas de quedar huérfano:
+  # un pin cuyo worktree vivo ya no está (el vivo se quitó a mano), y un pin
+  # cuyo DIR ya no está pero sigue registrado; ese segundo caso no lo ve ningún
+  # glob de directorios, y es justo el que deja el repo trabado. Por eso el
+  # prune corre siempre: es idempotente y solo toca lo que ya no existe.
+  for d in "$WS/worktrees/$TASK"/.review-* "$WS/worktrees/$TASK"/*/; do
+    d="${d%/}"
+    [ -e "$d" ] || continue                   # glob sin match
+    case "$d" in
+      */.review-*) repo="${d##*/.review-}" ;;
+      *)           repo="${d##*/}" ;;
+    esac
+    pin="$WS/worktrees/$TASK/.review-$repo"
+    gd="$WS/repos/$repo"
+    [ -e "$gd/.git" ] || gd="$WS/worktrees/$TASK/$repo"
+    [ -e "$gd/.git" ] || gd="$pin"            # último recurso: el pin sabe su repo
+    [ -e "$gd/.git" ] || continue             # sin repo desde donde hablarle a git
+    if [ -e "$pin" ]; then
+      if out="$(git -C "$gd" worktree remove --force "$pin" 2>&1)"; then
+        echo "🧹 removido el pin de review: $pin"
+      else
+        echo "⚠️  git worktree remove no pudo con el pin $pin: $(printf '%s' "$out" | head -1)"
+        rm -rf "$pin" || echo "   ⚠️  y tampoco pude borrar el directorio"
+        echo "   lo quité a mano; podo la metadata para no dejar el repo trabado"
+      fi
+    fi
+    [ -e "$gd/.git" ] || continue             # era el propio pin y ya no está
+    git -C "$gd" worktree prune \
+      || echo "⚠️  worktree prune falló en $gd: la metadata del pin puede quedar rota"
+  done
   for wt in "$WS/worktrees/$TASK"/*/; do
     [ -d "$wt" ] || continue
     repo="$(basename "$wt")"

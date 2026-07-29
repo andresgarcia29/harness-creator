@@ -49,11 +49,26 @@ reporta el código de error.
    si la evidencia de QA aún no existe). Escribe los campos mecánicos
    verificados (commit, evidence[], implementation_agents desde los
    runners de la evidencia); el reviewer SOLO reemplaza el juicio.
+   **Además clava un árbol de review** en `worktrees/<task-id>/.review-<repo>`:
+   un checkout desacoplado del commit que el veredicto sella. Es la ruta que le
+   pasás al reviewer en el paso 2. Si el scaffold avisa que NO pudo clavarlo, no
+   se cae nada (el pin es protección extra, no un gate), pero ese supuesto viaja
+   al veredicto: se revisó un árbol que podía moverse.
 2. **Lanza reviewer y QA EN PARALELO** — QA ejercita comportamiento y no
    necesita el veredicto; serializarlos regala la fase entera al camino
    crítico:
-   - `reviewer` sobre el worktree `worktrees/<task-id>/<repo>` → escribe
-     `verdict-<repo>.json` con `qa: "pending"`. **Lánzalo con identidad
+   - `reviewer` sobre el **árbol clavado** `worktrees/<task-id>/.review-<repo>`
+     → escribe `verdict-<repo>.json` con `qa: "pending"`. **Lee y corre sus
+     diffs AHÍ, nunca en `worktrees/<task-id>/<repo>`: el worktree vivo es del
+     implementer, que puede seguir editándolo sin commitear mientras se juzga,
+     y entonces el veredicto sella el commit X pero el juicio fue de X más
+     ediciones transitorias** (caso de campo P1: falso verde). Las citas de
+     `compliance[]` van con las rutas del árbol clavado TAL COMO las leyó
+     (`worktrees/<task-id>/.review-<repo>/...`): `gate_evidence` de ship.sh
+     exige que el artefacto exista bajo el workspace y que aparezca literal en
+     `evidence.log`, y el pin cumple las dos (vive hasta el `--rm` post-ship, y
+     `track-read.sh` deriva la tarea de la ruta `worktrees/<task>/...`, así que
+     las lecturas del reviewer se atribuyen solas). **Lánzalo con identidad
      estable (`reviewer-<repo>`, pásala como tercer argumento del scaffold:
      queda en el campo `reviewer` del veredicto) y NO lo descartes al
      recibir el veredicto: es TU reviewer de esta (tarea, repo) para todas
@@ -90,11 +105,12 @@ reporta el código de error.
    (fail-closed: la prueba caduca con el commit) y ARRASTRA el
    `compliance[]` que el delta no tocó, marcado con `carried_from`. El
    reviewer juzga SOLO las entradas con `.rejudge` más el cierre de cada
-   blocking, no el cambio completo otra vez. **El scaffold imprime el
-   comando exacto del delta y lo persiste en `delta_files`: cópialo
-   VERBATIM en el mensaje al reviewer** (re-derivar qué cambió quemó el
-   presupuesto de la ronda en campo). **Ronda ≥2: NO lances un reviewer
-   nuevo.** Continúa el MISMO agente con un mensaje que contenga (a) ese
+   blocking, no el cambio completo otra vez. **El scaffold re-clava el árbol
+   de review al commit nuevo, imprime el comando exacto del delta (ya apunta
+   a `worktrees/<task-id>/.review-<repo>`, que tiene los dos commits y no se
+   mueve) y lo persiste en `delta_files`: cópialo VERBATIM en el mensaje al
+   reviewer** (re-derivar qué cambió quemó el presupuesto de la ronda en
+   campo). **Ronda ≥2: NO lances un reviewer nuevo.** Continúa el MISMO agente con un mensaje que contenga (a) ese
    comando de delta y (b) la lista de blocking que el implementer atendió:
    él ya tiene el contexto, juzga el delta. **Si el agente murió o el
    watchdog lo mató**: lanza uno NUEVO con la MISMA identidad (el campo

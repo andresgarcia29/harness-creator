@@ -484,6 +484,51 @@ CANDIDATOS
 fi
 
 echo
+echo "── /smart-pr y /smart-main son WRAPPERS FINOS: la conducta vive en un archivo"
+# Las tres entradas (/smart, /smart-pr, /smart-main) son el MISMO playbook y se
+# diferencian en un dato: la entrega que declaran. Para que eso siga siendo
+# cierto dentro de un año, los wrappers no pueden engordar. Un wrapper que
+# vuelve a documentar reglas es un segundo playbook vivo, y cuando los dos se
+# contradicen manda el que el agente leyó primero: la misma lección que dejó el
+# puntero /auto, medida con la misma regla (ptr_body descuenta el frontmatter,
+# que es protocolo del comando y no contenido).
+WRAP_MAX_LINES=12
+for w in smart-pr smart-main; do
+  wf="$ROOT/templates/commands/$w.md.tmpl"
+  if [ ! -f "$wf" ]; then
+    fail "falta templates/commands/$w.md.tmpl: la entrada que declara esa entrega no existe, y sin ella el humano vuelve a pedirla por chat"
+    continue
+  fi
+  wbody="$(ptr_body "$wf")"
+  n_w="$(printf '%s\n' "$wbody" | grep -c '[^[:space:]]' | tr -d ' ')"
+  if [ "$n_w" -le "$WRAP_MAX_LINES" ]; then
+    pass "el wrapper /$w mide $n_w líneas de contenido (tope $WRAP_MAX_LINES)"
+  else
+    fail "el wrapper /$w pasó a $n_w líneas de contenido (tope $WRAP_MAX_LINES): dejó de ser un wrapper y empezó a ser un segundo playbook. La regla que agregaste va en smart.md.tmpl, que es el único que manda"
+  fi
+  assert_contains "$wbody" "commands/smart.md" "/$w delega en el archivo con su ruta, no en 'el comando de siempre'"
+done
+
+echo
+echo "── pedir permiso para publicar dejó de ser una parada: está prohibido POR ESCRITO"
+# El dolor que abrió esto: el agente terminaba de implementar y preguntaba en el
+# chat "no commiteé ni shippeé, ¿lo llevo por /review + ship?". La invocación ya
+# había contestado eso. La prohibición vive DENTRO de la lista cerrada de
+# paradas y no en un párrafo suelto: la lista es lo que el agente lee cuando
+# duda si parar, y una regla que no está ahí no gobierna esa duda.
+lista="$(printf '%s\n' "$smart" | awk '/^## Dónde SÍ paras/{f=1;next} f&&/^## /{exit} f{print}')"
+if [ -z "$lista" ]; then
+  fail "no encontré la sección 'Dónde SÍ paras' en smart.md.tmpl: sin la lista cerrada no puedo verificar que la prohibición esté DENTRO, y esto NO es verde"
+else
+  assert_contains "$lista" "PARA COMMITEAR, SHIPPEAR O PUBLICAR NO ES UNA PARADA" \
+    "la lista cerrada declara prohibida la pregunta por la entrega"
+  assert_contains "$lista" "re-litigar una" \
+    "y la nombra por lo que es: re-litigar una decisión ya tomada"
+  assert_contains "$lista" "delivery" \
+    "citando el campo de state.json donde la decisión quedó registrada"
+fi
+
+echo
 echo "── ratchet de prosa normativa: los mapas no engordan"
 # Politica de la casa: un incidente nuevo entra como test o gate, no como
 # parrafo. Un mapa que crece deja de leerse entero, y una ley que nadie lee no
@@ -520,6 +565,64 @@ elif [ "$dicho" = "$CLAUDE_MAX_LINES" ]; then
   pass "el tope que declara CLAUDE.md.tmpl ($dicho) es el del ratchet ($CLAUDE_MAX_LINES)"
 else
   fail "CLAUDE.md.tmpl dice '(hoy $dicho líneas)' y el ratchet es $CLAUDE_MAX_LINES: el mapa miente sobre su propio tope"
+fi
+
+echo
+echo "── el plan no cita runtime: lo ejecuta"
+# Caso real (una instancia, tres rondas): el plan del architect marco DOS
+# decisiones como "verificado en codigo" sobre el comportamiento en runtime de
+# una libreria de routing, leyendo su fuente. Las dos eran falsas y costaron dos
+# de las tres rondas. Leer el fuente de una dependencia dice lo que escribio su
+# autor, no lo que hace TU version con TU config en TU runtime: para runtime, la
+# unica evidencia que cuenta es una EJECUCION con su salida. Se testea frase por
+# frase porque cada una carga una pieza distinta de la regla (el disparador, la
+# evidencia admisible, la que NO lo es, el caso, y el destino de lo no
+# ejecutado): si sobrevive solo el titulo, la regla no gobierna ninguna
+# decision.
+arch_tmpl="$ROOT/templates/agents/architect.md.tmpl"
+rfc_tmpl="$ROOT/templates/commands/rfc.md.tmpl"
+# Se compara sobre el texto APLANADO (saltos de linea y sangria a un espacio):
+# la regla es prosa envuelta a 72 columnas y una frase parte en dos lineas donde
+# caiga el corte. Buscar sobre el crudo ataria el test al ancho del parrafo, y
+# reacomodar una coma lo pondria rojo sin que la regla hubiera cambiado.
+flat_tmpl() { tr '\n' ' ' < "$1" | tr -s ' '; }
+if [ ! -f "$arch_tmpl" ] || [ ! -f "$rfc_tmpl" ]; then
+  # Tercer estado: sin los dos archivos no hay nada que comparar. Un
+  # assert_not_contains sobre texto vacio pasa siempre, asi que callarlo aqui
+  # dejaria el bloque en verde por no haber mirado nada.
+  fail "no puedo verificar la regla de runtime: falta templates/agents/architect.md.tmpl o templates/commands/rfc.md.tmpl, y sin ellos este bloque NO es verde"
+else
+  arch="$(flat_tmpl "$arch_tmpl")"
+  assert_contains "$arch" "Runtime no se cita: se ejecuta" \
+    "architect.md declara la regla de runtime"
+  assert_contains "$arch" "comportamiento en runtime" \
+    "y nombra el disparador: la decision depende del runtime de una dependencia externa"
+  assert_contains "$arch" "**EJECUCIÓN**" \
+    "la evidencia admisible es una ejecucion, no una lectura"
+  assert_contains "$arch" "junto al comando que la produjo" \
+    "y la salida viaja con el comando que la produjo (sin comando no es reproducible)"
+  assert_contains "$arch" "no lo que hace TU versión" \
+    "dice por que el fuente no sirve: es el codigo del autor, no tu runtime"
+  assert_contains "$arch" "dos de tres rondas" \
+    "el caso que fija la regla viene con su costo medido"
+  assert_contains "$arch" "no verifica nada" \
+    "'lo lei en su fuente' se declara explicitamente como no verificacion"
+  assert_contains "$arch" "**SUPUESTO**" \
+    "lo no ejecutado baja a SUPUESTO del ledger, no sube a verificado"
+  # El puntero de /rfc: UNA linea que manda al architect. Duplicar el cuerpo ahi
+  # es garantizar que las dos copias diverjan y que mande la que el agente leyo
+  # primero (el mismo modo de fallo del puntero /auto, mas arriba).
+  rfc="$(flat_tmpl "$rfc_tmpl")"
+  assert_contains "$rfc" "se responde EJECUTANDO" \
+    "/rfc aplica la regla a la sonda sobre runtime"
+  # La ruta se exige DENTRO de la frase del puntero: /rfc ya nombra
+  # `.claude/agents/architect.md` en el paso 6 (por el formato de bloques
+  # `### T<n>`), asi que buscar la ruta suelta daba verde aunque el puntero no
+  # existiera (medido: al borrar el puntero, esa asercion seguia en verde).
+  assert_contains "$rfc" "regla y caso en \`.claude/agents/architect.md\`" \
+    "y apunta al architect por su ruta, en vez de copiar la regla"
+  assert_not_contains "$rfc" "dos de tres rondas" \
+    "/rfc no duplica el cuerpo de la regla (un duplicado diverge)"
 fi
 
 t_done

@@ -300,4 +300,122 @@ jq -n --arg c "$HEADQ" '{schema:1, task_id:"T1", repo:"atlas", qa:"fail",
 bash "$WS/scripts/verdict-scaffold.sh" --merge-qa T1 atlas >/dev/null 2>&1
 assert_eq "fail" "$(jq -r .qa "$V")" "qa fail se fusiona igual de mecánico"
 
+echo
+echo "── el ÁRBOL CLAVADO: el reviewer juzga el commit sellado, no el árbol vivo"
+# P1 de campo: el reviewer leía worktrees/<task>/<repo> mientras el implementer
+# (dueño del claim) seguía editándolo sin commitear. El veredicto sellaba X y el
+# juicio era de X más ediciones transitorias: un verde irreproducible. El
+# scaffold clava un checkout DESACOPLADO en worktrees/<task>/.review-<repo>
+# (bajo worktrees/<task>/ para que track-read.sh derive la tarea de la RUTA y
+# las lecturas del reviewer se atribuyan solas).
+
+mkdir -p "$WS/tasks/T5/evidence" "$WS/repos/beta"
+git init -q -b main "$WS/repos/beta"
+git -C "$WS/repos/beta" commit -q --allow-empty -m base
+git -C "$WS/repos/beta" update-ref refs/remotes/origin/main HEAD
+WT5="$WS/worktrees/T5/beta"
+PIN5="$WS/worktrees/T5/.review-beta"
+V5="$WS/tasks/T5/verdict-beta.json"
+git -C "$WS/repos/beta" worktree add -q -b task/T5 "$WT5" HEAD
+g5() { git -C "$WT5" "$@"; }
+mk_ev5() {  # mk_ev5 <id> <commit>
+  jq -n --arg id "$1" --arg c "$2" \
+    '{schema:1, id:$id, task_id:"T5", repo:"beta", kind:"test", runner:"impl-beta",
+      commit:$c, commit_after:$c, exit_code:0, output:("evidence/"+$id+".log"),
+      output_sha256:"deadbeef"}' > "$WS/tasks/T5/evidence/$1.json"
+}
+
+printf 'v1\n' > "$WT5/app.txt"
+g5 add -A; g5 commit -q -m v1
+H5A="$(g5 rev-parse HEAD)"
+mk_ev5 EV-TEST-pin000000001 "$H5A"
+
+# (a) el implementer deja ediciones SIN COMMITEAR encima: el pin sella el commit
+printf 'edicion transitoria\n' >> "$WT5/app.txt"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" T5 beta revisor-5 2>&1)"; rc=$?
+assert_eq 0 "$rc" "pin: el scaffold sale 0"
+[ -d "$PIN5" ] && pass "clava worktrees/T5/.review-beta (la ruta que track-read atribuye a T5)" \
+  || fail "no creó el árbol clavado"
+assert_eq "$H5A" "$(git -C "$PIN5" rev-parse HEAD)" "el pin está en el commit SELLADO"
+assert_eq "$H5A" "$(jq -r .commit "$V5")" "y es el mismo commit que sella el veredicto"
+assert_not_contains "$(cat "$PIN5/app.txt")" "edicion transitoria" \
+  "el pin NO contiene las ediciones sin commitear del worktree vivo"
+assert_contains "$(cat "$WT5/app.txt")" "edicion transitoria" \
+  "(el worktree vivo SÍ las tiene: el fixture reproduce el P1 de verdad)"
+git -C "$PIN5" symbolic-ref -q HEAD >/dev/null 2>&1 \
+  && fail "el pin tiene rama: podría esconder trabajo y --rm no podría borrarlo sin drama" \
+  || pass "el pin es detached (sin rama que conservar)"
+assert_contains "$out" "worktrees/T5/.review-beta" "el scaffold dice dónde quedó el árbol clavado"
+
+# (b) --rebase re-clava al commit nuevo
+printf 'v2\n' > "$WT5/app.txt"
+g5 add -A; g5 commit -q -m "fix del blocking"
+H5B="$(g5 rev-parse HEAD)"
+mk_ev5 EV-TEST-pin000000002 "$H5B"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --rebase T5 beta revisor-5 2>&1)"; rc=$?
+assert_eq 0 "$rc" "rebase: exit 0"
+assert_eq "$H5B" "$(jq -r .commit "$V5")" "rebase: el veredicto sella el commit nuevo"
+assert_eq "$H5B" "$(git -C "$PIN5" rev-parse HEAD)" "rebase: el pin se RE-CLAVA al commit nuevo"
+assert_contains "$(cat "$PIN5/app.txt")" "v2" "y su contenido es el del commit nuevo"
+assert_contains "$out" "worktrees/T5/.review-beta diff" \
+  "el comando de delta corre en el árbol clavado, no en el vivo"
+
+# (c) si el pin falla, el scaffold NO muere: lo declara y deja el supuesto al bus.
+# Fallo inyectado con un shim de git que rechaza SOLO el subcomando worktree
+# (repo raro, disco, metadata que no se deja podar: la clase entera).
+cp "$ROOT/templates/scripts/emit.sh" "$WS/scripts/"
+mkdir -p "$WS/.shim"
+REAL_GIT="$(command -v git)"
+cat > "$WS/.shim/git" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do
+  [ "\$a" = "worktree" ] && { echo "fatal: shim de test: git worktree no disponible" >&2; exit 128; }
+done
+exec "$REAL_GIT" "\$@"
+SHIM
+chmod +x "$WS/.shim/git"
+rm -rf "$PIN5"        # pin roto: metadata viva, dir ausente
+printf 'v3\n' > "$WT5/app.txt"; g5 add -A; g5 commit -q -m v3
+H5C="$(g5 rev-parse HEAD)"
+mk_ev5 EV-TEST-pin000000003 "$H5C"
+out="$(PATH="$WS/.shim:$PATH" CLAUDE_PROJECT_DIR="$WS" \
+  bash "$WS/scripts/verdict-scaffold.sh" --rebase T5 beta revisor-5 2>&1)"; rc=$?
+assert_eq 0 "$rc" "pin imposible: el scaffold NO muere (sería un falso rojo)"
+assert_eq "$H5C" "$(jq -r .commit "$V5")" "y el veredicto se sella igual"
+assert_contains "$out" "no pude clavar" "lo DICE (nada de degradar en silencio)"
+assert_contains "$out" "shim de test" "con el motivo REAL de git, no un resumen inventado"
+assert_contains "$out" "SUPUESTO" "declara el supuesto que queda abierto"
+assert_contains "$(cat "$WS/.harness/events.jsonl" 2>&1)" "assumption" "y lo deja en el bus"
+assert_contains "$out" "worktrees/T5/beta diff" "sin pin, el delta cae al worktree vivo (no miente la ruta)"
+
+# el pin roto no es permanente: el siguiente scaffold lo rehace
+printf 'v4\n' > "$WT5/app.txt"; g5 add -A; g5 commit -q -m v4
+H5D="$(g5 rev-parse HEAD)"
+mk_ev5 EV-TEST-pin000000004 "$H5D"
+bash "$WS/scripts/verdict-scaffold.sh" --rebase T5 beta revisor-5 >/dev/null 2>&1
+assert_eq "$H5D" "$(git -C "$PIN5" rev-parse HEAD)" \
+  "un pin roto ('missing but already registered') se rehace en el scaffold siguiente"
+
+echo
+echo "── --rm limpia el pin (un huérfano deja la metadata del repo rota)"
+cp "$ROOT/templates/scripts/worktree-task.sh" "$WS/scripts/"
+out="$(bash "$WS/scripts/worktree-task.sh" --rm T5 2>&1)"
+assert_no_file "$PIN5" "--rm borra el árbol clavado"
+assert_contains "$out" "pin de review" "y lo dice"
+# La metadata es la prueba dura, no que el dir se haya ido: `worktree add` en la
+# ruta de un pin huérfano a veces muere ("missing but already registered") y a
+# veces ni reconoce la colisión y registra una entrada basura más. Lo que no
+# puede quedar es la entrada.
+assert_not_contains "$(git -C "$WS/repos/beta" worktree list --porcelain)" ".review-beta" \
+  "git worktree list queda sin el pin: cero metadata huérfana"
+
+# El otro huérfano, y el que ningún glob de directorios ve: el DIR del pin ya no
+# está pero la metadata sigue registrada.
+git -C "$WS/repos/beta" worktree add -q "$WT5" task/T5
+git -C "$WS/repos/beta" worktree add -q --detach "$PIN5" HEAD
+rm -rf "$PIN5"
+bash "$WS/scripts/worktree-task.sh" --rm T5 >/dev/null 2>&1
+assert_not_contains "$(git -C "$WS/repos/beta" worktree list --porcelain)" ".review-beta" \
+  "--rm poda también el pin registrado cuyo dir ya no existe"
+
 t_done

@@ -44,12 +44,17 @@ task="${1:-}"
 discover() { # $1=root  [$2=ruta absoluta a podar]
   local root="$1" extra="${2:-}"
   [ -d "$root" ] || return 0
+  # `.review-*` es el arbol CLAVADO del reviewer (verdict-scaffold): mismo
+  # module-path que el worktree vivo. Sin podarlo, el go.work puede apuntar
+  # el loop nativo al commit sellado en vez de a las ediciones vivas, y el
+  # ganador lo decide el orden de readdir: no determinista (demostrado).
   if [ -n "$extra" ]; then
     find "$root" \( -name .git -o -name vendor -o -name node_modules \
-                    -o -name .cache -o -path "$extra" \) -prune -o -name go.mod -print
+                    -o -name .cache -o -name '.review-*' -o -path "$extra" \) \
+                    -prune -o -name go.mod -print
   else
     find "$root" \( -name .git -o -name vendor -o -name node_modules \
-                    -o -name .cache \) -prune -o -name go.mod -print
+                    -o -name .cache -o -name '.review-*' \) -prune -o -name go.mod -print
   fi
 }
 

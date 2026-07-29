@@ -43,6 +43,31 @@ contra una instalación real).
   /harness-update cierra publicando por ella.
 
 ### Changed
+- **`/smart` ya no publica por default: la entrega la declara la invocación.**
+  El síntoma llegaba como pregunta al final de cada corrida, en el chat: "no
+  commiteé ni shippeé, ¿lo llevo por /review + ship?". No era timidez del
+  modelo: la entrega no estaba declarada en ningún lado mecánico, así que
+  preguntar era lo correcto, y el humano terminaba autorizando por frase lo que
+  ninguna auditoría podía reconstruir después. Ahora es un DATO TIPADO que
+  escribe el comando de entrada en `tasks/<id>/state.json`, reusando el
+  vocabulario del knob `flow`: **`/smart` registra `delivery: review`** (nada se
+  publica: commits locales del worktree sí, push, PR y main JAMÁS), `/smart-pr`
+  registra `prs` (rama + PR) y `/smart-main` registra `trunk` (ship a main).
+  Ojo al cambio de conducta: hasta hoy `/smart` llegaba a main. El "go"
+  posterior a un `/smart` dejó de ser una frase y es una transición auditable
+  (`harness-policy.py delivery --to prs|trunk`: actor y motivo en `history[]`, y
+  solo hacia arriba, porque bajar el campo no despublica nada y dejaría al
+  estado mintiendo sobre lo que ya está afuera). Con eso, **pedir autorización
+  para commitear o publicar dentro de una corrida con entrega declarada quedó
+  PROHIBIDO** en la lista cerrada de paradas: la invocación ya contestó esa
+  pregunta, y volver a hacerla es re-litigar una decisión tomada. Nada de esto
+  toca a quien ya estaba trabajando: una tarea SIN campo `delivery` (las viejas
+  y las de `/quick`) conserva su conducta, `ship.sh` sigue el `flow` del
+  workspace; y con `delivery: review` el ship no devuelve un gate rojo sino
+  exit 8, que es "esto es lo que pediste", con la promoción escrita en la
+  salida. `autonomy: checkpoint` sigue mandando por encima de la invocación
+  porque es política del workspace y no de la tarea: con checkpoint, hasta
+  `/smart-main` hace su única parada legítima antes de publicar.
 - **El comando `/auto` pasa a llamarse `/smart`.** `/auto` chocaba con el
   comando homónimo de Kimi Code, y el harness es multi-herramienta por diseño:
   `AGENTS.md` es su puerta y promete que Cursor, Codex o Kimi operan el mismo
@@ -60,6 +85,23 @@ contra una instalación real).
   funcionando mientras el puntero esté.
 
 ### Fixed
+- **Tres hallazgos de la primera corrida de campo de una instancia real
+  (post 0.54.0), los tres verificados EJECUTANDO, no leyendo.** (1) El
+  reviewer leía el worktree VIVO mientras el implementer (dueño del claim)
+  podía seguir editando: el veredicto sellaba el commit X con un juicio de X
+  más ediciones transitorias, falso verde legítimo. Ahora `verdict-scaffold`
+  clava `worktrees/<task>/.review-<repo>` (detached al commit sellado,
+  re-clavado en cada `--rebase`, limpiado por `--rm`) y el reviewer lee ahí;
+  el pin degradado se declara, jamás mata el scaffold. El efecto colateral lo
+  encontró el propio fix ejecutándose: `gowork.sh` y `py.sh` veían el pin
+  como segundo módulo/paquete (con ganador por orden de `readdir`, no
+  determinista), y ahora lo podan. (2) Los planes del architect afirmaban
+  comportamiento runtime de una dependencia "verificado en código" leyéndole
+  el fuente (dos decisiones falsas, dos rondas pagadas): la regla nueva exige
+  una EJECUCIÓN con su salida citada, o la decisión es un supuesto. (3) Con
+  `manifest.yaml` ilegible, `init` salteaba EN SILENCIO el freno de infra y
+  el aviso de repos desconocidos, y el silencio se leyó como "chequeo
+  pasado": ahora grita nombrando lo que NO corrió y el backstop.
 - **#39: el precheck no sella con árbol sucio**. El fix de 0.52.0 degradó la
   EVIDENCIA honestamente pero el sello seguía grabando HEAD con ok:true: los
   gates corrieron sobre el working tree y /review leía "los gates pasaron

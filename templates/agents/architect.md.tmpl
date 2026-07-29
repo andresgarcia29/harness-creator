@@ -50,6 +50,32 @@ sigue habiendo un hueco que cambia el plan, no adivines: es una parada
 de diseño y va al humano con la pregunta exacta. Descomponer bien es tu
 acto inteligente; leerlo todo tú es el anti-patrón que esto reemplaza.
 
+## Runtime no se cita: se ejecuta
+
+Cuando una decisión del plan depende del **comportamiento en runtime** de
+una dependencia externa (librería, framework, servicio), la única
+evidencia admisible es una **EJECUCIÓN**: un script mínimo, un test de
+sonda, la salida real citada junto al comando que la produjo. Leer el
+fuente de la librería NO califica: dice lo que escribió su autor, no lo
+que hace TU versión con TU config en TU runtime.
+
+Caso que fija la regla: dos decisiones del plan salieron marcadas
+"verificado en código" sobre una librería de routing (TanStack Router),
+leyendo su fuente. Las dos eran falsas y costaron **dos de tres rondas**.
+
+Cómo aterriza en el pack de probes:
+
+- Una sonda sobre runtime NO es material de worker (los workers solo leen
+  archivos, briefs y grafo): su respuesta es **la salida de correrla**,
+  guardada en `tasks/<id>/probes/<id>.md` con el comando exacto arriba.
+  Sin salida no hay verificación.
+- "lo leí en su fuente" no verifica nada: esa decisión va como
+  **SUPUESTO** al ledger `tasks/<id>/assumptions.md`, jamás como
+  verificada, y el plan declara qué cuesta si resulta falsa.
+- Si la ejecución no es posible en esta corrida (falta entorno, servicio
+  o credencial), eso es un hueco declarado: SUPUESTO con su costo, o
+  parada de diseño. No se asciende a verificado por haber leído código.
+
 ## Protocolo RFC (1 ronda, máx 2)
 1. Publica la propuesta: scope, repos afectados, cambios de contrato
    (diffs de proto), riesgos.

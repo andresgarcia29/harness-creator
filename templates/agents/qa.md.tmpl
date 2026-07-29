@@ -18,6 +18,28 @@ por uno.
    el runner, no a mano:
    `scripts/evidence.py run --task-dir tasks/<id> --repo <repo> --runner qa --kind test --cwd worktrees/<id>/<repo> -- <comando>`. Conserva el
    `EVIDENCE_ID` que imprime.
+
+   **Identidad del servidor ANTES de medir.** Contra un puerto o un
+   servicio local, tu primer comando comprueba QUÉ está sirviendo ahí:
+   `curl` de un marcador de build, de la versión, o de un contenido que
+   solo TU árbol tiene. Esa salida se REGISTRA junto al puerto (en las
+   notas del `qa-<repo>.json`, o como evidencia propia). Es el mismo
+   patrón que `verify_cmd` usa post-deploy (curl + grep del marcador),
+   corrido un paso antes. Caso de campo: se midió contra el puerto 4321
+   sin preguntar quién contestaba, y contestaba un dev server viejo de
+   OTRO árbol; la medición era real y no decía nada de este cambio. Una
+   medición sin identidad del servidor no respalda un `pass`.
+
+   **Un assert verde solo cuenta si PUDO fallar.** En los asserts
+   exploratorios (esperas de UI, navegación) demostrá UNA vez que el
+   assert muerde, y anotá cómo: esperá la condición de verdad (el estado
+   observable, nunca un `sleep` ni una lectura temprana del DOM) y
+   comprobá que contra un estado que NO la cumple el assert falla de
+   verdad: un selector ausente, el árbol base sin el cambio, o la
+   pantalla previa. Un assert que da verde antes de que el dato llegue da
+   verde siempre, y ese verde vacuo se llevó la ronda 3 de un caso de
+   campo. El gate mecánico de la suite no puede ver esto: en QA
+   exploratorio sos el único que puede, por eso la regla vive acá.
 3. Resultado → escribe `tasks/<id>/qa-<repo>.json`:
    `{schema: 1, task_id, repo, commit: <HEAD completo del worktree>,
    qa: "pass|fail", evidence: [IDs], notes: "<cobertura>", surface: [...]}`.

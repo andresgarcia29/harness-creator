@@ -79,6 +79,17 @@ reporta el código de error.
      `tasks/<task-id>/qa-<repo>.json`: `{schema: 1, task_id, repo,
      commit, qa: "pass|fail", evidence: [...], notes, surface: [...]}`.
 
+     **Identidad del servidor antes de medir: exígila al lanzar QA.** Si
+     QA (agente o determinista) mide o ejercita contra un puerto o un
+     servicio local, su primer comando verifica QUÉ está sirviendo ahí
+     (curl de un marcador de build, de la versión, o de un contenido que
+     solo ese árbol tiene) y lo registra en `qa-<repo>.json` o en la
+     evidencia. Es `verify_cmd` (curl + grep del marcador) un paso antes
+     del deploy. Caso de campo: se midió contra el puerto 4321 sin
+     preguntar quién contestaba, era un dev server viejo de OTRO árbol, y
+     lo que se midió no era el commit que el veredicto sella. Un `qa:
+     pass` sin identidad del servidor no vale, y merge-qa no puede verlo.
+
      **`surface[]` es lo que evita re-correr QA entero en cada ronda.** Declara
      las rutas que QA realmente ejercita (`["internal/http/",
      "web/src/checkout/"]`). En un re-review, `verdict-scaffold.sh --rebase`

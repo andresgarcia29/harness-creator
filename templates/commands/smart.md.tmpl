@@ -313,6 +313,10 @@ Reglas del ledger, en orden de precedencia:
    **Contexto de arranque, completo y mínimo**: su entrada del plan, sus
    criterios, y el brief de `.cache/briefs/<repo>.md` — el implementer
    NO explora el repo desde cero; Serena cubre el nivel símbolo.
+   **El test se escribe para que FALLE sin el fix (rojo primero), y eso va en
+   su contexto**: el precheck lo comprueba con `gate_test_muerde` corriendo
+   cada test nuevo contra el árbol base, y un test que pasa en los dos árboles
+   es un rojo del implementer, no un verde.
    Cada tarea que termina pasa el **precheck** (`scripts/ship.sh
    --precheck <id> <repo>`: los gates mecánicos del ship, sin veredicto
    ni push) y con verde encola su review DE INMEDIATO (pipeline, no

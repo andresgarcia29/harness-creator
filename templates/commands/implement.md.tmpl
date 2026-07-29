@@ -31,6 +31,10 @@ Implementación de $ARGUMENTS según tasks/<task-id>/plan.md.
    sus criterios de aceptación y el brief (`.cache/briefs/<repo>.md`).
    Con eso el implementer NO explora el repo desde cero — Serena cubre
    el nivel símbolo. Tareas sin dependencia entre sí: EN PARALELO.
+   **Y va en su contexto, no solo acá: el test tiene que FALLAR sin el fix
+   (rojo primero).** `gate_test_muerde` corre cada test nuevo contra el árbol
+   base en el precheck, y un test que pasa en los dos árboles es un rojo tuyo:
+   no prueba la conducta nueva.
 4. Cada implementer termina → **precheck antes de review**:
    `scripts/ship.sh --precheck <task-id> <repo>` (los mismos gates
    mecánicos del ship, sin veredicto ni push, $0 tokens). Verde: marca

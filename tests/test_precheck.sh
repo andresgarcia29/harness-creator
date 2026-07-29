@@ -113,7 +113,13 @@ mkdir -p "$WS/worktrees/T8/svc" "$WS/tasks/T8"
 cp -R "$WS/repos/svc/." "$WS/worktrees/T8/svc/"
 ( cd "$WS/worktrees/T8/svc"
   printf '[project]\nname="svc"\nversion="0.1"\n' > pyproject.toml
-  mkdir -p tests && printf 'def test_ok():\n    assert 1 == 1\n' > tests/test_a.py
+  # El test AFIRMA algo que solo es cierto CON este commit (el pyproject que el
+  # mismo commit agrega). No es un rodeo: gate_test_muerde corre todo test nuevo
+  # contra el árbol base, y un `assert 1 == 1` pasaría también ahí, o sea que
+  # este fixture sería el test vacuo que ese gate existe para cazar y el
+  # precheck moriría antes de llegar a lo que este caso mide.
+  mkdir -p tests
+  printf 'import os\n\n\ndef test_ok():\n    assert os.path.exists("pyproject.toml")\n' > tests/test_a.py
   git add -A; git commit -qm "con stack
 
 Task: T8" )
@@ -365,6 +371,38 @@ assert_eq "desconocido" "$(clasifica '')"    "vacío: desconocido"
 assert_eq "desconocido" "$(clasifica '--sin-marcador')" "sin marcador: desconocido"
 assert_eq "ninguno"     "$(clasifica '0')"   "el caso de siempre no se movió: '0' es ninguno"
 assert_eq "completo"    "$(clasifica '1')"   "ni el otro: '1' es completo"
+
+echo
+echo "── un test nuevo que pasa SIN el cambio: el precheck lo caza, de punta a punta"
+# Caso de campo que costó una ronda entera: un implementer escribió un assert que
+# NO PODÍA FALLAR (evaluaba antes de que llegara el dato). La suite pasó, el
+# precheck pasó, y la ronda 3 completa (commit, precheck, dos sellos de
+# evidencia, dos agentes) se pagó por un test que no probaba nada. Los bloques de
+# arriba miden el gate aislado; esto mide que esté CABLEADO al precheck, que es
+# el único camino por el que un implementer lo va a encontrar.
+mkdir -p "$WS/worktrees/T15/svc" "$WS/tasks/T15"
+cp -R "$WS/repos/svc/." "$WS/worktrees/T15/svc/"
+( cd "$WS/worktrees/T15/svc"; mkdir -p tests
+  printf 'def test_vacuo():\n    assert True\n' > tests/test_vacuo.py
+  git add -A; git commit -qm "un test que no puede fallar
+
+Task: T15" )
+# pytest de palo: este caso no mide a pytest, mide que el gate corra el test
+# nuevo contra el árbol base y lea su exit. Un `assert True` pasa en los dos.
+printf '#!/bin/sh\necho "1 passed"\nexit 0\n' > "$WS/bin/pytest"; chmod +x "$WS/bin/pytest"
+stub_gitleaks 'exit 0'
+out="$( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/ship.sh --precheck T15 svc 2>&1 )"; rc=$?
+[ "$rc" -ne 0 ] && pass "test nuevo que pasa también sobre la base: el precheck sale != 0" \
+  || fail "un test que no puede fallar pasó el precheck (la ronda se paga igual)"
+assert_contains "$out" "PASAN también SIN tu cambio" "y nombra exactamente el defecto"
+assert_contains "$out" "tests/test_vacuo.py" "con el archivo"
+assert_contains "$out" "pasa sin tu fix" "y la remediación"
+assert_contains "$out" "NO entregues a review" "encuadrado como precheck rojo, o sea ronda AHORRADA"
+sello="$(cat "$WS/tasks/T15/precheck-svc.json")"
+assert_contains "$sello" '"ok":false' "el sello dice ok:false (lo lee /review para no lanzar a nadie)"
+assert_eq "1" "$( cd "$WS/worktrees/T15/svc" && git worktree list | grep -c . )" \
+  "y el worktree temporal del árbol base se limpió, incluso con el gate rojo"
+rm -f "$WS/bin/pytest"
 
 echo
 echo "── el reviewer no fabrica el veredicto que no existe"

@@ -1323,6 +1323,30 @@ salida_ceguera="$( WS="$WS"; WT="$WS"; REPO=svc; HARNESS_MIN_FREE_GB=2
 assert_eq 0 "$rc_ceguera" "df ilegible: NO inventa un rojo (se ausenta)"
 assert_not_contains "$salida_ceguera" "DISCO" "y no imprime un veredicto que no puede sostener"
 
+# MANDA EL MÁS APRETADO DE LOS DOS. El caso de campo fue el disco RAÍZ, y los
+# workers de test escriben su spill en TMPDIR, que muy seguido vive en otro
+# filesystem que el worktree. Mirar solo el worktree dejaba pasar el escenario
+# exacto del reporte: worktree holgado, raíz llena, suite roja por ENOSPC.
+cat > "$WS/dos-fs.sh" <<'STUB'
+# df stubeado con DOS sistemas de archivos: el worktree holgado y el de
+# temporales al 100 por ciento. La invocación real es `df -Pk <punto>`, así que
+# el punto de montaje es $2 (no $3: los flags van juntos en un solo argumento).
+df() {
+  if [ "$2" = "/tmp-simulado" ]; then
+    printf 'F B U Avail C M\n/dev/root 100 100 56 100%% /\n'
+  else
+    printf 'F B U Avail C M\n/dev/wt 100 1 31457280 1%% /wt\n'
+  fi
+}
+STUB
+salida_dos="$( WS="$WS"; WT="$WS"; REPO=svc; HARNESS_MIN_FREE_GB=2
+        TMPDIR=/tmp-simulado
+        gate() { echo "── gate: $1 ──"; }; emit() { :; }
+        . "$WS/dos-fs.sh"
+        . "$WS/disco.sh"; gate_espacio_en_disco 2>&1 )"; rc_dos=$?
+assert_eq 3 "$rc_dos" "worktree holgado pero TMPDIR lleno: igual se niega (manda el peor)"
+assert_contains "$salida_dos" "NO ES TU CÓDIGO" "y con el mismo diagnóstico"
+
 echo
 echo "── semgrep: el ignore por defecto escondía los tests, y el gate salía verde"
 # Caso de campo: semgrep trae un .semgrepignore propio que excluye *_test.go.
@@ -1376,6 +1400,29 @@ GO
   found="$( cd "$SG/repo" && for g in $(semgrep_test_globs "$SG/rules.yaml"); do
               git ls-files -- "$g"; done )"
   assert_eq "app_test.go" "$found" "el gate resuelve el target desde los globs de la regla"
+
+  # ── EL RATCHET: encender un gate ciego no puede murar el repo ──────
+  # Del otro lado de un gate que estuvo ciego hay deuda que nadie pudo ver (el
+  # propio reporte lo dice: "era un falso verde, no una ausencia de deuda").
+  # Bloquear todo pondría en rojo cada ship hasta que alguien limpie sleeps que
+  # no escribió: la misma trampa que el ratchet de buf lint existe para evitar.
+  ( cd "$SG/repo" && git update-ref refs/remotes/origin/main HEAD ) >/dev/null 2>&1
+  # un archivo de test NUEVO con la violación: ese SÍ es tuyo
+  cat > "$SG/repo/nuevo_test.go" <<'GO'
+package app
+import ("testing"; "time")
+func TestY(t *testing.T) { time.Sleep(time.Second) }
+GO
+  ( cd "$SG/repo" && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm nuevo ) >/dev/null 2>&1
+  tocados="$( cd "$SG/repo" && for g in $(semgrep_test_globs "$SG/rules.yaml"); do
+                git diff --name-only --diff-filter=d "origin/main...HEAD" -- "$g"; done )"
+  assert_eq "nuevo_test.go" "$tocados" \
+    "el bloqueo mira SOLO los tests que este cambio tocó (el viejo no es tuyo)"
+  todos="$( cd "$SG/repo" && for g in $(semgrep_test_globs "$SG/rules.yaml"); do
+              git ls-files -- "$g"; done | sort | tr '\n' ' ' )"
+  assert_contains "$todos" "app_test.go" "y el aviso sí cuenta la deuda preexistente"
+  assert_contains "$todos" "nuevo_test.go" "junto con la nueva"
 else
   echo "  ! semgrep no instalado: los dos casos end-to-end no corrieron."
   echo "    NO es un verde: la lógica de globs sí se probó arriba, pero la"

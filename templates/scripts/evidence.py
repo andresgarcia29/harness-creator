@@ -443,15 +443,25 @@ def command_run(args: argparse.Namespace) -> int:
         for line in dirty_after.splitlines()[:10]:
             print(f"  {line}", file=sys.stderr)
         print(
-            "\nEstaba limpio al empezar, así que alguien lo tocó DURANTE la\n"
-            "corrida: otro agente comparte este worktree. Lo que se ejecutó ya\n"
-            "no es lo que dice el commit, y sellarlo certificaría código que no\n"
-            "corrió (caso de campo: verificación por mutación del reviewer\n"
-            "mientras QA medía sobre el mismo árbol).\n"
-            "  ↳ remediación: re-corré cuando el árbol esté quieto. Si alguien\n"
-            "    necesita mutar para probar algo, que lo haga en un worktree\n"
-            "    descartable:\n"
-            "      git -C <worktree> worktree add --detach /tmp/sonda HEAD",
+            "\nEstaba limpio al empezar, así que se movió DURANTE la corrida, y\n"
+            "el sello diría 'commit P' sobre un árbol que ya no es P. No puedo\n"
+            "saber cuál de las dos causas fue, así que van las dos con su\n"
+            "remediación; los archivos de arriba te dicen cuál es la tuya:\n"
+            "\n"
+            "  (a) OTRO AGENTE comparte este worktree (caso de campo:\n"
+            "      verificación por mutación del reviewer mientras QA medía\n"
+            "      sobre el mismo árbol, y el build absorbió el archivo mutado).\n"
+            "      ↳ re-corré cuando el árbol esté quieto. Quien necesite mutar\n"
+            "        para probar algo, que use un árbol descartable:\n"
+            "          git -C <worktree> worktree add --detach /tmp/sonda HEAD\n"
+            "\n"
+            "  (b) EL COMANDO MISMO reescribe archivos versionados: goldens o\n"
+            "      snapshots que se auto-actualizan, go.sum, un lockfile. Eso es\n"
+            "      legítimo, pero el resultado pertenece al árbol de DESPUÉS.\n"
+            "      ↳ commitea lo que regeneró (con el trailer Task:) y re-corré\n"
+            "        sobre el árbol limpio, o corré el comando en modo que no\n"
+            "        reescriba (por ejemplo el flag de verificación del runner,\n"
+            "        no el de actualización).",
             file=sys.stderr)
         return 3
 

@@ -1282,15 +1282,48 @@ run_security_gates() {
     #
     # Los globs salen de las PROPIAS reglas (sus `include:`), no de una lista
     # cableada acá: si mañana una regla mira *.spec.rb, el gate la sigue sola.
-    local sg_glob sg_targets=""
+    #
+    # ── Y RATCHETEA, COMO buf Y ruff ──────────────────────────────────
+    # Encender un gate que estuvo CIEGO no es lo mismo que agregar uno nuevo:
+    # del otro lado hay deuda acumulada que nadie pudo ver. El propio reporte
+    # lo dice ("era un falso verde, no una ausencia de deuda"), así que un
+    # bloqueo sobre todo el repo pondría en rojo cada ship hasta que alguien
+    # limpie sleeps que no escribió. Esa es la misma trampa que el ratchet de
+    # buf lint existe para no tener.
+    #
+    # Bloquean solo los archivos que ESTE cambio tocó; el resto se cuenta y se
+    # avisa, candidatos al ratchet-keeper. La deuda deja de ser invisible sin
+    # secuestrar el shipping ajeno.
+    local sg_glob sg_todos="" sg_tocados="" sg_f sg_viejos=0
     for sg_glob in $(semgrep_test_globs "$WS/semgrep/rules.yaml"); do
-      sg_targets="$sg_targets $(git ls-files -- "$sg_glob" 2>/dev/null || true)"
+      sg_todos="$sg_todos $(git ls-files -- "$sg_glob" 2>/dev/null || true)"
+      sg_tocados="$sg_tocados $(git diff --name-only --diff-filter=d \
+        "origin/$BASE_REF...HEAD" -- "$sg_glob" 2>/dev/null || true)"
     done
     # shellcheck disable=SC2086
-    set -- $sg_targets
+    set -- $sg_tocados
     if [ $# -gt 0 ]; then
-      echo "   segunda pasada sobre $# archivo(s) que el ignore por defecto oculta"
+      echo "   segunda pasada sobre $# archivo(s) de test que este cambio tocó"
+      echo "   (el escaneo de directorio no los ve: los esconde el .semgrepignore)"
       semgrep scan --config "$WS/semgrep/rules.yaml" --error --quiet "$@"
+    fi
+    # Lo preexistente: se MIRA y se cuenta, pero no bloquea. Sin `--error` el
+    # exit es 0 pase lo que pase, así que esto no puede tumbar el gate.
+    # shellcheck disable=SC2086
+    set -- $sg_todos
+    if [ $# -gt 0 ]; then
+      sg_viejos="$(semgrep scan --config "$WS/semgrep/rules.yaml" --quiet \
+        --json "$@" 2>/dev/null | jq '.results | length' 2>/dev/null || echo 0)"
+      case "$sg_viejos" in ''|*[!0-9]*) sg_viejos=0 ;; esac
+      if [ "$sg_viejos" -gt 0 ]; then
+        echo "⚠️  semgrep: $sg_viejos hallazgo(s) en archivos de test del repo"
+        echo "   (incluidos los que este cambio NO tocó). No bloquean: son deuda"
+        echo "   que el .semgrepignore por defecto mantuvo invisible hasta ahora,"
+        echo "   y ponerla en rojo de golpe frenaría ships que no la causaron."
+        echo "   ↳ candidatos al ratchet-keeper: semgrep scan --config \\"
+        echo "     \"$WS/semgrep/rules.yaml\" --quiet \$(git ls-files '*_test.*')"
+        emit assumption "$REPO: $sg_viejos hallazgo(s) de semgrep en tests preexistentes (no bloquean)"
+      fi
     fi
   fi
 }
@@ -2167,9 +2200,21 @@ gate_espacio_en_disco() {
   min_gb="${HARNESS_MIN_FREE_GB:-2}"
   case "$min_gb" in ''|*[!0-9]*) min_gb=2 ;; esac
   [ "$min_gb" -gt 0 ] || return 0            # 0 = apagado explícito
+  # Se miran DOS sistemas de archivos y manda el más apretado: el worktree y el
+  # de temporales. El caso de campo fue el disco RAÍZ, y los workers de test
+  # escriben su spill en TMPDIR, que muy seguido está en otro filesystem que el
+  # worktree (o al revés). Mirar uno solo dejaba pasar exactamente el escenario
+  # reportado: worktree holgado, raíz al 100 por ciento, suite roja por ENOSPC.
+  #
   # -P: formato POSIX de una sola línea (sin él, un punto de montaje largo
   # parte la salida en dos y el awk lee la columna equivocada). BSD y GNU.
-  libre_kb="$(df -Pk "$WT" 2>/dev/null | awk 'NR==2 {print $4}')"
+  local punto otro_kb
+  libre_kb=""
+  for punto in "$WT" "${TMPDIR:-/tmp}"; do
+    otro_kb="$(df -Pk "$punto" 2>/dev/null | awk 'NR==2 {print $4}')"
+    case "$otro_kb" in ''|*[!0-9]*) continue ;; esac
+    if [ -z "$libre_kb" ] || [ "$otro_kb" -lt "$libre_kb" ]; then libre_kb="$otro_kb"; fi
+  done
   case "$libre_kb" in ''|*[!0-9]*) return 0 ;; esac   # sin df legible: no se inventa
   libre_gb=$((libre_kb / 1024 / 1024))
   [ "$libre_kb" -lt $((min_gb * 1024 * 1024)) ] || return 0

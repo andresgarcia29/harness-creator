@@ -437,8 +437,15 @@ class EvidenceTest(unittest.TestCase):
         result = self._run_mutating("printf 'mutado\\n' >> README.md")
         self.assertEqual(result.returncode, 3, result.stderr)
         self.assertIn("ENSUCIÓ", result.stderr)
-        self.assertIn("otro agente", result.stderr)
-        self.assertIn("worktree add --detach", result.stderr)   # la remediación exacta
+        # El mensaje NO puede afirmar una causa que no puede saber: desde el
+        # `git status` solo, "otro agente mutó el árbol" y "el comando regeneró
+        # un golden" son indistinguibles. Se nombran las DOS con su remediación
+        # y se deja que los archivos listados decidan cuál es.
+        self.assertIn("OTRO AGENTE", result.stderr)
+        self.assertIn("worktree add --detach", result.stderr)   # remediación (a)
+        self.assertIn("EL COMANDO MISMO", result.stderr)
+        self.assertIn("commitea lo que regeneró", result.stderr)  # remediación (b)
+        self.assertNotIn("así que alguien lo tocó", result.stderr)
         # y no queda un manifiesto sellando lo que no se puede afirmar
         sealed = list((self.task / "evidence").glob("EV-*.json")) \
             if (self.task / "evidence").is_dir() else []

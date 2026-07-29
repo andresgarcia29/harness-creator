@@ -1,0 +1,14 @@
+---
+description: /smart con la entrega declarada en rama + PR. Mismo pipeline y mismos gates; termina con el PR abierto, nunca en la trunk.
+argument-hint: <TICKET-ID | url | task-id | "prompt literal entre comillas"> [--hasta rfc|implement|review|ship] [--model fast|smart|deep]
+---
+
+Registrás `delivery: prs` en el init de la tarea
+(`scripts/harness-policy.py init tasks/<id> --lane <carril> --repos <repos>
+--delivery prs`) y después seguís `.claude/commands/smart.md` al pie de la
+letra, para $ARGUMENTS.
+
+La ÚNICA diferencia es la entrega declarada: donde `/smart` registra `review` y
+no publica nada, acá el ship publica la RAMA y abre el PR.
+
+Cero reglas propias: lo que no está en `smart.md`, no existe.

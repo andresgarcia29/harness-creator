@@ -105,11 +105,27 @@ Después de eso, el día a día es **una sola línea**:
 /smart COR-123 --model deep                     # misma tarea, modelo elegido por ti
 ```
 
-`/smart` corre el pipeline entero (enrichment, carril, RFC si aplica, implementación, review, ship, deploy, archive) dimensionado al blast radius: un cambio de 1 repo sin contratos va por el carril express, que salta el RFC, y `gate_lane` verifica que el diff cumpla esa promesa. (Este comando se llamaba `/auto`: el nombre chocaba con el `/auto` de Kimi Code, y el harness es multi-herramienta por diseño. `/auto` queda un ciclo como puntero de deprecación que redirige a `/smart` con los mismos argumentos.)
+`/smart` corre el pipeline entero (enrichment, carril, RFC si aplica, implementación, review y, si la entrega declarada lo autoriza, ship, deploy y archive) dimensionado al blast radius: un cambio de 1 repo sin contratos va por el carril express, que salta el RFC, y `gate_lane` verifica que el diff cumpla esa promesa. (Este comando se llamaba `/auto`: el nombre chocaba con el `/auto` de Kimi Code, y el harness es multi-herramienta por diseño. `/auto` queda un ciclo como puntero de deprecación que redirige a `/smart` con los mismos argumentos.)
 
 **Tu única intervención ocurre al principio.** El primer paso, el *enrichment*, investiga tu código, entiende la tarea y te hace **una sola ronda de preguntas**, solo si hay algo que tu propio repositorio no puede responder. A partir de ahí corre solo hasta el reporte final. Si prefieres conducir fase por fase, los comandos sueltos siguen ahí: `/feature`, `/rfc`, `/implement`, `/review`, `/ship`, `/archive`.
 
 Y hay un atajo para el otro extremo: **`/quick "<qué>"`**, para lo trivial que vos ya dimensionaste: cero deliberación, mismos gates. Un solo repo, hasta 8 archivos y 200 líneas cambiadas (los techos viven en `harness-policy.json`); si el diff se pasa, `gate_lane` lo para y te manda a `harness-policy.py escalate --to express`.
+
+### La entrega la declara la invocación, no una charla a mitad de vuelo
+
+Mismo pipeline, mismos gates, tres finales distintos, y el final lo eliges **al invocar**:
+
+| Invocación | Qué te deja | Qué NO hace |
+|---|---|---|
+| `/smart <ticket \| "prompt">` | el trabajo terminado y auditable: commits en el worktree, veredicto de review y evidencia sellada | no pushea, no abre PR, no toca `main` |
+| `/smart-pr <ticket \| "prompt">` | lo mismo, más la rama publicada y el PR abierto | no mergea |
+| `/smart-main <ticket \| "prompt">` | lo mismo, aterrizado en `main` por `ship.sh` con todos sus gates | no deja nada a mitad |
+
+**Por qué cambió** (y este es el caso real, no una hipótesis): los agentes terminaban de implementar y preguntaban en el chat *"no commiteé ni shippeé, ¿lo llevo por `/review` + ship?"*. No era timidez del modelo: **la entrega no estaba declarada en ningún lado mecánico**, así que preguntar era lo correcto. Hoy la declara la invocación y viaja como dato tipado en `tasks/<id>/state.json` (`delivery: review | prs | trunk`, el mismo vocabulario del knob `flow`), así que **pedir autorización para commitear o publicar quedó prohibido** en la lista cerrada de paradas: la invocación ya contestó esa pregunta. Ojo con el cambio de conducta: hasta hoy `/smart` llegaba a `main`; ahora `/smart` no publica nada.
+
+El "go" posterior a un `/smart` tampoco es una frase de chat, es un comando registrado: `harness-policy.py delivery tasks/<id> --to prs --actor <vos>` (o `--to trunk`) deja la autorización en el historial de la tarea, con actor y momento, igual que cualquier otra transición. Se audita como todo lo demás.
+
+Dos cosas **no** cambian. Una tarea sin campo `delivery` (las de antes, y las de `/quick`) se comporta igual que siempre: `ship.sh` sigue el `flow` que elegiste en la entrevista. Y `autonomy: checkpoint` manda por encima de la invocación, porque es política del workspace y no de la tarea: con checkpoint activo, hasta `/smart-main` hace su única parada legítima antes de publicar.
 
 **Requisitos**: macOS o Linux, `git`, `jq` (`brew install jq`), Claude Code. Todo lo demás lo instala el bootstrap.
 
@@ -262,7 +278,9 @@ IMP --> REV["<b>⑤ REVIEW</b> · encola al terminar, no al final<br/><b>reviewe
 REV -->|"🔴 fail · el error ES el prompt del fix"| IMP
 REV -.-> PARA
 
-REV --> CHK{"<b>autonomy</b> en harness-answers.yaml"}:::dec
+REV --> DEL{"<b>delivery</b> · lo declaró la INVOCACIÓN<br/>dato en state.json, jamás una pregunta al humano"}:::dec
+DEL -->|"<b>review</b> · /smart · no se publica nada"| REP
+DEL -->|"<b>prs</b> /smart-pr · <b>trunk</b> /smart-main<br/>o tarea sin campo: manda el flow del workspace"| CHK{"<b>autonomy</b> en harness-answers.yaml"}:::dec
 CHK -->|"checkpoint · UNA pausa extra antes de main"| GO(["resumen de 10 líneas → 'go'"]):::human
 CHK -->|"full · ninguna"| SHIP
 GO --> SHIP
@@ -281,7 +299,7 @@ DW -->|"🟢 · quedan tareas en el DAG"| SHIP
 
 DW -->|"🟢 · DAG completo"| ARCH["<b>⑧ /archive</b> · fusiona el delta-spec en la<br/>spec maestra ← por esto no hay spec-rot<br/>ticket-close.sh · mem_save"]:::agent
 
-ARCH --> REP(["<b>REPORTE FINAL</b> · lo único que lees<br/>qué se shippeó · <b>el ledger completo</b><br/>paradas · costo ccusage"]):::human
+ARCH --> REP(["<b>REPORTE FINAL</b> · lo único que lees<br/>qué se entregó (y cómo publicarlo, si quedó en review)<br/><b>el ledger completo</b> · paradas · costo ccusage"]):::human
 REP -.->|"<b>/promote</b> semanal · el loop se cierra:<br/>supuesto falso → regla semgrep · decisión madura → ADR"| SHIP
 
 classDef script fill:#0b3d2e,stroke:#10b981,stroke-width:2px,color:#d1fae5
@@ -529,6 +547,8 @@ Conviene separar dos cosas que se parecen y no son iguales:
 
 `/smart` solo para en la lista cerrada que vive en su comando, y **cada caso es una ley del harness, no una preferencia**. Esa plantilla es la fuente de verdad: añadir o retirar una parada exige cambiar el contrato y sus pruebas, no corregir un número repetido en prosa.
 
+**Una pregunta salió de la lista para siempre**: "¿commiteo?, ¿shippeo?". Dentro de una corrida con entrega declarada (`delivery` en `state.json`) está **prohibido** pedir esa autorización, porque la invocación ya la dio o ya la negó: `/smart` entrega sin publicar, `/smart-pr` publica rama y PR, `/smart-main` aterriza en `main`. Un agente que igual pregunta está pidiendo permiso por algo que el dato ya contesta.
+
 La regla que lo hace funcionar es negativa: **si la razón para parar no está en esa lista, no es una razón, decide.** Interrumpirte a mitad de vuelo es un fallo de diseño, no prudencia. La red que sostiene esto no eres tú: son los gates deterministas, el canary y el rollback. Y `autonomy: checkpoint` en `harness-answers.yaml` te da **una** pausa extra, un resumen de diez líneas antes del primer ship a main, para las primeras semanas mientras le agarras confianza. Gradúa *cuándo se toca main*, no *cuánto piensa el agente*.
 
 **Los presupuestos son tuyos y ahora sí se respetan.** `loop_budget` en `harness-answers.yaml` gobierna las iteraciones del loop implementer y reviewer. Hasta hace poco había un número distinto escondido en la política (un `3` fijo) que ganaba en silencio, así que subir el presupuesto no servía de nada y el pipeline paraba antes de lo pactado sin explicar por qué. Hoy el límite de la política se deriva de tu configuración.
@@ -769,7 +789,9 @@ El flujo es fijo (discovery, entrevista, generación, verificación); **todo lo 
 | Usar el harness desde Cursor, Kimi Code u otro agente | ya está: `AGENTS.md` es el punto de entrada, y los comandos de `.claude/commands/` son playbooks legibles por cualquiera |
 | Más o menos agentes | el clustering se decide en la entrevista y se corrige en `harness-answers.yaml` |
 | Cuántas vueltas puede dar el loop antes de escalarte | `loop_budget` en `harness-answers.yaml`; de ahí sale también el límite que aplica el motor de política |
-| Que `/smart` te pida un "go" antes de tocar main | `autonomy: checkpoint` o `full` en `harness-answers.yaml` |
+| Qué publica cada corrida | la invocación: `/smart` (nada), `/smart-pr` (rama + PR), `/smart-main` (main). Queda como `delivery` en `tasks/<id>/state.json` |
+| Publicar un `/smart` que ya terminó | `harness-policy.py delivery tasks/<id> --to prs --actor <vos>` (o `--to trunk`): transición registrada en el historial, no una frase de chat |
+| Que `/smart` te pida un "go" antes de tocar main | `autonomy: checkpoint` o `full` en `harness-answers.yaml` (manda sobre la invocación: aplica también a `/smart-main`) |
 | Endurecer o relajar qué bloquea el carril express | `LANE_GUARD_PATTERN` (variable de entorno de `ship.sh`) y las señales del paso de carril de `/smart`; las transiciones viven en `harness-policy.json` |
 | Endurecer o relajar leyes | hooks y denials en `settings.json.tmpl`; gates en `ship.sh.tmpl` |
 

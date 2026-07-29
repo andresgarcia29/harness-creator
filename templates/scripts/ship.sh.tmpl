@@ -29,7 +29,8 @@
 # `exit N` reales del archivo, en los dos sentidos.
 # exit 0 · verde: gates pasados (precheck, --ci, --lang-gates) o cambio publicado.
 # exit 2 · no puedo ni empezar: falta el repo en repos/, el worktree, el clon
-#          base, o no existe origin/<trunk>. Ningún gate llegó a correr.
+#          base, no existe origin/<trunk>, o no se pudo leer la entrega
+#          declarada de la tarea. Ningún gate llegó a correr.
 # exit 3 · un gate dijo que NO: trailer, carril, lenguaje/tests, tests
 #          debilitados, veredicto, compliance, policy o evidencia.
 # exit 4 · git no pudo mover el cambio: rebase imposible, detached HEAD, o la
@@ -38,6 +39,10 @@
 #          no un rojo del cambio.
 # exit 6 · el lock del repo siguió ocupado más de 10 min (otro ship en curso).
 # exit 7 · harness-answers.yaml declara un flow que este script no implementa.
+# exit 8 · la tarea declaró entrega SIN publicación (delivery: review) y este
+#          script publica: no es un rojo, es lo que pidió la invocación. Para
+#          publicar se PROMUEVE la entrega (harness-policy.py delivery ... --to
+#          prs|trunk) y se re-corre. Causa distinta al 7, mensaje distinto.
 # Cualquier otro código != 0 es el del comando que falló bajo set -e (pytest,
 # tsc, git, python3): este script no lo asigna, lo propaga tal cual.
 #
@@ -91,36 +96,7 @@ PUSH_RETRY_BUDGET="${HARNESS_PUSH_RETRIES:-20}"
 # Backoff con JITTER: sin él, N workspaces que pierden la misma carrera
 # reintentan en fase y se vuelven a pisar (manada). El jitter los desincroniza.
 PUSH_BACKOFF_MAX="${HARNESS_PUSH_BACKOFF_MAX:-30}"
-# El flujo a main que el humano eligió en la entrevista. Este script SOLO
-# implementa trunk direct-to-prod: hace `git push origin HEAD:$BASE_REF`. Las
-# otras dos respuestas (trunk-staging, prs) se ofrecían, se registraban en
-# harness-answers.yaml, y NADIE las leía, así que quien eligió "prs" por
-# política de su empresa recibía commits directos a main, en silencio.
-#
-# Se falla CERRADO y no se finge: implementar PRs o staging cambia también
-# lo que significa "shippeado" para deploy-watch y para /archive, y hacerlo
-# a medias produciría un archive que fusiona specs de un cambio que sigue
-# sin mergear. Mientras tanto, el que configuró otra cosa se entera acá y
-# no en producción.
-FLOW="{{FLOW}}"
-# La grafía varía (la entrevista ofrecía "trunk direct-to-prod" y el answers
-# documenta "trunk-direct-to-prod"), así que se normaliza en vez de exigir una
-# forma exacta. Un placeholder sin sustituir o vacío se trata como trunk: es
-# lo que este script hace y lo que hacen todas las instancias de hoy, y un
-# placeholder crudo es un problema de generación que le toca al doctor, no un
-# motivo para frenar un ship.
-flow_norm="$(printf '%s' "$FLOW" | tr 'A-Z' 'a-z' | tr -d ' +_-')"
-case "$flow_norm" in
-  trunk|trunkdirecttoprod|""|'{{flow}}') FLOW_MODE=trunk ;;
-  prs|pr) FLOW_MODE=prs ;;
-  *)
-    echo "❌ harness-answers.yaml declara flow: $FLOW, y ship.sh implementa dos:"
-    echo "   'trunk' (push directo tras los gates) y 'prs' (rama + PR)."
-    echo "   NO voy a pushear a espaldas de una política que dice otra cosa."
-    echo "   ↳ opciones: cambiá flow a 'trunk' o a 'prs', o abrí el PR a mano"
-    echo "     desde la rama task/<id> tras un --precheck verde."
-    exit 7 ;;
-esac
+
 LOCKDIR="$WS/locks/$REPO.lock.d"
 [ "$CI_MODE" -eq 1 ] || mkdir -p "$WS/locks" "$WS/tasks/$TASK"
 
@@ -198,6 +174,126 @@ if ! git -C "$WT" rev-parse --verify --quiet "origin/$BASE_REF" >/dev/null 2>&1;
     exit 2
   fi
 fi
+
+# ── LA ENTREGA LA DECLARA LA INVOCACIÓN, NO EL CHAT ───────────────────
+# El dolor que esto cierra: el agente termina de implementar y PREGUNTA en el
+# chat "no commiteé ni shippeé, ¿lo llevo por /review + ship?". Esa pregunta ya
+# tenía respuesta antes de empezar: /smart entrega para revisar (nada se
+# publica), /smart-pr entrega rama + PR, /smart-main entrega directo al trunk.
+# La respuesta viaja como DATO en tasks/<id>/state.json (campo `delivery`, con
+# el vocabulario del knob flow) y este script la LEE, en vez de esperar que
+# alguien la repita en una frase.
+#
+# Contrato de `delivery-mode <task-dir>` (harness-policy.py): UNA línea con
+# review|prs|trunk|flow y exit 0; exit 3 es "no pude mirar". `flow` significa
+# que la tarea no declaró entrega: conducta de HOY, manda el flow del
+# workspace. Ahí siguen las tareas viejas y /quick, que no cambian de conducta.
+#
+# Solo en el camino de SHIP: --precheck, --ci y --lang-gates no publican nada,
+# así que la entrega declarada no les concierne y no se les pregunta.
+#
+# El LUGAR importa y está elegido: DESPUÉS de las comprobaciones de "no puedo
+# ni empezar" (repo en repos/, worktree, clon base, origin/<trunk>) y muy ANTES
+# del lock y del rebase. Arriba de esas comprobaciones, un ship mal invocado
+# (el caso real: mandar acá el repo de la INSTANCIA) recibiría un mensaje sobre
+# la entrega en vez del error que de verdad tiene, y el humano perdería la
+# remediación correcta. Abajo del lock, una tarea que pidió NO publicar dejaría
+# el repo serializado y la historia rebaseada antes de decir que no.
+DELIVERY=flow
+resolve_delivery() {  # → DELIVERY: prs|trunk|flow, o se niega (8 sin publicar, 2 ilegible)
+  local out rc=0 line
+  out="$(python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" \
+    delivery-mode "$WS/tasks/$TASK" 2>&1)" || rc=$?
+  # La primera línea, con expansión y sin pipe: el contrato es UNA línea, y con
+  # `head` en un pipe bajo `set -o pipefail` una salida larga mata al script por
+  # SIGPIPE en vez de contestar. Un motivo extra en stderr no puede convertirse
+  # en un modo de entrega inventado, así que solo se mira la primera.
+  line="${out%%$'\n'*}"
+  line="$(printf '%s' "$line" | tr -d ' \r')"
+  if [ "$rc" -ne 0 ] || [ -z "$line" ]; then line=ilegible; fi
+  case "$line" in
+    prs|trunk|flow)
+      DELIVERY="$line"; return 0 ;;
+    review)
+      # NO es un error: es exactamente lo que pidió la invocación, y por eso
+      # lleva código propio. Con un exit 3 (gate rojo) el orquestador saldría a
+      # "arreglar" un ship que hizo lo correcto, que es la ronda más cara de
+      # todas: la que corrige algo que no está roto.
+      echo "🛑 la tarea $TASK declaró entrega SIN publicación (delivery: review)."
+      echo "   No es un rojo: es lo que pidió la invocación. Los commits del"
+      echo "   worktree se quedan donde están; push, PR y trunk NO ocurren, y"
+      echo "   esta corrida no toma el lock de $REPO ni rebasea nada."
+      echo "   ↳ para publicar, la entrega se PROMUEVE y queda auditada:"
+      echo "     python3 scripts/harness-policy.py delivery tasks/$TASK --to prs --actor humano"
+      echo "     (o --to trunk para ir directo al trunk), y después re-corré:"
+      echo "     scripts/ship.sh $TASK $REPO"
+      exit 8 ;;
+  esac
+  # Tercer estado: no pude leer la entrega declarada. Caer al flow del workspace
+  # sería elegir la puerta por mi cuenta y llamarlo "lo de siempre", que es
+  # justo el silencio que este campo existe para cerrar.
+  echo "❌ no pude leer la entrega declarada de la tarea $TASK:"
+  if [ -n "$out" ]; then printf '%s\n' "$out" | sed 's/^/   · /'
+  else echo "   · (el subcomando no imprimió nada y salió $rc)"; fi
+  echo "   La entrega decide si este cambio va a una rama, al trunk o a ningún"
+  echo "   lado. Sin ese dato NO publico: un default silencioso acá publicaría"
+  echo "   justo lo que quizá se pidió no publicar."
+  echo "   ↳ remediación: si tu scripts/harness-policy.py no conoce"
+  echo "     'delivery-mode', la instancia está atrasada y hay que actualizarla."
+  echo "     Si lo conoce, revisá que tasks/$TASK/state.json exista y sea JSON"
+  echo "     legible (arriba está lo que contestó el subcomando)."
+  echo "     Mientras tanto scripts/ship.sh --precheck $TASK $REPO corre igual:"
+  echo "     el precheck no publica, así que no depende de esto."
+  exit 2
+}
+if [ "$PRECHECK" -eq 0 ] && [ "$LANG_ONLY" -eq 0 ] && [ "$CI_MODE" -eq 0 ]; then
+  resolve_delivery
+fi
+# El flujo a main que el humano eligió en la entrevista. Este script SOLO
+# implementa trunk direct-to-prod: hace `git push origin HEAD:$BASE_REF`. Las
+# otras dos respuestas (trunk-staging, prs) se ofrecían, se registraban en
+# harness-answers.yaml, y NADIE las leía, así que quien eligió "prs" por
+# política de su empresa recibía commits directos a main, en silencio.
+#
+# Se falla CERRADO y no se finge: implementar PRs o staging cambia también
+# lo que significa "shippeado" para deploy-watch y para /archive, y hacerlo
+# a medias produciría un archive que fusiona specs de un cambio que sigue
+# sin mergear. Mientras tanto, el que configuró otra cosa se entera acá y
+# no en producción.
+FLOW="{{FLOW}}"
+# La grafía varía (la entrevista ofrecía "trunk direct-to-prod" y el answers
+# documenta "trunk-direct-to-prod"), así que se normaliza en vez de exigir una
+# forma exacta. Un placeholder sin sustituir o vacío se trata como trunk: es
+# lo que este script hace y lo que hacen todas las instancias de hoy, y un
+# placeholder crudo es un problema de generación que le toca al doctor, no un
+# motivo para frenar un ship.
+flow_norm="$(printf '%s' "$FLOW" | tr 'A-Z' 'a-z' | tr -d ' +_-')"
+case "$flow_norm" in
+  trunk|trunkdirecttoprod|""|'{{flow}}') FLOW_MODE=trunk ;;
+  prs|pr) FLOW_MODE=prs ;;
+  *)
+    echo "❌ harness-answers.yaml declara flow: $FLOW, y ship.sh implementa dos:"
+    echo "   'trunk' (push directo tras los gates) y 'prs' (rama + PR)."
+    echo "   NO voy a pushear a espaldas de una política que dice otra cosa."
+    echo "   ↳ opciones: cambiá flow a 'trunk' o a 'prs', o abrí el PR a mano"
+    echo "     desde la rama task/<id> tras un --precheck verde."
+    exit 7 ;;
+esac
+# ── La entrega de la TAREA manda sobre el default de la INSTANCIA ─────
+# `flow` es lo que este workspace hace por defecto; `delivery` es lo que se
+# pidió para ESTE trabajo. Cuando la tarea declaró prs o trunk, esa es la
+# puerta: seguir el default sería publicar distinto de lo que pidió la
+# invocación. La entrega solo elige entre las dos puertas implementadas, así
+# que un flow que ship.sh no implementa sigue siendo el rojo de arriba: no se
+# publica a espaldas de una política rota, ni con delivery declarado.
+case "$DELIVERY" in
+  prs|trunk)
+    if [ "$DELIVERY" != "$FLOW_MODE" ]; then
+      echo "ℹ️  entrega declarada de $TASK: $DELIVERY (manda sobre flow: $FLOW_MODE del workspace)"
+    fi
+    FLOW_MODE="$DELIVERY" ;;
+esac
+# fin-puerta-efectiva (marcador: tests/test_ship_gates.sh extrae hasta acá)
 
 # El bus: lo que este gate decide se cuenta. Fail-open — si emit.sh no está,
 # ship.sh funciona igual (el bus es observación, no control).

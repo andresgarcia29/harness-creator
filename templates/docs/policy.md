@@ -9,7 +9,8 @@ ship son válidos.
 Una tarea nueva ejecuta:
 
 ```bash
-scripts/harness-policy.py init tasks/<task-id> --lane <quick|express|standard|full>
+scripts/harness-policy.py init tasks/<task-id> --lane <quick|express|standard|full> \
+  [--delivery <review|prs|trunk>]
 ```
 
 Toda transición usa:
@@ -18,8 +19,9 @@ Toda transición usa:
 scripts/harness-policy.py transition tasks/<task-id> <fase> --actor <identidad>
 ```
 
-El motor conserva `tasks/<task-id>/state.json` con fase, **carril**, rondas de
-review e historial. No se edita a mano.
+El motor conserva `tasks/<task-id>/state.json` con fase, **carril**,
+**entrega** (`delivery`, si el comando la declaró), rondas de review e
+historial. No se edita a mano.
 
 ## Carriles
 
@@ -45,6 +47,34 @@ grafo sin ciclos. `record-cost` conserva un total monotónico y bloquea cuando
 supera el presupuesto inicial. `pause` sólo acepta los motivos cerrados de
 `harness-policy.json`; `resume` devuelve la tarea a la fase que fue pausada.
 
+## Entrega (`delivery`)
+
+El comando de entrada declara QUÉ se publica, y el motor lo guarda en
+`state.json`: `review` (nada se publica: commits del worktree sí; push, PR
+y main jamás), `prs` (rama + PR) y `trunk` (ship directo a main). El
+vocabulario es el del knob `flow` del workspace. `/smart` registra
+`review`, `/smart-pr` registra `prs`, `/smart-main` registra `trunk`.
+
+El "go" posterior a un `/smart` es una transición auditable, no una frase
+de chat:
+
+```bash
+scripts/harness-policy.py delivery tasks/<task-id> --to prs --actor humano
+```
+
+La entrega **solo sube** (`review → prs → trunk`) y queda en `history[]`
+con `kind: delivery`, actor y motivo. Códigos: `POLICY-DELIVERY-001`
+(entrega desconocida, también si `state.json` trae un valor ilegible),
+`-002` (degradarla, o promoverla a donde ya está), `-003` (`validate-ship`
+con `delivery: review`; `ship.sh` lo devuelve como exit 8) y `-004`
+(promover una tarea que no declara entrega).
+
+Una tarea SIN campo `delivery` conserva la conducta de siempre: `ship.sh`
+consulta `delivery-mode`, recibe `flow` y publica con el de
+`harness-answers.yaml`. Y `autonomy: checkpoint` manda por encima de la
+invocación: con checkpoint hay una parada antes de publicar aunque la
+entrega declarada sea `trunk`.
+
 ## Contrato de ship
 
 `validate-ship` exige:
@@ -52,7 +82,9 @@ supera el presupuesto inicial. `pause` sólo acepta los motivos cerrados de
 - fase `review`;
 - máximo de rondas respetado;
 - verdict y QA en `pass` para el HEAD actual;
-- reviewer identificado y separado de los implementadores.
+- reviewer identificado y separado de los implementadores;
+- entrega coherente: con `delivery: review` no se publica nada
+  (`POLICY-DELIVERY-003`, que `ship.sh` devuelve como exit 8).
 
 Evidence v1 valida por separado que las pruebas citadas pertenezcan a ese mismo
 HEAD. Los errores tienen códigos estables (`POLICY-TRANSITION-001`,

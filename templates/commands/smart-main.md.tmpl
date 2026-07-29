@@ -1,0 +1,14 @@
+---
+description: /smart con la entrega declarada directo a la trunk. Mismo pipeline y mismos gates; el cambio termina en main sin volver a preguntar.
+argument-hint: <TICKET-ID | url | task-id | "prompt literal entre comillas"> [--hasta rfc|implement|review|ship] [--model fast|smart|deep]
+---
+
+Registrás `delivery: trunk` en el init de la tarea
+(`scripts/harness-policy.py init tasks/<id> --lane <carril> --repos <repos>
+--delivery trunk`) y después seguís `.claude/commands/smart.md` al pie de la
+letra, para $ARGUMENTS.
+
+La ÚNICA diferencia es la entrega declarada: donde `/smart` registra `review` y
+no publica nada, acá el ship llega a la trunk y el pipeline sigue hasta archive.
+
+Cero reglas propias: lo que no está en `smart.md`, no existe.

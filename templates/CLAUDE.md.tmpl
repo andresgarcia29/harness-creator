@@ -42,12 +42,11 @@ Dirección de dependencias (ley, referencia del DAG de shipping):
    (`scripts/plan-lint.sh`); antes de review, `ship.sh --precheck` verde.
 7. **Decisiones fuera de `docs/` NO EXISTEN.** Lo decidido en chat se
    propone como ADR o se perdió.
-8. **Builds pesados serializados** (economía de CPU) — `docker
-   build/run` de toolchain SOLO vía `scripts/build-slot.sh`: semáforo
-   cross-sesión, `max(1, núcleos/4)` slots (override
-   `HARNESS_BUILD_SLOTS`), espera BLOQUEANTE de kernel sin polling. Sin
-   locks huérfanos (el kernel libera aún con `kill -9`). Un hook bloquea
-   el `docker build/run` pelado.
+8. **Builds pesados serializados** (economía de CPU): el `docker build/run`
+   de toolchain va SOLO vía `scripts/build-slot.sh` (semáforo cross-sesión,
+   `max(1, núcleos/4)` slots, override `HARNESS_BUILD_SLOTS`, espera
+   BLOQUEANTE de kernel sin polling ni locks huérfanos aun con `kill -9`).
+   Un hook bloquea el pelado.
 9. **Loop interno nativo** — iterá con las toolchains del host:
    `scripts/gowork.sh` (Go: `go.work` que une repos/worktree y arregla
    los `replace` del layout monorepo), `scripts/py.sh` (Python/uv +
@@ -60,14 +59,12 @@ Dirección de dependencias (ley, referencia del DAG de shipping):
 11. **Prohibido el guion largo "—"** en todo texto que produzcas
    (docs, reportes, commits, specs): delata texto de IA. Usa coma, dos
    puntos o paréntesis. (El "──" de cajas de terminal es otro carácter.)
-12. **Un bug del HARNESS se verifica y se reporta upstream, siempre.**
-   Si un artefacto del plugin (scripts/, hooks, comandos, gates, panel)
-   falla o contradice lo que documenta: repro mínimo dos veces con
-   `bash -c`, descartar que sea tuyo o versión vieja, y
-   `scripts/harness-bug.sh report` abre el issue en el repo del plugin
-   (redacta secretos, deduplica, cuota 3/24h). Rodearlo con un
-   workaround silencioso condena al siguiente usuario. Protocolo
-   completo: `.claude/skills/harness-bug-report/SKILL.md`.
+12. **Un bug del HARNESS se verifica y se reporta upstream, siempre.** Si un
+   artefacto del plugin (scripts/, hooks, comandos, gates, panel) falla o
+   contradice lo que documenta: repro mínimo dos veces con `bash -c`, descartar
+   que sea tuyo o versión vieja, y `scripts/harness-bug.sh report` abre el issue
+   (redacta secretos, deduplica, cuota 3/24h). Un workaround silencioso condena
+   al siguiente; protocolo: `.claude/skills/harness-bug-report/SKILL.md`.
 13. **Un repo ARCHIVADO en el forge se ignora SIEMPRE.** No entra al grafo,
    ni al inventario, ni a los briefs, ni a los pulls, ni lo cites como
    referencia: está muerto por decisión explícita de alguien y es de solo
@@ -85,8 +82,7 @@ Dirección de dependencias (ley, referencia del DAG de shipping):
    - **Si el lector no puede accionar con eso, sobra.** Sacalo.
    - Lo técnico se explica con un ejemplo concreto, no con teoría. Tu lector
      es técnico: no necesita el concepto, necesita el caso.
-   El costo de romper esta regla no es estético: un reporte que no se lee es
-   un reporte que no existe, y las decisiones se toman igual, peor informadas.
+   Un reporte que no se lee no existe: se decide igual, peor informado.
 15. **La recomendada es la que elimina la causa, jamás la más rápida.**
    Cuando presentes alternativas a un humano, la que marques como
    recomendada es la que deja el problema resuelto para siempre, aunque
@@ -109,7 +105,12 @@ canary. Rojo en deploy: ROLLBACK PRIMERO, diagnóstico después.
 `/quick "<qué>"`: lo trivial ya dimensionado; cero deliberación, mismos gates.
 `/smart <ticket | "prompt">` corre TODO eso sin intervención humana: la
 ambigüedad se resuelve con evidencia y se declara en
-`tasks/<id>/assumptions.md`; solo para donde una ley lo exige.
+`tasks/<id>/assumptions.md`; solo para donde una ley lo exige. La ENTREGA la
+declara la invocación (`delivery` en `state.json`): `/smart` no publica,
+`/smart-pr` deja rama y PR, `/smart-main` aterriza en main; el go es
+`harness-policy.py delivery <task-dir> --to prs|trunk`, no una frase de chat.
+Pedir permiso para commitear o publicar está PROHIBIDO: ya lo contestó la
+invocación. Sin campo, ship usa el `flow` del workspace.
 Semanal: `/promote` (memoria → ley). Roles: `.claude/agents/`.
 
 ## Secretos (jamás valores en repo ni en chat)
@@ -128,10 +129,9 @@ Semanal: `/promote` (memoria → ley). Roles: `.claude/agents/`.
   "¿Dónde está X?" → `semble` (búsqueda semántica local) si está
   instalado; abrir 20 archivos para ubicar uno es el anti-patrón.
 - Docs de librerías → MCP context7, no web-search repetido.
-- Implementación → edición simbólica (Serena), no leer archivos
-  enteros.
-- Estado en archivos, no en conversación: sesión corta y desechable
-  por tarea. Audita gasto: `ccusage`.
+- Implementación → edición simbólica (Serena), no archivos enteros.
+- Estado en archivos, no en conversación: sesión corta y desechable por
+  tarea. Audita gasto: `ccusage`.
 
 ## Memoria
 

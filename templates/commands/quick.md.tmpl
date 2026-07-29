@@ -77,6 +77,11 @@ scripts/worktree-task.sh <id> <repo>
 
 - `init` es quien registra el carril: sin `state.json` el ship muere en
   `POLICY-SCHEMA-001` y el mensaje no dice cuál paso se lo saltó.
+- **quick NO declara `delivery`, a propósito**: su `init` va sin `--delivery`, y
+  el ship publica con el `flow` del workspace, como siempre. El campo ausente en
+  `state.json` es exactamente eso, compatibilidad; no lo agregues por simetría
+  con /smart, que sí lo declara. Si alguna vez hace falta un quick que no
+  publique, será su propio cambio con su propio test, no una deducción de acá.
 - El carril quick permite `intake → implement` (no pasa por `rfc`, igual que
   express). Una transición rechazada es un gate: no edites `state.json` a mano.
 - Trabajás en `worktrees/<id>/<repo>`, NUNCA en `repos/` (el hook

@@ -50,11 +50,29 @@ Day-to-day is one line:
 ```
 
 `/smart` runs the whole pipeline (intake, lane, [RFC], implement, review,
-ship, deploy, archive) without asking you anything. State lives in
-`tasks/<id>/` and worktree commits, never in a conversation: a dead session
-resumes with `/smart <task-id>`. (It used to be called `/auto`, which
-collided with Kimi Code's own `/auto`; the old name stays one cycle as a
-deprecation pointer that redirects here.)
+and, if the declared delivery allows it, ship, deploy, archive) without
+asking you anything. State lives in `tasks/<id>/` and worktree commits,
+never in a conversation: a dead session resumes with `/smart <task-id>`.
+(It used to be called `/auto`, which collided with Kimi Code's own
+`/auto`; the old name stays one cycle as a deprecation pointer that
+redirects here.)
+
+**Delivery is declared by the invocation, never negotiated in chat.**
+`/smart` publishes nothing (worktree commits yes; push, PR and `main`
+never), `/smart-pr` delivers a branch plus a PR, `/smart-main` lands on
+`main` through `ship.sh` and its gates. The reason is a measured pain:
+agents used to finish and ask *"I didn't commit or ship, should I take it
+through /review + ship?"*, which was the right question while nothing
+mechanical declared the delivery. Now it is a typed field in
+`tasks/<id>/state.json` (`delivery: review | prs | trunk`, the same
+vocabulary as the `flow` knob), asking permission to commit or publish is
+**banned** from the closed list of stops, and the later "go" is a recorded
+transition (`harness-policy.py delivery <task-dir> --to prs|trunk --actor
+<you>`), not a sentence.
+Tasks with no `delivery` field (older ones, and `/quick`) behave exactly
+as before: `ship.sh` follows the workspace `flow`. And `autonomy:
+checkpoint` still outranks the invocation: with it, even `/smart-main`
+takes its one legitimate pause before publishing.
 
 ## The core ideas
 

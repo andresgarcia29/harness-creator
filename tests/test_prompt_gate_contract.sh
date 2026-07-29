@@ -232,4 +232,80 @@ else
   fail "transition intake → implement salió $qrc en quick: el paso 2 promete un camino cerrado · $qout"
 fi
 
+echo
+echo "── la entrega es un DATO que declara la invocación, no una pregunta al chat"
+# El dolor real: el agente terminaba de implementar y preguntaba "no commiteé ni
+# shippeé, ¿lo llevo por /review + ship?". La invocación YA había contestado eso,
+# pero en ninguna parte quedaba escrito, así que la decisión se re-litigaba al
+# final, con el humano lejos. Ahora la entrega es el campo `delivery` de
+# state.json y lo declara el init. Este bloque ata cada entrada a lo que
+# registra: un comando que promete una entrega y no la registra deja al ship
+# decidiendo por el flow del workspace, que es justo la conducta vieja.
+smart="$(cmd smart)"
+assert_contains "$smart" "--repos <repo1,repo2> --delivery review" \
+  "el init de /smart declara --delivery review en el MISMO comando, no en un párrafo aparte"
+assert_contains "$smart" "delivery: review" "/smart nombra el valor que queda en state.json"
+assert_contains "$smart" "PUBLICA NADA" "y declara arriba que no publica"
+assert_contains "$smart" "Commits locales en el worktree SÍ" \
+  "sin prohibir los commits locales, que son los que sostienen precheck, evidencia y review"
+
+# Los wrappers: cada uno nombra SU entrega y el archivo al que delega. Sin las
+# dos cosas no es un wrapper, es un comando huérfano que el agente completa a
+# ojo.
+pr="$(cmd smart-pr)"
+mn="$(cmd smart-main)"
+assert_contains "$pr" "--delivery prs" "/smart-pr registra su entrega en el init"
+assert_contains "$pr" 'commands/smart.md' "/smart-pr nombra el archivo al que delega, con su ruta"
+assert_contains "$mn" "--delivery trunk" "/smart-main registra su entrega en el init"
+assert_contains "$mn" 'commands/smart.md' "/smart-main nombra el archivo al que delega, con su ruta"
+
+# Lo que los tres comandos mandan correr tiene que EXISTIR y aceptar lo que
+# prometen. Sin esto, "--delivery review" y el "go" auditable son dos frases
+# bonitas y el agente descubre por el error de argparse que el paso 0.2 le pidió
+# un flag que nadie implementó.
+dws="$tmp/dws"
+mkdir -p "$dws/tasks/SMART-uno"
+dout="$(python3 "$polpy" --policy "$tmp/pol.json" init "$dws/tasks/SMART-uno" \
+  --lane express --repos atlas --delivery review 2>&1)"
+drc=$?
+if [ "$drc" -eq 0 ]; then
+  assert_contains "$dout" "delivery=review" "init acepta --delivery review y lo declara (es el comando del paso 0.2)"
+else
+  fail "init --delivery review salió $drc: el paso 0.2 de /smart manda correr algo que no funciona · $dout"
+fi
+dout="$(python3 "$polpy" --policy "$tmp/pol.json" delivery "$dws/tasks/SMART-uno" \
+  --to prs --actor humano 2>&1)"
+drc=$?
+if [ "$drc" -eq 0 ]; then
+  assert_contains "$dout" "review → prs" "el 'go' del reporte es una transición que el motor ejecuta de verdad"
+else
+  fail "delivery --to prs salió $drc: el reporte final de /smart imprime un comando que no corre · $dout"
+fi
+
+# La remediación del exit 8 va DONDE el humano la va a leer: el reporte final.
+# En cualquier otra sección es una nota que nadie abre cuando la necesita.
+rep="$(printf '%s\n' "$smart" | awk '/^## Reporte final/{f=1} f{print}')"
+if [ -z "$rep" ]; then
+  fail "no encontré la sección del reporte final en smart.md: sin ella no puedo verificar dónde queda la remediación del exit 8, y esto NO es verde"
+else
+  assert_contains "$rep" "exit 8" "el reporte de /smart nombra el código con que ship.sh se niega a publicar"
+  assert_contains "$rep" "delivery tasks/<id> --to prs" "y el comando literal para pasar a rama + PR"
+  assert_contains "$rep" "delivery tasks/<id> --to trunk" "y el de ir directo a la trunk"
+  assert_contains "$rep" "ship.sh <id> <repo>" "con el ship que va DESPUÉS: son dos comandos, no uno"
+  assert_contains "$rep" "worktrees/<id>/<repo>" "y dice dónde quedó el trabajo, para no buscarlo a mano"
+fi
+
+# El otro extremo del contrato lo implementa ship.sh. Mientras ese carril no
+# aterrice, esto no es verde ni rojo: es "no pude mirar", declarado.
+ship_tmpl="$(cat "$root/templates/scripts/ship.sh.tmpl")"
+case "$ship_tmpl" in
+  *"exit 8"*)
+    assert_contains "$ship_tmpl" "delivery" \
+      "ship.sh se niega a publicar por la entrega declarada, que es el 8 que el reporte promete" ;;
+  *)
+    echo "  ! no pude mirar: ship.sh.tmpl todavía no asigna exit 8, así que la remediación"
+    echo "    que /smart imprime no tiene aún su contraparte ejecutable. NO es un verde:"
+    echo "    es que la mitad del contrato (el gate) sigue sin existir." ;;
+esac
+
 t_done

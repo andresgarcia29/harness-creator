@@ -264,8 +264,17 @@ agents=$(ls "$WS"/.claude/agents/*.md 2>/dev/null | wc -l | tr -d ' ')
 for c in feature rfc implement review ship; do
   [ -f "$WS/.claude/commands/$c.md" ] && ok "comando /$c presente" || warn "comando /$c faltante — el pipeline documentado en CLAUDE.md no está completo"
 done
-[ -f "$WS/.claude/commands/auto.md" ] && ok "comando /auto presente (pipeline autónomo: ticket o prompt → prod)" \
-  || warn "comando /auto faltante — sin él no hay pipeline sin intervención; corre /harness-init . (modo update)"
+# El pipeline autónomo se llama /smart: /auto chocaba con el comando homónimo de
+# otros agentes (Kimi Code). Una instancia que solo tiene auto.md se quedó en el
+# nombre viejo, y decirle "falta el comando" mandaría a reinstalar lo que sí
+# está: lo que le falta es el update.
+if [ -f "$WS/.claude/commands/smart.md" ]; then
+  ok "comando /smart presente (pipeline autónomo: ticket o prompt → prod)"
+elif [ -f "$WS/.claude/commands/auto.md" ]; then
+  warn "solo está el /auto viejo: el pipeline se renombró a /smart (el nombre chocaba con otros agentes); corre /harness-init . (modo update)"
+else
+  warn "comando /smart faltante: sin él no hay pipeline sin intervención; corre /harness-init . (modo update)"
+fi
 
 # 8a-bis · El bus del harness
 if [ -f "$WS/scripts/emit.sh" ]; then
@@ -459,6 +468,128 @@ if [ -f "$WS/skills.yaml" ] && [ -x "$WS/scripts/skills-sync.sh" ]; then
 fi
 [ -f "$WS/AGENTS.md" ] && ok "AGENTS.md presente (mapa multi-herramienta)" || warn "sin AGENTS.md — Cursor/Kimi/otros agentes no tienen punto de entrada"
 
+# 10a · Los dos mapas de leyes hablan de LAS MISMAS leyes.
+# CLAUDE.md y AGENTS.md comparten numeracion, y los playbooks citan "Ley N" por
+# numero. Una instancia vieja que actualiza puede quedarse con las dos
+# numeraciones conviviendo: entonces "Ley 6" resuelve a leyes DISTINTAS segun
+# por que mapa entre el agente, que es la ambiguedad que ya costo horas. Ese
+# merge lo ejecuta un LLM leyendo prosa, y la prosa no frena a nadie: el diente
+# tiene que estar aca, en la instancia. Misma mecanica que tests/test_docs.sh
+# (que solo corre en el repo del plugin): el titulo llega al ULTIMO "**";
+# partido en dos lineas o con negrita adentro NO es titulo; los titulos se
+# comparan por prefijo y el comun tiene que cubrir al menos LEY_MIN_PCT del
+# canon, porque 8 caracteres identifican "Presupues" y en un titulo de 50 no
+# identifican nada.
+LEY_MIN_PCT=60
+_ley_nums() {   # _ley_nums <archivo> → numeros de ley, en orden de aparicion
+  sed -n 's/^\([0-9][0-9]*[a-z]*\)\. \*\*.*/\1/p' "$1" 2>/dev/null
+}
+_ley_title() {  # _ley_title <archivo> <num> → titulo, marcador de roto, o vacio
+  awk -v num="$2" '
+    $0 ~ ("^" num "\\. \\*\\*") {
+      resto = substr($0, index($0, "**") + 2)
+      cierre = 0
+      for (i = 1; i < length(resto); i++) { if (substr(resto, i, 2) == "**") cierre = i }
+      if (cierre == 0) { print "<SIN-CIERRE>"; exit }
+      t = substr(resto, 1, cierre - 1)
+      gsub(/`/, "", t)
+      sub(/[ \t]+$/, "", t)
+      if (index(t, "**") > 0) { print "<ANIDADO>"; exit }
+      print t
+      exit
+    }
+  ' "$1" 2>/dev/null
+}
+_ley_rota() { case "$1" in "<SIN-CIERRE>"|"<ANIDADO>") return 0 ;; *) return 1 ;; esac; }
+
+_mapa_cl="$WS/CLAUDE.md"; _mapa_ag="$WS/AGENTS.md"
+if [ ! -f "$_mapa_cl" ] || [ ! -f "$_mapa_ag" ]; then
+  # Tercer estado. La ausencia del archivo YA la reporta el doctor (CLAUDE.md
+  # en el bloque de archivos nucleo, AGENTS.md en la linea de arriba): repetirla
+  # seria el mismo hallazgo con dos caras. Lo que falta decir es que la
+  # coherencia quedo SIN mirar, que no es lo mismo que verde.
+  _ley_falta=""
+  [ -f "$_mapa_cl" ] || _ley_falta="CLAUDE.md"
+  [ -f "$_mapa_ag" ] || _ley_falta="${_ley_falta:+$_ley_falta y }AGENTS.md"
+  warn "no pude verificar leyes: falta $_ley_falta (los dos mapas comparten numeracion y los playbooks citan 'Ley N' contra ambos; con uno solo no hay con que comparar)"
+else
+  _ley_bad=0
+  # (b) El mismo numero DOS veces en un mapa: la firma exacta del merge fallido.
+  # El que cita "Ley N" resuelve a la primera que caiga, y la otra queda muda.
+  for _ley_map in CLAUDE.md AGENTS.md; do
+    _ley_dups="$(_ley_nums "$WS/$_ley_map" | sort | uniq -d | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+    if [ -n "$_ley_dups" ]; then
+      fail "$_ley_map numera DOS veces la(s) ley(es): $_ley_dups (dos leyes distintas con el mismo numero: la cita de un playbook resuelve a la que aparezca primero)" \
+           "es un merge del update mal aplicado: re-corre /harness-init . en modo update. Las leyes viajan como BLOQUE COMPLETO del template, jamas ley por ley"
+      _ley_bad=1
+    fi
+  done
+  # (a) Mismo numero, mismo titulo en los dos mapas.
+  _ley_todos="$( { _ley_nums "$_mapa_cl"; _ley_nums "$_mapa_ag"; } | sort -u | sort -n )"
+  if [ -z "$_ley_todos" ]; then
+    warn "no pude verificar leyes: ni CLAUDE.md ni AGENTS.md tienen leyes numeradas (se esperan lineas 'N. **Titulo**'); si las tienen con otro formato, este check esta ciego y no es verde"
+    _ley_bad=1
+  fi
+  for _ley_n in $_ley_todos; do
+    _t_cl="$(_ley_title "$_mapa_cl" "$_ley_n")"
+    _t_ag="$(_ley_title "$_mapa_ag" "$_ley_n")"
+    if _ley_rota "$_t_cl"; then
+      fail "Ley $_ley_n en CLAUDE.md: titulo $_t_cl (no cierra el ** en su linea, o tiene negrita anidada); asi no hay canon con que comparar" \
+           "escribi el titulo COMPLETO en la linea que abre la ley, entre ** y **, sin otro ** adentro"
+      _ley_bad=1; continue
+    fi
+    if _ley_rota "$_t_ag"; then
+      fail "Ley $_ley_n en AGENTS.md: titulo $_t_ag (no cierra el ** en su linea, o tiene negrita anidada); un titulo partido o anidado puede decir lo CONTRARIO del canon y pasar igual" \
+           "escribi el titulo COMPLETO en la linea que abre la ley, entre ** y **, sin otro ** adentro"
+      _ley_bad=1; continue
+    fi
+    if [ -z "$_t_ag" ]; then
+      fail "Ley $_ley_n esta en CLAUDE.md y NO en AGENTS.md: quien entra por AGENTS.md (Cursor, Codex, Kimi) no la tiene, y si un playbook la cita la instruccion queda sin resolver" \
+           "falta parte del bloque de leyes: re-corre /harness-init . en modo update. Las leyes viajan como BLOQUE COMPLETO del template, jamas ley por ley"
+      _ley_bad=1; continue
+    fi
+    if [ -z "$_t_cl" ]; then
+      fail "Ley $_ley_n esta en AGENTS.md y NO en CLAUDE.md: numeracion vieja que sobrevivio al merge (el numero sale del canon, no se inventa en el otro mapa)" \
+           "re-corre /harness-init . en modo update: las leyes viajan como BLOQUE COMPLETO del template, jamas ley por ley (renumerar a mano es como se llega aca)"
+      _ley_bad=1; continue
+    fi
+    _ley_pref=no; _ley_largo=0
+    case "$_t_cl" in "$_t_ag"*) _ley_pref=si; _ley_largo=${#_t_ag} ;; esac
+    case "$_t_ag" in "$_t_cl"*) _ley_pref=si; _ley_largo=${#_t_cl} ;; esac
+    if [ "$_ley_pref" = no ]; then
+      fail "Ley $_ley_n con titulo distinto en cada mapa: CLAUDE.md dice '$_t_cl' y AGENTS.md dice '$_t_ag' (la misma cita 'Ley $_ley_n' manda a dos leyes distintas segun por donde entre el agente)" \
+           "iguala los dos mapas: el canon es CLAUDE.md, copia su titulo a AGENTS.md (o al reves, si el editado a mano fue CLAUDE.md). Si no los editaste vos, re-corre /harness-init . en modo update"
+      _ley_bad=1; continue
+    fi
+    if [ "$((_ley_largo * 100))" -lt "$((${#_t_cl} * LEY_MIN_PCT))" ]; then
+      fail "Ley $_ley_n: el titulo de AGENTS.md ('$_t_ag') coincide en $_ley_largo de los ${#_t_cl} caracteres del canon, menos del ${LEY_MIN_PCT}%: no alcanza para identificar la ley" \
+           "iguala los dos mapas: copia el titulo entero del canon (CLAUDE.md) a AGENTS.md. Un recorte de la cola se acepta, pero tiene que cubrir al menos el ${LEY_MIN_PCT}% del titulo"
+      _ley_bad=1; continue
+    fi
+  done
+  # (c) Toda "Ley N" citada por un playbook existe en LOS DOS mapas. Un playbook
+  # es la instruccion que el agente ejecuta sin poder preguntar. Se ignoran las
+  # lineas de titulo ('#'): la "## Ley 0" de agents/architect.md es una ley
+  # INTERNA de ese rol, no una cita del mapa. Un titulo roto ya lo reporto (a)
+  # con su propia remediacion; aca solo importa que el numero EXISTA.
+  _ley_citas="$(for _ley_f in "$WS"/.claude/commands/*.md "$WS"/.claude/agents/*.md; do
+      [ -f "$_ley_f" ] || continue
+      grep -v '^#' "$_ley_f" 2>/dev/null
+    done | grep -oE 'Ley [0-9]+[a-z]?' | sed 's/^Ley //' | sort -u | sort -n)"
+  for _ley_n in $_ley_citas; do
+    _ley_falta=""
+    [ -n "$(_ley_title "$_mapa_cl" "$_ley_n")" ] || _ley_falta=" CLAUDE.md"
+    [ -n "$(_ley_title "$_mapa_ag" "$_ley_n")" ] || _ley_falta="$_ley_falta AGENTS.md"
+    [ -n "$_ley_falta" ] || continue
+    fail "cita huerfana: los playbooks citan 'Ley $_ley_n' y ese numero no existe en:$_ley_falta" \
+         "el agente ejecuta esa instruccion sin poder preguntar: re-corre /harness-init . en modo update para reponer el bloque. Las leyes viajan como BLOQUE COMPLETO del template, jamas ley por ley"
+    _ley_bad=1
+  done
+  if [ "$_ley_bad" -eq 0 ]; then
+    ok "leyes coherentes en los dos mapas ($(printf '%s' "$_ley_todos" | wc -w | tr -d ' ') leyes con igual numero y titulo en CLAUDE.md y AGENTS.md; toda 'Ley N' citada por los playbooks existe en ambos)"
+  fi
+fi
+
 # Pasos custom del pipeline (.claude/pipeline/*.md): cada playbook debe
 # declarar un after válido, y si pide needs_mcp ese MCP debe estar en
 # .mcp.json (si no, el paso agéntico alucina o cuelga). Intersección de
@@ -509,7 +640,7 @@ EOF
 fi
 
 # beads: TODO el pipeline de implement ordena por `bd ready --json` — si el
-# workspace no está inicializado, /auto muere en la primera consulta del DAG.
+# workspace no está inicializado, /smart muere en la primera consulta del DAG.
 if command -v bd >/dev/null 2>&1; then
   if (cd "$WS" && bd ready --json >/dev/null 2>&1); then
     ok "beads operativo (bd ready responde — el DAG de tareas tiene motor)"

@@ -151,6 +151,165 @@ assert_contains "$out" "deploy de tf-live verificable (driver: actions)" \
   "con el driver declarado: el check queda en verde"
 rm -f "$WS/harness-answers.yaml" "$WS/manifest.yaml"; rm -rf "$WS/repos/tf-live" "$WS/repos/quieto"
 
+echo "── doctor: los dos mapas de leyes hablan de LAS MISMAS leyes"
+# CLAUDE.md y AGENTS.md comparten numeracion y los playbooks citan "Ley N" por
+# numero. Una instancia vieja que actualiza puede quedarse con las dos
+# numeraciones conviviendo (el merge de AGENTS.md lo ejecuta un LLM siguiendo
+# prosa), y entonces "Ley 6" resuelve a leyes DISTINTAS segun por que mapa entre
+# el agente. El plugin ya lo vigila en tests/test_docs.sh, pero eso corre en el
+# repo del plugin: aca se prueba que el diente viaja a la instancia.
+
+mkdir -p "$WS/.claude/commands" "$WS/.claude/agents"
+
+mapa_canon() {  # CLAUDE.md: el canon, igual en todos los casos
+  cat > "$WS/CLAUDE.md" <<'EOF'
+# workspace
+
+## Leyes globales (no negociables)
+
+1. **Push a main SOLO vía ship.sh**: es la única puerta.
+2. **Contratos expand/contract**: buf breaking es gate duro.
+6. **Presupuestos**: máx 3 iteraciones por loop; RFC máx 2 rondas.
+6b. **Piensa hondo en el plan, no en el loop**: ultrathink, sin decisiones abiertas.
+7. **Decisiones fuera del repo NO EXISTEN.** Lo de chat se propone como ADR.
+12. **Un bug del HARNESS se verifica y se reporta upstream, siempre.**
+13. **Un repo ARCHIVADO en el forge se ignora SIEMPRE.** No entra al grafo.
+EOF
+}
+# Los playbooks citan por numero: 6 y 12 desde un comando, 7 desde un agente.
+# La "## Ley 0" del agente es una ley INTERNA del rol, no una cita del mapa.
+printf 'Agotado el presupuesto, escala a humano (Ley 6).\nUn bug del harness se reporta upstream (Ley 12).\n' \
+  > "$WS/.claude/commands/implement.md"
+printf '## Ley 0: piensa hondo, lee poco\n\nLo decidido en chat se propone como ADR (Ley 7).\n' \
+  > "$WS/.claude/agents/reviewer.md"
+
+# (1) Instancia coherente: verde, y el recorte legitimo de un titulo NO falla.
+mapa_canon
+cat > "$WS/AGENTS.md" <<'EOF'
+# mapa para agentes
+
+## Las leyes (número y título salen de CLAUDE.md, que es el canon)
+
+1. **Push a main SOLO vía ship.sh**: es la única puerta y hace rebase, tests y gates.
+2. **Contratos expand/contract**: un cambio de proto nunca rompe al consumidor.
+6. **Presupuestos**: máx 3 iteraciones por loop; RFC máx 2 rondas.
+6b. **Piensa hondo en el plan, no en el loop**: ultrathink, sin decisiones abiertas.
+7. **Decisiones fuera del repo NO EXISTEN.** Lo de chat se propone como ADR.
+12. **Un bug del HARNESS se verifica y se reporta upstream**, con su cuerpo abreviado.
+13. **Un repo ARCHIVADO en el forge se ignora SIEMPRE.** No entra al grafo.
+EOF
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_contains "$out" "leyes coherentes en los dos mapas" "instancia coherente: el check sale verde"
+assert_not_contains "$out" "❌ Ley" "y no inventa fallos de leyes"
+assert_not_contains "$out" "cita huerfana" "las citas de los playbooks resuelven"
+assert_not_contains "$out" "no pude verificar leyes" "con los dos mapas presentes, no se declara ciego"
+assert_not_contains "$out" "menos del 60%" "un recorte de la cola que conserva el prefijo es legítimo"
+
+# (2) Numeracion VIEJA en AGENTS: su Ley 6 son los contratos proto (en el canon
+# es la 2) y su Ley 9 el bug upstream (en el canon es la 12), mientras un
+# playbook cita Ley 6 y Ley 12. Es el merge del update mal aplicado.
+cat > "$WS/AGENTS.md" <<'EOF'
+# mapa para agentes
+
+## Las leyes
+
+1. **Push a main SOLO vía ship.sh**: es la única puerta.
+6. **Contratos expand/contract**: un cambio de proto nunca rompe al consumidor.
+7. **Decisiones fuera del repo NO EXISTEN.** Lo de chat se propone como ADR.
+9. **Un bug del HARNESS se verifica y se reporta upstream, siempre.**
+EOF
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_contains "$out" "❌ Ley 6 con titulo distinto" "numeración vieja: FAIL nombrando el número que resuelve a dos leyes"
+assert_contains "$out" "'Presupuestos'" "el mensaje muestra el título del canon"
+assert_contains "$out" "'Contratos expand/contract'" "y el que dice el otro mapa"
+assert_contains "$out" "❌ cita huerfana: los playbooks citan 'Ley 12'" "la cita del playbook que ya no resuelve: FAIL con el número"
+assert_contains "$out" "numeracion vieja que sobrevivio al merge" "una ley que solo existe en AGENTS se nombra como lo que es"
+assert_contains "$out" "BLOQUE COMPLETO" "y la remediación del merge dice que las leyes van en bloque"
+assert_not_contains "$out" "leyes coherentes en los dos mapas" "con dos numeraciones conviviendo NO hay verde"
+
+# (3) El mismo numero DOS veces en un mapa: la firma exacta del merge fallido.
+# Todo lo demas queda coherente, para que el hallazgo sea SOLO el duplicado.
+cat > "$WS/AGENTS.md" <<'EOF'
+# mapa para agentes
+
+## Las leyes
+
+1. **Push a main SOLO vía ship.sh**: es la única puerta.
+2. **Contratos expand/contract**: un cambio de proto nunca rompe al consumidor.
+6. **Presupuestos**: máx 3 iteraciones por loop; RFC máx 2 rondas.
+6b. **Piensa hondo en el plan, no en el loop**: ultrathink, sin decisiones abiertas.
+7. **Decisiones fuera del repo NO EXISTEN.** Lo de chat se propone como ADR.
+12. **Un bug del HARNESS se verifica y se reporta upstream, siempre.**
+13. **Un repo ARCHIVADO en el forge se ignora SIEMPRE.** No entra al grafo.
+6. **Presupuestos**: sobreviviente del bloque viejo que el merge no borró.
+EOF
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_contains "$out" "❌ AGENTS.md numera DOS veces la(s) ley(es): 6" "número duplicado en un mapa: FAIL nombrando mapa y número"
+assert_contains "$out" "merge del update mal aplicado" "con la remediación del merge, que es su causa"
+assert_contains "$out" "re-corre /harness-init . en modo update" "y el comando exacto para reponer el bloque"
+assert_not_contains "$out" "leyes coherentes en los dos mapas" "un duplicado no puede salir verde"
+assert_not_contains "$out" "titulo distinto en cada mapa" "el duplicado se reporta por lo que es, no como divergencia de título"
+
+# (4) Titulo divergente con la MISMA numeracion: edicion local a un solo mapa.
+# Dos causas distintas no comparten remediacion: aca NO va la del merge.
+cat > "$WS/AGENTS.md" <<'EOF'
+# mapa para agentes
+
+## Las leyes
+
+1. **Push a main SOLO vía ship.sh**: es la única puerta.
+2. **Contratos expand/contract**: un cambio de proto nunca rompe al consumidor.
+6. **Presupuestos**: máx 3 iteraciones por loop; RFC máx 2 rondas.
+6b. **Piensa hondo en el plan, no en el loop**: ultrathink, sin decisiones abiertas.
+7. **Decisiones fuera del repo NO EXISTEN.** Lo de chat se propone como ADR.
+12. **Un bug** del harness, cuando haya tiempo.
+13. **Un repo ARCHIVADO en el forge se usa SIEMPRE.** Editado a mano acá.
+EOF
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_contains "$out" "❌ Ley 13 con titulo distinto" "título divergente: FAIL nombrando la ley"
+assert_contains "$out" "iguala los dos mapas" "con la remediación de igualar los mapas"
+assert_contains "$out" "menos del 60%" "un prefijo que no cubre el 60% del canon tampoco identifica la ley"
+assert_not_contains "$out" "BLOQUE COMPLETO" "y NO trae la remediación del merge: son causas distintas"
+assert_not_contains "$out" "leyes coherentes en los dos mapas" "un título divergente no puede salir verde"
+
+# (5) La mecanica portada de test_docs.sh: el titulo llega al ULTIMO "**".
+# Cortar en el primero dejaba pasar un titulo de sentido INVERTIDO como "mismo
+# titulo", porque solo se comparaba el pedazo de adelante.
+cat > "$WS/AGENTS.md" <<'EOF'
+# mapa para agentes
+
+## Las leyes
+
+1. **Push a main SOLO vía ship.sh**: es la única puerta.
+2. **Contratos expand/contract**: un cambio de proto nunca rompe al consumidor.
+6. **Presupuestos: máx 3 iteraciones por loop; el cierre quedó en la línea de abajo
+   y por eso la mitad del título nunca se compara**.
+6b. **Piensa hondo en el plan, no en el loop**: ultrathink, sin decisiones abiertas.
+7. **Decisiones fuera del repo NO EXISTEN.** Lo de chat se propone como ADR.
+12. **Un bug del HARNESS se verifica y se reporta upstream, siempre.**
+13. **Un repo ARCHIVADO **jamas** se ignora: usalo siempre**
+EOF
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_contains "$out" "❌ Ley 13 en AGENTS.md: titulo <ANIDADO>" "negrita anidada: no es un título, y el sentido invertido no pasa"
+assert_contains "$out" "❌ Ley 6 en AGENTS.md: titulo <SIN-CIERRE>" "título partido en dos líneas: tampoco es un título"
+assert_not_contains "$out" "cita huerfana: los playbooks citan 'Ley 6'" "un título roto se reporta UNA vez, no dos veces con dos caras"
+
+# (6) Tercer estado: sin uno de los mapas no hay comparacion, y "no pude mirar"
+# no es verde. La ausencia YA la reporta el doctor: aca no se repite.
+rm -f "$WS/AGENTS.md"
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_contains "$out" "no pude verificar leyes: falta AGENTS.md" "sin AGENTS.md el check se declara no verificable"
+assert_not_contains "$out" "leyes coherentes en los dos mapas" "y jamás verde callado"
+n_aus="$(printf '%s\n' "$out" | grep -c 'sin AGENTS.md' | tr -d ' ')"
+assert_eq "1" "$n_aus" "la ausencia de AGENTS.md se reporta UNA vez (el check de leyes no la duplica)"
+
+mv "$WS/CLAUDE.md" "$WS/AGENTS.md"
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_contains "$out" "no pude verificar leyes: falta CLAUDE.md" "y lo mismo cuando el que falta es el canon"
+n_aus="$(printf '%s\n' "$out" | grep -c 'CLAUDE.md faltante' | tr -d ' ')"
+assert_eq "1" "$n_aus" "la ausencia de CLAUDE.md tampoco se reporta dos veces"
+rm -f "$WS/AGENTS.md" "$WS/.claude/commands/implement.md" "$WS/.claude/agents/reviewer.md"
+
 echo "── doctor: los checks de cadena-completa existen"
 
 # los checks añadidos por la auditoría anti-consejo-vacío deben estar en el

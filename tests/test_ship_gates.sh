@@ -375,6 +375,171 @@ git add . && git commit -qm quita-bare
 run_tests_gate >/dev/null 2>&1 && fail "bare assert borrado no bloqueó" || pass "bare assert de Python borrado: bloquea"
 
 echo
+echo "── gate_test_muerde: un test que no puede fallar no prueba nada"
+# Caso de campo: un assert que evaluaba ANTES de que llegara el dato pasó la
+# suite, pasó el precheck, y la ronda 3 entera (commit, precheck, dos sellos de
+# evidencia, dos agentes) se pagó por un test vacuo. gate_tests_untouched no lo
+# ve (no hay aserción DEBILITADA: hay una NUEVA que no muerde) y el
+# mutation-sentinel contesta al día siguiente. La única pregunta que lo caza es
+# mecánica: ¿este test falla sobre el árbol base?
+
+extract muerde_limpia > "$WS/gate_muerde.sh"
+for fn in muerde_pytest muerde_go muerde_node muerde_corre muerde_corre_grupo \
+          muerde_salto gate_test_muerde; do
+  extract "$fn" >> "$WS/gate_muerde.sh"
+done
+grep -q 'MUERDE_VACUOS' "$WS/gate_muerde.sh" || { echo "no pude extraer gate_test_muerde"; exit 1; }
+grep -q 'worktree remove --force' "$WS/gate_muerde.sh" || { echo "no pude extraer muerde_limpia"; exit 1; }
+
+# Los DOS gates que miran archivos de test tienen que reconocerlos IGUAL. Si el
+# literal se separa, uno empieza a proteger rutas que el otro ya no mira y nadie
+# se entera: el gate viejo sigue verde y el nuevo deja de correr. Se comparan los
+# literales, que es lo único que no envejece.
+pat_untouched="$(grep 'TEST_PATH_PATTERN:-' "$WS/gate_tests.sh" | head -1 | tr -d '[:space:]')"
+pat_muerde="$(grep 'TEST_PATH_PATTERN:-' "$WS/gate_muerde.sh" | head -1 | tr -d '[:space:]')"
+[ -n "$pat_untouched" ] && pass "extraje el patrón de test de gate_tests_untouched (vacío haría vacuo el chequeo)" \
+  || fail "no extraje el patrón de gate_tests_untouched"
+assert_eq "$pat_untouched" "$pat_muerde" "los dos gates detectan 'archivo de test' con el MISMO literal"
+art_untouched="$(grep 'TEST_ARTIFACT_PATTERN:-' "$WS/gate_tests.sh" | head -1 | tr -d '[:space:]')"
+art_muerde="$(grep 'TEST_ARTIFACT_PATTERN:-' "$WS/gate_muerde.sh" | head -1 | tr -d '[:space:]')"
+assert_eq "$art_untouched" "$art_muerde" "y excluyen los MISMOS artefactos compilados"
+
+# pytest de palo, hermético: modela la ÚNICA distinción que este gate mide.
+#   · un test cuyo nombre dice "vacuo" pasa en cualquier árbol
+#   · el resto necesita feature.py, que solo existe en HEAD: sobre la base
+#     revienta como reventaría un ImportError del módulo que aún no existe
+mkdir -p "$WS/bin-muerde" "$WS/tmp-muerde" "$WS/tasks/TM"
+cat > "$WS/bin-muerde/pytest" <<'SH'
+#!/bin/sh
+for a in "$@"; do t="$a"; done
+case "$t" in *vacuo*) echo "1 passed"; exit 0 ;; esac
+if [ -f feature.py ]; then echo "1 passed"; exit 0; fi
+echo "ImportError: cannot import name 'feature'"
+exit 1
+SH
+chmod +x "$WS/bin-muerde/pytest"
+
+run_muerde() {  # corre el gate en el repo actual (que hace de worktree)
+  ( set -euo pipefail; WS="$WS"; TASK=TM; REPO=test; BASE_REF=main; WT="$PWD"
+    PATH="$WS/bin-muerde:$PATH"; TMPDIR="$WS/tmp-muerde"
+    gate() { :; }; emit() { echo "EMIT $*"; }
+    . "$WS/gate_muerde.sh"; gate_test_muerde ) 2>&1
+}
+mk_muerde_repo() {  # mk_muerde_repo <dir>: base con un test viejo, origin/main al día
+  mk_repo "$1"
+  mkdir -p tests
+  printf 'def test_viejo():\n    import app\n' > tests/test_viejo.py
+  git add -A && git commit -qm tests
+  git update-ref refs/remotes/origin/main HEAD
+  rm -f "$WS/tasks/TM/delta-spec.md"
+}
+
+# (a) test NUEVO que falla sobre la base y pasa en HEAD → verde
+mk_muerde_repo "$WS/mu1"
+echo 'def f(): pass' > feature.py
+printf 'def test_feature():\n    import feature\n' > tests/test_feature.py
+git add -A && git commit -qm feat
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "test nuevo que falla sobre la base: verde (muerde)"
+assert_contains "$out" "MUERDE" "y lo dice, en vez de pasar callado"
+assert_contains "$out" "ImportError" "mostrando el motivo real del fallo sobre la base"
+
+# (b) test NUEVO que pasa en los DOS árboles → rojo con nombre y remediación
+mk_muerde_repo "$WS/mu2"
+printf 'def test_vacuo():\n    assert True\n' > tests/test_vacuo.py
+git add -A && git commit -qm "un test que no puede fallar"
+out="$(run_muerde)"; rc=$?
+assert_eq 3 "$rc" "test nuevo que pasa TAMBIÉN sobre la base: bloquea (exit 3)"
+assert_contains "$out" "tests/test_vacuo.py" "nombrando el archivo exacto"
+assert_contains "$out" "pasa sin tu fix" "con la remediación que explica qué está mal"
+assert_contains "$out" "rojo sobre la base, verde" "y qué se espera del test"
+assert_contains "$out" "MODIFIED" "y el escape para un refactor de test"
+
+# (g) la limpieza es del TRAP, así que ocurre también con el gate rojo. Un
+# worktree fantasma queda registrado en el repo y el próximo `worktree add`
+# sobre ese path se niega: la basura de este gate rompería al siguiente.
+assert_eq "1" "$(git worktree list | grep -c .)" \
+  "gate ROJO: el worktree temporal se limpió igual (git worktree list sano)"
+assert_eq "" "$(ls -A "$WS/tmp-muerde" 2>/dev/null)" "y no dejó el directorio temporal"
+
+# (c) test MODIFICADO y NO nombrado: fuera del alcance a propósito. Un retoque
+# cosmético pasa sobre la base legítimamente, y ponerlo rojo fabricaría el falso
+# rojo que enseña a desconfiar del gate.
+mk_muerde_repo "$WS/mu3"
+printf 'def test_vacuo_viejo():\n    assert True\n' > tests/test_vacuo_viejo.py
+git add -A && git commit -qm "el test ya existía"
+git update-ref refs/remotes/origin/main HEAD
+printf 'def test_vacuo_viejo():\n    assert True  # retoque\n' > tests/test_vacuo_viejo.py
+git add -A && git commit -qm cosmetico
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "test MODIFICADO y no nombrado: el gate NO lo mira (verde)"
+assert_not_contains "$out" "test_vacuo_viejo.py" "ni lo nombra: está fuera del alcance"
+assert_contains "$out" "sin tests nuevos que verificar" "y dice que no había nada en alcance"
+
+# (d) el MISMO archivo, nombrado por basename bajo ADDED → entra al alcance
+cat > "$WS/tasks/TM/delta-spec.md" <<'FIX'
+## ADDED Requirements
+- R1: el caso nuevo queda cubierto por tests/test_vacuo_viejo.py
+FIX
+out="$(run_muerde)"; rc=$?
+assert_eq 3 "$rc" "el mismo archivo NOMBRADO bajo ADDED: entra al alcance y es rojo"
+assert_contains "$out" "test_vacuo_viejo.py" "nombrándolo en el rojo"
+
+# ...y la remediación que el rojo imprime FUNCIONA: declararlo bajo MODIFIED lo
+# saca del alcance. Una remediación que no funcionara sería peor que ninguna.
+cat > "$WS/tasks/TM/delta-spec.md" <<'FIX'
+## ADDED Requirements
+- R1: el caso nuevo queda cubierto por tests/test_vacuo_viejo.py
+
+## MODIFIED Requirements
+- R2: es un refactor de tests/test_vacuo_viejo.py, no conducta nueva
+FIX
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "declarado bajo MODIFIED: sale del alcance (la remediación impresa funciona)"
+assert_contains "$out" "fuera del alcance" "y queda dicho, no borrado en silencio"
+rm -f "$WS/tasks/TM/delta-spec.md"
+
+# (e) stack sin runner dirigido: ni verde mudo ni rojo inventado
+mk_muerde_repo "$WS/mu4"
+printf 'assert true\n' > tests/algo_spec.rb
+git add -A && git commit -qm ruby
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "stack sin runner dirigido: NO bloquea (un rojo ahí sería inventado)"
+assert_contains "$out" "NO pude verificar contra la base" "pero lo DICE"
+assert_contains "$out" "tests/algo_spec.rb" "nombrando el archivo que no miró"
+assert_contains "$out" "NO dice verde ni rojo" "sin disfrazar el salto de verificación"
+assert_contains "$out" "EMIT assumption" "y el supuesto viaja al bus, como hacen sus vecinos"
+
+# (f) sin tests nuevos: no-op silencioso y sin costo (ni worktree temporal)
+mk_muerde_repo "$WS/mu5"
+echo 'algo nuevo' > otro.go
+git add -A && git commit -qm "solo código"
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "sin tests nuevos: verde sin hacer nada"
+assert_contains "$out" "sin tests nuevos que verificar" "con UNA línea, no un informe"
+assert_not_contains "$out" "❌" "sin ruido de rojo"
+assert_eq "1" "$(git worktree list | grep -c .)" "y sin pagar el checkout del árbol base"
+
+# ── DÓNDE corre: --precheck y --ci, jamás el camino de ship ──────────
+# El ship reintenta el push hasta 20 veces por contención: meterlo ahí pagaría un
+# checkout del árbol base por intento para reconfirmar una respuesta que no
+# cambia (el test es el mismo y el merge-base también). No es un agujero: /review
+# no lanza a nadie sin el sello del precheck.
+n_inv="$(grep -c '^ *gate_test_muerde$' "$TMPL")"
+assert_eq 2 "$n_inv" "se invoca exactamente dos veces (precheck y CI), en ningún otro lado"
+loop_line="$(grep -n '^# ── Loop de ship' "$TMPL" | head -1 | cut -d: -f1)"
+ultima_inv="$(grep -n '^ *gate_test_muerde$' "$TMPL" | tail -1 | cut -d: -f1)"
+[ -n "$loop_line" ] && [ -n "$ultima_inv" ] && [ "$ultima_inv" -lt "$loop_line" ] \
+  && pass "las dos invocaciones están ANTES del loop de ship (no se paga por intento de push)" \
+  || fail "gate_test_muerde se invoca dentro del loop de ship (muerde=$ultima_inv loop=$loop_line)"
+# Y DESPUÉS de la fase 0 barata: descubrir un test vacuo tras pagar la suite
+# completa es el orden que este archivo ya corrigió una vez.
+tras_fase0="$(grep -A6 '^ *run_phase0_gates$' "$TMPL" | grep -c 'gate_test_muerde')"
+assert_eq 2 "$tras_fase0" "y las dos van DESPUÉS de run_phase0_gates (los baratos primero)"
+
+cd "$WS"
+
+echo
 echo "── gate ts: un gate que no puede correr NO reporta rojo"
 # Caso de campo: el worktree nace de origin/main, sin node_modules y sin los
 # tipos de `astro sync`. tsc escupía 8 errores (import.meta.env, astro:assets)

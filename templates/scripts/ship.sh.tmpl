@@ -32,7 +32,8 @@
 #          base, no existe origin/<trunk>, o no se pudo leer la entrega
 #          declarada de la tarea. Ningún gate llegó a correr.
 # exit 3 · un gate dijo que NO: trailer, carril, lenguaje/tests, tests
-#          debilitados, veredicto, compliance, policy o evidencia.
+#          debilitados, tests nuevos que pasan sin el cambio, veredicto,
+#          compliance, policy o evidencia.
 # exit 4 · git no pudo mover el cambio: rebase imposible, detached HEAD, o la
 #          rama no se pudo publicar (flow: prs).
 # exit 5 · agotados los reintentos de push: es contención con otro workspace,
@@ -1355,6 +1356,297 @@ REPEOF
   exit 3
 }
 
+# ── gate_test_muerde: un test que no puede fallar no es un test ───────
+# Caso de campo, y costó una ronda entera: un implementer escribió un assert que
+# NO PODÍA FALLAR (evaluaba antes de que llegara el dato). La suite salió verde,
+# el precheck salió verde, y la ronda 3 completa (commit, precheck, dos sellos de
+# evidencia, dos agentes) se pagó por un test que no probaba nada. Los guardianes
+# que ya teníamos miran otra cosa: gate_tests_untouched caza tests DEBILITADOS
+# (aserciones que se van), no asserts nuevos VACUOS; y el mutation-sentinel es
+# nocturno, o sea que su respuesta llega al día siguiente de la ronda que se pagó.
+#
+# La pregunta que los distingue es UNA y es mecánica: ¿este test FALLA sobre el
+# árbol base? Un test que pasa con el cambio y sin el cambio no prueba la
+# conducta nueva. Se contesta corriendo ESE test contra el merge-base, y no hay
+# forma de contestarla leyendo el diff.
+#
+# DÓNDE CORRE: en --precheck y en --ci, NO en el camino de ship normal. No es un
+# agujero: /review no lanza a nadie sin el sello del precheck, así que el
+# precheck es obligatorio de facto; y el ship reintenta el push hasta 20 veces por
+# contención, así que meterlo ahí pagaría un checkout del árbol base por intento
+# para reconfirmar una respuesta que no cambia (el test es el mismo y el
+# merge-base también).
+#
+# ALCANCE, diseñado para CERO falsos rojos:
+#   (a) los archivos de test NUEVOS del diff contra el merge-base;
+#   (b) los archivos de test NOMBRADOS por basename bajo '## ADDED' del
+#       delta-spec (nuevos o ya existentes): nombrarlos es el opt-in, con la
+#       misma convención que MODIFIED/REMOVED ya usa para declarar.
+# Un test MODIFICADO y no nombrado queda FUERA a propósito: un retoque cosmético
+# pasa sobre la base legítimamente, y ponerlo rojo fabricaría justo la clase de
+# falso rojo que enseña a desconfiar de los gates. Y nombrarlo bajo
+# MODIFIED/REMOVED lo SACA del alcance, porque esa es la remediación que este
+# gate imprime: una remediación que no funcionara sería peor que ninguna.
+#
+# El patrón de "esto es un archivo de test" es EL MISMO de gate_tests_untouched,
+# literal: dos detecciones distintas de la misma cosa divergen en la primera
+# edición, y tests/test_ship_gates.sh compara los dos literales para que no
+# puedan separarse en silencio.
+muerde_limpia() {  # trap EXIT del subshell: el worktree temporal se va SIEMPRE
+  local rc=$?
+  # Un worktree fantasma no es basura inofensiva: queda registrado en el repo y
+  # el próximo `worktree add` sobre el mismo path se niega. Por eso la limpieza
+  # cuelga de un trap y no del camino feliz, y por eso, si falla, se DICE.
+  if [ -n "${MUERDE_WT:-}" ]; then
+    if ! git -C "$WT" worktree remove --force "$MUERDE_WT"; then
+      echo "⚠️  no pude quitar el worktree temporal $MUERDE_WT; pruneo el registro"
+      git -C "$WT" worktree prune \
+        || echo "⚠️  'git worktree prune' tampoco pudo: mirá 'git -C $WT worktree list'"
+    fi
+  fi
+  if [ -n "${MUERDE_TMP:-}" ]; then rm -rf "$MUERDE_TMP"; fi
+  exit "$rc"
+}
+# La lección del issue #29 (la herramienta es del PROYECTO, no del sistema) con
+# una vuelta más: acá pytest corre con el cwd puesto en el ÁRBOL BASE, así que
+# `uv run` NO sirve: uv resuelve el proyecto desde el cwd y saldría a
+# sincronizar un venv nuevo EN el árbol base (red y minutos) o a fallar. Lo que
+# `uv sync` deja es un directorio, y a ese binario se lo invoca por ruta.
+muerde_pytest() {  # → MUERDE_PY, o 1 con el motivo en MUERDE_MOTIVO
+  if [ -x "$WT/.venv/bin/pytest" ]; then MUERDE_PY="$WT/.venv/bin/pytest"; return 0; fi
+  if [ -x "$WT/venv/bin/pytest" ];  then MUERDE_PY="$WT/venv/bin/pytest";  return 0; fi
+  if command -v pytest >/dev/null;  then MUERDE_PY="pytest";               return 0; fi
+  MUERDE_MOTIVO="no encuentro pytest: ni .venv/bin/pytest del proyecto ni uno en el PATH ('uv sync --extra dev' lo deja en el venv)"
+  return 1
+}
+muerde_go() {  # → 0 si hay toolchain Go
+  if command -v go >/dev/null; then return 0; fi
+  MUERDE_MOTIVO="'go' no está en el PATH"
+  return 1
+}
+muerde_node() {  # → MUERDE_NODE/MUERDE_NODE_ARGS solo si el runner es INEQUÍVOCO
+  local pkg="$WT/package.json" kind=""
+  if [ ! -f "$pkg" ]; then
+    MUERDE_MOTIVO="no hay package.json en la raíz: no sé con qué runner correrlos"
+    return 1
+  fi
+  if jq -e '.devDependencies.vitest // .dependencies.vitest' "$pkg" >/dev/null 2>&1; then kind="vitest"; fi
+  if jq -e '.devDependencies.jest // .dependencies.jest' "$pkg" >/dev/null 2>&1; then
+    if [ -n "$kind" ]; then
+      MUERDE_MOTIVO="package.json declara vitest Y jest: el runner no es inequívoco, y elegir uno sería inventar el veredicto"
+      return 1
+    fi
+    kind="jest"
+  fi
+  if [ -z "$kind" ]; then
+    MUERDE_MOTIVO="package.json no declara vitest ni jest: el runner no es inequívoco"
+    return 1
+  fi
+  # Sin deps instaladas el árbol base fallaría por FALTA DE HERRAMIENTA, y este
+  # gate lee cualquier exit != 0 como "el test muerde": sería un verde comprado
+  # con una excusa. Se declara saltado en vez de cobrarlo como verificación.
+  if [ ! -x "$WT/node_modules/.bin/$kind" ]; then
+    MUERDE_MOTIVO="$kind declarado pero falta node_modules/.bin/$kind: sin deps no puedo distinguir 'el test falló' de 'no arrancó el runner'"
+    return 1
+  fi
+  MUERDE_NODE="$WT/node_modules/.bin/$kind"
+  if [ "$kind" = "vitest" ]; then MUERDE_NODE_ARGS="run"; else MUERDE_NODE_ARGS=""; fi
+  return 0
+}
+muerde_corre() {  # muerde_corre <clase> <unidad> → el exit REAL sobre el árbol base
+  case "$1" in
+    py)
+      # cwd = ÁRBOL BASE, para que rootdir, conftest.py y la config de pytest
+      # salgan del árbol que se está probando y no del worktree. Y el ÁRBOL BASE
+      # va delante en PYTHONPATH (raíz y src/, los dos layouts que existen)
+      # porque el venv del proyecto suele traer el paquete instalado en editable
+      # APUNTANDO AL WORKTREE: sin esas rutas el test importaría el código NUEVO,
+      # pasaría, y este gate fabricaría un rojo. Un src/ que no exista lo ignora
+      # Python; el rojo inventado no lo ignora nadie.
+      ( cd "$MUERDE_BASE"
+        PYTHONPATH="$MUERDE_BASE:$MUERDE_BASE/src${PYTHONPATH:+:$PYTHONPATH}" \
+          "$MUERDE_PY" -q "$2" ) ;;
+    go)
+      ( cd "$MUERDE_BASE"; go test "$2" ) ;;
+    node)
+      # shellcheck disable=SC2086
+      ( cd "$MUERDE_BASE"; "$MUERDE_NODE" $MUERDE_NODE_ARGS "$2" ) ;;
+  esac
+}
+muerde_corre_grupo() {  # muerde_corre_grupo <clase> <lista>: unidad por unidad
+  local clase="$1" u rc
+  # Unidad por unidad y no todo junto: con una sola invocación, un test que sí
+  # muerde tapa al vacuo que corrió al lado (basta un exit != 0 para todos), y
+  # el rojo no podría nombrar cuál es cuál. Son archivos NUEVOS: son pocos.
+  while IFS= read -r u; do
+    [ -n "$u" ] || continue
+    if muerde_corre "$clase" "$u" > "$MUERDE_SALIDA" 2>&1; then rc=0; else rc=$?; fi
+    if [ "$rc" -eq 0 ]; then
+      echo "   ✗ $u: PASA sobre el árbol base"
+      MUERDE_VACUOS="$MUERDE_VACUOS   · $u
+"
+    else
+      # El MOTIVO del fallo no se juzga: un ImportError porque el módulo nuevo
+      # todavía no existe es exactamente "este test no puede pasar sin el
+      # cambio", que es lo que el gate pregunta. exit != 0 es exit != 0.
+      echo "   ✓ $u: falla sobre el árbol base (exit $rc), o sea que MUERDE"
+    fi
+    tail -3 "$MUERDE_SALIDA" | sed 's/^/       /'
+  done <<GRUPOEOF
+$2
+GRUPOEOF
+}
+muerde_salto() {  # muerde_salto <qué> <lista>: saltar se DICE, no se calla
+  echo "⚠️  tests nuevos ($1) que NO pude verificar contra la base:"
+  printf '%s' "$2" | sed 's/^/     · /'
+  echo "   ↳ $MUERDE_MOTIVO"
+  echo "   Esto NO es un verde: es un tramo sin mirar, y queda dicho."
+  emit assumption "$REPO ($1): tests nuevos NO verificados contra la base ($MUERDE_MOTIVO)"
+}
+gate_test_muerde() {
+  local pat="${TEST_PATH_PATTERN:-(test|spec|Test|_test\.|\.test\.|\.spec\.|/tests?/|/spec/)}"
+  local artifacts="${TEST_ARTIFACT_PATTERN:-(__pycache__/|\.pyc$|\.pyo$|\.class$|\.pytest_cache/|/node_modules/)}"
+  local nuevos tocados delta added="" escape="" f dir
+  local scope="" escapados=""
+  local py_files="" go_dirs="" node_files="" otros=""
+  local corre_py=0 corre_go=0 corre_node=0
+  local MUERDE_PY="" MUERDE_NODE="" MUERDE_NODE_ARGS="" MUERDE_MOTIVO=""
+  local mb head tmp
+  # Tres puntos, el mismo ancla que gate_quick_size y por el mismo motivo: el
+  # precheck corre SIN rebase, así que la punta del trunk trae commits ajenos que
+  # esta tarea jamás tocó. El merge-base ES lo que "sin tu cambio" significa.
+  nuevos="$(git diff -M "origin/$BASE_REF...HEAD" --diff-filter=A --name-only \
+    | grep -E "$pat" | grep -vE "$artifacts" | sort -u || true)"
+  tocados="$(git diff -M "origin/$BASE_REF...HEAD" --diff-filter=AM --name-only \
+    | grep -E "$pat" | grep -vE "$artifacts" | sort -u || true)"
+  delta="${HARNESS_DELTA_SPEC_FILE:-$WS/tasks/$TASK/delta-spec.md}"
+  if [ -f "$delta" ]; then
+    added="$(awk '/^#/ { insec = (toupper($0) ~ /ADDED/); next } insec { print }' "$delta")"
+    escape="$(awk '/^#/ { insec = (toupper($0) ~ /(MODIFIED|REMOVED)/); next } insec { print }' "$delta")"
+  fi
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if printf '%s\n' "$nuevos" | grep -qxF -- "$f"; then :
+    elif printf '%s\n' "$added" | grep -qiF -- "$(basename "$f")"; then :
+    else continue
+    fi
+    if printf '%s\n' "$escape" | grep -qiF -- "$(basename "$f")"; then
+      escapados="$escapados   ⚠️  $f: declarado bajo MODIFIED/REMOVED, fuera del alcance
+"
+      continue
+    fi
+    scope="$scope$f
+"
+  done <<TOCEOF
+$tocados
+TOCEOF
+  if [ -n "$escapados" ]; then printf '%s' "$escapados"; fi
+  if [ -z "$scope" ]; then
+    echo "ℹ️  sin tests nuevos que verificar contra el árbol base"
+    return 0
+  fi
+  gate "el test nuevo MUERDE (rojo sobre la base)"
+  # El runner lo decide la EXTENSIÓN del archivo, no el stack del repo: un
+  # monorepo con package.json y pyproject.toml a la vez no tiene un stack único,
+  # y lo que hay que correr lo dice el test. Go va por PAQUETE porque `go test`
+  # no acepta un archivo suelto sin arrastrar a sus vecinos del mismo paquete.
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in
+      *.py) py_files="$py_files$f
+" ;;
+      *.go) dir="$(dirname "$f")"
+            if [ "$dir" = "." ]; then dir="./"; else dir="./$dir"; fi
+            go_dirs="$go_dirs$dir
+" ;;
+      *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs) node_files="$node_files$f
+" ;;
+      *) otros="$otros$f
+" ;;
+    esac
+  done <<SCOPEOF
+$scope
+SCOPEOF
+  if [ -n "$go_dirs" ]; then go_dirs="$(printf '%s' "$go_dirs" | sort -u)"; fi
+  # Los runners se resuelven ANTES de tocar disco: si no hay ninguno, el gate se
+  # declara saltado y no paga un checkout del árbol base para nada.
+  if [ -n "$py_files" ]; then
+    if muerde_pytest; then corre_py=1; else muerde_salto Python "$py_files"; fi
+  fi
+  if [ -n "$go_dirs" ]; then
+    if muerde_go; then corre_go=1; else muerde_salto Go "$go_dirs"; fi
+  fi
+  if [ -n "$node_files" ]; then
+    if muerde_node; then corre_node=1; else muerde_salto Node "$node_files"; fi
+  fi
+  if [ -n "$otros" ]; then
+    MUERDE_MOTIVO="corro pytest (.py), go test (.go) y vitest/jest (.ts/.js); para el resto NO invento un comando, porque un runner adivinado diría 'el test muerde' cuando lo que falló fue la invocación"
+    muerde_salto "sin runner dirigido" "$otros"
+  fi
+  if [ "$corre_py" -eq 0 ] && [ "$corre_go" -eq 0 ] && [ "$corre_node" -eq 0 ]; then
+    echo "   (nada que correr: este gate NO dice verde ni rojo sobre estos tests)"
+    return 0
+  fi
+  if ! mb="$(git merge-base HEAD "origin/$BASE_REF")"; then
+    echo "⚠️  no pude resolver el merge-base con origin/$BASE_REF: el gate NO CORRIÓ."
+    echo "   Sin árbol base no existe el 'sin tu cambio' contra el que medir, y"
+    echo "   correr el test contra cualquier otra cosa sería inventar el veredicto."
+    emit assumption "$REPO: tests nuevos NO verificados contra la base (sin merge-base con origin/$BASE_REF)"
+    return 0
+  fi
+  head="$(git rev-parse HEAD)"
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/ship-muerde.XXXXXX")"
+  # TODO el trabajo sucio va en un subshell con su propio trap EXIT: así el
+  # worktree temporal se limpia por CUALQUIER salida (verde, rojo, o una muerte
+  # por set -e a mitad de camino), que es la única forma de que la limpieza no
+  # dependa de acordarse de llamarla en cada rama.
+  (
+    MUERDE_TMP="$tmp"; MUERDE_WT=""; MUERDE_BASE="$tmp/base"
+    MUERDE_SALIDA="$tmp/salida"; MUERDE_VACUOS=""
+    trap muerde_limpia EXIT
+    if ! git -C "$WT" worktree add --detach --quiet "$MUERDE_BASE" "$mb"; then
+      echo "⚠️  no pude crear el worktree temporal del árbol base ($mb): el gate NO CORRIÓ."
+      echo "   No lo doy por verde: no miré nada."
+      emit assumption "$REPO: tests nuevos NO verificados contra la base (no pude crear el worktree temporal)"
+      exit 0
+    fi
+    MUERDE_WT="$MUERDE_BASE"
+    # Se traen SOLO los archivos de test del alcance, desde HEAD y DENTRO del
+    # temporal. El resto del árbol sigue siendo la base: eso es exactamente "tu
+    # test sin tu cambio".
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      if ! git -C "$MUERDE_BASE" checkout "$head" -- "$f"; then
+        echo "⚠️  no pude traer $f al árbol base: el gate NO CORRIÓ sobre estos tests."
+        emit assumption "$REPO: tests nuevos NO verificados contra la base (no pude traer $f al árbol temporal)"
+        exit 0
+      fi
+    done <<CKEOF
+$scope
+CKEOF
+    # node_modules no está versionado, así que el árbol base nace sin él: se
+    # presta el del worktree por enlace. Prestar deps no toca el artefacto que se
+    # juzga (misma frontera que el gate ts declara al preparar la toolchain).
+    if [ "$corre_node" -eq 1 ] && [ ! -e "$MUERDE_BASE/node_modules" ]; then
+      ln -s "$WT/node_modules" "$MUERDE_BASE/node_modules"
+    fi
+    if [ "$corre_py" -eq 1 ];   then muerde_corre_grupo py   "$py_files";   fi
+    if [ "$corre_go" -eq 1 ];   then muerde_corre_grupo go   "$go_dirs";    fi
+    if [ "$corre_node" -eq 1 ]; then muerde_corre_grupo node "$node_files"; fi
+    if [ -z "$MUERDE_VACUOS" ]; then
+      echo "   ✅ todo el alcance falla sobre la base: estos tests prueban conducta nueva"
+      exit 0
+    fi
+    echo "❌ estos tests PASAN también SIN tu cambio (sobre el árbol base):"
+    printf '%s' "$MUERDE_VACUOS"
+    echo "   ↳ remediación: este test pasa sin tu fix, o sea que no prueba la"
+    echo "     conducta nueva: hazlo fallar primero (rojo sobre la base, verde"
+    echo "     sobre tu cambio), o si es un refactor de test declaralo bajo"
+    echo "     MODIFIED en el delta-spec, nombrando su archivo."
+    exit 3
+  )
+}
+
 # gate_evidence — nuestra ley es "los agentes proponen, los sistemas
 # deterministas verifican". La compliance matrix la ESCRIBE un agente: hasta
 # ahora, el verificador proponía. Este gate no juzga el código; solo comprueba
@@ -1723,6 +2015,7 @@ if [ "$CI_MODE" -eq 1 ]; then
   # Se reusa esa bandera en vez de inventar una tercera.
   PRECHECK=1
   run_phase0_gates
+  gate_test_muerde
   run_parallel_gates
   echo "✅ gates verdes sobre el merge result. Este check es el que la cola de"
   echo "   merge exige, y corre en infra neutral: no depende de la laptop de nadie."
@@ -1781,6 +2074,10 @@ if [ "$PRECHECK" -eq 1 ]; then
   echo "══ precheck $REPO (task $TASK) ══"
   gate_entry_precheck
   run_phase0_gates
+  # Después de los baratos y ANTES de las suites completas: correr un test nuevo
+  # contra el árbol base cuesta un checkout y esos tests, no la suite entera, y
+  # si el test no muerde no tiene sentido pagar los gates caros para descubrirlo.
+  gate_test_muerde
   run_parallel_gates
   # EL SELLO AFIRMA "LOS GATES PASARON SOBRE ESTE COMMIT" (issue #39). Con el
   # árbol sucio los gates corrieron sobre el WORKING TREE, no sobre HEAD:

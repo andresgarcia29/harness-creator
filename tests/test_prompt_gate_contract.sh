@@ -83,6 +83,33 @@ ship_src="$(cat "$root/templates/scripts/ship.sh.tmpl")"
 assert_contains "$ship_src" "MODIFIED|REMOVED" "el gate sigue aceptando exactamente esas dos secciones"
 
 echo
+echo "── 'el test tiene que morder': el gate lo exige, así que los prompts lo piden"
+# La lección de c767363 (el gate exige lo que ningún prompt pidió) aplicada al
+# gate más nuevo: gate_test_muerde corre cada test NUEVO contra el árbol base y
+# se pone rojo si pasa en los dos. Quien escribe el test tiene que enterarse
+# ANTES de escribirlo, o el mecanismo se descubre por el mensaje del gate: una
+# ronda por implementer, que es justo la ronda que este gate vino a ahorrar.
+assert_contains "$ship_src" "gate_test_muerde" "el gate existe en ship.sh (si no, esto exigiría prosa sin diente)"
+for c in implement quick smart; do
+  assert_contains "$(cmd "$c")" "gate_test_muerde" "/$c nombra el gate que va a correr sus tests contra la base"
+done
+# El texto exacto varía por comando (implement habla del contexto del
+# implementer, quick de vos mismo), así que se exige la REGLA, no una frase
+# copiada: el test tiene que fallar sin el fix, y el precheck lo comprueba.
+impl="$(cmd implement)"; qk="$(cmd quick)"; sm="$(cmd smart)"
+assert_contains "$impl" "FALLAR sin el fix" "/implement pasa la regla del rojo primero al implementer"
+assert_contains "$impl" "los dos árboles" "y dice cuál es el rojo (pasar en base y en HEAD)"
+assert_contains "$qk" "FALLE sin tu fix" "/quick la pide en el paso de implementar"
+assert_contains "$qk" "árbol base" "nombrando el árbol contra el que se comprueba"
+assert_contains "$sm" "FALLE sin el fix" "/smart la pide donde instruye la implementación"
+assert_contains "$sm" "árbol base" "con el mismo mecanismo, no una versión propia"
+# Y el opt-in del delta-spec: nombrar un test bajo ADDED lo mete al chequeo
+# aunque el archivo ya existiera. Sin esta línea, el paso que escribe el
+# delta-spec no sabe que ese basename tiene consecuencias ejecutables.
+assert_contains "$qk" "bajo \`ADDED\` lo mete" "/quick dice que nombrar el basename bajo ADDED mete el test al chequeo"
+assert_contains "$qk" "aunque ese archivo ya existiera" "y que vale para un archivo existente"
+
+echo
 echo "── reviewer persistente: prompt del loop, prompt del agente y mecanismo, alineados"
 revd="$(cat "$root/templates/agents/reviewer.md.tmpl")"
 scaffold="$(cat "$root/templates/scripts/verdict-scaffold.sh")"

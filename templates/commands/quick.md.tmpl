@@ -55,6 +55,10 @@ Este es el comando que buscabas si pensaste "quick fix", "quick prompt",
    LITERALMENTE del prompt**, cada uno ejercitable por un test. No es una
    formalidad: la compliance matrix del reviewer y `gate_evidence` operan igual
    en todos los carriles, así que sin delta-spec el ship no abre.
+   **Nombrar el basename de un archivo de test bajo `ADDED` lo mete en el
+   chequeo de `gate_test_muerde`** aunque ese archivo ya existiera: el gate lo
+   correrá contra el árbol base y exigirá que ahí falle. Es el opt-in para
+   decir "este test existente es el que prueba lo nuevo".
    Si al escribirlos necesitás agregar una decisión que el prompt no trae, el
    trabajo NO era trivial: `/smart` y listo.
 
@@ -97,6 +101,11 @@ Sin enrichment, sin abogados, sin RFC, sin `dag.json`, sin briefs, sin
 `mem_search`, sin `plan.md`: el carril no los tiene y ningún gate te los va a
 pedir. Leé el CLAUDE.md del repo, implementá con tests, commiteá con el
 trailer.
+
+- **El test se escribe para que FALLE sin tu fix (rojo primero).** El precheck
+  lo comprueba con `gate_test_muerde`, que corre cada test nuevo contra el árbol
+  base, y un test que pasa en los dos árboles es un rojo tuyo: no prueba la
+  conducta nueva, y la ronda que lo descubre después ya se pagó entera.
 
 - **La ambigüedad chica se resuelve, no se rebota**: vale la regla del ledger
   de /smart, y de esa regla la que manda acá es "entre dos lecturas del prompt,
@@ -227,6 +236,7 @@ el contrato por el mensaje del gate, una ronda por mecanismo. Esta tabla es el
 |---|---|
 | `Task: <id>` en TODOS los commits (`gate_trailer`) | pasos 2 y 3 |
 | delta-spec con `## ADDED`, y `MODIFIED`/`REMOVED` nombrando el test (`gate_tests_untouched`) | paso 1 |
+| cada test nuevo FALLA sobre el árbol base (`gate_test_muerde`) | pasos 1 y 3 |
 | evidencia corrida por un runner de implementación (`POLICY-ROLE-002`) | paso 4 |
 | precheck verde y sellado sobre el HEAD que se revisa | paso 4 |
 | reviewer distinto del implementador (`POLICY-ROLE-001/002/003`) | paso 5 |

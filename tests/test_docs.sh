@@ -625,4 +625,77 @@ else
     "/rfc no duplica el cuerpo de la regla (un duplicado diverge)"
 fi
 
+echo
+echo "── QA: identidad del servidor antes de medir, y asserts que pueden fallar"
+# Dos errores de UNA corrida de campo, los dos en QA y ninguno visible para un
+# gate mecanico:
+#   1. se midio contra el puerto 4321 sin verificar QUE estaba sirviendo ahi:
+#      era un dev server viejo, o sea la medicion de OTRO arbol. El antidoto ya
+#      existia un paso mas tarde en el pipeline (verify_cmd post-deploy: curl +
+#      grep de un marcador); esto lo corre antes de medir.
+#   2. un assert de Playwright evaluaba antes de que el dato llegara, asi que no
+#      podia fallar: el verde vacuo costo la ronda 3 entera.
+# El gate de suite del precheck alcanza a los tests de suite; al QA exploratorio
+# (navegador) no lo alcanza ninguno, asi que su disciplina vive en el prompt y
+# se testea frase por frase: si sobrevive solo el titulo, la regla no gobierna
+# la decision. Se compara sobre el texto APLANADO (flat_tmpl) porque la prosa va
+# envuelta a ~70 columnas y reacomodar una coma no puede poner esto en rojo.
+qa_tmpl="$ROOT/templates/agents/qa.md.tmpl"
+rev_tmpl="$ROOT/templates/commands/review.md.tmpl"
+if [ ! -f "$qa_tmpl" ] || [ ! -f "$rev_tmpl" ]; then
+  # Tercer estado: sin los archivos no hay nada que comparar, y "no pude mirar"
+  # no se reporta como verde.
+  fail "no puedo verificar las reglas de QA: falta templates/agents/qa.md.tmpl o templates/commands/review.md.tmpl, y sin ellos este bloque NO es verde"
+else
+  qa_flat="$(flat_tmpl "$qa_tmpl")"
+  rev_flat="$(flat_tmpl "$rev_tmpl")"
+
+  # Regla 1, en el agente que mide.
+  assert_contains "$qa_flat" "Identidad del servidor ANTES de medir" \
+    "qa.md declara la regla de identidad del servidor"
+  assert_contains "$qa_flat" "QUÉ está sirviendo ahí" \
+    "y dice que lo primero es saber QUE contesta en ese puerto"
+  assert_contains "$qa_flat" "marcador de build" \
+    "con la sonda admisible: marcador de build, versión o contenido propio del árbol"
+  assert_contains "$qa_flat" "REGISTRA" \
+    "la identidad no se mira y se olvida: se registra con la evidencia"
+  assert_contains "$qa_flat" "\`verify_cmd\` usa post-deploy" \
+    "y se ata al patrón que ya existe post-deploy, un paso antes"
+  assert_contains "$qa_flat" "puerto 4321" \
+    "el caso real viene con su puerto, no como principio abstracto"
+  assert_contains "$qa_flat" "dev server viejo de OTRO árbol" \
+    "y con lo que de verdad contestaba: otro árbol"
+  assert_contains "$qa_flat" "sin identidad del servidor no respalda" \
+    "una medición sin identidad no sostiene el pass"
+
+  # Regla 2, la que ningun gate puede cubrir.
+  assert_contains "$qa_flat" "Un assert verde solo cuenta si PUDO fallar" \
+    "qa.md declara la regla del assert que puede fallar"
+  assert_contains "$qa_flat" "demostrá UNA vez que el assert muerde" \
+    "y pide la demostración, no la intención"
+  assert_contains "$qa_flat" "nunca un \`sleep\` ni una lectura temprana" \
+    "esperar la condición de verdad excluye el sleep y la lectura temprana"
+  assert_contains "$qa_flat" "un selector ausente" \
+    "con los estados contra los que el assert tiene que fallar"
+  assert_contains "$qa_flat" "el árbol base sin el cambio" \
+    "incluido el árbol base, que es el control negativo más barato"
+  assert_contains "$qa_flat" "se llevó la ronda 3" \
+    "el costo del verde vacuo está medido en rondas"
+  assert_contains "$qa_flat" "gate mecánico de la suite no puede ver esto" \
+    "y se dice por qué la regla es del prompt: ningún gate la alcanza"
+
+  # Regla 1 tambien en el punto donde el orquestador LANZA QA: si solo vive en
+  # el agente, el QA determinista (que no lee qa.md) mide sin identidad igual.
+  assert_contains "$rev_flat" "Identidad del servidor antes de medir" \
+    "review.md exige la identidad del servidor al lanzar QA"
+  assert_contains "$rev_flat" "verifica QUÉ está sirviendo ahí" \
+    "y la pide como primer comando de QA, agente o determinista"
+  assert_contains "$rev_flat" "\`verify_cmd\` (curl + grep del marcador) un paso antes" \
+    "nombrando el patrón post-deploy del que es un paso previo"
+  assert_contains "$rev_flat" "puerto 4321" \
+    "con el caso de campo y su puerto"
+  assert_contains "$rev_flat" "dev server viejo de OTRO árbol" \
+    "y el árbol equivocado que respondía"
+fi
+
 t_done

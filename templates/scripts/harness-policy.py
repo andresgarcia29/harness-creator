@@ -153,7 +153,7 @@ def repos_pending_ship(task_dir: Path) -> list:
     los gates mecánicos en verde... y trabado por el número de fase. Lo único
     rojo era la secuencia.
 
-    /auto ya lo pedía en prosa ("tras todos los repos verdes solicita review →
+    /smart ya lo pedía en prosa ("tras todos los repos verdes solicita review →
     ship"). La prosa no frena a nadie. Las dos fuentes son artefactos que ya
     existen: verdict-<repo>.json y ship.log (una línea por repo shippeado).
 
@@ -180,8 +180,8 @@ def repos_pending_ship(task_dir: Path) -> list:
 def repos_planned(task_dir: Path) -> list:
     """Repos que el DAG de la tarea declara como parte del trabajo.
 
-    Sin dag.json (el carril express no genera DAG) devuelve []: el gate se
-    comporta como siempre. Un dag ILEGIBLE en cambio bloquea: ignorarlo sería
+    Sin dag.json (los carriles quick y express no generan DAG) devuelve []: el
+    gate se comporta como siempre. Un dag ILEGIBLE en cambio bloquea: ignorarlo sería
     fail-open (los repos planificados desaparecen del conteo y la fase avanza
     en verde), que es exactamente el agujero que esta función cierra. Caso de
     campo: shippear el primer repo movió la tarea entera a ship y el review
@@ -332,11 +332,83 @@ def lane_transitions(policy: dict, state: dict) -> dict:
     """Transiciones vigentes para el carril de la tarea.
 
     Un carril sin `allowed_transitions` propio hereda el grafo por defecto
-    (standard y full son el pipeline completo; express salta rfc)."""
+    (standard y full son el pipeline completo; quick y express saltan rfc)."""
     workflow = policy.get("workflow", {})
     lane = state.get("lane", "full")
     lane_cfg = workflow.get("lanes", {}).get(lane, {})
     return lane_cfg.get("allowed_transitions") or workflow.get("allowed_transitions", {})
+
+
+# Techos que un carril puede prometer sobre el tamaño del diff. La lista es
+# CERRADA a propósito: una clave que nadie lee dentro de `limits` sería una
+# perilla muerta con cara de garantía (el humano cree que puso un techo y el
+# gate no lo mira), que es justo lo que persigue tests/test_dead_knobs.sh.
+LANE_LIMIT_FIELDS = ("max_files", "max_lines")
+
+
+def lane_limits(policy: dict, lane: str) -> list:
+    """Los techos del carril como pares clave=valor, o [] si no promete ninguno.
+
+    Un techo ILEGIBLE no devuelve [] (eso lo leería el gate como "este carril
+    no tiene techo" y dejaría pasar cualquier diff): muere tipado, porque no
+    poder mirar no es lo mismo que mirar y no encontrar nada."""
+    lanes = policy.get("workflow", {}).get("lanes", {})
+    if not isinstance(lanes, dict) or lane not in lanes:
+        known = sorted(lanes) if isinstance(lanes, dict) else []
+        fail("POLICY-LANE-001",
+             f"carril desconocido: {lane} (permitidos: {known}). "
+             "Los carriles se declaran en workflow.lanes de harness-policy.json")
+    cfg = lanes.get(lane)
+    limits = cfg.get("limits") if isinstance(cfg, dict) else None
+    if limits is None:
+        return []
+    if not isinstance(limits, dict):
+        fail("POLICY-SCHEMA-004",
+             f"workflow.lanes.{lane}.limits debe ser un objeto, no "
+             f"{type(limits).__name__}: un techo ilegible no puede pasar por "
+             "'sin techo'")
+    unknown = sorted(k for k in limits if k not in LANE_LIMIT_FIELDS)
+    if unknown:
+        fail("POLICY-SCHEMA-004",
+             f"workflow.lanes.{lane}.limits declara claves que ningún gate lee: "
+             f"{', '.join(unknown)} (leídas: {', '.join(LANE_LIMIT_FIELDS)}). "
+             "Un techo que nadie mide promete lo que no cumple: quitalo o "
+             "agregá su lector antes de declararlo")
+    pairs = []
+    for field in LANE_LIMIT_FIELDS:
+        if field not in limits:
+            continue
+        value = limits[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            fail("POLICY-SCHEMA-004",
+                 f"workflow.lanes.{lane}.limits.{field} debe ser un entero "
+                 f"positivo, no {value!r}: el gate del carril no puede comparar "
+                 "contra eso y tampoco puede fingir que no hay techo")
+        pairs.append(f"{field}={value}")
+    return pairs
+
+
+def cmd_lane_limits(args: argparse.Namespace) -> int:
+    """Imprime los techos del carril, para que ship.sh no parsee el policy.
+
+    Mismo motivo que evidence-policy: harness-policy.py es LA autoridad sobre
+    harness-policy.json. Un `jq` propio en ship.sh es una segunda lectura del
+    mismo dato, o sea una oportunidad de divergir en silencio justo en el gate
+    que decide si un diff cumple la promesa del carril.
+
+    Contrato para quien lo consume: una línea `clave=valor` por techo en stdout
+    y exit 0; stdout VACÍO con exit 0 significa "este carril no promete techo"
+    (no aplica el gate); exit 3 significa que no se pudo mirar (carril
+    desconocido o policy roto) y eso no se puede leer como verde."""
+    policy = load(Path(args.policy), "policy")
+    pairs = lane_limits(policy, args.lane)
+    if not pairs:
+        print(f"ℹ️  el carril {args.lane} no declara limits en el policy: "
+              "no hay techo de tamaño que verificar", file=sys.stderr)
+        return 0
+    for pair in pairs:
+        print(pair)
+    return 0
 
 
 def repo_kinds(ws: Path) -> dict:
@@ -382,20 +454,32 @@ def cmd_init(args: argparse.Namespace) -> int:
         fail("POLICY-LANE-001", f"carril desconocido: {args.lane} (permitidos: {sorted(known_lanes)})")
     repos = [r.strip() for r in (getattr(args, "repos", "") or "").split(",") if r.strip()]
     if repos:
-        # El aviso temprano que faltaba: gate_lane frena un express que toca
-        # infra, pero recién en el precheck, DESPUÉS de que el implementer
+        # quick es de UN repo, y eso se puede comprobar ACÁ: es la única
+        # promesa del carril que no necesita ver el diff. quick no genera DAG,
+        # así que nada ordena el ship entre repos, y descubrirlo al final
+        # costaría el trabajo del implementer más una escalada.
+        distinct = list(dict.fromkeys(repos))
+        if args.lane == "quick" and len(distinct) > 1:
+            fail("POLICY-LANE-005",
+                 f"quick es de UN repo; para multi-repo usa express o superior. "
+                 f"Esta tarea declara {len(distinct)}: {', '.join(distinct)}. "
+                 "quick no genera DAG, o sea que no hay nada que ordene el ship "
+                 "entre repos. Remediación: iniciá con --lane express (o "
+                 "superior), o partí la tarea en una por repo")
+        # El aviso temprano que faltaba: gate_lane frena un carril corto que
+        # toca infra, pero recién en el precheck, DESPUÉS de que el implementer
         # trabajó. Caso de campo: un carril se clasificó por el tamaño del
         # cambio en vez de por lo que toca, y el error se pagó al final.
         kinds = repo_kinds(task_dir.parent.parent)   # tasks/<id> vive bajo el WS
-        if args.lane == "express":
+        if args.lane in ("quick", "express"):
             infra = [r for r in repos if kinds.get(r) in ("infra-live", "infra-module")]
             if infra:
                 fail("POLICY-LANE-004",
-                     f"carril express con repos de infra: {', '.join(infra)} "
-                     "(kind infra-module/infra-live en manifest.yaml). Express "
-                     "promete cero infra y gate_lane lo va a bloquear DESPUÉS "
-                     "de que el implementer trabaje. Remediación: iniciá con "
-                     "--lane standard (o full), o quitá ese repo de la tarea")
+                     f"carril {args.lane} con repos de infra: {', '.join(infra)} "
+                     f"(kind infra-module/infra-live en manifest.yaml). El carril "
+                     f"{args.lane} promete cero infra y gate_lane lo va a bloquear "
+                     "DESPUÉS de que el implementer trabaje. Remediación: iniciá "
+                     "con --lane standard (o full), o quitá ese repo de la tarea")
         unknown = [r for r in repos if kinds and r not in kinds]
         if unknown:
             print(f"⚠️  repos fuera de manifest.yaml (sin kind conocido): "
@@ -428,7 +512,8 @@ def cmd_escalate(args: argparse.Namespace) -> int:
     path = state_path(task_dir)
     lock_state(task_dir)
     state = load(path, "estado")
-    order = policy.get("workflow", {}).get("lane_escalation", ["express", "standard", "full"])
+    order = policy.get("workflow", {}).get("lane_escalation",
+                                           ["quick", "express", "standard", "full"])
     current_lane = state.get("lane", "full")
     if args.to not in order or current_lane not in order:
         fail("POLICY-LANE-001", f"carril desconocido: {args.to}")
@@ -437,8 +522,16 @@ def cmd_escalate(args: argparse.Namespace) -> int:
     if state.get("phase") == "blocked":
         fail("POLICY-LANE-003", "tarea bloqueada: resume antes de escalar")
     previous_phase = state.get("phase")
-    # La deliberación saltada se recupera: fases posteriores a rfc regresan a rfc.
-    destination = "rfc" if previous_phase in ("implement", "review", "ship") else previous_phase
+    # La deliberación saltada se recupera volviendo atrás, pero el punto de
+    # reentrada tiene que EXISTIR en el grafo del carril destino. Con la terna
+    # vieja siempre era rfc (standard y full lo tienen); quick → express manda
+    # a una fase que el grafo de express ni siquiera declara, y desde ahí no
+    # sale ninguna transición: la tarea quedaba trabada donde no la salvaba ni
+    # un escalate más. Cuando el destino no tiene rfc, la deliberación que
+    # quick se saltó vive en intake (mini-plan y delta-spec de express).
+    graph = lane_transitions(policy, dict(state, lane=args.to))
+    reentry = "rfc" if "rfc" in graph else policy.get("workflow", {}).get("initial_phase", "intake")
+    destination = reentry if previous_phase in ("implement", "review", "ship") else previous_phase
     state["lane"] = args.to
     state["phase"] = destination
     state.setdefault("history", []).append({
@@ -579,7 +672,8 @@ def cmd_dag_order(args: argparse.Namespace) -> int:
     if not dag_path.exists():
         fail("POLICY-DAG-008",
              f"no existe tasks/{task_dir.name}/dag.json: sin plan no hay ola. "
-             "El carril express no genera DAG: shippea con ship.sh directo")
+             "Los carriles quick y express no generan DAG: shippea con ship.sh "
+             "directo")
     nodes, repos = load_dag_nodes(dag_path)
     order: list = []
     visited: set = set()
@@ -1027,6 +1121,12 @@ def build_parser() -> argparse.ArgumentParser:
                       help="commits que avanzó la base desde el review")
     ship.add_argument("--verdict", required=True)
     ship.set_defaults(func=cmd_validate_ship)
+    lanelim = sub.add_parser("lane-limits",
+                             help="techos de tamaño que promete un carril, una "
+                                  "línea clave=valor por techo (stdout vacío = "
+                                  "el carril no promete ninguno)")
+    lanelim.add_argument("lane")
+    lanelim.set_defaults(func=cmd_lane_limits)
     evpol = sub.add_parser("evidence-policy")
     evpol.add_argument("--field", default="required_evidence_kinds",
                        choices=("required_evidence_kinds", "require_fresh_evidence"))

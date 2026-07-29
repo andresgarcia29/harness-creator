@@ -1,0 +1,231 @@
+---
+description: Prompt trivial a producción en UNA sesión. Recorta la deliberación, jamás la verificación.
+argument-hint: <"prompt literal entre comillas"> [repo]
+---
+
+Ejecutás $ARGUMENTS vos mismo, de punta a punta, en ESTA sesión.
+
+**La promesa de este comando la hiciste vos, no el harness.** Al escribir
+`/quick` ya dimensionaste el trabajo y dijiste "esto es trivial". El carril
+recorta la DELIBERACIÓN (enrichment, abogados, RFC, DAG, briefs, mem_search,
+plan) y NO toca la VERIFICACIÓN: worktree, trailer `Task:`, precheck, TODOS los
+gates de `ship.sh`, reviewer independiente y QA determinista quedan idénticos a
+/smart. Si el diff no cabe en la promesa, `gate_lane` se pone rojo y te manda de
+vuelta a /smart: dimensionar de menos cuesta una escalada, jamás un ship sin la
+verificación que tocaba.
+
+Este es el comando que buscabas si pensaste "quick fix", "quick prompt",
+"arreglo rápido", "cambio chico sin ceremonia": todos entran por acá.
+
+## Paso 0 · Normaliza la entrada (prompt + UN repo)
+
+`$ARGUMENTS` es el prompt literal entre comillas y, opcionalmente, el repo.
+
+- **El prompt es la spec.** No lo reescribas, no lo enriquezcas, no le agregues
+  criterios que no trae. En quick el enunciado del humano ES la especificación;
+  "mejorarlo" es inventar alcance que nadie pidió y encima sin la ronda de
+  preguntas que /smart sí tiene.
+- **El repo**: si el workspace gestiona UN solo repo (`inventory.json`,
+  `manifest.yaml`), ese. Si gestiona varios, el argumento `[repo]` es
+  OBLIGATORIO, salvo que el prompt nombre uno de forma inequívoca (el nombre
+  exacto de un repo del manifiesto, y uno solo).
+- **Ambiguo se para, no se adivina.** Una línea: "hay N repos y el prompt no
+  nombra ninguno: `/quick "<prompt>" <repo>`, o mandalo por `/smart`, que sí
+  dimensiona". Adivinar el repo acá cuesta un worktree, un implementer y una
+  escalada; preguntarlo cuesta una línea.
+- **Multi-repo NO existe en quick.** `harness-policy.py init --lane quick` con
+  más de un repo lo rechaza en el acto (`POLICY-LANE-005`), ANTES de que
+  trabajes: quick no genera `dag.json`, así que nada ordenaría el ship entre
+  repos. Dos repos es `/smart` con carril express o superior.
+
+## Paso 1 · Id y los dos artefactos que los gates leen
+
+1. `id = QUICK-$(date +%Y%m%d)-<slug-de-3-palabras>-$(id -un | cut -c1-4)`
+   (verificá que no exista en `tasks/`; si choca, sufijá `-2`).
+   **El sufijo de identidad no es adorno**, y es el mismo esquema que usa
+   `AUTO-` en el paso 1 de /smart por la misma razón: el chequeo de colisión
+   solo ve el `tasks/` de ESTA máquina, y el trailer `Task: <id>` viaja al main
+   que comparten todos los workspaces. Dos personas con prompts parecidos el
+   mismo día producían el mismo id, y la trazabilidad (y `/archive`) mezclaba
+   dos trabajos distintos bajo una sola clave, para siempre.
+2. `tasks/<id>/task.md` **mínimo**: frontmatter con `origin: prompt` y
+   `title:` (verbo + resultado observable; sin ese campo el panel muestra "Sin
+   título registrado"), y el prompt **VERBATIM** como cuerpo. Eso es la spec.
+3. `tasks/<id>/delta-spec.md` con `## ADDED` y **1 a 3 requisitos derivados
+   LITERALMENTE del prompt**, cada uno ejercitable por un test. No es una
+   formalidad: la compliance matrix del reviewer y `gate_evidence` operan igual
+   en todos los carriles, así que sin delta-spec el ship no abre.
+   Si al escribirlos necesitás agregar una decisión que el prompt no trae, el
+   trabajo NO era trivial: `/smart` y listo.
+
+   **Si el cambio toca el comportamiento de un test que YA existe, `ADDED` no
+   alcanza.** `gate_tests_untouched` bloquea toda aserción eliminada o `skip`
+   añadido, y la ÚNICA declaración que acepta es una entrada bajo un encabezado
+   `## MODIFIED Requirements` o `## REMOVED Requirements` que
+   **nombra el archivo de test** (su basename): la palabra suelta en la
+   prosa no abre nada.
+   Declararlo acá cuesta una línea; descubrirlo por el mensaje del gate cuesta
+   una ronda entera.
+
+## Paso 2 · Estado ejecutable y worktree (la prosa no mueve fases)
+
+```
+scripts/harness-policy.py init tasks/<id> --lane quick --repos <repo>
+scripts/harness-policy.py transition tasks/<id> implement --actor orchestrator
+scripts/worktree-task.sh <id> <repo>
+```
+
+- `init` es quien registra el carril: sin `state.json` el ship muere en
+  `POLICY-SCHEMA-001` y el mensaje no dice cuál paso se lo saltó.
+- El carril quick permite `intake → implement` (no pasa por `rfc`, igual que
+  express). Una transición rechazada es un gate: no edites `state.json` a mano.
+- Trabajás en `worktrees/<id>/<repo>`, NUNCA en `repos/` (el hook
+  guard-canonical te bloquea el clon canónico).
+- **Trailer `Task: <id>` desde el PRIMER commit**, en todos. Lo exige
+  `gate_trailer` en el precheck y otra vez en el ship, y su remediación tardía
+  es un `git rebase --exec ... --amend`, que mueve HEAD y te invalida evidencia
+  y veredicto. Temprano no cuesta nada.
+
+## Paso 3 · Implementá, en esta misma sesión, directo del prompt
+
+Sin enrichment, sin abogados, sin RFC, sin `dag.json`, sin briefs, sin
+`mem_search`, sin `plan.md`: el carril no los tiene y ningún gate te los va a
+pedir. Leé el CLAUDE.md del repo, implementá con tests, commiteá con el
+trailer.
+
+- **La ambigüedad chica se resuelve, no se rebota**: vale la regla del ledger
+  de /smart, y de esa regla la que manda acá es "entre dos lecturas del prompt,
+  la más fácil de deshacer, aunque haga menos". Cada supuesto va a
+  `tasks/<id>/assumptions.md` en una línea
+  (`- SUPUESTO: <qué> · PORQUE: <evidencia> · SI ES FALSO: <qué cuesta
+  deshacerlo>`) y se emite al bus: `scripts/emit.sh assumption "<la línea>" ""
+  <id>`. Lo que no se emite, para el humano no pasó.
+- **UNA sola pausa posible**: que el prompt sea inejecutable sin una decisión
+  humana. Se registra antes de emitirse, con un motivo del catálogo de
+  `harness-policy.json`: `scripts/harness-policy.py pause tasks/<id> --reason
+  <código> --detail "<por qué>" --actor orchestrator`. Un motivo que no está en
+  ese catálogo no es una parada: es una decisión que te toca a vos.
+
+## Paso 4 · Precheck hasta verde (antes de gastar reviewer)
+
+`bash scripts/ship.sh --precheck <id> <repo>`, con el árbol LIMPIO (commiteá
+primero). Son los mismos gates mecánicos del ship, sin veredicto ni push.
+
+- Rojo se arregla ACÁ. Es la misma regla que /review paso 0: un reviewer que
+  descubre un test roto gastó una ronda de 10 a 20 minutos en algo que un
+  script dice en segundos. Si tras 2 intentos sigue rojo, para y escalá con el
+  error completo.
+- **Con el árbol limpio el precheck SELLA tu evidencia solo**, como `EV-TEST-*`
+  con runner de implementación atado a tu commit exacto. Eso es lo que llena
+  `implementation_agents[]` del veredicto, que es lo que exige `POLICY-ROLE-002`
+  en el ship. Si el sello no pudo emitirse (el script te lo dice), registrala
+  vos, después del último commit y con el árbol limpio:
+
+  ```
+  python3 scripts/evidence.py run --task-dir tasks/<id> --repo <repo> \
+    --runner implementer --kind test --cwd worktrees/<id>/<repo> \
+    -- <el comando de test del repo>
+  ```
+
+- **Leé el campo `verificado` del sello** (`tasks/<id>/precheck-<repo>.json`):
+  `completo` es el único verde verificado; `ninguno` y `desconocido` son tramos
+  sin mirar, y el veredicto DEBE declararlos (supuesto en `notes`, o blocking
+  si ese repo sí se construye). Callarlo convierte un "no miré" en un "pasó".
+- Acá corre `gate_lane`: si el diff se pasó de la promesa del carril, te
+  enterás antes del review (ver "El techo de quick", abajo).
+
+## Paso 5 · Review: el reviewer es INDEPENDIENTE, y eso quick no lo negocia
+
+0. **Primero mueve la fase** (también la PRIMERA entrada, no solo las
+   vueltas del loop): `scripts/harness-policy.py transition tasks/<id>
+   review --repo <repo> --actor orchestrator`. Sin esto el ship muere con
+   `POLICY-SHIP-001` (exige `phase=review`) una ronda después.
+1. `bash scripts/verdict-scaffold.sh <id> <repo> reviewer-<repo>` (con
+   `--allow-empty` si la evidencia de QA todavía no existe). Escribe los campos
+   mecánicos verificados; el juicio lo pone el reviewer.
+2. Lanzá el subagente `reviewer` sobre `worktrees/<id>/<repo>`, con la
+   identidad `reviewer-<repo>` que le pasaste al scaffold. **Vos implementaste,
+   así que no podés firmar el veredicto**: `POLICY-ROLE-001/002/003` rechaza el
+   ship si falta reviewer, si `implementation_agents[]` está vacío o si el
+   reviewer figura también como implementador. La separación de roles es la
+   parte del pipeline que quick NO recorta, porque es la única que no se puede
+   reconstruir después.
+3. **QA por el camino DETERMINISTA** que /review ya define en su paso 1: los
+   tests que cubren los criterios, corridos con
+   `scripts/evidence.py run ... --runner qa --kind test ...`, y su resultado en
+   `tasks/<id>/qa-<repo>.json`. En quick no hay dimensionamiento de QA ni
+   agente qa: un cambio que necesita un navegador para demostrarse no es
+   trivial, y esa es señal de escalar el carril, no de agrandar quick.
+4. **Merge mecánico**: `scripts/verdict-scaffold.sh --merge-qa <id> <repo>`.
+   Nunca edites el veredicto a mano para "arreglar" la fusión.
+5. **Loop de fix idéntico a /review paso 4**, presupuesto {{LOOP_BUDGET}}: los
+   `blocking` vuelven TODOS juntos en una sola pasada, los `non_blocking` se
+   convierten en beads con `scripts/verdict-beads.sh <id> <repo>` y no en otra
+   ronda, el re-review es incremental con `verdict-scaffold.sh --rebase <id>
+   <repo>`, y cada vuelta se pide con `scripts/harness-policy.py transition
+   tasks/<id> review --repo <repo> --actor orchestrator`. Presupuesto agotado
+   es una parada con el historial de veredictos.
+6. El veredicto llega al ship con `verdict: pass`, `qa: pass`,
+   `requirements_uncovered: 0` y un `compliance[]` cuyos artefactos EXISTEN y
+   fueron LEÍDOS: eso último lo verifica `gate_evidence` contra
+   `tasks/<id>/evidence.log`, y "confía en mí" no es evidencia.
+
+## Paso 6 · Ship, deploy-watch y archive (igual que /smart, sin variantes)
+
+Son exactamente los pasos 6, 7 y 8 de /smart, y se hacen con los mismos
+comandos: `bash scripts/ship.sh <id> <repo>` (o `/ship <id> <repo>`),
+deploy-watch, y `/archive`.
+
+- La transición `review → ship` **no la pidas**: `ship.sh` ya la registró él
+  mismo tras el push. Las fases las mueven los scripts, no esta prosa.
+- Con `flow: prs` el ship termina con el PR abierto y `landed: false`: el
+  cambio todavía NO está en la trunk, así que no sigas a deploy ni a archive
+  hasta que mergee.
+- Gate rojo en el ship: máximo 2 rondas de autofix (el error del gate ES el
+  prompt del fix), y a la tercera es parada con el error completo.
+
+## El techo de quick, y qué NO promete este carril
+
+El carril promete UN repo y un diff chico: los techos (`max_files` y
+`max_lines`, líneas cambiadas contra el merge-base) viven como DATO en
+`harness-policy.json`, y `gate_lane` los lee de ahí con
+`scripts/harness-policy.py lane-limits quick`. No los copies de memoria a
+ningún lado: una copia editorializada envejece y termina prometiendo un número
+que el gate no aplica.
+
+Tampoco promete contratos, migraciones ni infra: el patrón exacto que
+`gate_lane` bloquea es el del gate (`LANE_GUARD_PATTERN` en `ship.sh`), y ese
+es el que manda, no una lista reescrita acá.
+
+**Cuando `gate_lane` se pone rojo, la remediación es escalar**, y es barata a
+propósito. El gate distingue los dos rojos y cada uno trae la suya:
+
+- **El diff se pasó del techo** (más archivos o más líneas de las prometidas):
+  `python3 scripts/harness-policy.py escalate tasks/<id> --to express --actor orchestrator`
+  y seguís con `/smart <id>`.
+- **El diff toca contratos, migraciones o infra**: eso no es tamaño, es
+  deliberación faltante, así que el salto es a `--to standard` y se entra por
+  `/rfc <id>`.
+
+En los dos casos el worktree y los commits se conservan: lo único que se
+recupera es la deliberación que quick saltó. Escalar no es una falla ni una
+parada, es el precio de haber dimensionado de menos, y es exactamente por qué
+el carril puede recortar prosa sin recortar seguridad.
+
+## El contrato completo: todo gate que te van a exigir está acá arriba
+
+Un carril nuevo que no nombra los gates de siempre produce tareas que descubren
+el contrato por el mensaje del gate, una ronda por mecanismo. Esta tabla es el
+índice, no una promesa aparte:
+
+| Lo que un gate exige | Dónde lo producís |
+|---|---|
+| `Task: <id>` en TODOS los commits (`gate_trailer`) | pasos 2 y 3 |
+| delta-spec con `## ADDED`, y `MODIFIED`/`REMOVED` nombrando el test (`gate_tests_untouched`) | paso 1 |
+| evidencia corrida por un runner de implementación (`POLICY-ROLE-002`) | paso 4 |
+| precheck verde y sellado sobre el HEAD que se revisa | paso 4 |
+| reviewer distinto del implementador (`POLICY-ROLE-001/002/003`) | paso 5 |
+| `compliance[]` citando artefactos que existen y se leyeron (`gate_evidence`) | paso 5 |
+| `qa: "pass"` con artefacto detrás, y `requirements_uncovered: 0` | paso 5 |
+| las fases movidas por `harness-policy.py`, nunca por prosa | pasos 2, 5 y 6 |
+| un repo y el diff dentro de los techos (`gate_lane`) | paso 0 y "El techo de quick" |

@@ -31,6 +31,13 @@ es correr los scripts y solo despertar en rojo.
    - 🔴 → deploy-watch ya hizo/pidió ROLLBACK PRIMERO. Lee su log en
      tasks/<task-id>/deploy-<repo>.log, diagnostica (kubectl/gcloud vía
      quiet.sh + with-secrets.sh) y propón el fix como nueva tarea.
+   - ⚠️ **CEGUERA NO ES ROJO.** `deploy-watch` tiene TRES salidas, no dos:
+     observó y está sano, observó y está enfermo (rojo, rollback primero), y
+     **no pudo observar** (supuesto en el bus, sin rollback). Si el log dice
+     "CEGUERA, no un deploy rojo", el deploy NO está declarado malo: falta
+     visibilidad. No revierta nada; seguí la remediación que imprime (la
+     dirección del servidor además del token) o verificá el tramo a mano y
+     dejalo dicho. Revertir por ceguera ya rompió un deploy sano una vez.
 3. 🟢 → `scripts/worktree-task.sh --rm <task-id>` si ya no quedan
    tareas del repo, y consulta `bd ready`: ¿siguiente tarea del DAG?
 4. ¿Era la última tarea del ticket? → **la fase ya la registró `ship.sh`**: la

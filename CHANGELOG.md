@@ -102,6 +102,34 @@ contra una instalación real).
   funcionando mientras el puntero esté.
 
 ### Fixed
+- **`deploy-watch` por fin puede DEJAR de ser ciego, y `Progressing` dejó de
+  leerse como "roto".** El tri-estado (observé y está sano / observé y está
+  enfermo / no pude observar) ya impedía el rollback por ceguera, pero el
+  watcher no tenía forma de salir de la ceguera y por eso esa era su vida
+  normal. (1) El respaldo por CLI era **código muerto**: exigía `ARGOCD_URL`,
+  un nombre nuestro, cuando el CLI lee `ARGOCD_SERVER` y lo quiere como HOST
+  (con el esquema adelante contesta "server address unspecified", con un path
+  detrás "unknown port": los dos síntomas de campo). Ahora se canonicaliza y
+  se exporta lo que el CLI lee de verdad. (2) El CLI de Kargo busca
+  `KARGO_API_ADDRESS`/`KARGO_API_TOKEN` y el harness guardaba
+  `KARGO_ADDRESS`/`KARGO_TOKEN`: el inyector metía credenciales correctas que
+  el CLI nunca miraba. Se puentea en los dos sentidos, solo con export (un
+  `kargo login` dejaría estado mutable en `$HOME` y puede colgarse pidiendo
+  input). (3) El catálogo declaraba el token y NO la dirección, así que el
+  bootstrap instalaba la herramienta, el doctor la veía presente, y el watcher
+  quedaba ciego por diseño: la cadena de la regla anti-consejo-vacío se
+  cortaba en el último eslabón. (4) `argocd app wait` quemaba el timeout
+  entero contra un host inalcanzable y recién después preguntaba si la app
+  existía; ahora el `get` barato va primero y sin VPN cuesta segundos.
+  (5) **Falso rojo nuevo, encontrado auditando lo anterior**: el health por
+  `kubectl` (que es el camino preferido) hacía UNA lectura instantánea, sin
+  loop y sin usar el timeout. Corriendo segundos después del push,
+  `OutOfSync`/`Progressing` es el estado normal de un deploy que va bien, y se
+  devolvía como enfermo, o sea rollback propuesto sobre un deploy sano. Ahora
+  re-consulta hasta el deadline y solo lo que sigue enfermo al vencer es rojo;
+  una salida vacía rompe el loop, porque eso es ceguera y no enfermedad. El
+  contrato de tres salidas viaja también en el prompt de `/ship`, que hasta
+  hoy solo modelaba verde y rojo.
 - **El callejón sin salida de `review → ship`: mecanismo completo, y ahora
   también documentado y ejecutado por la suite.** Tres casos de campo
   terminaron en la misma pregunta ("avancé la fase antes de tiempo, cómo

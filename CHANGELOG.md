@@ -102,6 +102,26 @@ contra una instalación real).
   funcionando mientras el puntero esté.
 
 ### Fixed
+- **El cable que hace sobrevivir el review al rebase pasó a tener diente, y
+  el gate dejó de ser mudo cuando no hay identidad de cambio.** Los tres
+  eslabones que permiten que un rebase NO tire veredicto ni evidencia
+  (`change-id.sh`, la ventana de reuso de `harness-policy.py`, la
+  equivalencia por `patch_id` de `evidence.py`) estaban cada uno probado
+  contra su código real, pero la función que los CONECTA
+  (`gate_policy_and_evidence`) no la ejecutaba ningún test: está stubbeada
+  donde se mide el fan-out, que es lo correcto ahí, y dejaba el cable al
+  aire. Borrar el `--patch-id` o romper el parseo de `REVIEWED_COMMIT=`
+  dejaba la suite VERDE y devolvía a producción el bucle ceremonial de
+  POLICY-SHIP-002 (registrar evidencia, rebase, re-registrar, re-sellar, una
+  ronda por repo). Ahora `test_rebase_survival.sh` extrae la función del
+  template y la corre sobre git de verdad, con la base movida por un commit
+  ajeno y el SHA reescrito por un rebase real, con el caso de campo de los
+  TRES SHAs; y muerde: la mutación que corta el cable pone el test en rojo.
+  Además, el gate ya no tira el stderr de `change-id.sh`: cuando no puede
+  calcular el `patch_id` (diff vacío contra `origin/<base>`, o esa referencia
+  no existe) DICE la causa y la remediación en vez de dejar solo
+  "POLICY-SHIP-002: falta --patch-id", que nombra el síntoma, suena a bug del
+  harness y casi siempre es un worktree sin commits propios.
 - **Tres hallazgos de la primera corrida de campo de una instancia real
   (post 0.54.0), los tres verificados EJECUTANDO, no leyendo.** (1) El
   reviewer leía el worktree VIVO mientras el implementer (dueño del claim)

@@ -1770,7 +1770,24 @@ gate_policy_and_evidence() {
   # al mismo trunk, el rebase de más abajo reescribe los SHA sin tocar el
   # contenido: exigir SHA idéntico tiraba el review y el QA por un movimiento
   # que el reviewer nunca miró. Ver scripts/change-id.sh.
-  pid="$(bash "$WS/scripts/change-id.sh" "$WT" "$BASE_REF" 2>/dev/null || true)"
+  #
+  # El stderr NO se tira. change-id.sh sabe exactamente por qué no pudo calcular
+  # el id (el diff contra origin/<base> está vacío, o no existe esa referencia) y
+  # lo dice; tirarlo dejaba al operador con "POLICY-SHIP-002: falta --patch-id",
+  # que nombra el síntoma y no la causa, y encima suena a bug del harness cuando
+  # casi siempre es un worktree sin commits propios. Un gate mudo obliga a
+  # adivinar, y adivinar cuesta una ronda.
+  local pid_err
+  pid_err="$(mktemp "${TMPDIR:-/tmp}/ship-changeid.XXXXXX")"
+  pid="$(bash "$WS/scripts/change-id.sh" "$WT" "$BASE_REF" 2>"$pid_err" || true)"
+  if [ -z "$pid" ]; then
+    echo "⚠️  sin identidad de cambio (patch_id): el veredicto solo va a valer para"
+    echo "   el SHA exacto, así que si el trunk se movió esto corta abajo."
+    sed 's/^/   ↳ /' "$pid_err" 2>/dev/null
+    echo "   ↳ remediación: commitea tu cambio en el worktree y verificá que"
+    echo "     origin/$BASE_REF exista (git -C \"$WT\" fetch origin $BASE_REF)."
+  fi
+  rm -f "$pid_err"
 
   # Cuánto avanzó la base desde lo que se revisó: el juicio caduca en el
   # tiempo, no solo en el texto. Best-effort (el commit viejo puede haber sido

@@ -26,7 +26,11 @@ jobs:
     # esta guarda se llama a si mismo para siempre.
     if: "!contains(github.event.head_commit.message, '[skip release]')"
     steps:
-      - uses: actions/checkout@v4
+      # Pineada por SHA, no por tag: este job tiene contents:write y publica el
+      # release. Un tag es un puntero mutable, y quien lo mueva commitea, taggea
+      # y publica en tu nombre. El comentario dice la version legible; para
+      # subirla, resolve el SHA nuevo y cambia los dos a la vez.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
         with:
           fetch-depth: 0   # necesita los tags y la historia para derivar el bump
 

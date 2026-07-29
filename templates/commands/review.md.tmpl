@@ -26,6 +26,15 @@ reporta el código de error.
    hasta que quede verde** (rojo vuelve al implementer con el error
    completo). Un reviewer que descubre un test roto gastó una ronda de
    10-20 minutos en algo que un script dice en segundos.
+   **El sello también dice CUÁNTO se miró: el campo `verificado`.**
+   `"completo"` = al menos un gate de lenguaje compiló o testeó de verdad;
+   `"ninguno"` = no corrió ninguno (stack no reconocido o toolchain
+   ausente); `"desconocido"` = no se pudo saber. Un `ok:true` con
+   `verificado` distinto de `"completo"` NO es un verde verificado, es un
+   tramo sin mirar: **el veredicto DEBE declararlo** (supuesto en `notes`,
+   o blocking si ese repo sí se construye), jamás ignorarlo en silencio.
+   Callarlo convierte un "no miré" en un "pasó", que es el defecto que el
+   campo existe para cerrar.
 1. **Dimensiona QA primero** (decide antes de lanzar nada):
    - Repos frontend/mobile, o criterios de cara al usuario → QA es un
      agente (`qa`, ejercita como usuario, Playwright).

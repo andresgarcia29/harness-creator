@@ -11,7 +11,8 @@
 # un lint quema una ronda completa de reviewer (10-20 min de reloj) para
 # decir lo que un script dice en segundos y gratis. El implementer lo corre
 # antes de entregar; /review no lanza a nadie si el precheck no está verde.
-# Deja el sello en tasks/<task>/precheck-<repo>.json (commit + ok).
+# Deja el sello en tasks/<task>/precheck-<repo>.json (commit + ok +
+# verificado, que dice cuánto se miró de verdad: ver stamp_precheck).
 #
 # Opera sobre el WORKTREE de la tarea (worktrees/<task>/<repo>), nunca
 # sobre el clon canónico. Serie solo lo que tiene orden real:
@@ -20,6 +21,25 @@
 # veredicto+evidencia+policy) y se reportan TODOS los rojos juntos — un
 # solo prompt de fix con todo, en vez de descubrirlos ronda por ronda.
 # Al final, en serie otra vez: lock → push.
+#
+# ── CÓDIGOS DE SALIDA ─────────────────────────────────────────────────
+# Los de verdad, los que este script asigna. Quien automatiza alrededor (CI,
+# wrappers, /smart) decide por lo que dice esta tabla, así que no lista ninguno
+# que el código no devuelva: tests/test_precheck.sh compara la tabla contra los
+# `exit N` reales del archivo, en los dos sentidos.
+# exit 0 · verde: gates pasados (precheck, --ci, --lang-gates) o cambio publicado.
+# exit 2 · no puedo ni empezar: falta el repo en repos/, el worktree, el clon
+#          base, o no existe origin/<trunk>. Ningún gate llegó a correr.
+# exit 3 · un gate dijo que NO: trailer, carril, lenguaje/tests, tests
+#          debilitados, veredicto, compliance, policy o evidencia.
+# exit 4 · git no pudo mover el cambio: rebase imposible, detached HEAD, o la
+#          rama no se pudo publicar (flow: prs).
+# exit 5 · agotados los reintentos de push: es contención con otro workspace,
+#          no un rojo del cambio.
+# exit 6 · el lock del repo siguió ocupado más de 10 min (otro ship en curso).
+# exit 7 · harness-answers.yaml declara un flow que este script no implementa.
+# Cualquier otro código != 0 es el del comando que falló bajo set -e (pytest,
+# tsc, git, python3): este script no lo asigna, lo propaga tal cual.
 #
 # Portabilidad: bash 3.2 (macOS), BSD grep. Sin flock (lock por mkdir).
 set -euo pipefail
@@ -196,11 +216,53 @@ gate() {
 # imprime la instrucción de autocorrección (el agente que lee esto
 # arregla en una iteración, sin adivinar). También libera el lock.
 CURRENT_GATE="preflight"; LOCK_HELD=""
+# ── "OK" NO ES "VERIFICADO" ───────────────────────────────────────────
+# El sello decía solo {commit, ok}, y un precheck donde NINGÚN gate de lenguaje
+# llegó a compilar ni testear (stack no reconocido, toolchain ausente) sellaba
+# el MISMO ok:true que un verde con la suite corrida. Desde el sello los dos
+# eran indistinguibles, así que /review los trataba igual: el aviso existía,
+# pero solo en stdout, que ningún consumidor parsea. Es el "UNKNOWN se
+# convierte en PASS" de HARDENING, en el único artefacto que sobrevive a la
+# corrida.
+#
+# `ok` NO cambia de significado ni se endurece: sigue siendo "ningún gate dijo
+# que no", y un repo de docs sin stack no es un rojo. Convertirlo en rojo
+# fabricaría falsos rojos, que es la mitad simétrica del mismo defecto. Lo que
+# gana el sello es decir CUÁNTO miró, para que el reviewer no tenga que
+# adivinarlo.
+#
+# Tercer estado, no dos: si el marcador no está (los gates corrieron sin
+# evidence.py, así que nadie dejó rastro de si algo se ejecutó), el sello dice
+# "desconocido". "No pude saberlo" no es "no corrió nada" ni "corrió todo".
+# CALIBRADO PARA SELLOS VERDES. TESTS_RAN=1 se asigna DESPUÉS de que el tramo
+# pasa (`cargo test; TESTS_RAN=1`), así que una suite que corrió y FALLÓ deja el
+# marcador en 0 y este campo dice "ninguno" en un sello ok:false. Es aceptable
+# porque el único consumidor (/review) actúa sobre ok:true y ahí la asignación
+# ya ocurrió; en un rojo el motivo lo da el gate que falló, no este campo. Queda
+# DICHO para que nadie lo lea como "en el rojo tampoco corrió nada".
+precheck_verificado() {  # → completo | ninguno | desconocido
+  local m="$WS/tasks/$TASK/.langseen-$REPO" v
+  # El marcador lo escribe el trap de la corrida `--lang-gates` con el valor de
+  # TESTS_RAN: 1 = algún tramo compiló o testeó de verdad, 0 = ninguno.
+  if [ ! -r "$m" ]; then printf 'desconocido'; return 0; fi
+  if ! v="$(tr -d ' \n' < "$m")"; then printf 'desconocido'; return 0; fi
+  # El orden del case ES la clasificación. Con `0)` primero y `*)` al final,
+  # todo contenido raro que no fuera exactamente "0" caía en "completo": "00",
+  # "10" y "2" sellaban un verde verificado que nadie escribió. Ahora se
+  # descarta primero lo ilegible, después se exige un dígito 1-9 de verdad, y
+  # "solo ceros" es el resto. Ningún patrón acá usa extglob: bash 3.2 lo corre.
+  case "$v" in
+    ''|*[!0-9]*)    printf 'desconocido' ;;
+    *[1-9]*)        printf 'completo' ;;
+    *)              printf 'ninguno' ;;
+  esac
+}
 stamp_precheck() {  # stamp_precheck <ok:true|false>: sello que /review lee
-  local ok="$1" head
+  local ok="$1" head verificado
   head="$(git -C "$WT" rev-parse HEAD 2>/dev/null || echo unknown)"
-  printf '{"schema":1,"task_id":"%s","repo":"%s","commit":"%s","ok":%s,"at":"%s"}\n' \
-    "$TASK" "$REPO" "$head" "$ok" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  verificado="$(precheck_verificado)"
+  printf '{"schema":1,"task_id":"%s","repo":"%s","commit":"%s","ok":%s,"verificado":"%s","at":"%s"}\n' \
+    "$TASK" "$REPO" "$head" "$ok" "$verificado" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     > "$WS/tasks/$TASK/precheck-$REPO.json"
 }
 # ── Procedencia: qué harness, de qué máquina, con qué gates ───────────
@@ -239,10 +301,10 @@ task: $TASK" "$sha" >/dev/null 2>&1 || return 0
 }
 
 # ── LA FASE LA REGISTRA EL HECHO, NO EL RECORDATORIO ──────────────────
-# `review → ship` era prosa en el prompt de /ship y de /auto. Si el orquestador
+# `review → ship` era prosa en el prompt de /ship y de /smart. Si el orquestador
 # se la olvidaba (y se la olvidaba), state.json quedaba en `review` con el
 # codigo ya en main: quien auditara por el estado reconstruia una historia
-# falsa, y un /auto <task-id> posterior re-entraba a revisar algo publicado.
+# falsa, y un /smart <task-id> posterior re-entraba a revisar algo publicado.
 # Verificado en dos corridas reales.
 #
 # POLICY-SHIP-004 ya encierra la condicion correcta (no se avanza hasta que
@@ -408,22 +470,102 @@ gate_trailer() {
 # de carril cuesta una re-entrada — jamás un ship sin la deliberación que
 # tocaba. Por esto los carriles no relajan la seguridad: la clasificación
 # del intake es una propuesta; este gate es quien la verifica.
+#
+# quick promete lo mismo que express y ADEMÁS un tamaño: es la promesa más
+# barata de romper sin darse cuenta, porque nadie decide "voy a tocar 40
+# archivos", se llega ahí de a uno. Por eso el techo lo mide este gate y no la
+# buena memoria de quien implementa.
 gate_lane() {
   gate "carril (lane)"
   local st="$WS/tasks/$TASK/state.json" lane
   lane="$(jq -r '.lane // "full"' "$st" 2>/dev/null || echo full)"
-  [ "$lane" = "express" ] || return 0
+  # quick hereda ENTERA la lista de prohibiciones de express: recorta
+  # deliberación, no verificación, así que lo que express no se permite
+  # tampoco se lo permite un carril todavía más corto. Los carriles con
+  # deliberación (standard, full) no pasan por acá: ahí un .proto ya se
+  # discutió, y este gate no tiene nada que decir.
+  case "$lane" in
+    express|quick) ;;
+    *) return 0 ;;
+  esac
   local pat="${LANE_GUARD_PATTERN:-(\.proto\$|(^|/)proto/|(^|/)migrations?/|\.sql\$|(^|/)helm/|(^|/)charts/|(^|/)terraform/|(^|/)openapi\.|(^|/)swagger\.)}"
   local hits
   hits="$(git diff origin/$BASE_REF..HEAD --name-only | grep -E "$pat" || true)"
   if [ -n "$hits" ]; then
-    echo "❌ carril express, pero el diff toca contratos/migraciones/infra:"
+    echo "❌ carril $lane, pero el diff toca contratos/migraciones/infra:"
     echo "$hits" | sed 's/^/   · /'
     echo "   ↳ remediación: este cambio SÍ necesita deliberación. Escala el carril:"
     echo "     python3 scripts/harness-policy.py escalate tasks/$TASK --to standard --actor orchestrator"
     echo "     y corre /rfc $TASK — el trabajo hecho se conserva en el worktree."
     exit 3
   fi
+  [ "$lane" = "quick" ] || return 0
+  gate_quick_size
+}
+
+# El techo de quick es DATO del policy, no una constante acá: un número
+# cableado en el gate no se puede ajustar por instancia, y quien lo intente
+# editaría harness-policy.json creyendo que sirve de algo. harness-policy.py
+# es la autoridad sobre ese archivo (mismo motivo que evidence-policy): un jq
+# propio en este script sería una segunda lectura del mismo dato, o sea una
+# oportunidad de divergir justo en el gate que decide si el diff cumplió.
+#
+# Contrato de `lane-limits <carril>`: una línea clave=valor por techo y exit 0.
+# Cualquier otra cosa (exit != 0 por policy roto, subcomando ausente en una
+# instancia vieja, stdout sin números) NO se puede leer como "sin techo":
+# quick promete un diff chico y el único que lo mide es este gate, así que un
+# techo que no se pudo leer es un tercer estado, ni verde ni exceso.
+gate_quick_size() {
+  local lim lim_rc=0 max_files max_lines nums diff_rc=0 counts files lines
+  lim="$(python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" \
+    lane-limits quick 2>&1)" || lim_rc=$?
+  if [ "$lim_rc" -eq 0 ]; then
+    max_files="$(printf '%s\n' "$lim" | sed -n 's/^max_files=\([0-9][0-9]*\)$/\1/p' | head -1)"
+    max_lines="$(printf '%s\n' "$lim" | sed -n 's/^max_lines=\([0-9][0-9]*\)$/\1/p' | head -1)"
+  fi
+  if [ -z "${max_files:-}" ] || [ -z "${max_lines:-}" ]; then
+    echo "❌ carril quick, pero no pude leer los límites del carril quick:"
+    printf '%s\n' "$lim" | sed 's/^/   · /'
+    echo "   Sin techos no hay promesa que verificar, y un techo inventado acá"
+    echo "   sería peor que ninguno: diría que el diff cabe en un número que"
+    echo "   nadie declaró."
+    echo "   ↳ remediación: si tu scripts/harness-policy.py no conoce"
+    echo "     'lane-limits', es anterior a quick y hay que actualizar la"
+    echo "     instancia. Si lo conoce, revisá que harness-policy.json declare"
+    echo "     workflow.lanes.quick.limits con max_files y max_lines enteros."
+    exit 3
+  fi
+  # Contra el MERGE-BASE (tres puntos), no contra la punta del trunk: en el
+  # camino de ship el rebase ya los iguala, pero el precheck corre sin rebase y
+  # ahí la punta trae commits ajenos que este cambio jamás tocó. Cobrárselos al
+  # carril mandaría a escalar por trabajo de otro.
+  nums="$(git diff --numstat "origin/$BASE_REF...HEAD" 2>&1)" || diff_rc=$?
+  if [ "$diff_rc" -ne 0 ]; then
+    echo "❌ carril quick, pero no pude medir el diff contra origin/$BASE_REF:"
+    printf '%s\n' "$nums" | sed 's/^/   · /'
+    echo "   Un carril con techos que no puede contar no verifica nada, y salir"
+    echo "   verde de acá sería afirmar un tamaño que nadie midió."
+    echo "   ↳ remediación: corré 'git fetch origin' en el worktree y verificá"
+    echo "     que la rama tenga ancestro común con origin/$BASE_REF."
+    exit 3
+  fi
+  # Un binario cuenta como archivo y no suma líneas: numstat le pone guion
+  # porque no tiene líneas que contar. Fingir un número ahí sería inventar.
+  counts="$(printf '%s\n' "$nums" | awk 'NF{n++; if($1 ~ /^[0-9]+$/) a+=$1; if($2 ~ /^[0-9]+$/) d+=$2} END{printf "%d %d\n", n+0, a+d+0}')"
+  files="${counts%% *}"
+  lines="${counts##* }"
+  if [ "$files" -le "$max_files" ] && [ "$lines" -le "$max_lines" ]; then
+    return 0
+  fi
+  echo "❌ carril quick, pero el diff excede lo que quick promete:"
+  echo "   archivos: $files (techo $max_files)"
+  echo "   líneas cambiadas: $lines (techo $max_lines)"
+  echo "   ↳ remediación: este cambio no es quick. Escalá a express, que"
+  echo "     conserva TODA la verificación y devuelve la deliberación que quick"
+  echo "     recorta:"
+  echo "     python3 scripts/harness-policy.py escalate tasks/$TASK --to express --actor orchestrator --reason '$files archivos / $lines líneas'"
+  echo "     y seguí con /smart $TASK: el trabajo hecho se conserva en el worktree."
+  exit 3
 }
 
 run_lang_gates() {
@@ -924,16 +1066,37 @@ run_lang_gates_sealed() {
   # líneas más abajo decía que no sellaba. Caso de campo: cuatro agentes
   # distintos parsearon ese stdout y se llevaron un ID que apuntaba a
   # archivos ya borrados, y el fallo apareció recién en el ship.
-  local evid
+  #
+  # Y LA AUSENCIA DEL MARCADOR NO ES UN VERDE. Esto leía el marcador con
+  # `|| echo 1`, o sea que si no estaba se CONSERVABA el sello. El marcador no
+  # está en dos casos y ninguno dice "se verificó": nadie lo pudo escribir, o
+  # un precheck del MISMO task+repo hizo su `rm -f` (más abajo) entre que este
+  # hijo lo escribió y este padre lo leyó. Conservar ahí acuña un EV-TEST que
+  # satisface `--require-fresh-kind test` salido de una corrida de la que no
+  # sabemos si ejecutó una sola suite: el verde silencioso, otra vez, y por
+  # fail-open. gate_fresh_evidence ya trata el mismo marcador como fail-closed;
+  # esto lo alinea. Se sella SOLO con "completo": no saber pesa como no probar.
+  local evid seen
   evid="$(printf '%s\n' "$out" | sed -n 's/^EVIDENCE_ID=//p' | tail -1)"
-  if [ "$(cat "$WS/tasks/$TASK/.langseen-$REPO" 2>/dev/null || echo 1)" = "0" ] && [ -n "$evid" ]; then
+  seen="$(precheck_verificado)"
+  if [ -n "$evid" ] && [ "$seen" != "completo" ]; then
     rm -f "$WS/tasks/$TASK/evidence/$evid.json" "$WS/tasks/$TASK/evidence/$evid.log"
     printf '%s\n' "$out" | grep -v '^EVIDENCE_ID=' || true
-    echo "⚠️  NO sello evidencia de $REPO: ninguna suite de tests llegó a correr"
-    echo "   (stack no reconocido, o su herramienta de test no está). Un EV-TEST"
-    echo "   de una corrida sin tests diría"
-    echo "   'este árbol pasa la suite' sin que ninguna suite haya corrido."
-    emit assumption "$REPO sin evidencia de test: ninguna suite llegó a correr"
+    if [ "$seen" = "ninguno" ]; then
+      echo "⚠️  NO sello evidencia de $REPO: ninguna suite de tests llegó a correr"
+      echo "   (stack no reconocido, o su herramienta de test no está). Un EV-TEST"
+      echo "   de una corrida sin tests diría"
+      echo "   'este árbol pasa la suite' sin que ninguna suite haya corrido."
+      emit assumption "$REPO sin evidencia de test: ninguna suite llegó a correr"
+    else
+      echo "⚠️  NO sello evidencia de $REPO: no hay rastro de si algo corrió."
+      echo "   Falta el marcador tasks/$TASK/.langseen-$REPO que deja la corrida"
+      echo "   --lang-gates: no pude escribirlo, o lo borró otro precheck del"
+      echo "   mismo task+repo corriendo a la vez. No sé si probó algo, así que"
+      echo "   no lo certifico: un sello es una afirmación, no un default."
+      echo "   ↳ re-corré el precheck sin corridas vecinas del mismo task+repo."
+      emit assumption "$REPO sin evidencia de test: sin marcador, no hay rastro de si alguna suite corrió"
+    fi
   else
     printf '%s\n' "$out"
   fi
@@ -1494,6 +1657,30 @@ gate_entry_precheck() {
 
 if [ "$PRECHECK" -eq 1 ]; then
   cd "$WT"
+  # El marcador de "algo se verificó" es de ESTA corrida. Sobrevive entre
+  # corridas (vive en tasks/<task>/), así que uno viejo dejaría que un precheck
+  # que ni llegó a los gates de lenguaje heredara el "completo" del anterior y
+  # lo sellara como propio. Se borra ANTES de mirar, no después.
+  #
+  # SALVO QUE HAYA UN SHIP EN VUELO. El marcador es UN archivo por task+repo y
+  # el ship lo usa igual: su hijo --lang-gates lo escribe y su padre lo lee dos
+  # veces (al sellar evidencia y en gate_fresh_evidence). Borrarlo desde acá en
+  # medio de esa ventana le arranca la evidencia al vecino y encima en la
+  # dirección cara: el ship ve "no hay rastro", tira su EV-TEST recién acuñado
+  # y repite la suite entera. El lock del repo es el único indicio de que hay
+  # un ship vivo, así que se respeta. Heredar un marcador viejo es el daño
+  # MENOR y además se declara acá y en el sello ("verificado" puede venir de la
+  # otra corrida), en vez de pisar en silencio lo ajeno.
+  if [ -d "$LOCKDIR" ]; then
+    echo "⚠️  hay un ship de '$REPO' en vuelo (lock $LOCKDIR): NO borro el marcador"
+    echo "   tasks/$TASK/.langseen-$REPO, que mientras dure ese ship es SUYO."
+    echo "   El campo 'verificado' de este sello puede venir de esa corrida y no"
+    echo "   de esta: no lo leas como que ESTOS gates compilaron y testearon."
+    echo "   ↳ re-corré el precheck cuando el ship termine si querés el dato limpio."
+    emit assumption "precheck de $REPO: marcador conservado, hay un ship en vuelo con el lock"
+  else
+    rm -f "$WS/tasks/$TASK/.langseen-$REPO"
+  fi
   git fetch origin --quiet 2>/dev/null || true   # fail-open: sin red, compara contra el origin/$BASE_REF local
   echo "══ precheck $REPO (task $TASK) ══"
   gate_entry_precheck
@@ -1516,6 +1703,22 @@ if [ "$PRECHECK" -eq 1 ]; then
     stamp_precheck true
     emit gate "precheck de $REPO verde, listo para review" true
     echo "✅ precheck verde. Sello: tasks/$TASK/precheck-$REPO.json"
+    # La ÚLTIMA LÍNEA es la que alguien lee, así que no puede afirmar más de lo
+    # que el sello dice. Verde con verificado != completo sigue siendo verde (no
+    # bloquea), pero no es un verde verificado, y callarlo acá volvería a
+    # convertir un "no miré" en un "pasó".
+    v_estado="$(precheck_verificado)"
+    case "$v_estado" in
+      completo) ;;
+      ninguno)
+        echo "   ⚠️  verificado: ninguno. Verde acá significa 'ningún gate dijo que"
+        echo "      no', NO 'la suite pasó': no corrió un solo gate de lenguaje"
+        echo "      (motivo arriba). El sello lo declara y /review debe decirlo." ;;
+      *)
+        echo "   ⚠️  verificado: $v_estado. No pude saber si algún gate de lenguaje"
+        echo "      llegó a correr: falta el marcador que deja la corrida sellada."
+        echo "      Va así en el sello, sin disfrazarlo de verde ni de rojo." ;;
+    esac
     echo "→ siguiente: /review $TASK $REPO"
   fi
   exit 0

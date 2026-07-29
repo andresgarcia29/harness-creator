@@ -8,6 +8,13 @@ on:
 permissions:
   contents: read
 
+# Las actions van pineadas por SHA de 40, nunca por tag. Un tag es un puntero
+# MUTABLE: quien pueda mover el tag v4 de una action corre su codigo dentro de
+# este workflow, con el token del repo, sin que cambie una linea de aca. El SHA
+# no se puede mover. El comentario al lado dice a que version legible apunta,
+# que es lo unico que el SHA no cuenta solo. Para subirla, deliberadamente:
+# gh api repos/actions/checkout/git/ref/tags/v4  y cambia SHA y comentario a la
+# vez. tests/test_ci_gates.sh falla si una action vuelve a colgar de un tag.
 jobs:
   contracts:
     # La promesa de portabilidad (macOS/Linux, bash 3.2) se PRUEBA, no se
@@ -18,7 +25,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
       - name: Contratos Python compilan
         run: python3 -m py_compile templates/scripts/evidence.py templates/scripts/harness-policy.py
       - name: Templates shell parsean
@@ -36,7 +43,7 @@ jobs:
   version:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
         with: { fetch-depth: 0 }
       - name: la version dice lo mismo en los tres lugares
         # marketplace.json es lo que Claude Code lee para INSTALAR y plugin.json
@@ -47,7 +54,7 @@ jobs:
   shellcheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
       - name: shellcheck nivel error (gate; warnings son aspiracionales)
         run: |
           shellcheck --version

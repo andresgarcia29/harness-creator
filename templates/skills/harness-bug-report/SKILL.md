@@ -83,9 +83,22 @@ scripts/harness-bug.sh report \
 ```
 
 El script verifica, redacta secretos, deduplica (local y remoto), respeta la
-cuota de 3 issues/24h y publica en el repo del plugin. Sale distinto de cero
-con la razón exacta cuando NO procede: propiedad (3), repro ausente (4), cuota
-(5), instancia atrasada (6), drift local (7), canal apagado (8).
+cuota de 3 issues **creados** por 24h (un issue que resultó duplicado, o que
+cediste a otra máquina, no te la gasta) y publica en el repo del plugin. Sale
+distinto de cero con la razón exacta cuando NO procede: propiedad (3), repro
+ausente (4), cuota (5), instancia atrasada (6), drift local (7), canal apagado
+(8), claim huérfano (9), claim imposible de tomar (10).
+
+Los dos últimos vienen del candado local contra duplicados (`.harness/claims/`)
+y no se destraban solos. Son problemas distintos con remedios distintos:
+
+| Exit | Qué pasó | Qué hacer |
+|---|---|---|
+| 9 | ya había un claim sobre esa huella, el proceso que lo tomó ya no existe y no dejó `url` adentro: nadie sabe si alcanzó a publicar | busca la huella en los issues del plugin. Si aparece, ya está reportado. Si no aparece, borra ese claim (`rm -rf '.harness/claims/<fp>.lock.d'`) y re-corre |
+| 10 | el claim no se pudo ni intentar: `.harness/claims/` no es un directorio escribible (permisos, disco lleno, un archivo con ese nombre) | arregla el directorio (el motivo exacto lo imprimió `mkdir` en la salida) y re-corre. Sin claim no hay dedupe, y sin dedupe el script no publica |
+
+Nunca borres un claim "por si acaso": el que tiene una `url` adentro es el
+rastro de un issue YA abierto, y borrarlo reabre la puerta al duplicado.
 
 **Antes de publicar, lee el cuerpo del `--dry-run` completo.** Sale a un repo
 PÚBLICO: nombres de tus repos privados, hosts internos, rutas con tu usuario y

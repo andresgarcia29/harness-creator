@@ -8,73 +8,107 @@ Code lee `CLAUDE.md` (mismo mapa, más los hooks/comandos nativos).
 
 ## Las leyes (válidas para TODA herramienta)
 
-1. **Push a main SOLO vía `scripts/ship.sh <task-id> <repo>`.** Es la
-   única puerta: rebase, tests, contratos, secretos, semgrep, veredicto
-   de review y evidencia. Un push directo es un incidente, no un atajo.
-2. **Nunca trabajes en `repos/`** (clones canónicos, intocables). El
-   trabajo vive en `worktrees/<task-id>/<repo>`; créalos con
-   `scripts/worktree-task.sh <task-id> <repos...>`.
-3. **Todo commit lleva el trailer `Task: <task-id>`.**
-4. **Los valores de secretos jamás tocan chat, commits ni logs.** Solo
-   `scripts/with-secrets.sh <cmd>` inyecta; `.secrets` no se lee.
-5. **Las fases de una tarea las mueve `scripts/harness-policy.py`**
-   (`transition`, `pause`, `escalate`, `rollback`); el estado es
-   `tasks/<id>/state.json` y no se edita a mano. Si avanzaste una fase por
-   error, el camino de vuelta es
-   `harness-policy.py rollback <task-dir> <fase> --actor <quien> --reason <por qué>`:
-   solo va hacia atrás, no cobra una ronda de review y deja registro en
-   `history[]`. Editar el archivo a mano ya no es "lo mismo pero rápido":
-   `validate-ship` compara `phase` contra el último movimiento registrado y
-   una fase que nadie declaró muere en `POLICY-STATE-003`.
-6. **Contratos proto: expand/contract siempre** (buf breaking es gate).
-7. Decisiones de arquitectura irreversibles → ADR `PROPOSED` en
-   `docs/adr/` y esperar ratificación humana.
-7b. **El pensamiento caro va en el plan, no en el loop.** Planes,
-   síntesis de RFC y ADRs se escriben en modo **ultrathink** (en
-   herramientas sin esa palabra clave: el modo de razonamiento más
-   profundo que ofrezcan) y sin decisiones abiertas, verificado por
-   `scripts/plan-lint.sh <task-id>`. Y antes de pedir review, el
-   worktree pasa `scripts/ship.sh --precheck <task-id> <repo>`: los
-   gates mecánicos cuestan segundos, una ronda de review cuesta
-   minutos.
-8b. **Escribí para que se lea.** Todo reporte cabe en una pantalla: empezá
-   por el estado y no por el viaje, pegá el dato real (la línea de salida, el
-   número, el sha) en vez de describirlo, no narres lo que vas a hacer, y sacá
-   todo lo que el lector no pueda accionar. Lo técnico se explica con un
-   ejemplo concreto, no con teoría. Un reporte que no se lee no existe.
-8. **Estilo: prohibido el guion largo "—"** en todo texto que
-   produzcas (docs, reportes, commits, specs). Delata texto de IA; usa
-   coma, dos puntos o paréntesis. *Style rule: never write the em dash
-   in any produced text; it reads as AI-generated.*
-9. **Un bug del harness se verifica y se reporta upstream.** Si falla un
-   artefacto del PLUGIN (`scripts/`, `.claude/hooks/`,
-   `.claude/commands/`, gates, panel, cronjobs, en su repo aparte) o contradice lo que su
-   propia cabecera documenta: repro mínimo dos veces con `bash -c`,
-   descarta que sea tu personalización o una versión atrasada, y corre
+Número y título salen de `CLAUDE.md`, que es el canon: los playbooks citan
+por número ("escala a humano (Ley 6)") y esa cita tiene que resolver a la
+MISMA ley, entres por donde entres. Cuerpos abreviados: el largo, allá.
+
+1. **Push a main SOLO vía `scripts/ship.sh`**: es la única puerta
+   (`scripts/ship.sh <task-id> <repo>`) y hace rebase, tests, contratos,
+   secretos, semgrep, veredicto de review y evidencia. Un push directo es
+   un incidente, no un atajo.
+2. **Contratos expand/contract**: un cambio de proto nunca rompe al
+   consumidor en un solo paso; `buf breaking` es gate duro.
+3. **Ownership exclusivo de datos**: quién escribe qué lo dice
+   `docs/architecture/map.md`. En duda, RFC; nunca suposición.
+4. **Una tarea = un worktree por repo**: `repos/` son los clones canónicos
+   y son intocables. El trabajo vive en `worktrees/<task-id>/<repo>`, creado
+   con `scripts/worktree-task.sh <task-id> <repos...>`.
+5. **Trailer `Task: <id>` en todo commit**: gate en `ship.sh`.
+6. **Presupuestos**: máx {{LOOP_BUDGET}} iteraciones por loop; RFC máx 2
+   rondas. Agotado significa humano, no una vuelta más.
+6b. **Piensa hondo en el plan, no en el loop**: planes, síntesis de RFC y
+   ADRs se escriben en modo **ultrathink** (en herramientas sin esa
+   palabra clave: el modo de razonamiento más profundo que ofrezcan) y sin
+   decisiones abiertas, verificado por `scripts/plan-lint.sh <task-id>`.
+   Antes de pedir review, el worktree pasa
+   `scripts/ship.sh --precheck <task-id> <repo>`: los gates mecánicos
+   cuestan segundos, una ronda de review cuesta minutos.
+7. **Decisiones fuera de `docs/` NO EXISTEN.** Lo decidido en chat se
+   propone como ADR `PROPOSED` en `docs/adr/` y espera ratificación
+   humana, o se perdió.
+8. **Builds pesados serializados**: el `docker build/run` de toolchain va
+   SOLO por `scripts/build-slot.sh` (semáforo cross-sesión, espera
+   bloqueante de kernel). La CPU de la máquina es de todos.
+9. **Loop interno nativo**: iterá con las toolchains del host
+   (`scripts/gowork.sh`, `scripts/py.sh`, `scripts/fe.sh`). El contenedor
+   es SOLO la compuerta CI pre-ship, no el loop.
+10. **Reproduce gates/scripts SIEMPRE con `bash -c`**: otra shell (zsh,
+   fish) tiene word-splitting distinto y te da resultados FALSOS (medido).
+11. **Prohibido el guion largo "—"** en todo texto que produzcas (docs,
+   reportes, commits, specs): delata texto de IA, usa coma, dos puntos o
+   paréntesis. *Style rule: never write the em dash in any produced text;
+   it reads as AI-generated.*
+12. **Un bug del HARNESS se verifica y se reporta upstream, siempre.** Si
+   un artefacto del PLUGIN (`scripts/`, `.claude/hooks/`, comandos, gates,
+   panel, cronjobs, en su repo aparte) falla o contradice lo que su propia
+   cabecera documenta: repro mínimo dos veces con `bash -c`, descartá que
+   sea tu personalización o una versión atrasada, y corré
    `scripts/harness-bug.sh report --title … --file … --repro … --impact …`
-   (verifica, redacta secretos, deduplica y levanta el issue en el repo
-   del plugin). Lo que falla en tu código, en tu instancia o en tu
-   configuración NO va upstream. Protocolo:
-   `.claude/skills/harness-bug-report/SKILL.md`. Un workaround
-   silencioso sobre un bug del harness es deuda para todos los demás.
+   (verifica, redacta secretos, deduplica y levanta el issue en el repo del
+   plugin). Lo que falla en tu código o tu configuración NO va upstream, y
+   un workaround silencioso es deuda para todos los demás. Protocolo:
+   `.claude/skills/harness-bug-report/SKILL.md`.
+13. **Un repo ARCHIVADO en el forge se ignora SIEMPRE.** No entra al
+   grafo, ni al inventario, ni a los briefs, ni lo cites como referencia:
+   está muerto por decisión explícita de alguien y es de solo lectura. La
+   lista la mantiene `scripts/archived-repos.sh refresh`.
+14. **Escribí para que se lea, no para demostrar que trabajaste.** Todo
+   reporte cabe en una pantalla: empezá por el estado y no por el viaje,
+   pegá el dato real (la línea de salida, el número, el sha) en vez de
+   describirlo, no narres lo que vas a hacer, y sacá todo lo que el lector
+   no pueda accionar. Lo técnico se explica con un ejemplo concreto, no
+   con teoría. Un reporte que no se lee no existe.
+15. **La recomendada es la que elimina la causa, jamás la más rápida.**
+   Cuando le presentes alternativas a un humano, la que marques como
+   recomendada es la que deja el problema resuelto para siempre. El atajo
+   se puede listar, NUNCA como recomendado y siempre con su deuda escrita.
+   Si el único camino corto rompe una ley de este archivo, lo que falta es
+   un camino legítimo en el harness: eso es un bug (Ley 12), no un permiso.
+
+Estas dos no están numeradas en `CLAUDE.md` (viven allí como sección), así
+que aquí tampoco: un número inventado manda a la ley equivocada.
+
+- **Secretos**: sus valores jamás tocan chat, commits ni logs. Solo
+  `scripts/with-secrets.sh <cmd>` inyecta; `.secrets` no se lee ni se
+  imprime.
+- **Fases de la tarea**: las mueve `scripts/harness-policy.py`
+  (`transition`, `pause`, `escalate`, `rollback`); el estado vive en
+  `tasks/<id>/state.json` y no se edita a mano. ¿Avanzaste una fase por
+  error? El camino de vuelta es
+  `harness-policy.py rollback <task-dir> <fase> --actor <quien> --reason <por qué>`:
+  solo va hacia atrás, no cobra una ronda de review y deja registro en
+  `history[]`. Editarlo a mano no es "lo mismo pero rápido": `validate-ship`
+  compara `phase` contra el último movimiento registrado y una fase que
+  nadie declaró muere en `POLICY-STATE-003`.
 
 ⚠️ **Enforcement por herramienta**: en Claude Code, hooks locales
 (`.claude/hooks/`) bloquean el push directo y la edición de `repos/`
 ANTES de que ocurran. En otras herramientas esos hooks NO corren: las
 leyes siguen siendo obligatorias, pero el freno automático local no
 existe: actívale branch protection a `main` en el remoto como red
-equivalente, y trata las leyes 1-2 como si el hook estuviera mirando.
+equivalente, y trata las leyes 1 y 4 como si el hook estuviera mirando.
 
 ## El pipeline (y cómo correrlo sin Claude Code)
 
-Los "comandos" viven en `.claude/commands/*.md` y **son playbooks en
-markdown, legibles por cualquier agente**: si tu herramienta no soporta
-slash-commands, abre el archivo y sigue sus pasos tal cual.
+Los "comandos" de `.claude/commands/*.md` son **playbooks en markdown**: si
+tu herramienta no soporta slash-commands, abre el archivo y sigue sus pasos.
 
-- `auto.md`: el pipeline completo (ticket o prompt → producción):
-  intake → carril → [rfc] → implement → review → ship → deploy → archive.
+- `smart.md`: el pipeline completo (ticket o prompt → producción): intake →
+  carril → [rfc] → implement → review → ship → deploy → archive. El `auto.md`
+  que sobrevive un ciclo solo redirige aquí: está deprecado.
 - `rfc.md`, `implement.md`, `review.md`, `ship.md`, `archive.md`: las
   fases sueltas. `feature.md` = intake con humano.
+- `quick.md`: carril quick (1 repo, cambio chico): cero deliberación, mismos gates.
 
 Los roles de `.claude/agents/*.md` (architect, implementer, reviewer,
 qa, abogados `svc-*`) son definiciones de agente de Claude Code; en

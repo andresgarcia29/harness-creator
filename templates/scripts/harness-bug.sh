@@ -25,7 +25,10 @@
 #     y esa salida trae tokens. La ley de secretos también aplica aquí, y
 #     aquí es peor: esto sale a un repo PÚBLICO.
 #   · CUOTA Y DEDUPE. Máximo 3 issues automáticos por 24h y jamás dos veces
-#     el mismo fingerprint (local + búsqueda remota).
+#     el mismo fingerprint. Tres capas, porque el dedupe es una CARRERA: claim
+#     local atómico antes de tocar la red (misma máquina), búsqueda remota
+#     antes de crear, y reconciliación contra el forge después de crear (otra
+#     máquina que ganó por segundos: el número de issue menor sobrevive).
 #   · APAGABLE. HARNESS_UPSTREAM_ISSUES=off o `upstream_issues: off` en
 #     harness-answers.yaml y este script no publica nada.
 #
@@ -35,7 +38,9 @@ set -u
 UPSTREAM_REPO="${HARNESS_UPSTREAM_REPO:-andresgarcia29/harness-creator}"
 WS="$(cd "$(dirname "$0")/.." && pwd)"
 LEDGER="$WS/.harness/upstream-issues.jsonl"
+CLAIMS="$WS/.harness/claims"
 QUOTA="${HARNESS_BUG_QUOTA:-3}"
+RECON_LIMIT="${HARNESS_BUG_RECONCILE_LIMIT:-30}"
 
 die()  { echo "❌ $1" >&2; exit "${2:-1}"; }
 note() { echo "   ↳ $1"; }
@@ -128,6 +133,142 @@ enabled() {
   return 0
 }
 
+# ── claim local sobre la huella ────────────────────────────────────────────
+# EL DEDUPE ERA UNA CARRERA. Entre el chequeo del ledger y la escritura del
+# ledger hay dos llamadas de red (el gate de versión y la búsqueda remota).
+# Diez sesiones tropezando con el MISMO bug del plugin, que es exactamente el
+# escenario para el que existe este canal, pasaban las tres verificaciones
+# antes de que la primera escribiera: diez issues idénticos en un repo público.
+# El claim cierra esa ventana con un mkdir, que es atómico (mismo patrón que
+# acquire_create_lock de worktree-task.sh) y va ANTES de la primera llamada de
+# red: dos sesiones de esta máquina jamás llegan las dos al forge.
+# Lo que NINGÚN lock local puede cerrar es la carrera entre máquinas distintas
+# (o entre dos workspaces): eso lo cierra la reconciliación post-create.
+CLAIM_DIR=""    # claim en vuelo. El trap lo suelta salvo que hayamos publicado
+CLAIM_PATH=""   # ruta del claim disputado, para poder nombrarla en el mensaje
+CLAIM_OWNER=""  # pid que lo tomó, cuando el claim es ajeno
+CLAIM_URL=""    # url que dejó el dueño anterior, si alcanzó a publicar
+
+# Un claim solo se suelta si NO publicamos. Si el issue salió, el claim deja de
+# ser un lock y pasa a ser rastro: sobrevive al proceso junto al ledger.
+trap 'if [ -n "$CLAIM_DIR" ]; then rm -rf "$CLAIM_DIR"; fi' EXIT
+
+# Ojo: estos códigos son INTERNOS de la función y no son los exits del script.
+# El caller los traduce: 10 (ajeno vivo) sale 0, 11 con url sale 0, 11 sin url
+# sale 9, y 12 sale 10.
+claim_take() {  # claim_take <fp> → 0 tomado · 10 ajeno vivo · 11 huérfano · 12 no pude
+  local fp="$1" dir err rc lpid=""
+  dir="$CLAIMS/$fp.lock.d"
+  CLAIM_PATH="$dir"; CLAIM_OWNER=""; CLAIM_URL=""
+  if ! mkdir -p "$CLAIMS"; then
+    return 12   # el motivo lo imprimió mkdir; tragárselo sería inventar un verde
+  fi
+  err="$(mkdir "$dir" 2>&1)"; rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\n' "$$" > "$dir/pid"
+    CLAIM_DIR="$dir"
+    return 0
+  fi
+  # mkdir falló: el caso ESPERADO es que otra sesión lo tenga, pero si el
+  # directorio no existe el motivo era otro (permisos, disco) y llamarlo
+  # "carrera" sería reportar un choque que no hubo.
+  if [ ! -d "$dir" ]; then
+    printf '   ↳ mkdir del claim: %s\n' "$err" >&2
+    return 12
+  fi
+  if [ -f "$dir/pid" ]; then lpid="$(cat "$dir/pid")"; else lpid=""; fi
+  if [ -z "$lpid" ]; then
+    # entre el mkdir del dueño y su escritura del pid pasan microsegundos: una
+    # relectura cubre esa ventana en vez de inventarle un estado al claim
+    sleep 1
+    if [ -f "$dir/pid" ]; then lpid="$(cat "$dir/pid")"; else lpid=""; fi
+  fi
+  CLAIM_OWNER="$lpid"
+  if [ -n "$lpid" ] && kill -0 "$lpid" 2>/dev/null; then
+    return 10
+  fi
+  if [ -f "$dir/url" ]; then CLAIM_URL="$(cat "$dir/url")"; else CLAIM_URL=""; fi
+  return 11
+}
+
+claim_seal() {  # claim_seal <url>: el claim ya no es lock, es rastro del issue
+  if [ -z "$CLAIM_DIR" ]; then return 0; fi
+  local tmp; tmp="$CLAIM_DIR/.url.$$"
+  printf '%s\n' "$1" > "$tmp"
+  mv "$tmp" "$CLAIM_DIR/url"
+  # se vacía SIEMPRE, incluso si la escritura falló: publicamos, y un trap que
+  # borre el claim de un issue ya creado reabre la puerta al duplicado
+  CLAIM_DIR=""
+}
+
+# ── reconciliación post-create (la carrera ENTRE máquinas) ─────────────────
+# Dos máquinas no comparten locks; lo único que ven igual es el forge, y ahí el
+# número de issue es un orden total compartido (el mismo principio que el claim
+# de tickets por comentario: gana quien llegó primero, y "primero" lo dice el
+# servidor, no el cliente). Regla: sobrevive el número MENOR. Quien creó el
+# mayor cierra el suyo apuntando al superviviente y anota al superviviente como
+# el issue del bug.
+# La relectura NO usa `--search`: el índice de búsqueda del forge va con
+# segundos (a veces minutos) de retraso, que es EXACTAMENTE la ventana de esta
+# carrera, así que el rival de hace tres segundos no aparecería. El listado de
+# issues es consistente al instante, y traer el cuerpo permite exigir la huella
+# literal antes de cerrar nada.
+reconcile_after_create() {  # reconcile_after_create <fp> <file> <url-propio>
+  local fp="$1" f="$2" mine_url="$3" mine_num list rc surv surv_url msg
+  mine_num="${mine_url##*/}"
+  case "$mine_num" in
+    ''|*[!0-9]*)
+      echo "⚠️  no pude leer el número de mi propio issue en '$mine_url': NO reconcilio"
+      note "sin número no hay orden que comparar; si hay un duplicado, ciérralo a mano"
+      return 0 ;;
+  esac
+  # El stderr va a un archivo aparte, no a 2>&1: un aviso de gh ("hay una
+  # versión nueva") mezclado con el JSON lo volvería imparseable y esta capa
+  # declararía "no pude releer" para siempre, sin que nadie sepa por qué.
+  local errf; errf="$(mktemp)"
+  # --state open a propósito: heredar el hilo de un issue YA CERRADO enterraría
+  # un bug vivo detrás de uno que alguien dio por muerto.
+  list="$(gh issue list --repo "$UPSTREAM_REPO" --state open \
+          --limit "$RECON_LIMIT" --json number,body 2>"$errf")"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "⚠️  no pude releer los issues de $UPSTREAM_REPO (gh salió $rc): NO cierro nada"
+    note "gh dijo: $(head -3 "$errf" | tr '\n' ' ')"
+    note "si otra máquina abrió el mismo bug al mismo tiempo quedan dos issues abiertos, que es el mal MENOR frente a cerrar el equivocado"
+    rm -f "$errf"
+    return 0
+  fi
+  surv="$(printf '%s' "$list" | jq -r --arg fp "$fp" --argjson mine "$mine_num" \
+     '[ .[] | select(((.body // "") | contains("harness-fp: " + $fp))) | .number | select(. < $mine) ] | min // empty' 2>"$errf")"; rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "⚠️  no pude interpretar la relectura (jq salió $rc): NO cierro nada"
+    note "jq dijo: $(head -3 "$errf" | tr '\n' ' ')"
+    rm -f "$errf"
+    return 0
+  fi
+  rm -f "$errf"
+  if [ -z "$surv" ]; then
+    note "reconciliación: ningún issue abierto más viejo con la huella $fp; el mío queda como el issue del bug"
+    return 0
+  fi
+  # Solo se cierra contra un número: cualquier otra cosa que salga de jq es una
+  # sorpresa, y una sorpresa no alcanza para cerrar un issue en un repo público.
+  case "$surv" in
+    ''|*[!0-9]*)
+      echo "⚠️  la relectura devolvió algo que no es un número de issue ('$surv'): NO cierro nada"
+      return 0 ;;
+  esac
+  surv_url="https://github.com/$UPSTREAM_REPO/issues/$surv"
+  msg="Duplicado de $surv_url: otra instancia del harness abrió el mismo bug (huella \`$fp\`) unos segundos antes."
+  msg="$msg Gana el número menor, que es el único orden que las dos máquinas ven igual. Sigo el hilo allá."
+  if gh issue close "$mine_num" --repo "$UPSTREAM_REPO" --comment "$msg"; then
+    echo "⏭  reconciliado: cierro el mío (#$mine_num) a favor de $surv_url"
+    ledger_add "$fp" "$f" "$surv_url" "reconciliado" "$mine_url"
+  else
+    echo "⚠️  hay un issue más viejo con la misma huella ($surv_url) pero no pude cerrar el mío (#$mine_num): ciérralo a mano"
+    ledger_add "$fp" "$f" "$surv_url" "reconciliado-sin-cerrar" "$mine_url"
+  fi
+}
+
 # ── check ──────────────────────────────────────────────────────────────────
 cmd_check() {
   local p="${1:?uso: harness-bug.sh check <ruta-relativa-al-workspace>}"
@@ -196,7 +337,78 @@ cmd_report() {
   local repro_path="$repro"; [ -f "$WS/$repro" ] && repro_path="$WS/$repro"
   [ -s "$repro_path" ] || die "el repro está vacío: $repro" 4
 
-  # 3 · versión: reportar un bug ya arreglado upstream es la falla más común
+  # 3 · fingerprint y dedupe local
+  # LC_ALL=C en los dos tr a propósito: GNU tr trabaja byte a byte y BSD tr
+  # respeta el locale, así que un título con acentos normalizaba distinto en
+  # macOS que en Linux y la MISMA falla daba dos huellas. La reconciliación
+  # entre máquinas compara huellas literales: sin esto, jamás matcheaba.
+  # Efecto único de la corrección: un título acentuado ya reportado cambia de
+  # huella una sola vez, y el dedupe local lo verá como nuevo esa vez.
+  local norm fp
+  norm="$(printf '%s' "$title" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -cs '[:alnum:]' ' ' | awk '{$1=$1};1')"
+  fp="$(printf '%s|%s' "$file" "$norm" | sha | cut -c1-12)"
+  if [ -f "$LEDGER" ] && grep -q "\"fp\":\"$fp\"" "$LEDGER" 2>/dev/null; then
+    local prev; prev="$(grep "\"fp\":\"$fp\"" "$LEDGER" | tail -1 | jq -r '.url // "(sin url)"' 2>/dev/null)"
+    echo "⏭  ya reportado (fp $fp): $prev"
+    return 0
+  fi
+
+  # 4 · cuota diaria (una tormenta de issues automáticos es spam, no señal)
+  # La cuota cuenta ISSUES QUE ABRÍ, no filas del ledger. Un solo evento deja
+  # varias filas: el `creado` y, si otra máquina ganó la carrera, el
+  # `reconciliado` del mismo bug; `recuperado` y `duplicado` ni siquiera
+  # abrieron nada. Contarlas todas cobraba el mismo reporte dos y tres veces y
+  # cerraba el canal con la cuota a medio gastar.
+  if [ -f "$LEDGER" ]; then
+    local recent now; now="$(date +%s)"
+    recent="$(jq -r --argjson now "$now" 'select((.epoch // 0) > ($now - 86400)) | select((.status // "") == "creado") | .fp' "$LEDGER" 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "${recent:-0}" -ge "$QUOTA" ]; then
+      die "cuota de reportes automáticos agotada ($recent en 24h, tope $QUOTA): junta los hallazgos en UN issue o repórtalo a mano" 5
+    fi
+  fi
+
+  # 5 · CLAIM sobre la huella, antes de la PRIMERA llamada de red. El orden
+  #     importa: el gate de versión de abajo ya consulta al forge, así que un
+  #     claim posterior dejaría a las diez sesiones llegando juntas a la red.
+  #     Un --dry-run no publica ni toca la red: tomar el claim ahí solo serviría
+  #     para bloquear a un reporte de verdad.
+  local crc
+  if [ "$dry" -eq 0 ]; then
+    claim_take "$fp"; crc=$?
+    case "$crc" in
+      0) : ;;
+      10)
+        echo "⏭  otra sesión de esta máquina está reportando este mismo bug ahora (fp $fp, pid $CLAIM_OWNER): no duplico"
+        return 0 ;;
+      11)
+        if [ -n "$CLAIM_URL" ]; then
+          echo "⏭  ya lo reportó otra sesión de esta máquina (fp $fp): $CLAIM_URL"
+          note "el claim quedó huérfano con la url adentro: el issue existe aunque el ledger no lo hubiera anotado"
+          ledger_add "$fp" "$file" "$CLAIM_URL" "recuperado"
+          return 0
+        fi
+        # Tercer estado honesto: no es verde (no reportamos) ni rojo (nadie dijo
+        # que el reporte esté mal); es "no puedo saber si aquella sesión llegó a
+        # publicar", y ante la duda este canal NO publica.
+        echo "❌ claim local huérfano sobre la huella $fp: no publico a ciegas" >&2
+        note "el proceso que lo tomó (pid ${CLAIM_OWNER:-desconocido}) ya no existe y el claim no guarda url"
+        # La ruta va entre comillas simples porque el mensaje es un comando para
+        # copiar y pegar: sin ellas, un workspace con espacios convierte el
+        # rm -rf en DOS rutas, y una de las dos no es la que se quería borrar.
+        note "mira https://github.com/$UPSTREAM_REPO/issues?q=$fp: si no hay ninguno con esa huella, borra el claim (rm -rf '$CLAIM_PATH') y re-corre"
+        exit 9 ;;
+      *)
+        # Otro exit, porque es otro problema con otra remediación: acá el claim
+        # no se pudo ni intentar (permisos, disco, .harness/claims ocupado por un
+        # archivo). No hay nada que mirar en el forge ni claim que borrar; lo que
+        # se arregla es el directorio.
+        echo "❌ no pude tomar el claim local sobre la huella $fp: sin claim no hay dedupe, y sin dedupe no publico" >&2
+        note "revisa $CLAIMS: tiene que ser un directorio escribible (el motivo exacto lo imprimió mkdir, arriba)"
+        exit 10 ;;
+    esac
+  fi
+
+  # 6 · versión: reportar un bug ya arreglado upstream es la falla más común
   local local_ver up_ver=""
   local_ver="$(cat "$WS/.harness-version" 2>/dev/null | tr -d ' \n')"
   if command -v gh >/dev/null 2>&1 && [ "$dry" -eq 0 ]; then
@@ -207,26 +419,7 @@ cmd_report() {
     die "tu instancia está en $local_ver y upstream va en $up_ver: actualiza (/harness-update) y re-verifica antes de reportar" 6
   fi
 
-  # 4 · fingerprint y dedupe local
-  local norm fp
-  norm="$(printf '%s' "$title" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' ' ' | awk '{$1=$1};1')"
-  fp="$(printf '%s|%s' "$file" "$norm" | sha | cut -c1-12)"
-  if [ -f "$LEDGER" ] && grep -q "\"fp\":\"$fp\"" "$LEDGER" 2>/dev/null; then
-    local prev; prev="$(grep "\"fp\":\"$fp\"" "$LEDGER" | tail -1 | jq -r '.url // "(sin url)"' 2>/dev/null)"
-    echo "⏭  ya reportado (fp $fp): $prev"
-    return 0
-  fi
-
-  # 5 · cuota diaria (una tormenta de issues automáticos es spam, no señal)
-  if [ -f "$LEDGER" ]; then
-    local recent now; now="$(date +%s)"
-    recent="$(jq -r --argjson now "$now" 'select((.epoch // 0) > ($now - 86400)) | .fp' "$LEDGER" 2>/dev/null | wc -l | tr -d ' ')"
-    if [ "${recent:-0}" -ge "$QUOTA" ]; then
-      die "cuota de reportes automáticos agotada ($recent en 24h, tope $QUOTA): junta los hallazgos en UN issue o repórtalo a mano" 5
-    fi
-  fi
-
-  # 6 · cuerpo, redactado SIEMPRE
+  # 7 · cuerpo, redactado SIEMPRE
   local body os bashv jqv
   os="$(uname -sr 2>/dev/null)"; bashv="${BASH_VERSION:-?}"; jqv="$(jq --version 2>/dev/null)"
   body="$(cat <<EOF
@@ -274,7 +467,7 @@ EOF
     return 0
   fi
 
-  # 7 · publicar (gh es el único canal; sin él, deja el reporte listo a mano)
+  # 8 · publicar (gh es el único canal; sin él, deja el reporte listo a mano)
   command -v gh >/dev/null 2>&1 || die "gh no instalado: no puedo abrir el issue. Cuerpo listo con --dry-run; súbelo a https://github.com/$UPSTREAM_REPO/issues/new" 2
   gh auth status >/dev/null 2>&1 || die "gh sin autenticar (gh auth login): no puedo abrir el issue" 2
 
@@ -294,19 +487,28 @@ EOF
   rm -f "$tmp"
   [ -n "$url" ] || die "gh no pudo crear el issue (¿permisos? ¿issues deshabilitados?)" 2
 
+  # El issue ya existe: el claim guarda la url ANTES que el ledger, porque si el
+  # proceso muere en medio la url dentro del claim es lo único que responde
+  # "¿aquella sesión llegó a publicar?" a la sesión siguiente.
+  claim_seal "$url"
   ledger_add "$fp" "$file" "$url" "creado"
   echo "✅ issue upstream: $url"
+  reconcile_after_create "$fp" "$file" "$url"
   [ -f "$WS/scripts/emit.sh" ] && bash "$WS/scripts/emit.sh" decision \
     "bug del harness reportado upstream: $title ($url)" "" "${HARNESS_TASK:-${TASK:-}}" 2>/dev/null
   return 0
 }
 
-ledger_add() {  # fp file url estado
+ledger_add() {  # fp file url estado [issue-propio-que-cedió]
   mkdir -p "$(dirname "$LEDGER")" 2>/dev/null || return 0
   command -v jq >/dev/null 2>&1 || return 0
-  jq -nc --arg fp "$1" --arg f "$2" --arg u "$3" --arg st "$4" \
+  # `url` es SIEMPRE el issue que vale para ese bug: cuando la reconciliación
+  # cede ante uno más viejo, la url es la del superviviente y la del propio (ya
+  # cerrado) queda en `superseded`, que es historia, no destino.
+  jq -nc --arg fp "$1" --arg f "$2" --arg u "$3" --arg st "$4" --arg sup "${5:-}" \
      --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson ep "$(date +%s)" \
-     '{ts:$ts,epoch:$ep,fp:$fp,file:$f,url:$u,status:$st}' >> "$LEDGER" 2>/dev/null || true
+     '{ts:$ts,epoch:$ep,fp:$fp,file:$f,url:$u,status:$st}
+      + (if $sup == "" then {} else {superseded:$sup} end)' >> "$LEDGER" 2>/dev/null || true
 }
 
 cmd_list() {

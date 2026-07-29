@@ -66,4 +66,104 @@ assert_contains "$wf" "HARNESS_DELTA_SPEC_FILE" "y pasa la declaracion del PR"
 upd="$(cat "$ROOT/commands/harness-update.md")"
 assert_contains "$upd" "Gates-en-CI" "el updater lo trata como paquete atado con ship.sh"
 
+echo "── cadena de suministro: las actions van por SHA, nunca por tag"
+# Un tag es un puntero MUTABLE. Quien pueda mover el v4 de una action corre su
+# codigo dentro del runner que decide si un PR entra, con el token del repo, sin
+# que cambie una linea de estos YAML. Esta es la trinchera mecanica: el dia que
+# alguien escriba de nuevo @v4 (o el proximo @v5, que se ve igual de inofensivo)
+# el test lo dice antes que el incidente.
+USES='^[[:space:]]*(- )?uses:'
+for f in .github/workflows/ci.yml .github/workflows/release.yml templates/ci/harness-gates.yml.tmpl; do
+  movible="$(grep -n -E "$USES.*@v[0-9]" "$ROOT/$f")"
+  assert_eq "" "$movible" "$f: ningun uses: apunta a un tag movible (@vN)"
+  sin_sha="$(grep -n -E "$USES" "$ROOT/$f" | grep -v -E '@[0-9a-f]{40}')"
+  assert_eq "" "$sin_sha" "$f: todo uses: lleva sha de 40"
+  # El sha solo no dice QUE version es: sin el comentario, subirla a mano se
+  # vuelve arqueologia y nadie la sube.
+  sin_ver="$(grep -n -E "$USES" "$ROOT/$f" | grep -v -E '#[[:space:]]*v[0-9]+\.')"
+  assert_eq "" "$sin_ver" "$f: y al lado la version legible (# vX.Y.Z)"
+done
+
+echo "── cadena de suministro: uv con version en la URL"
+gates="$(cat "$ROOT/templates/ci/harness-gates.yml.tmpl")"
+# /uv/install.sh baja el latest DE HOY: el mismo commit se verifica cada semana
+# con otra toolchain, y un rojo nuevo no distingue "rompi algo" de "cambio uv".
+assert_not_contains "$gates" "astral.sh/uv/install.sh" "la URL sin version no vuelve"
+pineada="$(grep -E 'astral\.sh/uv/[0-9]+\.[0-9]+\.[0-9]+/install\.sh' "$ROOT/templates/ci/harness-gates.yml.tmpl")"
+assert_contains "$pineada" "astral.sh/uv/" "el instalador de uv trae version explicita en la URL"
+
+echo "── el binario del panel se verifica contra el sha256 del release"
+# panel.sh bajaba harnessd y lo ejecutaba sin mirar QUE bajo: toda la cadena de
+# suministro confiando en el transporte. El release publica SHA256SUMS, asi que
+# se compara de verdad; y cuando no se puede comparar, se DICE (tercer estado),
+# porque un "✓ instalado" que no verifico nada es peor que no verificar.
+mkdir -p "$WS/ui" "$WS/bin"
+cp "$ROOT/templates/ui/panel.sh" "$WS/ui/panel.sh"
+# El fallback sin binario exec-ea el panel Python: este server.py de mentira lo
+# hace observable sin traerse el real (ni su puerto, ni su red).
+printf 'print("PANEL PYTHON")\n' > "$WS/ui/server.py"
+# Y el abridor de browser se stubea: un test que abre Chrome no es hermetico.
+printf '#!/usr/bin/env bash\nexit 0\n' > "$WS/bin/xdg-open"
+chmod +x "$WS/bin/xdg-open"
+
+# gh de mentira: solo entiende `release download -p <patron> -D <dir>`.
+# STUB_SUMS gobierna el unico eje que importa acá: ok | malo | ninguno.
+cat > "$WS/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+dir=""; pat=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -D) dir="$2"; shift 2 ;;
+    -p) pat="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+sha_de() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; return 0; fi
+  shasum -a 256 "$1" | awk '{print $1}'
+}
+if [ "$pat" = "SHA256SUMS" ]; then
+  if [ "${STUB_SUMS:-ok}" = "ninguno" ]; then
+    echo "gh: el release no publica un asset SHA256SUMS" >&2
+    exit 1
+  fi
+  for f in "$dir"/harnessd-*; do
+    s="$(sha_de "$f")"
+    if [ "${STUB_SUMS:-ok}" = "malo" ]; then
+      s="000000000000000000000000000000000000000000000000000000000000dead"
+    fi
+    printf '%s  %s\n' "$s" "$(basename "$f")"
+  done > "$dir/SHA256SUMS"
+  exit 0
+fi
+printf '#!/usr/bin/env bash\ncase "${1:-}" in version) echo 0.46.0 ;; run) echo "HARNESSD RUN" ;; esac\n' > "$dir/$pat"
+chmod +x "$dir/$pat"
+exit 0
+STUB
+chmod +x "$WS/bin/gh"
+
+# El harness instalado por brew gana antes de llegar a la descarga: si la maquina
+# del que corre el test lo tiene, el test probaria otra cosa. Por eso un PATH sin él.
+NOHARNESS="$(t_path_without harness)"
+run_panel() {  # run_panel <ok|malo|ninguno> → salida del panel
+  rm -f "$WS/ui/harnessd"
+  ( cd "$WS/ui" && STUB_SUMS="$1" PATH="$WS/bin:$NOHARNESS" bash "$WS/ui/panel.sh" 7999 2>&1 )
+}
+
+out="$(run_panel ok)"
+assert_contains "$out" "sha256 verificado" "sha que coincide: lo dice, no lo da por sentado"
+assert_contains "$out" "HARNESSD RUN" "y recien ahi ejecuta el binario"
+
+out="$(run_panel malo)"
+assert_contains "$out" "NO coincide" "sha distinto al del release: lo nombra"
+assert_not_contains "$out" "verificado contra el release" "y NO se declara verificado"
+assert_no_file "$WS/ui/harnessd" "el binario que no verifica no queda instalado"
+assert_contains "$out" "PANEL PYTHON" "cae al panel Python en vez de ejecutar lo que bajo"
+
+out="$(run_panel ninguno)"
+assert_contains "$out" "no publica SHA256SUMS" "release sin checksums: lo avisa, no lo silencia"
+assert_contains "$out" "SIN verificar" "y el ✓ de instalado admite que no verifico"
+assert_not_contains "$out" "sha256 verificado" "jamas una verificacion fingida"
+assert_contains "$out" "HARNESSD RUN" "avisado, sigue: es el tercer estado, no un rojo"
+
 t_done

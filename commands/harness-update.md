@@ -110,7 +110,18 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
      pipeline-steps,py,fe,archived-repos,mark-read,verdict-beads,ship-wave,
      port-forwards,instance-ship}.sh,
      scripts/{harness-policy,evidence}.py, `harness-policy.json`,
-     hooks, y **el panel**:
+     **los hooks Y el archivo que los cablea**, que van JUNTOS o el update
+     entrega un hook que nunca corre:
+     `.claude/hooks/{block-direct-push,guard-canonical,guard-worktree,
+     guard-build-slot,guard-ws-scripts,guard-broad-add,track-read,ui-emit,
+     on-compact,session-summary}.sh` más `.claude/settings.json`, que es
+     el que los registra en sus matchers. Un hook nuevo copiado sin
+     re-generar `settings.json` llega al disco y no lo invoca nadie: es
+     una protección que el humano cree tener y no tiene. `settings.json`
+     es propiedad del plugin (hooks + denials read-only): se re-instancia
+     entero desde el template, y si la instancia le agregó hooks propios,
+     eso se resuelve como `.new` con el humano igual que el resto.
+     Y **el panel**:
      `scripts/ui/{panel.sh,server.py,pricing.json,dist/}`): upstream gana por
      default — re-instancia con las respuestas del answers y propón el
      archivo completo. Un parche local aquí casi siempre fue un fix que

@@ -117,6 +117,24 @@ done
 [ -z "$faltan" ] && pass "todos los scripts del plugin estan clasificados en harness-update.md" \
   || fail "scripts del plugin sin clasificar en harness-update.md:$faltan"
 
+# Y los HOOKS igual, que era el agujero que quedaba: este bloque solo miraba
+# templates/scripts/. Un hook nuevo no basta con copiarlo, hay que CABLEARLO en
+# .claude/settings.json, asi que si el update no lo nombra la instancia recibe
+# el archivo y el hook no corre nunca. Paso con guard-broad-add.sh.
+faltan_h=""
+for f in "$ROOT"/templates/hooks/*; do
+  b="$(basename "$f")"; n="${b%.sh}"
+  [ -n "$n" ] || continue
+  grep -q -- "$n" "$UPD" || faltan_h="$faltan_h $n"
+done
+[ -z "$faltan_h" ] && pass "todos los hooks del plugin estan clasificados en harness-update.md" \
+  || fail "hooks del plugin sin clasificar en harness-update.md:$faltan_h"
+# Y el archivo que los CABLEA tiene que tener dueno declarado, o un hook nuevo
+# llega al disco sin que nada lo invoque.
+grep -q "settings.json" "$UPD" \
+  && pass "harness-update.md declara quien es dueno de .claude/settings.json" \
+  || fail ".claude/settings.json sin propietario declarado: un hook nuevo llega pero no se cablea"
+
 echo
 echo "── AGENTS.md no se regenera: se mergea"
 # Caso real: el update lo trato como propiedad del plugin y lo reescribio

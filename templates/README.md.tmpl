@@ -46,11 +46,11 @@ Los VALORES de secretos jamás van al repo, al chat ni a los logs. -->
 Sesión de Claude Code en esta carpeta. El día a día es UNA línea:
 
 ```
-/auto {{TICKET_PREFIX}}-123                      # un ticket del tracker
-/auto "agrega rate limiting por tenant, 100 req/min"   # o un prompt literal
+/smart {{TICKET_PREFIX}}-123                      # un ticket del tracker
+/smart "agrega rate limiting por tenant, 100 req/min"   # o un prompt literal
 ```
 
-`/auto` corre el pipeline entero sin preguntarte: intake → RFC →
+`/smart` corre el pipeline entero sin preguntarte: intake → RFC →
 implement → review → ship → deploy → archive — **dimensionado al blast
 radius**: una tarea de 1 repo sin contratos va por el carril express
 (salta el RFC; 2 sesiones LLM) y `gate_lane` en ship.sh verifica que el
@@ -62,6 +62,11 @@ harness lo exige (ver `docs/harness/pipeline.md`).
 Si quieres conducir fase por fase, los comandos sueltos siguen ahí:
 `/feature <ticket>` → `/rfc` → `/implement` → `/review` → `/ship` →
 `/archive`. Reglas de entrada de tickets: `docs/harness/intake.md`.
+Y para lo trivial que ya dimensionaste, `/quick "<qué>"`: carril quick,
+un repo y cambio chico (techos en `harness-policy.json`), cero
+deliberación y los mismos gates. Si el diff se pasa del techo,
+`gate_lane` lo para y la salida te da el escape:
+`harness-policy.py escalate --to express`.
 
 **Por qué no da vueltas** (las tres reglas que recortan iteraciones):
 el plan se piensa en modo `ultrathink` y pasa `make plan-lint TASK=<id>`
@@ -74,7 +79,7 @@ primera ronda. Detalle en `docs/harness/pipeline.md`.
 **Modelos**: `models.yaml` es la única perilla — aliases `fast|smart|deep`,
 rol→alias, overrides por agente y el proveedor (anthropic/vertex/bedrock/
 kimi/openrouter). Cambias una línea y corres `make models`. Para una sola
-tarea: `/auto <id> --model deep`.
+tarea: `/smart <id> --model deep`.
 
 **¿Otra herramienta además de Claude Code?** `AGENTS.md` es el punto de
 entrada estándar (Cursor, Kimi Code, Codex…): mismas leyes, y los comandos

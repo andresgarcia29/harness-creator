@@ -66,7 +66,7 @@ que se calla no pasa un gate).
 
 ## Verificación
 
-`make doctor` confirma que el playbook es válido. En el próximo `/auto`, el
+`make doctor` confirma que el playbook es válido. En el próximo `/smart`, el
 paso corre en su fase, escribe su result, y emite al panel (verde o la
 parada `custom_step_failed` si gatea en rojo). Sin guion largo en lo que
 escribas: es ley de estilo del workspace.

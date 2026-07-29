@@ -85,7 +85,7 @@ TASK="${1:?uso: worktree-task.sh <task-id> <repo> [repo...]}"; shift
 [ $# -gt 0 ] || { echo "❌ indica al menos un repo"; exit 1; }
 
 # ── Lock de CREACIÓN por (task, repo) ─────────────────────────────────
-# Caso de campo: /auto lanza este script en paralelo y dos procesos pasaron
+# Caso de campo: /smart lanza este script en paralelo y dos procesos pasaron
 # juntos el chequeo "ya existe": el segundo moría a mitad del bucle con un
 # error de git silenciado, o peor, dos implementers acababan escribiendo el
 # mismo worktree y un `git add` se llevaba el trabajo del otro. El lock de

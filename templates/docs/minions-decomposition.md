@@ -84,7 +84,7 @@ decisión que le toca a un humano, y se para.
 
 ## Cómo medirlo (y cómo apagarlo)
 
-1. Corre `/auto` sobre una tarea FULL (cruza ownership, varios repos): ahí es
+1. Corre `/smart` sobre una tarea FULL (cruza ownership, varios repos): ahí es
    donde el supervisor tiene más que razonar y la descomposición paga.
 2. Compara en el panel (Gastos): el input del architect debe CAER, y el plan
    no debe perder ownership ni invariantes (los abogados son la red).

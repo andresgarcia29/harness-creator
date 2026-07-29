@@ -51,13 +51,13 @@ que es fail-open a propósito: telemetría, no control.)
 
 - `gate: true` + rojo → `pipeline-steps.sh` registra la parada
   `custom_step_failed` (razón cerrada de policy), emite al panel y PARA. Tras
-  arreglar: borra el result rojo, `harness-policy.py resume`, re-corre `/auto`.
+  arreglar: borra el result rojo, `harness-policy.py resume`, re-corre `/smart`.
 - `gate: false` (advisory) + rojo → emite el aviso y CONTINÚA.
 
 ## 6. Orden y fases
 
 - Varios pasos en una fase corren por `(order, filename)`.
-- `after:<fase>` solo dispara si `/auto` realmente pasa por esa fase. Un
+- `after:<fase>` solo dispara si `/smart` realmente pasa por esa fase. Un
   `after:deploy` en una tarea SIN CD **se salta**: un gate no-corrido no es
   rojo, simplemente no corrió. (Gatear en deploy es contraintuitivo porque
   deploy ya es rollback-first; prefiere advisory ahí salvo caso justificado.)

@@ -2,11 +2,11 @@
 # on-compact.sh — PreCompact: la señal de contexto agotado que no existía.
 #
 # POR QUÉ EXISTE: record-cost mide dólares y nada medía contexto. Caso de
-# campo: en un /auto de nueve horas el humano tuvo que avisar A MANO varias
+# campo: en un /smart de nueve horas el humano tuvo que avisar A MANO varias
 # veces "te estás quedando sin ventana". La compactación es el único evento
 # determinista que dice "esta sesión está por resumirse": este hook lo vuelve
 # observable, para el panel (bus) y para la propia sesión (marca en disco que
-# /auto lee al retomar).
+# /smart lee al retomar).
 #
 # QUÉ HACE: deriva la tarea del puntero por sesión que mantiene track-read.sh
 # (.harness/session-task/<sid>, jamás estado global) y deja

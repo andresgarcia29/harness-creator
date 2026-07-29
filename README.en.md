@@ -44,23 +44,27 @@ make init
 Day-to-day is one line:
 
 ```
-/auto COR-123                                   # a ticket
-/auto "add per-tenant rate limiting, 100 req/min"   # or a literal prompt
-/auto COR-123 --model deep                      # same task, your model choice
+/smart COR-123                                   # a ticket
+/smart "add per-tenant rate limiting, 100 req/min"   # or a literal prompt
+/smart COR-123 --model deep                      # same task, your model choice
 ```
 
-`/auto` runs the whole pipeline (intake, lane, [RFC], implement, review,
+`/smart` runs the whole pipeline (intake, lane, [RFC], implement, review,
 ship, deploy, archive) without asking you anything. State lives in
 `tasks/<id>/` and worktree commits, never in a conversation: a dead session
-resumes with `/auto <task-id>`.
+resumes with `/smart <task-id>`. (It used to be called `/auto`, which
+collided with Kimi Code's own `/auto`; the old name stays one cycle as a
+deprecation pointer that redirects here.)
 
 ## The core ideas
 
 - **Lanes by blast radius**: deterministic signals classify each task as
   express (1 repo, 1 ownership domain, no contracts → skips the RFC entirely),
-  standard (architect, no lawyer agents) or full. `gate_lane` in `ship.sh`
-  verifies the real diff against the declared lane; misclassifying costs a
-  re-entry, never an unsafe ship. Gates are identical in all three lanes.
+  standard (architect, no lawyer agents) or full. A fourth lane, `quick`
+  (`/quick`), is human-declared only: zero deliberation, single repo, size
+  ceilings enforced by the gate. `gate_lane` in `ship.sh` verifies the real
+  diff against the declared lane; misclassifying costs a re-entry, never an
+  unsafe ship. Gates are identical in all four lanes.
 - **`ship.sh` is the only door to `main`**: rebase → task trailer → lane in
   series; then in parallel: build/test + buf breaking ∥ gitleaks + semgrep ∥
   tests-not-weakened ∥ review verdict + evidence + policy. Red gates report

@@ -24,7 +24,7 @@ Si nunca trabajaste con agentes de código, esta sección te ahorra el resto del
 | **Hook** | Un programa que se dispara **antes o después** de que un agente use una herramienta, y puede cancelarla. | Escribir "no hagas push a `main`" en un documento es una sugerencia que un agente puede racionalizar. Un hook intercepta la llamada y la cancela: la orden nunca llega a ejecutarse. |
 | **Worktree** | Una copia de trabajo independiente del mismo repositorio de git, en otra carpeta y otra rama. | Cada tarea trabaja en el suyo. Dos tareas nunca se pisan los archivos, y el clon original queda intacto. |
 | **Blast radius** | El "radio de explosión": cuánto puede romper un cambio si sale mal. Cambiar un texto tiene radio chico; mover una base de datos entre servicios tiene radio grande. | El pipeline se dimensiona a esto. Una tarea chica no paga el mismo peaje de ceremonia que una migración. |
-| **Carril** (lane) | El tamaño de proceso que se le asigna a una tarea según su blast radius: `express`, `standard` o `full`. | Es el mecanismo concreto de lo anterior. En `express` una tarea usa 2 sesiones de modelo en vez de 6, con los **mismos** gates. |
+| **Carril** (lane) | El tamaño de proceso que se le asigna a una tarea según su blast radius: `quick`, `express`, `standard` o `full`. | Es el mecanismo concreto de lo anterior. En `express` una tarea usa 2 sesiones de modelo en vez de 6, y en `quick` ni siquiera se delibera, siempre con los **mismos** gates. |
 | **DAG** | Grafo dirigido sin ciclos. En cristiano: una lista de tareas con sus dependencias, donde nada puede depender de sí mismo. | Dice qué se puede hacer **en paralelo** y qué tiene que esperar. Es la única autoridad sobre el orden de trabajo. |
 | **Canary** | Desplegar el cambio primero a un grupo reducido (un cliente, un entorno) antes que a todos. | Si algo sale mal, sale mal en pequeño. Viene del canario en la mina: se entera antes que vos. |
 | **Fail-open / fail-closed** | Qué hace un componente cuando **él mismo** falla. *Fail-closed* bloquea por precaución. *Fail-open* deja pasar. | No es un detalle: es una decisión de diseño por componente. Un hook de seguridad roto debe bloquear. Un hook de telemetría roto debe dejar pasar, porque tumbar un despliegue por un problema de estadísticas sería absurdo. |
@@ -55,7 +55,7 @@ Si nunca trabajaste con agentes de código, esta sección te ahorra el resto del
 1. [Quickstart](#quickstart)
 2. [Cómo funciona el instalador](#cómo-funciona-el-instalador)
 3. [Qué genera: anatomía de una instancia](#qué-genera-anatomía-de-una-instancia)
-4. [El diagrama maestro: qué pasa cuando corres `/auto`](#el-diagrama-maestro-qué-pasa-cuando-corres-auto)
+4. [El diagrama maestro: qué pasa cuando corres `/smart`](#el-diagrama-maestro-qué-pasa-cuando-corres-smart)
 5. [Cómo leer el diagrama](#cómo-leer-el-diagrama)
 6. [El panel: `make ui`](#el-panel-make-ui)
 7. [Componentes, explicados uno por uno](#componentes-explicados-uno-por-uno)
@@ -100,14 +100,16 @@ make init
 Después de eso, el día a día es **una sola línea**:
 
 ```
-/auto COR-123                                  # un ticket de Linear
-/auto "agrega rate limiting por tenant al gateway, 100 req/min"   # o un prompt literal
-/auto COR-123 --model deep                     # misma tarea, modelo elegido por ti
+/smart COR-123                                  # un ticket de Linear
+/smart "agrega rate limiting por tenant al gateway, 100 req/min"   # o un prompt literal
+/smart COR-123 --model deep                     # misma tarea, modelo elegido por ti
 ```
 
-`/auto` corre el pipeline entero (enrichment, carril, RFC si aplica, implementación, review, ship, deploy, archive) dimensionado al blast radius: un cambio de 1 repo sin contratos va por el carril express, que salta el RFC, y `gate_lane` verifica que el diff cumpla esa promesa.
+`/smart` corre el pipeline entero (enrichment, carril, RFC si aplica, implementación, review, ship, deploy, archive) dimensionado al blast radius: un cambio de 1 repo sin contratos va por el carril express, que salta el RFC, y `gate_lane` verifica que el diff cumpla esa promesa. (Este comando se llamaba `/auto`: el nombre chocaba con el `/auto` de Kimi Code, y el harness es multi-herramienta por diseño. `/auto` queda un ciclo como puntero de deprecación que redirige a `/smart` con los mismos argumentos.)
 
 **Tu única intervención ocurre al principio.** El primer paso, el *enrichment*, investiga tu código, entiende la tarea y te hace **una sola ronda de preguntas**, solo si hay algo que tu propio repositorio no puede responder. A partir de ahí corre solo hasta el reporte final. Si prefieres conducir fase por fase, los comandos sueltos siguen ahí: `/feature`, `/rfc`, `/implement`, `/review`, `/ship`, `/archive`.
+
+Y hay un atajo para el otro extremo: **`/quick "<qué>"`**, para lo trivial que vos ya dimensionaste: cero deliberación, mismos gates. Un solo repo, hasta 8 archivos y 200 líneas cambiadas (los techos viven en `harness-policy.json`); si el diff se pasa, `gate_lane` lo para y te manda a `harness-policy.py escalate --to express`.
 
 **Requisitos**: macOS o Linux, `git`, `jq` (`brew install jq`), Claude Code. Todo lo demás lo instala el bootstrap.
 
@@ -164,8 +166,9 @@ mi-workspace/
 ├── .mcp.json                 ← MCPs elegidos (los autenticados, envueltos en with-secrets)
 ├── .claude/
 │   ├── agents/               ← architect, reviewer, implementer, qa + abogados por cluster
-│   ├── commands/             ← /auto (todo el pipeline) + /feature /rfc /implement
-│   │                           /review /ship /promote /archive
+│   ├── commands/             ← /smart (todo el pipeline) + /quick (lo trivial)
+│   │                           + /feature /rfc /implement /review /ship
+│   │                           /promote /archive
 │   ├── hooks/                ← block-direct-push, guard-canonical, guard-worktree
 │   │                           (leyes con dientes) + track-read, ui-emit,
 │   │                           session-summary (observadores, fail-open)
@@ -210,9 +213,9 @@ mi-workspace/
 
 ---
 
-## El diagrama maestro: qué pasa cuando corres `/auto`
+## El diagrama maestro: qué pasa cuando corres `/smart`
 
-Primero la **espina dorsal**: las tres entradas, dónde despierta cada agente, qué lo bloquea, y el hecho central: **todas las salidas hacia un humano están enumeradas en `/auto`, y están en un solo nodo rojo**. Cada bloque tiene su zoom en la sección siguiente. Los colores importan; la leyenda está debajo.
+Primero la **espina dorsal**: las tres entradas, dónde despierta cada agente, qué lo bloquea, y el hecho central: **todas las salidas hacia un humano están enumeradas en `/smart`, y están en un solo nodo rojo**. Cada bloque tiene su zoom en la sección siguiente. Los colores importan; la leyenda está debajo.
 
 ```mermaid
 flowchart TD
@@ -225,7 +228,7 @@ E1 --> P0
 E2 --> P0
 E3 --> P0
 
-P0{"<b>① /auto · paso 0</b><br/>¿ticket, prompt o retomar?"}:::dec
+P0{"<b>① /smart · paso 0</b><br/>¿ticket, prompt o retomar?"}:::dec
 
 P0 -->|"COR-N o URL"| TP(["<b>ticket-pull.sh</b> · GraphQL · $0<br/>materializa task.md · label → in-harness"]):::script
 P0 -->|"texto libre"| PR["<b>redacta el intake</b> · id AUTO-fecha-slug<br/>criterios binarios · scope mínimo · repos vía grafo"]:::agent
@@ -311,7 +314,7 @@ Nueve bloques (los ocho del pipeline más el carril, que decide cuánta ceremoni
 
 ### ① Entrada: tres formas de empezar, ninguna te hace trabajar
 
-Un ticket de Linear, un prompt literal entre comillas, o el `task-id` de una corrida que se murió. `/auto` decide cuál es sin preguntarte. El tercer caso es el que más vas a agradecer: como **todo el estado vive en `tasks/<id>/` y en los commits del worktree, nunca en la conversación de un agente**, una sesión muerta a mitad del pipeline se retoma con `/auto <task-id>`, y entra por la primera fase cuyo artefacto falte. Un artefacto válido jamás se re-genera.
+Un ticket de Linear, un prompt literal entre comillas, o el `task-id` de una corrida que se murió. `/smart` decide cuál es sin preguntarte. El tercer caso es el que más vas a agradecer: como **todo el estado vive en `tasks/<id>/` y en los commits del worktree, nunca en la conversación de un agente**, una sesión muerta a mitad del pipeline se retoma con `/smart <task-id>`, y entra por la primera fase cuyo artefacto falte. Un artefacto válido jamás se re-genera.
 
 ### ② Enrichment: la única vez que el harness te habla
 
@@ -333,9 +336,9 @@ Ocurre en cuatro tiempos:
 
 Desde aquí y hasta el reporte final, el harness no te vuelve a hablar salvo que caiga en una de las diez paradas de emergencia.
 
-**Lo que aparece después ya no se pregunta**, porque tú ya te fuiste. Va al **ledger de supuestos** (`tasks/<id>/assumptions.md`), una línea por decisión: qué asumió, con qué evidencia, y qué costaría deshacerlo si era falso. Es lo primero del reporte final. Y alimenta al sistema: un supuesto que resultó falso es material de `/promote`, que lo convierte en regla de semgrep o en ADR, para que el siguiente `/auto` ya no lo repita. Por eso la flecha punteada del reporte vuelve hacia los gates: **el loop se cierra**.
+**Lo que aparece después ya no se pregunta**, porque tú ya te fuiste. Va al **ledger de supuestos** (`tasks/<id>/assumptions.md`), una línea por decisión: qué asumió, con qué evidencia, y qué costaría deshacerlo si era falso. Es lo primero del reporte final. Y alimenta al sistema: un supuesto que resultó falso es material de `/promote`, que lo convierte en regla de semgrep o en ADR, para que el siguiente `/smart` ya no lo repita. Por eso la flecha punteada del reporte vuelve hacia los gates: **el loop se cierra**.
 
-**Zoom: los cinco criterios de rebote, y qué hace `/auto` con cada uno.**
+**Zoom: los cinco criterios de rebote, y qué hace `/smart` con cada uno.**
 
 ```mermaid
 flowchart LR
@@ -372,11 +375,14 @@ La seguridad de este harness vive en los gates deterministas, el canary y el rol
 
 | Carril | Señales (deterministas: inventario, grafo, manifest) | Qué salta |
 |---|---|---|
+| **quick** | ninguna: no se deduce, la declara el humano con `/quick`. Techos duros en `harness-policy.json`: **1 repo, 8 archivos, 200 líneas cambiadas** contra el merge-base | **toda la deliberación**: enrichment, abogados, RFC, DAG, briefs y plan. Quedan worktree, implementer, reviewer independiente y QA |
 | **express** | 1 repo, 1 dominio, sin contratos ni migraciones ni infra | el RFC entero: el orquestador escribe mini-plan y delta-spec mínimo, luego implementer y reviewer. **2 sesiones LLM** |
 | **standard** | 2 a 3 repos, dominios no cruzados, sin breaking | los abogados (no hay frontera que defender) |
 | **full** | cruza ownership, breaking, servicio nuevo, migración | nada |
 
-Tres redes lo hacen seguro. En duda entre dos carriles, gana el mayor. La clasificación es una *propuesta* que `ship.sh` verifica: **`gate_lane`** compara el diff real contra el carril declarado en `state.json`, y un express que tocó un `.proto` o una migración no pasa. Y escalar es barato y está pre-aprobado: `harness-policy.py escalate` sube el carril y re-encauza por `/rfc` conservando el worktree. **Equivocarse de carril cuesta una re-entrada, jamás un ship sin la deliberación que tocaba.** Los gates, la compliance matrix, la evidencia, el canary y el rollback son idénticos en los tres carriles: el carril recorta deliberación, nunca verificación.
+Tres redes lo hacen seguro. En duda entre dos carriles, gana el mayor. La clasificación es una *propuesta* que `ship.sh` verifica: **`gate_lane`** compara el diff real contra el carril declarado en `state.json`, y un express que tocó un `.proto` o una migración no pasa. Y escalar es barato y está pre-aprobado: `harness-policy.py escalate` sube el carril por la escalera `quick → express → standard → full` y re-encauza donde el carril destino recupera la deliberación (`/rfc` si la declara; `quick → express` cae en `intake`), conservando el worktree. **Equivocarse de carril cuesta una re-entrada, jamás un ship sin la deliberación que tocaba.** Los gates, la compliance matrix, la evidencia, el canary y el rollback son idénticos en los cuatro carriles: el carril recorta deliberación, nunca verificación.
+
+**`quick` es la entrada mínima, y es una promesa tuya.** Es el único carril que no se clasifica: `/smart` jamás lo elige por su cuenta (solo lo *sugiere* en el reporte final, cuando la tarea resultó trivial), porque lo que ahorra es la deliberación que sirve justamente para dimensionar. Vos ya dimensionaste, y el harness te toma la palabra: sin enrichment, sin abogados, sin RFC ni plan, worktree y a implementar. Lo que no se toca es la verificación: trailer, precheck, todos los gates de `ship.sh`, reviewer independiente y QA determinista. Y la promesa se mide: un diff de más de 8 archivos o 200 líneas cambiadas es `gate_lane` en rojo, con la remediación escrita (`harness-policy.py escalate --to express`). La tarea no se pierde, sube de carril.
 
 ### ③ RFC: por qué existen los abogados, y cuándo no
 
@@ -390,7 +396,7 @@ Cuando chocan, el desempate **no es el consenso ni la opinión del arquitecto**:
 
 Antes de que salga un solo implementer, el plan pasa por **`plan-lint.sh`** (determinista, $0): cada tarea declara repo, IDs de requisitos, archivos, criterios binarios, complejidad y dependencias; cero "TBD", "por definir" o "investigar si"; y cada requisito citado existe de verdad en el delta-spec. La razón es de velocidad, no de burocracia: **lo que el plan no decide lo decide un implementer solo y a ciegas, y vuelve como blocking una hora después**. Es la única revisión del plan que no cuesta una ronda.
 
-La parada por **abogado en `DRAFT`** parece burocracia y es lo contrario: la constitución de un abogado la propuso la arqueología leyendo tu código, pero hasta que un humano la ratifica **nadie la firmó**. Litigar citando una ley sin firmar es teatro. Por eso `/auto` para ahí, y es la primera cosa que vas a ratificar después de instalar.
+La parada por **abogado en `DRAFT`** parece burocracia y es lo contrario: la constitución de un abogado la propuso la arqueología leyendo tu código, pero hasta que un humano la ratifica **nadie la firmó**. Litigar citando una ley sin firmar es teatro. Por eso `/smart` para ahí, y es la primera cosa que vas a ratificar después de instalar.
 
 ### ④ Implement: paralelo por defecto, contexto mínimo por diseño
 
@@ -455,7 +461,7 @@ Un gate que **no puede correr no reporta rojo**, y esa distinción cuesta rondas
 
 ```mermaid
 flowchart TD
-  A["cualquier agente<br/>implementer · reviewer · qa · /auto"]:::agent -->|"git push origin main"| H1{{"🚫 <b>block-direct-push</b><br/>hook PreToolUse · <b>fail-closed</b><br/>sin jq → bloquea por precaución"}}:::hook
+  A["cualquier agente<br/>implementer · reviewer · qa · /smart"]:::agent -->|"git push origin main"| H1{{"🚫 <b>block-direct-push</b><br/>hook PreToolUse · <b>fail-closed</b><br/>sin jq → bloquea por precaución"}}:::hook
   A -->|"edita repos/atlas"| H2{{"🚫 <b>guard-canonical</b><br/>el clon base es intocable"}}:::hook
   A -->|"escribe en un worktree<br/>que otra sesión tiene tomado"| H4{{"🚫 <b>guard-worktree</b><br/>un worktree, un dueño"}}:::hook
   A -->|"kubectl apply · terraform apply<br/>argocd app rollback · push --force"| H3{{"🚫 <b>denials</b> de settings.json"}}:::hook
@@ -521,7 +527,7 @@ Conviene separar dos cosas que se parecen y no son iguales:
 - **El enrichment** es la interacción **planificada**: ocurre al principio, es una sola ronda, y muchas veces ni siquiera hace falta.
 - **Las diez paradas** son salidas de **emergencia**: algo que el harness no tiene autoridad para decidir, o un presupuesto agotado.
 
-`/auto` solo para en la lista cerrada que vive en su comando, y **cada caso es una ley del harness, no una preferencia**. Esa plantilla es la fuente de verdad: añadir o retirar una parada exige cambiar el contrato y sus pruebas, no corregir un número repetido en prosa.
+`/smart` solo para en la lista cerrada que vive en su comando, y **cada caso es una ley del harness, no una preferencia**. Esa plantilla es la fuente de verdad: añadir o retirar una parada exige cambiar el contrato y sus pruebas, no corregir un número repetido en prosa.
 
 La regla que lo hace funcionar es negativa: **si la razón para parar no está en esa lista, no es una razón, decide.** Interrumpirte a mitad de vuelo es un fallo de diseño, no prudencia. La red que sostiene esto no eres tú: son los gates deterministas, el canary y el rollback. Y `autonomy: checkpoint` en `harness-answers.yaml` te da **una** pausa extra, un resumen de diez líneas antes del primer ship a main, para las primeras semanas mientras le agarras confianza. Gradúa *cuándo se toca main*, no *cuánto piensa el agente*.
 
@@ -531,7 +537,7 @@ La regla que lo hace funcionar es negativa: **si la razón para parar no está e
 
 ## El panel: `make ui`
 
-`/auto` corre solo, pero "solo" no debería significar "a ciegas". `make ui` abre el panel local (por defecto `127.0.0.1:7180`) que te deja ver, mientras el harness trabaja: **qué agentes están vivos ahora mismo** y en paralelo, en qué fase va cada tarea, el texto que van produciendo, tokens y costo por agente, el grafo de quién lanzó a quién, y **el ledger de supuestos** de cada tarea.
+`/smart` corre solo, pero "solo" no debería significar "a ciegas". `make ui` abre el panel local (por defecto `127.0.0.1:7180`) que te deja ver, mientras el harness trabaja: **qué agentes están vivos ahora mismo** y en paralelo, en qué fase va cada tarea, el texto que van produciendo, tokens y costo por agente, el grafo de quién lanzó a quién, y **el ledger de supuestos** de cada tarea.
 
 ```
 make ui          # o: make ui PORT=8080
@@ -539,8 +545,8 @@ make ui          # o: make ui PORT=8080
 
 Dos zonas en la barra lateral, y la distinción es la arquitectura entera:
 
-- **OBSERVAR**: Resumen (qué te espera, la curva de concurrencia, las últimas decisiones), Tareas (pipeline, ledger de supuestos y la historia paso a paso que escriben `ship.sh` y `/auto`), Sesiones (cada terminal con su gantt de agentes, árbol de spawns y el texto por turno), Gastos (día por modelo, por sesión, tabla de precios).
-- **OPERAR**: Nueva tarea (un formulario que escribe `tasks/<id>/task.md` y lanza `claude -p "/auto <id>"` headless con `--session-id` conocido, así la tarea aparece sola en Sesiones), responder a un agente que te espera (reanuda **su** sesión con `claude --resume`), Conexiones (Linear u OpenRouter: el token se **valida contra el proveedor antes de guardarse**, va a `~/.config/harness/` con `chmod 600`, y jamás se muestra ni pasa por un agente) y sincronizar precios reales desde OpenRouter para los modelos observados sin precio.
+- **OBSERVAR**: Resumen (qué te espera, la curva de concurrencia, las últimas decisiones), Tareas (pipeline, ledger de supuestos y la historia paso a paso que escriben `ship.sh` y `/smart`), Sesiones (cada terminal con su gantt de agentes, árbol de spawns y el texto por turno), Gastos (día por modelo, por sesión, tabla de precios).
+- **OPERAR**: Nueva tarea (un formulario que escribe `tasks/<id>/task.md` y lanza `claude -p "/smart <id>"` headless con `--session-id` conocido, así la tarea aparece sola en Sesiones), responder a un agente que te espera (reanuda **su** sesión con `claude --resume`), Conexiones (Linear u OpenRouter: el token se **valida contra el proveedor antes de guardarse**, va a `~/.config/harness/` con `chmod 600`, y jamás se muestra ni pasa por un agente) y sincronizar precios reales desde OpenRouter para los modelos observados sin precio.
 
 Además, al cerrarse cada sesión, el hook `session-summary.sh` deja en `.harness/sessions/<id>.md` un resumen legible de **lo que el harness decidió**: supuestos sin confirmar primero, luego paradas, gates en rojo, decisiones y cambios de fase. Es determinista a propósito, se deriva del bus de eventos y no de la memoria del agente, porque quien resume es el mismo que decidió y tiende a omitir justo lo que hay que auditar. Como el bus es compartido entre todas las sesiones del workspace, la atribución se hace por identificador de sesión para los eventos de Claude Code y por tarea para los del harness, y el propio resumen declara ese límite al pie.
 
@@ -574,7 +580,7 @@ Un panel en un sistema cuya filosofía es "los agentes proponen, los sistemas de
 4. **Cero dependencias en tiempo de ejecución.** El frontend es React con shadcn/ui pero viaja **compilado y vendorizado** en `dist/`: el server es stdlib de Python sirviendo estáticos y el usuario jamás corre `npm install`. Node existe solo para construir el panel (repo `harness-ui`; el instalador lo trae con `scripts/sync-ui.sh`).
 5. **Degrada, no explota.** Lee dos fuentes con dos niveles de confianza: `.harness/events.jsonl` y `tasks/` son **nuestros** (estables); los transcripts de Claude Code son **prestados** (formato interno, cambia entre versiones). Si el parseo falla, el panel sigue vivo con lo que el harness sí controla y te lo dice arriba en rojo.
 
-El formulario de Nueva tarea escribe preferencias que `/auto` **respeta como ley**: `review_before_ship: true` fuerza una pausa antes del primer ship, `assumptions_ok: false` convierte cada ambigüedad en una parada en vez de un supuesto, `max_parallel` acota los implementers y `budget_usd` convierte pasarse de presupuesto en una parada.
+El formulario de Nueva tarea escribe preferencias que `/smart` **respeta como ley**: `review_before_ship: true` fuerza una pausa antes del primer ship, `assumptions_ok: false` convierte cada ambigüedad en una parada en vez de un supuesto, `max_parallel` acota los implementers y `budget_usd` convierte pasarse de presupuesto en una parada.
 
 ### Lo que el panel no hace, y por qué
 
@@ -605,7 +611,7 @@ El formulario de Nueva tarea escribe preferencias que `/auto` **respeta como ley
 
 - **`docs/constitution.md`**: principios innegociables inyectados a *todos* los agentes: no asumas, código mínimo, cambios quirúrgicos (cada línea traza a la solicitud), ejecución verificable. Es el desempate de cualquier RFC. Incluye la regla de que **lo correcto va por encima de lo rápido**, con una aclaración que importa: el código mínimo habla del *alcance* (no construyas más de lo pedido) y esta regla habla de la *clase de arreglo* dentro de ese alcance (ataca la causa, no el síntoma). Ninguna cancela a la otra.
 - **`specs/<capability>/spec.md`**: el comportamiento actual del sistema en notación EARS (`CUANDO <evento> EL SISTEMA DEBE <resultado>`) más escenarios Given/When/Then, cada requisito enlazado a su test. Es lo que los abogados **citan** ("esto viola AUTH-3").
-- **Delta-specs**: cada RFC produce sus cambios como secciones ADDED, MODIFIED o REMOVED contra la spec maestra. El delta **es** la definición formal del blast radius. *(En el carril express lo redacta el orquestador, de 2 a 6 líneas EARS desde los criterios: express recorta sesiones LLM, jamás artefactos; la compliance matrix y `gate_evidence` operan igual en los tres carriles.)*
+- **Delta-specs**: cada RFC produce sus cambios como secciones ADDED, MODIFIED o REMOVED contra la spec maestra. El delta **es** la definición formal del blast radius. *(En el carril express lo redacta el orquestador, de 2 a 6 líneas EARS desde los criterios: express recorta sesiones LLM, jamás artefactos; la compliance matrix y `gate_evidence` operan igual en los cuatro carriles.)*
 - **`/archive`**: cuando el despliegue queda verde, fusiona el delta en la spec maestra automáticamente. **Esta pieza es la razón por la que el SDD de este harness no muere de spec-rot.**
 
 ### Economía de tokens (el contexto es el recurso escaso)
@@ -613,11 +619,11 @@ El formulario de Nueva tarea escribe preferencias que `/auto` **respeta como ley
 | Herramienta | Qué es | Para qué sirve aquí |
 |---|---|---|
 | **Serena** (MCP) | Servidor que expone **LSP** (Language Server Protocol, el mismo motor de "ir a definición" o "encontrar referencias" de tu editor) como herramientas del agente. | El implementer navega y edita **por símbolo** (`find_symbol`, `find_referencing_symbols`) en vez de leer archivos completos o buscar texto. Es el ahorro de tokens más grande en implementación. En multi-repo se activa **por worktree**. |
-| **Graphify** (CLI) | Knowledge graph del código cross-repo (Tree-sitter y detección de comunidades). | Las preguntas de *comprensión* ("¿quién consume este servicio?", "¿qué camino conecta A con B?") se responden con el grafo (~71 veces menos tokens, [cifra reportada por Graphify](https://github.com/Graphify-Labs/graphify)) en vez de con búsquedas masivas. Lo usan arquitecto y orquestador; los implementers no lo necesitan porque Serena cubre el nivel de símbolo. **El grafo se mantiene solo**: `graph-refresh.sh` corre en el prefetch de `/auto`, en harness-janitor y en `make graph`; el doctor avisa si graphify está instalado sin grafo construido. |
+| **Graphify** (CLI) | Knowledge graph del código cross-repo (Tree-sitter y detección de comunidades). | Las preguntas de *comprensión* ("¿quién consume este servicio?", "¿qué camino conecta A con B?") se responden con el grafo (~71 veces menos tokens, [cifra reportada por Graphify](https://github.com/Graphify-Labs/graphify)) en vez de con búsquedas masivas. Lo usan arquitecto y orquestador; los implementers no lo necesitan porque Serena cubre el nivel de símbolo. **El grafo se mantiene solo**: `graph-refresh.sh` corre en el prefetch de `/smart`, en harness-janitor y en `make graph`; el doctor avisa si graphify está instalado sin grafo construido. |
 | **context7** (MCP) | Documentación de librerías bajo demanda, versionada. | El agente no inventa APIs ni repite búsquedas web de la misma librería. |
 | **quiet.sh** | Envoltorio para CLIs ruidosos (`kubectl logs`, `gh run view`, `gcloud`). | Si la salida pasa de unas 120 líneas, muestra principio y final y guarda el volcado completo en `.cache/quiet/` para leerlo bajo demanda. |
 | **repo-brief.sh** | Resumen determinista por repo (`.cache/briefs/<repo>.md`, cacheado por HEAD): stack, comandos de test, estructura, convenciones. | El arranque en frío de cada implementer o reviewer re-descubría lo mismo en cada tarea, y eso son minutos y miles de tokens de exploración. El resumen se genera una vez con $0 tokens y viaja en el prompt: el agente arranca editando, no explorando. |
-| **Carriles** (express, standard, full) | El pipeline dimensionado al blast radius (ver ②b). | El ahorro más grande de todos: una tarea chica pasa de unas 6 sesiones LLM a 2. Menos sesiones son menos arranques en frío, o sea menos tokens **y** menos minutos, con los mismos gates. |
+| **Carriles** (quick, express, standard, full) | El pipeline dimensionado al blast radius (ver ②b). | El ahorro más grande de todos: una tarea chica pasa de unas 6 sesiones LLM a 2, y en `quick` no hay ninguna fase de deliberación. Menos sesiones son menos arranques en frío, o sea menos tokens **y** menos minutos, con los mismos gates. |
 | **ccusage** | La báscula: costo por sesión y por tarea. | No optimizas lo que no mides. |
 | **models.yaml + stamp-models.sh** | La perilla de modelos: aliases `fast`, `smart` y `deep` por proveedor (anthropic, vertex, bedrock, kimi, openrouter), rol a alias, overrides por agente. `make models` estampa; `resolve` traduce. | Cambiar un modelo, un agente o el proveedor entero es una línea y un comando. Nadie edita frontmatter a mano y el doctor detecta el drift. |
 
@@ -636,7 +642,7 @@ overrides:
 ```
 
 ```
-/auto COR-123 --model deep       # ← una sola tarea, sin tocar nada
+/smart COR-123 --model deep       # ← una sola tarea, sin tocar nada
 ```
 
 `scripts/stamp-models.sh` materializa la política en el frontmatter de los agentes (determinista, $0 tokens), `resolve <alias|rol>` la traduce para headless y cronjobs, y `check` (lo corre el doctor) detecta si alguien editó un agente a mano.
@@ -759,12 +765,12 @@ El flujo es fijo (discovery, entrevista, generación, verificación); **todo lo 
 | Otra fuente de secretos | `secrets.sh` ya trae 7; una nueva es una función `pull_*` más |
 | Cambiar el modelo de un rol, un agente o todo | una línea en `models.yaml` (roles u overrides, en aliases) más `make models` |
 | Cambiar de proveedor | la línea `provider:` de `models.yaml` más `make models`; roles y comandos no se tocan |
-| Modelo para una tarea puntual | `/auto <id> --model deep` (o `model:` en el frontmatter de `task.md`) |
+| Modelo para una tarea puntual | `/smart <id> --model deep` (o `model:` en el frontmatter de `task.md`) |
 | Usar el harness desde Cursor, Kimi Code u otro agente | ya está: `AGENTS.md` es el punto de entrada, y los comandos de `.claude/commands/` son playbooks legibles por cualquiera |
 | Más o menos agentes | el clustering se decide en la entrevista y se corrige en `harness-answers.yaml` |
 | Cuántas vueltas puede dar el loop antes de escalarte | `loop_budget` en `harness-answers.yaml`; de ahí sale también el límite que aplica el motor de política |
-| Que `/auto` te pida un "go" antes de tocar main | `autonomy: checkpoint` o `full` en `harness-answers.yaml` |
-| Endurecer o relajar qué bloquea el carril express | `LANE_GUARD_PATTERN` (variable de entorno de `ship.sh`) y las señales del paso de carril de `/auto`; las transiciones viven en `harness-policy.json` |
+| Que `/smart` te pida un "go" antes de tocar main | `autonomy: checkpoint` o `full` en `harness-answers.yaml` |
+| Endurecer o relajar qué bloquea el carril express | `LANE_GUARD_PATTERN` (variable de entorno de `ship.sh`) y las señales del paso de carril de `/smart`; las transiciones viven en `harness-policy.json` |
 | Endurecer o relajar leyes | hooks y denials en `settings.json.tmpl`; gates en `ship.sh.tmpl` |
 
 Lo **no** negociable, a propósito: push a main solo por gates, worktrees, valores de secretos fuera del chat, rollback seguro (nunca `argocd app rollback` automático, sino Argo Rollouts abort-to-stable o revert en git), y que la ley la ratifiquen humanos.

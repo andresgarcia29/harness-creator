@@ -7,6 +7,23 @@ contra una instalación real).
 ## [Sin publicar]
 
 ### Added
+- **`gate_test_muerde`: un test nuevo tiene que MORDER.** Tercer gate de
+  integridad, de la corrida de campo que pagó una ronda entera por un assert
+  que no podía fallar (evaluaba antes de que el dato llegara): en el precheck
+  y en `--ci`, todo test NUEVO del diff (y todo el nombrado bajo `ADDED` del
+  delta-spec) se corre también sobre el árbol base con los tests del cambio
+  encima; si pasa ahí, no prueba la conducta nueva y el rojo trae la
+  remediación ejecutable (rojo primero, o `MODIFIED` si es refactor, que
+  saca del alcance). Cero falsos rojos por diseño: modificados sin nombrar
+  quedan fuera, runner dirigido por extensión con skip declarado donde no es
+  inequívoco, y el árbol base va delante en PYTHONPATH para que un editable
+  install no importe el código nuevo. La regla viaja en los prompts de
+  implement, quick y smart (un gate que exige lo que ningún prompt pidió ya
+  costó horas una vez). Y para el territorio que ningún gate de precheck
+  alcanza, el QA exploratorio: identidad ANTES de medir (qué sirve en ese
+  puerto, registrado en la evidencia) y un assert verde solo cuenta si se
+  demostró capaz de fallar; en `qa.md` Y en `review.md`, porque el QA
+  determinista nunca lee `qa.md`.
 - **Carril `quick` y comando `/quick`: cero deliberación, mismos gates.** Para
   lo trivial que el humano ya dimensionó ("cambia estos logos"): sin
   enrichment, sin abogados, sin RFC ni plan; la misma sesión implementa y el

@@ -117,7 +117,10 @@ takes its one legitimate pause before publishing.
 - **Anti-cheating gates**: `gate_tests_untouched` blocks weakened tests
   (deleted assertions, added skips) unless the spec declares the behavior
   change; `gate_evidence` verifies the reviewer actually *opened* the tests
-  it cites (set intersection with tracked reads; zero LLM).
+  it cites (set intersection with tracked reads; zero LLM); and
+  `gate_test_muerde` runs every NEW test against the base tree too: a test
+  that also passes without your change proves nothing, so red-first is
+  enforced, not suggested.
 
 ## Local panel
 

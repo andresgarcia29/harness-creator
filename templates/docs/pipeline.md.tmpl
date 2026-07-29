@@ -53,6 +53,12 @@ tres piezas que las recortan, en el orden en que actúan:
    loop. Con el árbol limpio **sella su corrida como evidencia**, así que el
    implementer no vuelve a correr la suite: antes se corría cuatro veces por
    tarea (precheck, evidencia, QA y ship) sobre el mismo código.
+   El precheck también comprueba que **los tests nuevos MUERDAN**
+   (`gate_test_muerde`): cada test nuevo del diff, y cada uno nombrado bajo
+   `ADDED` en el delta-spec, se corre además sobre el árbol base; si pasa
+   sin tu cambio, no prueba la conducta nueva y el rojo es tuyo. Escribí el
+   test para que falle primero; un refactor de test se declara `MODIFIED` y
+   sale del alcance.
 4. **El juicio sobrevive a que se mueva el trunk.** Con varias personas
    pusheando al mismo main, el rebase del ship reescribía los SHA y tiraba
    review, QA y evidencia por un movimiento que el reviewer nunca miró. El

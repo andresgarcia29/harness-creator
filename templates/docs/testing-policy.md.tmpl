@@ -29,8 +29,18 @@ cara al usuario? sí → e2e (uno, no cinco variantes).
 4. **Property-based donde hay invariantes**: parsers, serialización,
    cálculos de dinero/fechas → rapid (Go) / Hypothesis (Py) /
    fast-check (TS). Un property test vale por veinte examples.
-5. **Los tests de un fix reproducen el bug primero** (rojo→verde,
-   constitución §4).
+5. **Todo test nuevo nace ROJO** (rojo→verde, constitución §4), y desde
+   `gate_test_muerde` esto tiene diente, no solo prosa: el precheck corre
+   cada test nuevo (y cada uno nombrado bajo `ADDED` del delta-spec)
+   sobre el árbol base; si también pasa ahí, no prueba nada y el gate lo
+   rechaza. El caso que fijó la regla: un assert que evaluaba antes de
+   que el dato llegara pagó una ronda entera en verde vacuo.
+5b. **Ninguna medición sin identidad del servidor.** Antes de medir o
+   ejercitar contra un puerto o servicio local, el primer comando
+   verifica QUÉ está sirviendo (marcador de build, versión) y queda
+   registrado en la evidencia. El caso: medir contra el puerto 4321 sin
+   saber si el dev server era del árbol correcto. Una medición sin
+   identidad es evidencia de OTRO árbol.
 6. **Flaky = cuarentena, no reintento infinito.** El flake-warden lo
    detecta; un test en cuarentena tiene issue con dueño y fecha.
 7. **Herméticos contra el inventario del host.** Un test que depende de

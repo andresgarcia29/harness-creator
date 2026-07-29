@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# guard-broad-add.sh — PreToolUse (Bash): BLOQUEA `git add` amplio (-A, --all,
+# guard-broad-add.sh: hook PreToolUse (Bash) que BLOQUEA `git add` amplio (-A, --all,
 # ".", -u) y `git commit -a` dentro de un worktree que COMPARTEN varias tareas
 # del DAG.
 #

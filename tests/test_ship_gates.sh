@@ -1267,6 +1267,122 @@ assert_contains "$out" "no pude leer la entrega declarada" "con el rechazo hones
 assert_contains "$out" "POLICY-DELIVERY-001" "citando el código real del productor"
 
 echo
+echo "── el rojo que no es del código: disco lleno"
+# Caso de campo: 3 de 8 corridas de la MISMA suite rojas con el disco al 100 por
+# ciento (56K libres de 193G); dos ni colectaron el archivo de test porque los
+# workers murieron por ENOSPC. Con 29G libres, 16 de 16 verdes. El daño no es la
+# corrida perdida: es que ese rojo se lee igual que un defecto y manda al agente
+# a arreglar lo que no está roto.
+extract gate_espacio_en_disco > "$WS/disco.sh"
+grep -q 'ENOSPC' "$WS/disco.sh" || fail "no pude extraer gate_espacio_en_disco del template"
+
+corre_disco() {  # corre_disco <kb-libres-simulados> <min-gb> → salida, con RC=<n>
+  # El gate hace `exit 3`, así que el rc se captura del subshell entero y se
+  # anexa a la salida: un `echo` después del exit nunca correría.
+  local salida rc
+  salida="$( WS="$WS"; WT="$WS"; REPO=svc
+    HARNESS_MIN_FREE_GB="$2"
+    gate() { echo "── gate: $1 ──"; }
+    emit() { :; }
+    # df stubeado: lo que se mide es la DECISIÓN, no el df del host (que no se
+    # puede llenar en un test). El formato imita el -P real.
+    KB="$1"
+    df() { printf 'Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 100 100 %s 100%% /\n' "$KB"; }
+    # shellcheck disable=SC1090
+    . "$WS/disco.sh"
+    gate_espacio_en_disco 2>&1 )"; rc=$?
+  printf '%s\nRC=%s\n' "$salida" "$rc"
+}
+
+out="$(corre_disco 56 2)"          # 56K libres: el caso de campo literal
+assert_contains "$out" "RC=3" "con el disco lleno el gate se NIEGA a correr (fail-closed)"
+assert_contains "$out" "NO ES TU CÓDIGO, ES EL DISCO" "y lo dice con todas las letras"
+assert_contains "$out" "ENOSPC" "explicando por qué el rojo no significaría nada"
+assert_contains "$out" "worktree-task.sh --rm" "con la remediación ejecutable"
+assert_contains "$out" "HARNESS_MIN_FREE_GB=0" "y el escape declarado para quien insista"
+
+out="$(corre_disco 31457280 2)"    # 30G libres
+assert_contains "$out" "RC=0" "con espacio de sobra no molesta"
+assert_not_contains "$out" "DISCO" "y ni siquiera imprime el gate"
+
+# El umbral es configurable: una suite de Go con cachés y una de docs no
+# necesitan lo mismo, y cablear un número sería el eje que no se despacha.
+out="$(corre_disco 5242880 2)"     # 5G libres, mínimo 2G
+assert_contains "$out" "RC=0" "5G con mínimo 2G: pasa"
+out="$(corre_disco 5242880 10)"    # 5G libres, mínimo 10G
+assert_contains "$out" "RC=3" "5G con mínimo 10G: se niega (el umbral manda)"
+out="$(corre_disco 56 0)"
+assert_contains "$out" "RC=0" "HARNESS_MIN_FREE_GB=0 apaga el gate explícitamente"
+
+# UN GATE QUE NO PUEDE MEDIR NO REPORTA ROJO: la ley de la casa. Un df que no
+# devuelve un número es ceguera, y la ceguera no es un defecto del código.
+salida_ceguera="$( WS="$WS"; WT="$WS"; REPO=svc; HARNESS_MIN_FREE_GB=2
+        gate() { echo "── gate: $1 ──"; }; emit() { :; }
+        df() { echo "df: ilegible"; return 1; }
+        . "$WS/disco.sh"; gate_espacio_en_disco 2>&1 )"; rc_ceguera=$?
+assert_eq 0 "$rc_ceguera" "df ilegible: NO inventa un rojo (se ausenta)"
+assert_not_contains "$salida_ceguera" "DISCO" "y no imprime un veredicto que no puede sostener"
+
+echo
+echo "── semgrep: el ignore por defecto escondía los tests, y el gate salía verde"
+# Caso de campo: semgrep trae un .semgrepignore propio que excluye *_test.go.
+# Como ship.sh escanea el DIRECTORIO ('.'), las ramas de las reglas que apuntan
+# a tests NUNCA se evaluaban: todo el workspace mostraba 0 matches de
+# "no sleep en tests" para Go, y eso se leyó como ausencia de deuda cuando era
+# un gate ciego. Un falso verde es peor que un rojo: nadie lo investiga.
+extract semgrep_test_globs > "$WS/sgglobs.sh"
+grep -q 'include:' "$WS/sgglobs.sh" || fail "no pude extraer semgrep_test_globs del template"
+. "$WS/sgglobs.sh"
+
+# Los globs salen de las REGLAS, no de una lista cableada en el gate: si mañana
+# una regla mira *.spec.rb, la segunda pasada la sigue sola.
+globs="$(semgrep_test_globs "$ROOT/templates/semgrep-rules.yaml.tmpl" | tr '\n' ' ')"
+assert_contains "$globs" "*_test.go" "los globs salen de las reglas reales (Go)"
+assert_contains "$globs" "test_*.py" "y de las demás ramas declaradas (Python)"
+assert_contains "$globs" "*.spec.ts" "sin una lista cableada que envejezca en el gate"
+assert_eq "" "$(semgrep_test_globs "$WS/no-existe.yaml")" \
+  "sin archivo de reglas no imprime nada (la segunda pasada no corre)"
+printf 'rules:\n  - id: x\n    pattern: foo(...)\n' > "$WS/sinincludes.yaml"
+assert_eq "" "$(semgrep_test_globs "$WS/sinincludes.yaml")" \
+  "reglas sin include: tampoco (un gate sin qué mirar se ausenta, no inventa rojo)"
+
+if command -v semgrep >/dev/null 2>&1; then
+  # La prueba que importa: MISMO archivo, dos formas de invocar, dos resultados.
+  SG="$WS/sg"; mkdir -p "$SG/repo"
+  cat > "$SG/rules.yaml" <<'YAML'
+rules:
+  - id: no-sleep-en-tests
+    languages: [go]
+    severity: ERROR
+    message: sleep en test
+    pattern: time.Sleep(...)
+    paths:
+      include: ["*_test.go"]
+YAML
+  cat > "$SG/repo/app_test.go" <<'GO'
+package app
+import ("testing"; "time")
+func TestX(t *testing.T) { time.Sleep(time.Second) }
+GO
+  ( cd "$SG/repo" && git init -q . && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+  dir_out="$( cd "$SG/repo" && semgrep scan --config "$SG/rules.yaml" --error --quiet . 2>&1 )"
+  assert_not_contains "$dir_out" "sleep en test" \
+    "la premisa del bug se reproduce: el escaneo de directorio NO ve el _test.go"
+  tgt_out="$( cd "$SG/repo" && semgrep scan --config "$SG/rules.yaml" --error --quiet app_test.go 2>&1 )"
+  assert_contains "$tgt_out" "sleep en test" \
+    "y como target EXPLÍCITO sí lo ve (que es lo que hace la segunda pasada)"
+  # Y el gate tiene que encontrar ese archivo por sí solo, desde los globs.
+  found="$( cd "$SG/repo" && for g in $(semgrep_test_globs "$SG/rules.yaml"); do
+              git ls-files -- "$g"; done )"
+  assert_eq "app_test.go" "$found" "el gate resuelve el target desde los globs de la regla"
+else
+  echo "  ! semgrep no instalado: los dos casos end-to-end no corrieron."
+  echo "    NO es un verde: la lógica de globs sí se probó arriba, pero la"
+  echo "    diferencia directorio-vs-target (que es el bug) quedó sin ejercitar."
+fi
+
+echo
 echo "── request_ship_phase: quien mueve la fase es el PUSH, y se ejecuta de verdad"
 # Tres bugs de campo distintos nacieron de que la transicion review->ship la
 # pedia el orquestador: si se adelantaba, los repos que faltaban se quedaban sin

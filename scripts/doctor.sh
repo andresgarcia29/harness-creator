@@ -746,5 +746,31 @@ if [ -d "$WS/scripts/cronjobs" ]; then
   done
 fi
 
+# ── Espacio en disco: el rojo que no es del código ────────────────────
+# Caso de campo: 3 de 8 corridas de la misma suite rojas con el disco al 100 por
+# ciento (los workers murieron por ENOSPC y ni colectaron el archivo de test);
+# 16 de 16 verdes con 29G libres, mismo código. Un rojo por disco se lee igual
+# que un defecto y manda a arreglar lo que no está roto.
+#
+# Acá es OBSERVADOR (el doctor informa), y avisa ANTES del umbral en el que
+# ship.sh se niega a correr, para que se limpie sin perder una corrida. El que
+# bloquea es el gate; este avisa. No mezclamos las familias.
+_libre_kb="$(df -Pk "$WS" 2>/dev/null | awk 'NR==2 {print $4}')"
+case "${_libre_kb:-x}" in
+  ''|*[!0-9]*) warn "no pude leer el espacio libre de $WS (df ilegible): si una suite se pone roja sin causa clara, mirá el disco a mano" ;;
+  *)
+    _libre_gb=$((_libre_kb / 1024 / 1024))
+    _min_gb="${HARNESS_MIN_FREE_GB:-2}"
+    case "$_min_gb" in ''|*[!0-9]*) _min_gb=2 ;; esac
+    if [ "$_libre_gb" -lt "$_min_gb" ]; then
+      fail "quedan ${_libre_gb}G libres (ship.sh se niega a correr gates bajo ${_min_gb}G): NO ES TU CÓDIGO, ES EL DISCO" \
+        "du -sh $WS/.cache $WS/worktrees | sort -h; scripts/worktree-task.sh --rm <task-id> de lo ya shippeado; docker system prune -a"
+    elif [ "$_libre_gb" -lt $((_min_gb * 5)) ]; then
+      warn "quedan ${_libre_gb}G libres: por encima del mínimo (${_min_gb}G) pero con poco margen. Un disco lleno produce rojos que PARECEN defectos de código (medido: 3 de 8 corridas). Lo que más crece: .cache/, worktrees/, imágenes de docker"
+    else
+      ok "espacio en disco: ${_libre_gb}G libres"
+    fi ;;
+esac
+
 echo "── resultado: $FAIL fallos, $WARN advertencias ──"
 [ "$FAIL" -eq 0 ]

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_guard_broad_add.sh — el diente contra el `git add` amplio en un worktree
+# test_guard_broad_add.sh: el diente contra el `git add` amplio en un worktree
 # que varias tareas del DAG comparten.
 #
 # CASO DE CAMPO: worktree-task.sh crea el árbol en worktrees/<task-id>/<repo>,

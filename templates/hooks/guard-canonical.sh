@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hook PreToolUse (Edit|Write|MultiEdit) — tres leyes con dientes:
+# Hook PreToolUse (Edit|Write|MultiEdit): tres leyes con dientes.
 #   LEY 4: nunca editar el clon canónico repos/<x>; el trabajo vive en
 #          worktrees/<task>/<repo>.
 #   EL PIN ES DE SOLO LECTURA: worktrees/<task>/.review-<repo> es el árbol

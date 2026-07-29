@@ -102,6 +102,33 @@ contra una instalación real).
   funcionando mientras el puntero esté.
 
 ### Fixed
+- **Un disco lleno deja de disfrazarse de defecto de código.** Medido: 3 de 8
+  corridas de la MISMA suite en rojo con el disco al 100 por ciento (56K libres
+  de 193G); dos ni llegaron a colectar el archivo de test porque los workers
+  murieron por ENOSPC. Con 29G libres, 16 de 16 verdes, mismo código. El daño
+  no es la corrida perdida: es que ese rojo se lee igual que un defecto y manda
+  al agente a arreglar lo que no está roto, quemando rondas. Es el mismo patrón
+  que el rojo por ceguera de `deploy-watch`, una causa ambiental disfrazada de
+  causa de código. Ahora `ship.sh` comprueba el espacio ANTES de los gates y se
+  niega a correr con un mensaje que empieza por "NO ES TU CÓDIGO, ES EL DISCO",
+  dice qué borrar primero y declara el escape (`HARNESS_MIN_FREE_GB=0`). El
+  umbral es configurable porque una suite de Go con cachés y una de docs no
+  necesitan lo mismo. `doctor.sh` avisa antes, como observador, para que se
+  limpie sin perder una corrida. Y un `df` ilegible no inventa un rojo: se
+  ausenta, como manda la ley de los gates que no pueden medir.
+- **El `.semgrepignore` por defecto escondía los tests, y el gate salía verde.**
+  semgrep trae un ignore propio que excluye `*_test.go` entre otras cosas, y
+  como `ship.sh` escanea el DIRECTORIO, las ramas de las reglas que apuntan a
+  tests no se evaluaban nunca: el workspace mostraba 0 matches de "no sleep en
+  tests" para Go, que se leía como ausencia de deuda cuando era un gate ciego.
+  Reproducido en la suite: el mismo archivo da 0 hallazgos como directorio y 1
+  como target explícito. Ahora hay una segunda pasada con los archivos como
+  target explícito, que es lo que los saca del ignore. Los globs salen de los
+  `include:` de las PROPIAS reglas, no de una lista cableada en el gate que
+  envejecería en silencio, y sin `include:` la segunda pasada no corre: un gate
+  que no encuentra qué mirar se ausenta. No se escribe un `.semgrepignore` en
+  el worktree aunque también funcione: ensuciaría un árbol que otros gates
+  están midiendo y pisaría el del repo si lo tiene.
 - **Ejecutar un artefacto por fin cuenta como tocarlo.** `gate_evidence`
   intersecta lo CITADO por la compliance matrix con lo LEÍDO según
   `tasks/<id>/evidence.log`, y ese log lo alimentaba SOLO el hook track-read,

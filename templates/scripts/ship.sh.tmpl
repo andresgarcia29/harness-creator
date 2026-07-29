@@ -1266,7 +1266,46 @@ run_security_gates() {
   if [ -f "$WS/semgrep/rules.yaml" ]; then
     gate semgrep
     semgrep scan --config "$WS/semgrep/rules.yaml" --error --quiet .
+    # ── LA SEGUNDA PASADA: LO QUE EL IGNORE POR DEFECTO ESCONDE ────────
+    # semgrep trae un .semgrepignore propio que excluye, entre otras cosas,
+    # *_test.go. En un escaneo de DIRECTORIO (el `.` de arriba) esos archivos
+    # ni se abren, así que las ramas de las reglas que apuntan a tests jamás
+    # se evalúan: el workspace mostraba 0 matches de "no sleep en tests" para
+    # Go, y eso se leía como ausencia de deuda cuando era un gate ciego.
+    # Reproducido: el mismo archivo da 0 hallazgos como directorio y 1 como
+    # target explícito.
+    #
+    # Se pasan los archivos como TARGET EXPLÍCITO, que es lo que los saca del
+    # ignore. No se escribe un .semgrepignore propio en el worktree aunque
+    # también funcione: ensuciaría un árbol que otros gates están midiendo, y
+    # pisaría el del repo si lo tiene.
+    #
+    # Los globs salen de las PROPIAS reglas (sus `include:`), no de una lista
+    # cableada acá: si mañana una regla mira *.spec.rb, el gate la sigue sola.
+    local sg_glob sg_targets=""
+    for sg_glob in $(semgrep_test_globs "$WS/semgrep/rules.yaml"); do
+      sg_targets="$sg_targets $(git ls-files -- "$sg_glob" 2>/dev/null || true)"
+    done
+    # shellcheck disable=SC2086
+    set -- $sg_targets
+    if [ $# -gt 0 ]; then
+      echo "   segunda pasada sobre $# archivo(s) que el ignore por defecto oculta"
+      semgrep scan --config "$WS/semgrep/rules.yaml" --error --quiet "$@"
+    fi
   fi
+}
+
+# semgrep_test_globs <rules.yaml> → los globs que las reglas declaran mirar.
+# Sale de los `include:` del propio archivo de reglas para que el gate no
+# tenga una lista de extensiones cableada que envejece en silencio. Si no hay
+# ninguno, no imprime nada y la segunda pasada no corre: un gate que no
+# encuentra qué mirar se ausenta, no inventa un rojo.
+semgrep_test_globs() {
+  [ -f "$1" ] || return 0
+  grep -o 'include:[^]]*]' "$1" 2>/dev/null \
+    | tr ',' '\n' \
+    | sed -n 's/.*"\([^"]*\)".*/\1/p' \
+    | sort -u
 }
 
 # gate_tests_untouched — el gate confía en el test suite; el test suite es un
@@ -1943,6 +1982,7 @@ gate_fresh_evidence() {
 gate_ship_preflight() {
   local v="$WS/tasks/$TASK/verdict-$REPO.json" vc kinds kind kind_flags=""
   echo "── preflight (sin lock): el veredicto se valida ANTES de retener nada ──"
+  gate_espacio_en_disco
   check_verdict
   gate_evidence
   vc="$(jq -r '.commit // ""' "$v" 2>/dev/null)"
@@ -2105,7 +2145,53 @@ fi
 # cuestan milisegundos, y el carril rojo es el retroceso más caro del pipeline
 # (escala de carril → vuelta a /rfc → re-planear → re-implementar). Descubrirlo
 # en el momento de máximo costo hundido era el peor orden posible.
+# ── "NO ES TU CÓDIGO, ES EL DISCO" ───────────────────────────────────
+# Caso de campo medido: un lote de 8 corridas de la misma suite dio 3 rojas con
+# el disco al 100 por ciento (56K libres de 193G). Dos ni llegaron a colectar el
+# archivo de test (los workers murieron por ENOSPC, 99 de 113 tests) y la
+# tercera falló un assert por contención. Con 29G libres, 16 corridas seguidas
+# salieron verdes.
+#
+# El daño no es la corrida perdida: es que un rojo por disco se lee IGUAL que un
+# defecto de código, así que manda al agente a arreglar lo que no está roto y le
+# quema rondas del presupuesto. Es el mismo patrón que el rojo por ceguera de
+# deploy-watch: una causa ambiental disfrazada de causa de código.
+#
+# Corre ANTES de los gates, no después: la gracia es no pagar la suite entera
+# para descubrir que el resultado no significaba nada. Es fail-CLOSED a
+# propósito (se niega a correr en vez de producir un resultado que no vale), y
+# el mensaje dice exactamente qué borrar. El umbral es configurable porque una
+# suite de Go con cachés y una de docs no necesitan lo mismo.
+gate_espacio_en_disco() {
+  local libre_kb min_gb libre_gb
+  min_gb="${HARNESS_MIN_FREE_GB:-2}"
+  case "$min_gb" in ''|*[!0-9]*) min_gb=2 ;; esac
+  [ "$min_gb" -gt 0 ] || return 0            # 0 = apagado explícito
+  # -P: formato POSIX de una sola línea (sin él, un punto de montaje largo
+  # parte la salida en dos y el awk lee la columna equivocada). BSD y GNU.
+  libre_kb="$(df -Pk "$WT" 2>/dev/null | awk 'NR==2 {print $4}')"
+  case "$libre_kb" in ''|*[!0-9]*) return 0 ;; esac   # sin df legible: no se inventa
+  libre_gb=$((libre_kb / 1024 / 1024))
+  [ "$libre_kb" -lt $((min_gb * 1024 * 1024)) ] || return 0
+  gate "espacio en disco"
+  echo "⛔ quedan ${libre_gb}G libres (mínimo ${min_gb}G): NO corro los gates."
+  echo "   NO ES TU CÓDIGO, ES EL DISCO. Con el disco lleno los workers de test"
+  echo "   mueren por ENOSPC y ni colectan los archivos: el rojo que verías no"
+  echo "   diría nada sobre el cambio, y arreglarlo te costaría rondas."
+  echo "   Medido: 3 de 8 corridas rojas con el disco al 100 por ciento; 16 de 16"
+  echo "   verdes con 29G libres, mismo código."
+  echo "   ↳ remediación, lo que más crece primero:"
+  echo "     du -sh \"$WS\"/.cache \"$WS\"/worktrees 2>/dev/null | sort -h"
+  echo "     scripts/worktree-task.sh --rm <task-id>   # worktrees ya shippeados"
+  echo "     docker system prune -a                    # si usás docker"
+  echo "   ↳ si de verdad querés correr así: HARNESS_MIN_FREE_GB=0 (y no confíes"
+  echo "     en el resultado)."
+  emit gate "gates de $REPO NO corridos: ${libre_gb}G libres de disco" false
+  exit 3
+}
+
 gate_entry_precheck() {
+  gate_espacio_en_disco
   local total
   total="$(git rev-list --count "origin/$BASE_REF..HEAD" 2>/dev/null || echo 0)"
   if [ "${total:-0}" -eq 0 ]; then

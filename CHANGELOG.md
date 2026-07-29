@@ -102,6 +102,26 @@ contra una instalación real).
   funcionando mientras el puntero esté.
 
 ### Fixed
+- **El callejón sin salida de `review → ship`: mecanismo completo, y ahora
+  también documentado y ejecutado por la suite.** Tres casos de campo
+  terminaron en la misma pregunta ("avancé la fase antes de tiempo, cómo
+  vuelvo"), y el mecanismo ya existía: `harness-policy.py rollback` deshace
+  hacia atrás con actor y motivo en el historial, y la transición la registra
+  `ship.sh` tras cada push, prosperando solo en el último repo por
+  `POLICY-SHIP-004`. Lo que faltaba era que se supiera y que tuviera diente.
+  (1) `docs/harness/policy.md`, que es EL doc del motor que se instala, no
+  mencionaba ni el rollback ni quién mueve la fase: quien lo leía encontraba
+  solo `transition`, que apunta hacia adelante, y concluía que no había vuelta.
+  De ahí sale "editá `state.json` a mano", que es justo lo que la constitución
+  prohíbe. Ahora documenta las dos cosas con sus códigos. (2)
+  `request_ship_phase` solo estaba cubierta por asserts de presencia de texto
+  en el template: podía romperse entera con la suite en verde. Ahora
+  `test_ship_gates.sh` la extrae y la ejecuta contra el `harness-policy.py`
+  real en sus cuatro ramas (faltan repos, último repo, fase ya avanzada, sin
+  estado), y muerde: devolverle el comportamiento viejo rompe cuatro
+  aserciones. (3) El paso 4 del prompt de `/ship` tenía dos redacciones de la
+  misma regla pegadas por una edición previa, con dos "Después:" colgando;
+  fusionadas, y ahora nombra el rollback como el rescate.
 - **El precheck avisa cuando la evidencia del repo no apunta al HEAD que está
   sellando.** Caso de campo, dos veces en la misma sesión: sello `ok:true`
   sobre el hijo con las únicas evidencias del repo apuntando al padre. El

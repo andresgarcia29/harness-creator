@@ -698,4 +698,23 @@ else
     "y el árbol equivocado que respondía"
 fi
 
+echo
+echo "── el doc del MOTOR enseña el camino de vuelta y quién mueve la fase"
+# Tres casos de campo distintos terminaron en la misma pregunta: "avancé la fase
+# antes de tiempo, cómo vuelvo". El mecanismo existe (harness-policy.py rollback,
+# y la transición review→ship la registra ship.sh solo), pero el doc que se
+# INSTALA con el motor no lo mencionaba: quien leía docs/harness/policy.md para
+# saber cómo se mueve una fase encontraba solo `transition`, que apunta hacia
+# adelante, y concluía que no había vuelta. De ahí sale "editá state.json a
+# mano", que es justo lo que la constitución prohíbe.
+pol="$(cat "$root/templates/docs/policy.md")"
+assert_contains "$pol" "harness-policy.py rollback" \
+  "policy.md nombra el comando que deshace un avance equivocado"
+assert_contains "$pol" "POLICY-ROLLBACK-003" \
+  "y su restricción: el rollback solo va hacia atrás"
+assert_contains "$pol" "POLICY-SHIP-004" \
+  "policy.md explica por qué la fase no avanza con repos sin shippear"
+assert_contains "$pol" "ship.sh" \
+  "y quién es el dueño de la transición review a ship"
+
 t_done

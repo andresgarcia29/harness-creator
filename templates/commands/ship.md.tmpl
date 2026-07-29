@@ -34,14 +34,14 @@ es correr los scripts y solo despertar en rojo.
 3. 🟢 → `scripts/worktree-task.sh --rm <task-id>` si ya no quedan
    tareas del repo, y consulta `bd ready`: ¿siguiente tarea del DAG?
 4. ¿Era la última tarea del ticket? → **la fase ya la registró `ship.sh`**: la
-   pide él tras cada push y solo prospera cuando `POLICY-SHIP-004` ve que
-   todos los repos con veredicto shippearon. No la pidas vos; si la ves en
-   `review` con todo shippeado, eso es un bug y hay que reportarlo (Ley 12).
-   Después:
-   Va DESPUÉS de que TODOS los repos hayan shippeado, no antes: `ship.sh`
-   exige `phase=review` y se corre una vez por repo, así que adelantarla
-   deja a los repos que faltan sin camino. `POLICY-SHIP-004` lo rechaza y
-   te dice cuáles faltan. Después:
+   pide él tras cada push, y va DESPUÉS de que TODOS los repos hayan
+   shippeado, no antes. `ship.sh` exige `phase=review` y se corre una vez por
+   repo, así que adelantarla deja a los repos que faltan sin camino;
+   `POLICY-SHIP-004` lo rechaza y te dice cuáles faltan. No la pidas vos; si
+   la ves en `review` con todo shippeado, eso es un bug y hay que reportarlo
+   (Ley 12). Si ya quedó adelantada, se corrige con
+   `scripts/harness-policy.py rollback tasks/<task-id> review --actor <vos>
+   --reason "<por qué>"`, nunca editando `state.json`. Después:
    `scripts/with-secrets.sh scripts/ticket-close.sh <TICKET> --status shipped`,
    luego `/archive <task-id>` (fusiona el delta-spec en las specs
    maestras — NO lo saltes: sin archive hay spec rot), y cierra con

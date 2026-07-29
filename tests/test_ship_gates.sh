@@ -1266,4 +1266,70 @@ assert_eq 2 "$rc" "productor real + entrega fuera del catálogo: ship se niega (
 assert_contains "$out" "no pude leer la entrega declarada" "con el rechazo honesto"
 assert_contains "$out" "POLICY-DELIVERY-001" "citando el código real del productor"
 
+echo
+echo "── request_ship_phase: quien mueve la fase es el PUSH, y se ejecuta de verdad"
+# Tres bugs de campo distintos nacieron de que la transicion review->ship la
+# pedia el orquestador: si se adelantaba, los repos que faltaban se quedaban sin
+# camino (validate-ship exige phase=review y no hay arista ship->review).
+# La solucion fue mover el dueno: la registra ship.sh tras cada push. Pero la
+# funcion solo estaba cubierta por asserts de PRESENCIA DE TEXTO en el template,
+# o sea que nadie la ejecutaba: podia romperse entera con la suite en verde.
+# Aca se extrae del template y se corre contra el harness-policy.py REAL.
+RSP_FN="$WS/rsp.sh"
+extract request_ship_phase > "$RSP_FN"
+grep -q 'POLICY-SHIP-004' "$RSP_FN" || fail "no pude extraer request_ship_phase del template"
+
+RWS="$WS/rsp-ws"; mkdir -p "$RWS/scripts" "$RWS/tasks/T1"
+cp "$ROOT/templates/scripts/harness-policy.py" "$RWS/scripts/"
+cat > "$RWS/harness-policy.json" <<'JSON'
+{"schema":1,
+ "workflow":{"initial_phase":"intake",
+   "phase_order":["intake","rfc","implement","review","ship","deploy","archive"],
+   "allowed_transitions":{"intake":["rfc"],"rfc":["implement"],"implement":["review"],
+     "review":["implement","ship"],"ship":["deploy"],"deploy":["archive"],"archive":[],"blocked":[]},
+   "lanes":{"express":{},"standard":{},"full":{}},
+   "lane_escalation":["express","standard","full"],
+   "allowed_pause_reasons":["enrichment_questions"]},
+ "limits":{"max_review_rounds":3},
+ "ship":{"require_independent_review":true}}
+JSON
+cat > "$RWS/tasks/T1/state.json" <<'JSON'
+{"schema":1,"task_id":"T1","phase":"review","lane":"full","review_rounds":1,
+ "budget_usd":null,"spent_usd":0.0,"repos":["svc","api"],
+ "history":[{"from":"implement","to":"review","actor":"orchestrator"}]}
+JSON
+mk_verdict_rsp() {  # mk_verdict_rsp <repo>
+  jq -n --arg r "$1" '{schema:1, task_id:"T1", repo:$r, commit:"aaa", reviewer:"rev",
+    implementation_agents:["impl"], verdict:"pass", qa:"pass", evidence:[],
+    blocking:[], non_blocking:[], docs_updated:true, compliance:[],
+    requirements_uncovered:0, snapshots_updated_justified:true}' > "$RWS/tasks/T1/verdict-$1.json"
+}
+corre_rsp() { ( WS="$RWS"; TASK=T1; . "$RSP_FN"; request_ship_phase 2>&1 ); }
+
+# (a) faltan repos por shippear: NO avanza, y lo dice como lo correcto
+mk_verdict_rsp svc; mk_verdict_rsp api
+printf '%s\n' '{"repo":"svc","sha":"aaa"}' > "$RWS/tasks/T1/ship.log"
+out="$(corre_rsp)"; rc=$?
+assert_eq 0 "$rc" "faltando un repo: fail-open, el push ya ocurrio (exit 0)"
+assert_contains "$out" "sigue en review" "y lo declara como lo CORRECTO, no como un fallo"
+assert_eq "review" "$(jq -r .phase "$RWS/tasks/T1/state.json")" "la fase no se movio"
+
+# (b) shippeo el ultimo repo: ahora si avanza, y queda en el estado
+printf '%s\n' '{"repo":"api","sha":"bbb"}' >> "$RWS/tasks/T1/ship.log"
+out="$(corre_rsp)"; rc=$?
+assert_eq 0 "$rc" "con todos los repos shippeados: exit 0"
+assert_contains "$out" "la registró el push" "y declara quien movio la fase"
+assert_eq "ship" "$(jq -r .phase "$RWS/tasks/T1/state.json")" "la fase avanzo a ship SOLA"
+
+# (c) segunda llamada sobre una fase ya avanzada: no la mueve ni miente
+out="$(corre_rsp)"; rc=$?
+assert_eq 0 "$rc" "re-invocada sobre una fase ya avanzada: exit 0"
+assert_contains "$out" "ya estaba avanzada" "y lo dice en vez de fingir que la movio"
+
+# (d) sin state.json no hay nada que registrar: muda y fail-open
+rm -f "$RWS/tasks/T1/state.json"
+out="$(corre_rsp)"; rc=$?
+assert_eq 0 "$rc" "sin state.json: exit 0 (fail-open, el push ya ocurrio)"
+assert_eq "" "$out" "y muda: no inventa un fallo donde no hay tarea"
+
 t_done

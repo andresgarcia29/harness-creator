@@ -415,6 +415,44 @@ class EvidenceTest(unittest.TestCase):
         result = self.verify(self.verdict(evidence_id))
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    # ── EL ÁRBOL SE MOVIÓ MIENTRAS CORRÍA ────────────────────────────────
+    # El chequeo de árbol limpio miraba solo ANTES de ejecutar, y esa ventana
+    # es justo la que importa: un worktree lo comparten varios agentes.
+    #
+    # Caso de campo: el reviewer hizo verificación por mutación (editar src/
+    # para ver un test ponerse rojo) mientras QA buildeaba sobre el MISMO
+    # árbol. El build absorbió el archivo mutado, el reviewer restauró, y para
+    # cuando se selló la evidencia el árbol estaba limpio otra vez: el sello
+    # certificaba un commit cuyo código no fue el que corrió, sin una sola
+    # señal. Lo cazó la diligencia de QA, no el harness.
+    def _run_mutating(self, command):
+        return subprocess.run(
+            ["python3", str(SCRIPT), "run", "--task-dir", str(self.task),
+             "--repo", "atlas", "--runner", "qa-atlas", "--kind", "test",
+             "--cwd", str(self.repo), "--", "sh", "-c", command],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+
+    def test_run_refuses_to_seal_when_the_tree_moved_during_the_command(self):
+        result = self._run_mutating("printf 'mutado\\n' >> README.md")
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn("ENSUCIÓ", result.stderr)
+        self.assertIn("otro agente", result.stderr)
+        self.assertIn("worktree add --detach", result.stderr)   # la remediación exacta
+        # y no queda un manifiesto sellando lo que no se puede afirmar
+        sealed = list((self.task / "evidence").glob("EV-*.json")) \
+            if (self.task / "evidence").is_dir() else []
+        self.assertEqual(sealed, [], "selló pese a que el árbol se movió")
+
+    def test_run_still_seals_when_the_command_only_touches_untracked(self):
+        # CONTRA-MITAD: sin esto, la guarda de arriba pasaría igual con un
+        # chequeo que rechace SIEMPRE. Un artefacto de build sin trackear no
+        # cambia lo que el commit contiene, y rechazar por eso sería inservible
+        # (es la misma razón por la que el chequeo previo usa -uno).
+        result = self._run_mutating("printf 'build\\n' > out.tmp")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("EVIDENCE_ID=", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

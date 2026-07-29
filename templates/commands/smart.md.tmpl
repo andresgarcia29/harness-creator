@@ -308,8 +308,11 @@ Reglas del ledger, en orden de precedencia:
    válidos, ejecuta `scripts/plan-lint.sh <id>` y
    `scripts/harness-policy.py validate-dag tasks/<id>/dag.json`, y
    solicita `rfc → implement` sólo si los dos quedan verdes.
-3. **Implement**. Un worktree por repo, un implementer por tarea.
-   `bd ready` manda: todo lo que el DAG no serializa va EN PARALELO.
+3. **Implement**. Un worktree por (tarea, repo), un implementer por tarea.
+   `bd ready` manda: todo lo que el DAG no serializa va EN PARALELO,
+   y el DAG serializa SIEMPRE las tareas que comparten repo, porque
+   comparten árbol, rama e index (`POLICY-DAG-010`). El paralelo que da
+   ganancia de reloj es el de repos distintos.
    **Contexto de arranque, completo y mínimo**: su entrada del plan, sus
    criterios, y el brief de `.cache/briefs/<repo>.md` — el implementer
    NO explora el repo desde cero; Serena cubre el nivel símbolo.

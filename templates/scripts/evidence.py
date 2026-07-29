@@ -368,6 +368,41 @@ def command_run(args: argparse.Namespace) -> int:
         contention["slot_wrapped"] = slot_wrapped
 
     after = git(cwd, "rev-parse", "HEAD")
+
+    # ── ¿SE MOVIÓ EL ÁRBOL MIENTRAS CORRÍA? ──────────────────────────────
+    # El chequeo de arriba mira el árbol ANTES de ejecutar, y eso deja abierta
+    # la ventana que importa: un worktree lo comparten varios agentes.
+    #
+    # Caso de campo: el reviewer hizo verificación por mutación (editar src/
+    # para comprobar que un test se pone rojo) sobre el MISMO árbol donde QA
+    # estaba buildeando en paralelo. El build absorbió el archivo mutado, el
+    # reviewer restauró, y para cuando se selló la evidencia el árbol volvía a
+    # estar limpio: el sello certificaba un commit cuyo código no fue el que
+    # corrió, y nada lo delataba. QA lo cazó por diligencia, no porque el
+    # harness se lo dijera.
+    #
+    # Fail-CLOSED, como su hermano de antes de correr: o sella o no sella,
+    # jamás degrada a un sello con asterisco. Un sello que miente sobre qué
+    # probó es peor que no tener sello.
+    dirty_after = git(cwd, "status", "--porcelain", "-uno")
+    if dirty_after:
+        print("EVIDENCE: el árbol se ENSUCIÓ mientras corría el comando:",
+              file=sys.stderr)
+        for line in dirty_after.splitlines()[:10]:
+            print(f"  {line}", file=sys.stderr)
+        print(
+            "\nEstaba limpio al empezar, así que alguien lo tocó DURANTE la\n"
+            "corrida: otro agente comparte este worktree. Lo que se ejecutó ya\n"
+            "no es lo que dice el commit, y sellarlo certificaría código que no\n"
+            "corrió (caso de campo: verificación por mutación del reviewer\n"
+            "mientras QA medía sobre el mismo árbol).\n"
+            "  ↳ remediación: re-corré cuando el árbol esté quieto. Si alguien\n"
+            "    necesita mutar para probar algo, que lo haga en un worktree\n"
+            "    descartable:\n"
+            "      git -C <worktree> worktree add --detach /tmp/sonda HEAD",
+            file=sys.stderr)
+        return 3
+
     manifest = {
         "schema": SCHEMA,
         "id": evidence_id,

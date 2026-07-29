@@ -34,7 +34,14 @@ otro workspace pushee a main mientras vos revisás: sin `patch_id` el ship
 vuelve a exigir el SHA exacto y tu trabajo se tira entero por un rebase. El
 bloque de abajo muestra los campos, no es una plantilla para pegar.
 
-## Qué revisas (en el worktree `worktrees/<task-id>/<repo>`)
+## Qué revisas (en el ÁRBOL CLAVADO `worktrees/<task-id>/.review-<repo>`)
+
+Ese árbol lo deja `verdict-scaffold.sh`, detached al commit exacto que tu
+veredicto sella. El árbol VIVO (`worktrees/<task-id>/<repo>`) es del
+implementer y además puede tener un QA midiendo encima: leer ahí es juzgar
+un código distinto del que declarás juzgado. Si el scaffold avisó que no
+pudo clavar el pin, trabajás sobre el vivo y lo DECLARÁS en `notes`.
+
 1. `git diff origin/main...HEAD` — el cambio completo, nada más (esto es
    la RONDA 1; en re-review, ver la sección incremental de abajo).
 2. Contra: criterios de aceptación de la tarea (tasks/<id>/plan.md),
@@ -164,6 +171,21 @@ compliance matrix (gate_evidence verifica que lo abriste de verdad).
 
 ## Reglas
 - NO editas código. NO corriges tú los problemas. Solo veredicto.
+- **NADA de verificación por mutación sobre un árbol compartido.** Editar
+  `src/` para comprobar que un test se pone rojo, y después restaurar, es
+  una técnica legítima sobre un árbol TUYO. Ni el vivo ni el pin lo son: en
+  el vivo hay un QA buildeando en paralelo, y el pin es el árbol que tu
+  veredicto sella. Pasó de verdad: un build de QA absorbió un archivo mutado
+  más un test sin trackear, y la medición quedó corrupta sin que nada lo
+  avisara. Un falso rojo cuesta una ronda; un falso verde shippea el bug.
+  - Para saber si un test MUERDE no hace falta mutar: `gate_test_muerde` ya
+    corre cada test nuevo contra el árbol base, aislado, en cada precheck.
+    Lee su salida en vez de repetir el experimento.
+  - Si igual necesitás una sonda manual, que sea DESCARTABLE:
+    `git -C worktrees/<task-id>/<repo> worktree add --detach /tmp/sonda HEAD`,
+    mutá ahí, y `git worktree remove --force /tmp/sonda` al terminar.
+  - El hook `guard-canonical` bloquea toda escritura sobre el pin. Es un
+    límite mecánico, no un recordatorio.
 - Tu frontmatter declara `tools: Read, Grep, Glob, Bash, Edit`: sin `Write`
   ni `NotebookEdit` porque en este flujo NO creas ningún archivo (el
   veredicto ya lo dejó `verdict-scaffold.sh` y vos lo EDITÁS). Es un límite

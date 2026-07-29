@@ -112,8 +112,12 @@ verifica y sin verde no hay implement):
 
 - `req` son IDs REALES del delta-spec (trazabilidad req → tarea → test;
   el reviewer arma su matriz con eso).
-- `archivos` es lo que justifica el paralelo: mismo repo con archivos
-  disjuntos = tareas PARALELAS. Sale del grafo y de las probes, no de
+- `archivos` es lo que justifica el paralelo, y el paralelo vive ENTRE
+  repos. **Dos tareas del mismo repo van en CADENA, aunque sus archivos
+  sean disjuntos**: el worktree es `worktrees/<task-id>/<repo>`, uno por
+  (tarea, repo), así que comparten árbol, rama e index de git, y en
+  paralelo se pisan los commits (pasó: un `git add` amplio se llevó seis
+  archivos de la tarea vecina). Sale del grafo y de las probes, no de
   una corazonada.
 - **Ancla por SÍMBOLO, jamás por número de línea** (`render.mjs:44` está
   prohibido y plan-lint lo rechaza): una tarea hermana que shippea
@@ -121,8 +125,10 @@ verifica y sin verde no hay implement):
   muertas. Nombra la función, la clase o la sección.
 - `criterios` binarios y ejercitables. Si no se puede escribir el test
   que lo prueba, no es un criterio.
-- `deps` solo por conflicto REAL (archivo compartido o dependencia de
-  contrato), jamás por repo.
+- `deps` por conflicto REAL (archivo compartido o dependencia de
+  contrato) **y siempre entre tareas del mismo repo**, que comparten
+  worktree. `POLICY-DAG-010` rechaza el plan que no las ordena, y
+  cualquiera de los dos órdenes sirve.
 - **Cero decisiones abiertas**: nada de TBD, "por definir" ni
   "investigar si". Lo que no decidiste tú, lo decide un implementer solo
   y a ciegas, y eso se paga en rondas.

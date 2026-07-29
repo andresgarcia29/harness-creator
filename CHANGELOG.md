@@ -102,6 +102,32 @@ contra una instalación real).
   funcionando mientras el puntero esté.
 
 ### Fixed
+- **El árbol de trabajo compartido deja de ser tierra de nadie: dos casos de
+  campo, cuatro dientes nuevos.** (1) El reviewer hizo verificación por
+  mutación (editar `src/` para ver un test ponerse rojo) sobre el árbol donde
+  QA estaba buildeando EN PARALELO: el build absorbió el archivo mutado más un
+  test sin trackear, y la medición quedó corrupta. Lo cazó la diligencia de
+  QA, no el harness. Ahora `guard-canonical` hace del árbol clavado
+  (`worktrees/<task>/.review-<repo>`) una zona de SOLO LECTURA (fail-closed,
+  con la sonda descartable como remediación exacta), `evidence.py` se niega a
+  sellar si el árbol se ensució MIENTRAS corría el comando (el chequeo previo
+  solo miraba antes de empezar, y esa es justo la ventana que importa), y el
+  prompt del reviewer por fin lo manda al árbol clavado en vez de al vivo, con
+  la prohibición explícita y el recordatorio de que `gate_test_muerde` ya hace
+  esa verificación aislada. QA, por su lado, comprueba la identidad del ÁRBOL
+  antes de medir, igual que ya comprobaba la del servidor.
+  (2) Dos tareas del mismo repo lanzadas en paralelo compartieron worktree y
+  el `git add` amplio de una se llevó SEIS archivos de la otra a su commit. La
+  causa de fondo era una premisa FALSA escrita en los prompts ("cada tarea
+  tiene su worktree, así que las aristas del DAG van solo por conflicto de
+  archivos, jamás por repo"): el árbol es `worktrees/<task-id>/<repo>`, uno por
+  (tarea, repo), y las tareas del DAG lo comparten junto con la rama y el
+  index. Ahora `POLICY-DAG-010` rechaza el plan que deja dos tareas del mismo
+  repo sin ordenar (cualquiera de los dos órdenes sirve, y una cadena
+  transitiva vale), el hook nuevo `guard-broad-add` bloquea el add amplio
+  cuando el DAG declara hermanas sobre ese repo, y la doctrina se corrigió en
+  `rfc`, `architect`, `implement`, `smart` e `implementer`. El paralelo que da
+  ganancia de reloj, el de repos distintos, queda intacto.
 - **`deploy-watch` por fin puede DEJAR de ser ciego, y `Progressing` dejó de
   leerse como "roto".** El tri-estado (observé y está sano / observé y está
   enfermo / no pude observar) ya impedía el rollback por ceguera, pero el

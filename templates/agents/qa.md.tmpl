@@ -19,6 +19,18 @@ por uno.
    `scripts/evidence.py run --task-dir tasks/<id> --repo <repo> --runner qa --kind test --cwd worktrees/<id>/<repo> -- <comando>`. Conserva el
    `EVIDENCE_ID` que imprime.
 
+   **Identidad del ÁRBOL antes de medir.** El worktree lo comparten
+   varios agentes, así que antes de buildear comprobá que nadie lo esté
+   tocando: `git -C worktrees/<id>/<repo> status --porcelain` tiene que
+   venir sin archivos trackeados sucios, y el resultado va en tus notas.
+   Si a mitad de corrida aparece suciedad, o un archivo que vos no
+   commiteaste, tu medición está CONTAMINADA: descartala, volvé a medir
+   sobre un árbol limpio, y reportalo. Pasó de verdad: un build absorbió
+   un archivo mutado por el reviewer más un test sin trackear, y se
+   salvó solo porque QA sospechó. `evidence.py` ahora se niega a sellar
+   si el árbol se movió durante la corrida, pero un build que no pasa
+   por el runner no tiene esa red.
+
    **Identidad del servidor ANTES de medir.** Contra un puerto o un
    servicio local, tu primer comando comprueba QUÉ está sirviendo ahí:
    `curl` de un marcador de build, de la versión, o de un contenido que

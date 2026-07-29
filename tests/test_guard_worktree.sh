@@ -73,4 +73,47 @@ assert_eq 0 "$(printf '%s' '{}' | CLAUDE_PROJECT_DIR="$WS" bash "$HOOK" >/dev/nu
 assert_eq 0 "$(printf '%s' 'no soy json' | CLAUDE_PROJECT_DIR="$WS" bash "$HOOK" >/dev/null 2>&1; echo $?)" "payload corrupto: pasa"
 assert_eq 0 "$(printf '' | CLAUDE_PROJECT_DIR="$WS" bash "$HOOK" >/dev/null 2>&1; echo $?)" "payload vacío: pasa"
 
+echo
+echo "── el ÁRBOL CLAVADO es de solo lectura (guard-canonical, fail-CLOSED)"
+# guard-worktree coordina entre sesiones, pero reviewer, QA e implementer
+# lanzados como subagentes de la MISMA sesión comparten session_id: el claim se
+# refresca y pasan los tres. Ahí no hay guarda.
+#
+# Caso de campo: el reviewer hizo verificación por mutación (editar src/ para
+# comprobar que un test se pone rojo) sobre el árbol que QA medía EN PARALELO.
+# El build de QA absorbió el archivo mutado y un test sin trackear, y la
+# medición quedó corrupta. QA lo cazó por diligencia, no porque algo se lo
+# avisara. Un falso rojo cuesta una ronda; un falso verde shippea el bug.
+#
+# El pin worktrees/<task>/.review-<repo> es además el árbol que el veredicto
+# SELLA: mutarlo es juzgar un código distinto del que se declara juzgado.
+CANON="$ROOT/templates/hooks/guard-canonical.sh"
+mkdir -p "$WS/worktrees/T1/.review-videocore/src"
+canon_rc() {  # canon_rc <path> → exit code, stderr en $WS/canon.err
+  printf '{"tool_input":{"file_path":"%s"}}' "$1" \
+    | CLAUDE_PROJECT_DIR="$WS" bash "$CANON" 2>"$WS/canon.err" >/dev/null
+  echo $?
+}
+assert_eq 2 "$(canon_rc "$WS/worktrees/T1/.review-videocore/src/app.ts")" \
+  "escribir en el árbol clavado: BLOQUEADO"
+canon_err="$(cat "$WS/canon.err")"
+assert_contains "$canon_err" "SOLO LECTURA" "el mensaje nombra la ley"
+assert_contains "$canon_err" "QA midiendo" "y por qué importa (hay alguien midiendo al lado)"
+assert_contains "$canon_err" "gate_test_muerde" "y dice que la mutación ya se hace mecánicamente"
+assert_contains "$canon_err" "worktree add --detach" "con la sonda descartable como alternativa exacta"
+
+# LA LEY NO SE DERRAMA: el árbol vivo es del implementer y ahí sí se escribe.
+# Un guard que bloquea de más es un guard que alguien desactiva.
+assert_eq 0 "$(canon_rc "$WS/worktrees/T1/videocore/src/app.ts")" \
+  "el árbol VIVO sigue siendo escribible (es del implementer)"
+assert_eq 2 "$(canon_rc "$WS/repos/videocore/src/app.ts")" \
+  "y el clon canónico sigue bloqueado (Ley 4 intacta)"
+
+# Sin jq el hook es fail-CLOSED, y el pin tiene que entrar en esa red.
+NOJQ2="$(t_path_without jq)"
+printf '{"tool_input":{"file_path":"%s"}}' "$WS/worktrees/T1/.review-videocore/x.ts" \
+  | PATH="$NOJQ2" CLAUDE_PROJECT_DIR="$WS" bash "$CANON" >/dev/null 2>&1
+[ $? -eq 2 ] && pass "sin jq: el pin también se bloquea por precaución" \
+  || fail "sin jq el pin quedaba desprotegido"
+
 t_done

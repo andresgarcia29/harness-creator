@@ -30,7 +30,11 @@ Implementación de $ARGUMENTS según tasks/<task-id>/plan.md.
    mínimo y completo: task-id, repo, su worktree, su entrada del plan,
    sus criterios de aceptación y el brief (`.cache/briefs/<repo>.md`).
    Con eso el implementer NO explora el repo desde cero — Serena cubre
-   el nivel símbolo. Tareas sin dependencia entre sí: EN PARALELO.
+   el nivel símbolo. Tareas sin dependencia entre sí: EN PARALELO,
+   pero **solo entre repos distintos**. Dos tareas del mismo repo
+   comparten `worktrees/<task-id>/<repo>`, la rama y el index, así que
+   van en serie (la segunda arranca cuando la primera commiteó y pasó
+   precheck). `POLICY-DAG-010` exige que el plan ya venga ordenado.
    **Y va en su contexto, no solo acá: el test tiene que FALLAR sin el fix
    (rojo primero).** `gate_test_muerde` corre cada test nuevo contra el árbol
    base en el precheck, y un test que pasa en los dos árboles es un rojo tuyo:

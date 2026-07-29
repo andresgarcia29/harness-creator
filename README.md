@@ -188,8 +188,14 @@ mi-workspace/
 │   ├── hooks/                ← block-direct-push, guard-canonical, guard-worktree
 │   │                           (leyes con dientes) + track-read, ui-emit,
 │   │                           session-summary (observadores, fail-open)
-│   ├── skills/               ← skill-creator (la guía) + las skills que el
-│   │                           skill-miner extrae de tus procedimientos repetidos
+│   ├── skills/               ← skill-creator (la guía) + custom-build-skill y
+│   │                           custom-edit-skill (crear y cambiar skills desde
+│   │                           un pedido en prosa) + custom-build-rule y
+│   │                           custom-edit-rule (las leyes propias de tu
+│   │                           workspace) + las que el skill-miner extrae de
+│   │                           tus procedimientos repetidos
+│   ├── rules/                ← tus reglas custom: una ley por archivo, con su
+│   │                           diente declarado (el doctor lo verifica)
 │   └── settings.json         ← hooks registrados + denials (kubectl apply, terraform apply)
 ├── docs/
 │   ├── constitution.md       ← principios innegociables, inyectados a TODOS los agentes
@@ -870,7 +876,9 @@ templates/         todo lo que se genera:
   │                forge (github|gitlab) · tickets (linear|github)
   │                plan-lint · worktree · repo-brief · stamp-models · secrets · with-secrets
   │                quiet · deploy-watch · tickets
-  ├── skills/      skill-creator (guía para extraer y crear skills de instancia)
+  ├── skills/      skill-creator (guía) · custom-build-skill · custom-edit-skill
+  │                custom-build-rule · custom-edit-rule
+  │                pipeline-step-creator · harness-bug-report
   ├── hooks/       block-direct-push · guard-canonical · guard-worktree (fail-closed: bloquean)
   │                track-read · ui-emit · session-summary (fail-open: observan)
   ├── ui/          server.py · pricing.json · web/ (fuente React) · dist/ (build vendorizado)

@@ -405,6 +405,60 @@ assert_eq "1" "$( cd "$WS/worktrees/T15/svc" && git worktree list | grep -c . )"
 rm -f "$WS/bin/pytest"
 
 echo
+echo "── el precheck avisa si la evidencia del repo NO apunta al HEAD que sella"
+# Caso de campo, dos veces en la misma sesion: el precheck sello ok:true sobre
+# el hijo mientras las UNICAS evidencias del repo apuntaban al padre. El
+# desalineamiento lo cazaba recien verdict-scaffold.sh, o sea despues de lanzar
+# la ronda de review: la ronda ya estaba pagada.
+#
+# Es un OBSERVADOR, no un gate: avisa y sigue verde. Convertirlo en rojo seria
+# la mitad simetrica del defecto que este mismo archivo ya rechazo (un repo sin
+# stack no puede sellar en HEAD y es legitimo), y ademas tras un rebase puro la
+# evidencia vieja SIGUE siendo valida por patch_id.
+stub_gitleaks 'exit 0'
+mkdir -p "$WS/tasks/T1/evidence"
+VIEJO="$( cd "$WS/worktrees/T1/svc" && git rev-parse HEAD )"
+mk_ev_precheck() {  # mk_ev_precheck <id> <commit> <patch_id>
+  printf 'salida\n' > "$WS/tasks/T1/evidence/$1.log"
+  local h; h="$(shasum -a 256 "$WS/tasks/T1/evidence/$1.log" | cut -d' ' -f1)"
+  jq -n --arg id "$1" --arg c "$2" --arg p "$3" --arg h "$h" \
+    '{schema:1, id:$id, task_id:"T1", repo:"svc", kind:"test", runner:"impl-svc",
+      commit:$c, commit_after:$c, exit_code:0, patch_id:$p,
+      output:("evidence/"+$id+".log"), output_sha256:$h}' \
+    > "$WS/tasks/T1/evidence/$1.json"
+}
+mk_ev_precheck EV-TEST-viejo0000001 "$VIEJO" "PID-VIEJO"
+# HEAD se mueve: la evidencia de arriba queda apuntando al padre
+( cd "$WS/worktrees/T1/svc"; echo mas > otro.txt; git add .
+  git commit -qm "feat 2
+
+Task: T1" )
+out="$(run_precheck)"; rc=$?
+assert_eq 0 "$rc" "es un aviso, no un rojo: el precheck sigue en verde"
+assert_contains "$(cat "$WS/tasks/T1/precheck-svc.json")" '"ok":true' "y el sello sigue verde"
+assert_contains "$out" "NO apuntan al HEAD" "pero DICE que la evidencia quedo atras"
+assert_contains "$out" "evidence.py run" "con la misma remediacion que da el scaffold"
+
+# CONTRA-MITAD 1: con una evidencia en el HEAD sellado, el aviso NO aparece.
+# Sin esto, un aviso que se imprime siempre pasaria el bloque de arriba.
+NUEVO="$( cd "$WS/worktrees/T1/svc" && git rev-parse HEAD )"
+mk_ev_precheck EV-TEST-nuevo0000001 "$NUEVO" "PID-NUEVO"
+out="$(run_precheck)"
+assert_not_contains "$out" "NO apuntan al HEAD" "con evidencia en el HEAD: sin aviso"
+
+# CONTRA-MITAD 2: el rebase puro no es desalineamiento. Si el patch_id de la
+# evidencia es el del cambio actual, es la MISMA evidencia sobre otra base y
+# avisar seria una falsa alarma. Espeja la equivalencia de verdict-scaffold.sh.
+rm -f "$WS/tasks/T1/evidence/EV-TEST-nuevo0000001.json"
+PID_ACTUAL="$(bash "$WS/scripts/change-id.sh" "$WS/worktrees/T1/svc" main 2>/dev/null || echo '')"
+[ -n "$PID_ACTUAL" ] && pass "change-id.sh resuelve el patch_id del worktree (si no, el caso seria vacuo)" \
+  || fail "no pude calcular el patch_id: la contra-mitad del rebase no probaria nada"
+mk_ev_precheck EV-TEST-rebase000001 "0000000000000000000000000000000000000000" "$PID_ACTUAL"
+out="$(run_precheck)"
+assert_not_contains "$out" "NO apuntan al HEAD" "rebase puro (mismo patch_id): sin falsa alarma"
+rm -f "$WS/tasks/T1"/evidence/EV-*.json "$WS/tasks/T1"/evidence/EV-*.log
+
+echo
 echo "── el reviewer no fabrica el veredicto que no existe"
 # Lanzado a mano sin verdict-scaffold.sh, el reviewer no tiene camino para
 # crear el archivo (su frontmatter no trae Write), así que el modo de fallo es

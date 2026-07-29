@@ -335,4 +335,51 @@ case "$ship_tmpl" in
     echo "    es que la mitad del contrato (el gate) sigue sin existir." ;;
 esac
 
+echo
+echo "── el árbol compartido: cada regla nueva tiene su diente y su prompt"
+# Dos bugs de campo por lo mismo: agentes concurrentes sobre un árbol mutable.
+# (1) el reviewer mutó src/ para verificar mientras QA medía sobre ese árbol;
+# (2) dos implementers del mismo repo compartieron worktree y el `git add`
+# amplio de uno se llevó seis archivos del otro. Acá se ata cada prosa a su
+# mecanismo: una regla que solo vive en el prompt se erosiona sin que nadie
+# lo note, y un mecanismo que ningún prompt explica se lee como un bug.
+
+rev="$(cat "$root/templates/agents/reviewer.md.tmpl")"
+assert_contains "$rev" ".review-" \
+  "el reviewer trabaja sobre el ÁRBOL CLAVADO, y su prompt lo nombra"
+assert_contains "$rev" "verificación por mutación" \
+  "y tiene prohibida la mutación sobre árboles compartidos"
+assert_contains "$rev" "gate_test_muerde" \
+  "con la alternativa que YA existe y corre aislada"
+assert_contains "$rev" "worktree add --detach" \
+  "y la sonda descartable para cuando de verdad haga falta"
+assert_contains "$(cat "$root/templates/hooks/guard-canonical.sh")" ".review-" \
+  "y el hook lo hace cumplir (la prosa sola no frena a nadie)"
+
+qa="$(cat "$root/templates/agents/qa.md.tmpl")"
+assert_contains "$qa" "status --porcelain" \
+  "QA comprueba la identidad del ÁRBOL antes de medir"
+assert_contains "$qa" "CONTAMINADA" \
+  "y sabe qué hacer si aparece suciedad a mitad de corrida"
+
+impl="$(cat "$root/templates/agents/implementer.md.tmpl")"
+assert_contains "$impl" "git add -A" \
+  "el implementer tiene prohibido el add amplio"
+assert_contains "$impl" "guard-broad-add" \
+  "y sabe que hay un hook que lo bloquea"
+assert_contains "$(cat "$root/templates/settings.json.tmpl")" "guard-broad-add.sh" \
+  "que está registrado de verdad (si no, es un hook que nunca corre)"
+
+# La premisa FALSA que originó el bug: 'cada tarea tiene su worktree'.
+rfc="$(cat "$root/templates/commands/rfc.md.tmpl")"
+assert_not_contains "$rfc" "cada tarea tiene su worktree" \
+  "rfc.md ya no afirma la premisa falsa que justificaba el paralelo intra-repo"
+assert_contains "$rfc" "POLICY-DAG-010" \
+  "y cita el gate que rechaza el plan sin ordenar"
+arch="$(cat "$root/templates/agents/architect.md.tmpl")"
+assert_contains "$arch" "POLICY-DAG-010" \
+  "el architect, que es quien escribe el DAG, también lo cita"
+assert_contains "$(cat "$root/templates/scripts/harness-policy.py")" "POLICY-DAG-010" \
+  "y el código lo implementa de verdad"
+
 t_done

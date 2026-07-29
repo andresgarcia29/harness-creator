@@ -110,7 +110,18 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
      pipeline-steps,py,fe,archived-repos,mark-read,verdict-beads,ship-wave,
      port-forwards,instance-ship}.sh,
      scripts/{harness-policy,evidence}.py, `harness-policy.json`,
-     hooks, y **el panel**:
+     **los hooks Y el archivo que los cablea**, que van JUNTOS o el update
+     entrega un hook que nunca corre:
+     `.claude/hooks/{block-direct-push,guard-canonical,guard-worktree,
+     guard-build-slot,guard-ws-scripts,guard-broad-add,track-read,ui-emit,
+     on-compact,session-summary}.sh` más `.claude/settings.json`, que es
+     el que los registra en sus matchers. Un hook nuevo copiado sin
+     re-generar `settings.json` llega al disco y no lo invoca nadie: es
+     una protección que el humano cree tener y no tiene. `settings.json`
+     es propiedad del plugin (hooks + denials read-only): se re-instancia
+     entero desde el template, y si la instancia le agregó hooks propios,
+     eso se resuelve como `.new` con el humano igual que el resto.
+     Y **el panel**:
      `scripts/ui/{panel.sh,server.py,pricing.json,dist/}`): upstream gana por
      default — re-instancia con las respuestas del answers y propón el
      archivo completo. Un parche local aquí casi siempre fue un fix que
@@ -154,6 +165,16 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
      actualizan con el plugin; las `.managed` son de skills-sync (ni las
      toques: `make skills` las gobierna); el RESTO de `.claude/skills/`
      es ley local intocable. `skills.yaml` es ley local (jamás se pisa).
+     Las upstream de HOY son siete, y se enumeran para que una nueva no se
+     cuele sin clasificar: `skill-creator`, `pipeline-step-creator`,
+     `harness-bug-report`, `custom-build-skill`, `custom-edit-skill`,
+     `custom-build-rule` y `custom-edit-rule`. Las cuatro últimas son nuevas
+     y van en DOS paquetes atados (paso 4: **skills-custom** y
+     **reglas-custom**). Las dos de skills van JUNTAS porque:
+     custom-edit-skill manda a custom-build-skill cuando la skill pedida no
+     existe, y custom-build-skill manda a custom-edit-skill ante una colisión
+     de nombre, así que instalar una sola deja punteros a un comando que la
+     instancia no tiene.
    - **Propiedad de la instancia** (harness-answers, models.yaml,
      CLAUDE.md, constituciones, specs, docs): lo local gana — es ley
      del proyecto; si choca con un cambio upstream, muestra ambos y
@@ -199,6 +220,30 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
      algo hacia afuera, y si no lo quiere se cambia a `off`).
      La ley sin el script manda a los agentes a un comando que no existe, y
      el script sin la skill reporta sin verificar.
+   - **Skills-custom**: `.claude/skills/custom-build-skill/SKILL.md` +
+     `.claude/skills/custom-edit-skill/SKILL.md` (las dos NUEVAS). Se
+     aceptan o se rechazan juntas porque cada una manda a la otra: la de
+     edición deriva a la de creación cuando la skill buscada no existe, y la
+     de creación deriva a la de edición ante una colisión de nombre. A
+     medias, el agente sigue un puntero a un comando que no está y el humano
+     se queda sin salida en el momento exacto en que la necesita.
+     Ninguna de las dos toca `.claude/skills/` local ni `skills.yaml`: lo que
+     generan nace en la capa local, que es de la instancia.
+   - **Reglas-custom**: `.claude/skills/custom-build-rule/SKILL.md` +
+     `.claude/skills/custom-edit-rule/SKILL.md` + `.claude/rules/.gitkeep` +
+     `docs/harness/rules.md` + `scripts/doctor.sh` + la sección **§7** de
+     `docs/constitution.md`. Las reglas custom son leyes propias del workspace
+     que viven en `.claude/rules/<id>.md` con su diente declarado
+     (`enforcement` + `enforced_by`), y el paquete se acepta entero porque cada
+     pieza sostiene a la otra: sin el doctor nuevo nadie valida el contrato y
+     una regla puede apuntar a un verificador inexistente (que es peor que no
+     tener regla: se cita en los reviews como si tuviera diente); sin
+     `docs/harness/rules.md` el contrato es memoria del agente que la escribió;
+     y sin el §7 de la constitución las reglas no llegan a ningún agente,
+     porque ese puntero de una línea es lo único que las hace visibles.
+     OJO con la constitución: es **propiedad de la instancia**, así que el §7
+     se AÑADE (merge), jamás se regenera el archivo, y `.claude/rules/` con
+     contenido es intocable como `.claude/pipeline/`.
    - **Veredicto-sobrevive-al-rebase**: `scripts/change-id.sh` (NUEVO, hay que
      crearlo) + `scripts/harness-policy.py` + `scripts/evidence.py` +
      `scripts/verdict-scaffold.sh` + `scripts/ship.sh` + `harness-policy.json`

@@ -74,6 +74,13 @@ heredas conversaciones.
   un lockfile inventado y un CI roto). Ese lockfile solo lo genera una
   máquina con acceso real al registry: CI, o el humano. Si te falta el
   token, repórtalo como bloqueo; no lo escribas a mano.
+- **`git add -A` / `git add .` / `git add -u` / `git commit -a` en tu
+  worktree.** El árbol es `worktrees/<task-id>/<repo>`, o sea UNO por
+  (tarea, repo): si el DAG tiene otra tarea del mismo repo, comparten
+  árbol, rama e index, y un add amplio se lleva los archivos de tu
+  vecina a TU commit (pasó: seis archivos, atribución mezclada).
+  Mirá qué es tuyo con `git status --porcelain` y agregá POR NOMBRE.
+  El hook `guard-broad-add` lo bloquea cuando hay hermanas en el DAG.
 - Cambiar contratos proto sin que el plan lo autorice.
 - Editar docs/ transversal salvo que tu tarea lo incluya.
 - "Mejorar" código fuera del scope de la tarea.

@@ -1,0 +1,64 @@
+# Reglas custom del workspace
+
+Una regla custom es una ley propia de {{PROJECT_NAME}} que los agentes deben
+seguir y que no viene con el harness: cómo se nombran los proyectos en el
+tracker, dónde vive un bug, qué se puede desplegar un viernes. Vive en
+`.claude/rules/<id>.md`, es **de la instancia** (ni el update del plugin ni
+`make skills` la tocan), y se crea con `/custom-build-rule` o se cambia con
+`/custom-edit-rule`.
+
+Una regla NO es: un check mecánico sobre código (eso es `semgrep/rules.yaml`),
+una decisión de arquitectura con alternativas (eso es un ADR), un paso que
+corre tras una fase (eso es `.claude/pipeline/`, ver `pipeline-steps.md`), ni
+una ley del flujo del harness (eso es `harness-policy.json`).
+
+## El contrato
+
+```markdown
+---
+id: linear-proyecto-por-servicio    # OBLIGATORIO, igual al nombre del archivo
+applies_to: workspace               # workspace | <repo> | agente:<nombre>
+enforcement: pipeline-step          # judgment|semgrep|hook|gate|pipeline-step|doctor|cronjob
+enforced_by: .claude/pipeline/linear-sync.md   # OBLIGATORIO salvo judgment
+needs_mcp: linear-server            # opcional; el doctor exige esa clave en .mcp.json
+status: DRAFT                       # DRAFT | RATIFICADA (la ratifica un humano)
+source: linear:PLATAFORMA · manifest.yaml      # la evidencia que la originó
+---
+# <la regla en UNA línea imperativa>
+
+## Qué exige
+## Por qué (evidencia)
+## Cómo se verifica
+## Excepciones
+```
+
+`enforcement` declara CON QUÉ DIENTE se cumple, y es lo que separa una ley de
+un párrafo:
+
+| valor | quién la hace cumplir |
+|---|---|
+| `judgment` | nadie automático: la citan los agentes (reviewer, abogados) al deliberar |
+| `semgrep` | una regla de `semgrep/rules.yaml`; `enforced_by` va como `semgrep/rules.yaml:<rule-id>` |
+| `hook` | un hook de `.claude/hooks/` registrado en settings.json (bloquea la acción) |
+| `gate` | un gate de `scripts/ship.sh` o un script propio que corre ahí |
+| `pipeline-step` | un playbook de `.claude/pipeline/` (ver `pipeline-steps.md`) |
+| `doctor` | un check de `scripts/doctor.sh` |
+| `cronjob` | un job del repo de cronjobs que la audita y abre PR o issue |
+
+## Qué verifica el doctor
+
+`make doctor` valida lo mecánico, cero opinión: que el `id` sea el nombre del
+archivo, que `enforcement` esté en la lista cerrada, que el `enforced_by`
+EXISTA de verdad (y, en semgrep, que el rule-id esté dentro del archivo), y que
+el `needs_mcp` esté en `.mcp.json`. Una regla en `status: DRAFT` sale como
+advertencia permanente: no es ley hasta que un humano la ratifique.
+
+Lo que el doctor no hace es juzgar si la regla es buena. Eso es humano, igual
+que la constitución.
+
+## Cómo llega a los agentes
+
+El archivo es la fuente de verdad; lo que la hace visible es el puntero de una
+línea en `docs/constitution.md` §7 (que se inyecta a TODOS los agentes) para
+las de `applies_to: workspace`, o en el agente o repo correspondiente cuando el
+alcance es más chico. Una regla sin puntero es un archivo que nadie lee.

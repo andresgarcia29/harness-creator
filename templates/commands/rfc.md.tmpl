@@ -85,12 +85,15 @@ tasks/$ARGUMENTS/task.md).
    usa la escalación de models.yaml), forecast de tamaño de review
    (presupuesto ~400 líneas/PR; si excede, rebana en tareas
    entregables), y tareas de docs (ADR + doc de servicio) si cambia
-   comportamiento o contrato. **Aristas del DAG solo por conflicto
-   REAL** (archivos compartidos o dependencia de contrato), no por
-   repo: cada tarea tiene su worktree y el lock de ship serializa el
-   push, no el desarrollo; el plan declara los ARCHIVOS por tarea para
-   justificar el paralelo (medido: 8 tareas en fila del mismo repo con
-   archivos disjuntos = el mayor costo de reloj de la sesión). **Si una
+   comportamiento o contrato. **Aristas del DAG por conflicto REAL**
+   (archivos compartidos o dependencia de contrato) **y SIEMPRE entre
+   tareas del mismo repo**: el worktree es `worktrees/<task-id>/<repo>`,
+   o sea UNO por (tarea, repo), así que dos tareas del mismo repo
+   comparten árbol, rama e index de git y en paralelo se pisan los
+   commits (pasó: un `git add` amplio se llevó seis archivos de la tarea
+   vecina). `POLICY-DAG-010` lo rechaza, y cualquiera de los dos órdenes
+   sirve. El paralelo que da ganancia de reloj vive ENTRE repos; el plan
+   declara los ARCHIVOS por tarea para justificarlo. **Si una
    tarea toca tests**, la entrada MODIFIED/REMOVED del delta-spec
    NOMBRA los archivos de test afectados: gate_tests_untouched exige
    esa declaración por archivo.

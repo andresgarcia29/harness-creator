@@ -655,13 +655,20 @@ class PolicyTest(unittest.TestCase):
     # ── dag-order: el orden de shipping por fin EJECUTABLE ──
 
     def test_dag_order_topological_dedup_last_occurrence(self):
-        # atlas tiene T1 (independiente) y T3 (depende de T2 de proto): la ola
-        # hace UN ship por repo, así que atlas va DESPUÉS de proto (última
+        # atlas tiene T1 y T3 (que además depende de T2 de proto): la ola hace
+        # UN ship por repo, así que atlas va DESPUÉS de proto (última
         # aparición; posicionarlo en T1 aterrizaría T3 antes que su dependencia)
+        #
+        # T3 depende TAMBIÉN de T1 porque las dos son del mismo repo y por lo
+        # tanto comparten worktree, rama e index: POLICY-DAG-010 exige que el
+        # plan las ordene. Este fixture nació antes de esa regla y describía un
+        # plan que hoy es ilegal; el orden explícito no cambia lo que el test
+        # mide (proto antes que atlas), solo lo hace un plan que se puede
+        # ejecutar sin que dos implementers se pisen.
         self.mk_dag_items([
             {"id": "T1", "repo": "atlas", "depends_on": []},
             {"id": "T2", "repo": "proto", "depends_on": []},
-            {"id": "T3", "repo": "atlas", "depends_on": ["T2"]},
+            {"id": "T3", "repo": "atlas", "depends_on": ["T2", "T1"]},
         ])
         result = self.run_policy("dag-order", self.task)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1108,6 +1115,73 @@ class PolicyTest(unittest.TestCase):
         ]}))
         cycle = self.run_policy("validate-dag", dag)
         self.assertIn("POLICY-DAG-007", cycle.stderr)
+
+    # ── DOS TAREAS DEL MISMO REPO NO PUEDEN IR EN PARALELO ────────────────
+    # La doctrina decía "aristas solo por conflicto REAL de archivos, jamás por
+    # repo, porque cada tarea tiene su worktree". Esa premisa es FALSA:
+    # worktree-task.sh crea worktrees/<task-id>/<repo>, o sea UNO por (tarea,
+    # repo), y todas las tareas del DAG lo comparten junto con la rama y el
+    # index. Caso de campo: dos tareas del mismo repo en vuelo a la vez, y el
+    # `git add` amplio de una se llevó SEIS archivos de la otra a su commit.
+    def _dag(self, tasks):
+        dag = self.task / "dag.json"
+        dag.write_text(json.dumps({"schema": 1, "tasks": tasks}))
+        return dag
+
+    def test_dag_refuses_two_unordered_tasks_on_the_same_repo(self):
+        dag = self._dag([
+            {"id": "T3", "repo": "acme", "depends_on": []},
+            {"id": "T12", "repo": "acme", "depends_on": []},
+        ])
+        result = self.run_policy("validate-dag", dag)
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("POLICY-DAG-010", result.stderr)
+        self.assertIn("acme", result.stderr)          # nombra el repo
+        self.assertIn("T3", result.stderr)            # y las dos tareas
+        self.assertIn("T12", result.stderr)
+        self.assertIn("depends_on", result.stderr)    # con la remediación exacta
+
+    def test_dag_accepts_the_same_repo_when_an_edge_orders_them(self):
+        # CONTRA-MITAD: cualquiera de los dos órdenes sirve. Sin esto, la regla
+        # de arriba pasaría igual con un chequeo que prohíba repetir repo, que
+        # sería inservible (una tarea de 3 pasos sobre un repo es lo normal).
+        dag = self._dag([
+            {"id": "T3", "repo": "acme", "depends_on": []},
+            {"id": "T12", "repo": "acme", "depends_on": ["T3"]},
+        ])
+        self.assertEqual(self.run_policy("validate-dag", dag).returncode, 0)
+
+    def test_dag_accepts_a_transitive_chain_on_the_same_repo(self):
+        # El orden puede ser INDIRECTO: T1 → T2 → T3 serializa T1 y T3 aunque
+        # no se nombren entre sí. Exigir arista directa forzaría a escribir un
+        # DAG completo en vez de una cadena.
+        dag = self._dag([
+            {"id": "T1", "repo": "acme", "depends_on": []},
+            {"id": "T2", "repo": "acme", "depends_on": ["T1"]},
+            {"id": "T3", "repo": "acme", "depends_on": ["T2"]},
+        ])
+        self.assertEqual(self.run_policy("validate-dag", dag).returncode, 0)
+
+    def test_dag_still_allows_parallel_across_different_repos(self):
+        # El paralelo entre REPOS distintos es el que da la ganancia de reloj y
+        # no toca ningún árbol compartido: intacto.
+        dag = self._dag([
+            {"id": "T1", "repo": "acme", "depends_on": []},
+            {"id": "T2", "repo": "example-org", "depends_on": []},
+            {"id": "T3", "repo": "svc-pagos", "depends_on": []},
+        ])
+        self.assertEqual(self.run_policy("validate-dag", dag).returncode, 0)
+
+    def test_dag_order_applies_the_same_rule(self):
+        # dag-order comparte load_dag_nodes con validate-dag a propósito: dos
+        # validadores del mismo artefacto es una oportunidad de divergir.
+        self.mk_dag_items([
+            {"id": "T3", "repo": "acme", "depends_on": []},
+            {"id": "T12", "repo": "acme", "depends_on": []},
+        ])
+        result = self.run_policy("dag-order", self.task)
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("POLICY-DAG-010", result.stderr)
 
 
 if __name__ == "__main__":

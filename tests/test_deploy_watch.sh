@@ -485,4 +485,123 @@ assert_eq "$stale_head" "$( cd "$WS/repos/stale" && git rev-parse HEAD )" \
 assert_eq "" "$( cd "$WS/repos/stale" && git status --porcelain )" \
   "ni lo dejo sucio (antes hacia reset --hard sobre un recurso compartido)"
 
+echo
+echo "── SALIR de la ceguera: el contrato de env que los CLIs leen de verdad"
+# El tri-estado ya impide el rollback por ceguera (arriba), pero el watcher no
+# tenia forma de DEJAR de estar ciego: argocd_cli_ready exigia ARGOCD_URL, una
+# variable que el CLI de argocd no lee (lee ARGOCD_SERVER, host SIN esquema) y
+# que nada del harness provee. O sea: el respaldo por CLI era codigo muerto, y
+# la ceguera era el estado normal, no la excepcion.
+extract_fn argocd_server > "$WS/acsrv.sh" 2>/dev/null || true
+extract_fn argocd_cli_ready >> "$WS/acsrv.sh"
+srv_of() {  # srv_of <valor de ARGOCD_URL o ARGOCD_SERVER>
+  ( ARGOCD_URL="$1"; ARGOCD_SERVER="${2:-}"
+    . "$WS/acsrv.sh"; argocd_server )
+}
+assert_eq "argocd.example.org" "$(srv_of 'https://argocd.example.org')" \
+  "el esquema https:// se saca: el CLI espera host, no URL"
+assert_eq "argocd.example.org" "$(srv_of 'https://argocd.example.org/')" \
+  "y la barra final tampoco viaja"
+assert_eq "argocd.example.org" "$(srv_of 'http://argocd.example.org/applications')" \
+  "ni el path (el 'unknown port' del contexto roto salia de aca)"
+assert_eq "argocd.example.org" "$(srv_of '' 'argocd.example.org')" \
+  "ARGOCD_SERVER ya canonico se respeta tal cual"
+assert_eq "" "$(srv_of '' '')" "sin ninguna de las dos: vacio, y arriba eso es ceguera declarada"
+
+ready_con() {  # ready_con <url> <token>: 0 si el CLI tiene con que hablar
+  ( ARGOCD_URL="$1"; ARGOCD_AUTH_TOKEN="$2"; ARGOCD_SERVER=""
+    ARGOCD_USERNAME=""; ARGOCD_PASSWORD=""
+    . "$WS/acsrv.sh"; argocd_cli_ready ) >/dev/null 2>&1
+}
+ready_con 'https://argocd.example.org' 'tok' \
+  && pass "con direccion y token: el CLI esta listo" \
+  || fail "con direccion y token sigue declarandose ciego (el respaldo es codigo muerto)"
+ready_con '' 'tok' && fail "sin direccion se declaro listo" \
+  || pass "sin direccion: no listo (y arriba eso es ceguera, no rojo)"
+
+echo
+echo "── el puente de nombres de Kargo: el CLI pide KARGO_API_*, el harness guarda KARGO_*"
+extract_fn kargo_env_bridge > "$WS/kbridge.sh"
+grep -q 'KARGO_API_ADDRESS' "$WS/kbridge.sh" \
+  || fail "no pude extraer kargo_env_bridge del template"
+puente() {  # puente <KARGO_ADDRESS> <KARGO_TOKEN> → 'API_ADDRESS|API_TOKEN'
+  ( KARGO_ADDRESS="$1"; KARGO_TOKEN="$2"
+    KARGO_API_ADDRESS=""; KARGO_API_TOKEN=""
+    . "$WS/kbridge.sh"; kargo_env_bridge
+    printf '%s|%s' "$KARGO_API_ADDRESS" "$KARGO_API_TOKEN" )
+}
+assert_eq "https://kargo.example.org|tok" "$(puente 'https://kargo.example.org' 'tok')" \
+  "KARGO_ADDRESS/KARGO_TOKEN llegan al CLI como KARGO_API_*"
+inverso() {  # el puente va en los dos sentidos: una instancia puede tener cualquiera
+  ( KARGO_ADDRESS=""; KARGO_TOKEN=""
+    KARGO_API_ADDRESS="https://kargo.example.org"; KARGO_API_TOKEN="tok"
+    . "$WS/kbridge.sh"; kargo_env_bridge
+    printf '%s|%s' "$KARGO_ADDRESS" "$KARGO_TOKEN" )
+}
+assert_eq "https://kargo.example.org|tok" "$(inverso)" "y en el sentido inverso tambien"
+assert_eq "|" "$(puente '' '')" "sin nada que puentear: no inventa valores"
+
+echo
+echo "── el health por kubectl ESPERA: 'Progressing' no es 'roto'"
+# Bug encontrado auditando esta familia: la lectura de kubectl era instantanea,
+# sin loop ni uso del timeout. Corriendo segundos despues del push, OutOfSync o
+# Progressing es lo NORMAL y transitorio, y ese estado devolvia 1 = rojo = red()
+# = propuesta de rollback sobre un deploy que iba bien. Es el mismo falso rojo
+# que esta familia de bugs vino a matar, entrando por otra puerta.
+extract_fn check_argocd_health > "$WS/health.sh"
+mk_kubectl() {  # mk_kubectl <linea1> <linea2...>: respuestas sucesivas
+  : > "$WS/kubectl.calls"
+  { printf '#!/usr/bin/env bash\n'
+    printf 'n=$(( $(cat "%s" 2>/dev/null || echo 0) + 1 )); echo "$n" > "%s"\n' \
+      "$WS/kubectl.calls" "$WS/kubectl.calls"
+    printf 'case "$n" in\n'
+    local i=1
+    for r in "$@"; do printf '  %s) echo "%s" ;;\n' "$i" "$r"; i=$((i+1)); done
+    printf '  *) echo "%s" ;;\nesac\n' "$1"
+  } > "$WS/bin/kubectl"
+  chmod +x "$WS/bin/kubectl"
+}
+corre_health() {  # corre_health <timeout>
+  ( export PATH="$WS/bin:$PATH"
+    APP=demo; TIMEOUT="$1"; LOG="$WS/h.log"; OBSERVED_REVISION=""
+    say() { echo "$1"; }
+    PATH="$WS/bin:$PATH"
+    . "$WS/health.sh"
+    check_argocd_health; echo "RC=$?" )
+}
+# Dos lecturas transitorias y despues sano: tiene que salir VERDE, no rojo.
+mk_kubectl "Synced Progressing abc123" "OutOfSync Progressing abc123" "Synced Healthy abc123"
+out="$(corre_health 60)"
+assert_contains "$out" "RC=0" "espera al Progressing en vez de llamarlo roto"
+[ "$(cat "$WS/kubectl.calls")" -ge 3 ] \
+  && pass "y volvio a mirar (no fue una lectura instantanea)" \
+  || fail "leyo una sola vez: el timeout sigue sin usarse en el camino kubectl"
+
+# Enfermo de verdad hasta el deadline: eso SI es rojo, con el estado observado.
+mk_kubectl "OutOfSync Degraded abc123"
+start=$(date +%s); out="$(corre_health 3)"; elapsed=$(( $(date +%s) - start ))
+assert_contains "$out" "RC=1" "enfermo hasta el deadline: rojo legitimo"
+assert_contains "$out" "health=Degraded" "y el mensaje trae el estado observado"
+[ "$elapsed" -lt 30 ] && pass "respeta el deadline (${elapsed}s)" \
+  || fail "se paso del timeout: ${elapsed}s"
+
+# kubectl que no responde nada NO es enfermedad: es ceguera. No puede quemar el
+# timeout esperandole a un cluster que no esta.
+mk_kubectl ""
+start=$(date +%s); out="$(corre_health 30)"; elapsed=$(( $(date +%s) - start ))
+assert_contains "$out" "RC=2" "kubectl mudo: ceguera (no rojo, no verde)"
+[ "$elapsed" -lt 10 ] && pass "y no le espera al cluster ausente (${elapsed}s)" \
+  || fail "espero ${elapsed}s a un kubectl que no responde"
+rm -f "$WS/bin/kubectl"
+
+echo
+echo "── el catalogo declara la DIRECCION, no solo el token"
+# Sin la direccion en el catalogo, el bootstrap instala el CLI y el doctor lo ve
+# presente, pero nadie puede materializar con que servidor habla: la cadena
+# completa que exige la regla anti-consejo-vacio quedaba cortada en el ultimo
+# eslabon, y el watcher vivia ciego por diseno.
+cat_yaml="$(cat "$ROOT/catalog/capabilities.yaml")"
+assert_contains "$cat_yaml" "ARGOCD_URL" "el entry de argocd declara su direccion"
+assert_contains "$cat_yaml" "KARGO_API_ADDRESS" "y el de kargo la suya"
+
 t_done

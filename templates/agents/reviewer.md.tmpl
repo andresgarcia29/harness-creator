@@ -89,9 +89,15 @@ pudo clavar el pin, trabajás sobre el vivo y lo DECLARÁS en `notes`.
   **Formato de la cita** (gate_evidence lo verifica mecánicamente): RUTAS
   de archivo, relativas al worktree o al workspace, jamás IDs `EV-*`.
   Puede llevar el caso concreto (`tests/x.py::test_caso`, `archivo.go:42`):
-  el gate normaliza el sufijo y comprueba el ARCHIVO. La lectura la registra
-  el hook track-read de Claude Code solo; si operas desde otro agente,
-  registra cada artefacto que abriste con
+  el gate normaliza el sufijo y comprueba el ARCHIVO. **Hay dos formas de
+  "tocar" un artefacto y las dos cuentan**: ABRIRLO (Read, o `cat`/`sed -n`/
+  `git show` por Bash: el hook los registra) o EJECUTARLO con
+  `scripts/evidence.py run`, que apunta en el log los archivos que el COMANDO
+  NOMBRA. La trampa que ya costó tres rondas a tres reviewers distintos: si
+  corres `go test ./internal/...` y citas `internal/auth/auth_test.go`, el
+  comando nunca nombró ese archivo, así que no queda registrado. **Cita la
+  ruta que ejecutaste, o abrila.** Si operas desde otro agente sin el hook
+  track-read, registra cada artefacto que abriste con
   `bash scripts/mark-read.sh <task-id> <ruta>` o el gate te va a acusar,
   con razón, de citar sin leer.
   `requirements_uncovered` > 0 bloquea el ship (gate duro) salvo

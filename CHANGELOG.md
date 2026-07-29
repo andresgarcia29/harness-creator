@@ -102,6 +102,23 @@ contra una instalación real).
   funcionando mientras el puntero esté.
 
 ### Fixed
+- **Ejecutar un artefacto por fin cuenta como tocarlo.** `gate_evidence`
+  intersecta lo CITADO por la compliance matrix con lo LEÍDO según
+  `tasks/<id>/evidence.log`, y ese log lo alimentaba SOLO el hook track-read,
+  o sea abrir el archivo. Correr la prueba con `evidence.py` no dejaba rastro
+  ahí, así que un reviewer que EJECUTABA el test y citaba su ruta quedaba rojo
+  por no haberlo "leído". Pasó tres veces en la misma tarea con tres
+  reviewers distintos, pese a que el mensaje del gate ya hablaba de abrir: un
+  gate que castiga la conducta más fuerte (ejecutar) para premiar la más débil
+  (leer) está midiendo lo que no quiso medir, y el propio hook ya declaraba
+  que "un test que CORRIÓ es la evidencia más fuerte que hay". Ahora
+  `evidence.py run` apunta en el log los archivos que el comando NOMBRA, y
+  solo los que resuelven a un archivo real: no se afloja "citado no es
+  verificado", porque nada entra sin haberse ejecutado. El mensaje del gate y
+  el prompt del reviewer nombran las dos formas válidas de tocar un artefacto
+  y advierten la trampa que queda: correr `go test ./internal/...` y citar
+  `internal/auth/auth_test.go` no registra nada, porque el comando nunca
+  nombró ese archivo.
 - **El árbol de trabajo compartido deja de ser tierra de nadie: dos casos de
   campo, cuatro dientes nuevos.** (1) El reviewer hizo verificación por
   mutación (editar `src/` para ver un test ponerse rojo) sobre el árbol donde

@@ -454,5 +454,55 @@ class EvidenceTest(unittest.TestCase):
         self.assertIn("EVIDENCE_ID=", result.stdout)
 
 
+    # ── EJECUTAR UN ARTEFACTO CUENTA COMO ABRIRLO ────────────────────────
+    # gate_evidence intersecta lo CITADO por la compliance matrix con lo LEÍDO
+    # según tasks/<id>/evidence.log, y ese log lo alimentaba SOLO el hook
+    # track-read (o sea: abrir el archivo con Read). Correr la prueba con
+    # evidence.py no dejaba rastro ahí, así que un reviewer que EJECUTABA el
+    # test y citaba su ruta quedaba rojo por no haberlo "leído".
+    #
+    # Pasó tres veces en la misma tarea, con tres reviewers distintos, pese a
+    # que el mensaje del gate ya hablaba de "abrir". Un gate que castiga la
+    # conducta más fuerte (ejecutar) para premiar la más débil (leer) está
+    # midiendo lo que no quiso medir: el propio hook ya declara que "un test
+    # que CORRIÓ es la evidencia más fuerte que hay".
+    #
+    # Se registran SOLO los tokens del comando que resuelven a un archivo real:
+    # no se afloja "citado no es verificado", porque nada se apunta que no se
+    # haya ejecutado de verdad.
+    def _log_lines(self):
+        log = self.task / "evidence.log"
+        return log.read_text() if log.is_file() else ""
+
+    def test_run_registers_the_artifact_it_executed_as_read(self):
+        (self.repo / "auth_test.py").write_text("def test_ok():\n    assert True\n")
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "test"], cwd=self.repo, check=True)
+        result = subprocess.run(
+            ["python3", str(SCRIPT), "run", "--task-dir", str(self.task),
+             "--repo", "atlas", "--runner", "reviewer", "--kind", "test",
+             "--cwd", str(self.repo), "--", "sh", "-c", "echo ok auth_test.py"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("auth_test.py", self._log_lines(),
+                      "el artefacto ejecutado no quedó en evidence.log")
+        self.assertIn("ran-file", self._log_lines(),
+                      "y se marca como CORRIDO, no como leído a mano")
+
+    def test_run_does_not_register_paths_that_do_not_exist(self):
+        # CONTRA-MITAD: sin esto, la regla de arriba se cumpliría igual con un
+        # registro que apunte cualquier palabra del comando, y entonces citar
+        # una ruta inventada pasaría el gate. La ley "citado no es verificado"
+        # es la razón de ser del gate y no se afloja.
+        result = subprocess.run(
+            ["python3", str(SCRIPT), "run", "--task-dir", str(self.task),
+             "--repo", "atlas", "--runner", "reviewer", "--kind", "test",
+             "--cwd", str(self.repo), "--", "sh", "-c", "echo ok inventado_test.py"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("inventado_test.py", self._log_lines(),
+                         "apuntó como leído un archivo que no existe")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -221,6 +221,55 @@ def atomic_json(path: Path, value: dict) -> None:
             os.unlink(tmp_name)
 
 
+def log_executed_artifacts(task_dir: Path, cwd: Path, command: "list[str]",
+                           evidence_id: str) -> None:
+    """Apunta en evidence.log los artefactos que este comando EJECUTÓ.
+
+    POR QUÉ EXISTE: `gate_evidence` de ship.sh intersecta lo CITADO por la
+    compliance matrix con lo LEÍDO según `tasks/<id>/evidence.log`, y ese log
+    lo alimentaba SOLO el hook track-read, o sea abrir el archivo con Read.
+    Correr la prueba por acá no dejaba rastro, así que un reviewer que
+    EJECUTABA el test y citaba su ruta quedaba rojo por no haberlo "leído".
+    Pasó tres veces en la misma tarea, con tres reviewers distintos, pese a que
+    el mensaje del gate ya hablaba de abrir el artefacto.
+
+    Un gate que castiga la conducta MÁS fuerte (ejecutar) para premiar la más
+    débil (leer) está midiendo lo que no quiso medir. El propio track-read ya
+    lo dice en su código: "un test que CORRIÓ es la evidencia más fuerte que
+    hay", y registra `ran-file` para los comandos que pasan por Bash. Esto le
+    da la misma capacidad al camino sellado, que es el que el harness pide usar.
+
+    NO afloja "citado no es verificado": solo se apuntan los tokens que
+    resuelven a un archivo REAL, así que nada entra al log sin haberse
+    ejecutado de verdad. Y es best-effort: un fallo acá no puede tumbar un
+    sello que ya está en disco (mismo criterio fail-open que el hook)."""
+    try:
+        log = task_dir / "evidence.log"
+        stamp = utc_now()
+        seen: set = set()
+        lines = []
+        # Se parte por espacios además de por argumento: la ruta puede venir
+        # dentro de un `sh -c "pytest tests/x.py"`, que llega como UN token.
+        tokens = [piece for arg in command for piece in arg.split()]
+        for token in tokens:
+            if token.startswith("-") or "=" in token:
+                continue          # flags y asignaciones no son artefactos
+            base = token.split("::", 1)[0]
+            if not base or base in seen:
+                continue
+            candidate = Path(base) if os.path.isabs(base) else (cwd / base)
+            if not candidate.is_file():
+                continue
+            seen.add(base)
+            lines.append(f"{stamp}\t{evidence_id}\tran-file\t{base}\n")
+        if lines:
+            task_dir.mkdir(parents=True, exist_ok=True)
+            with open(log, "a", encoding="utf-8") as stream:
+                stream.writelines(lines)
+    except OSError:
+        pass
+
+
 TASK_DIR_MARKERS = ("task.md", "plan.md", "state.json")
 
 
@@ -328,6 +377,9 @@ def command_run(args: argparse.Namespace) -> int:
         command = command[1:]
     if not command:
         die("falta el comando después de --")
+    # El comando que PIDIÓ el usuario, antes de que el semáforo lo envuelva:
+    # es el que nombra los artefactos, y el wrapper solo nombraría build-slot.
+    user_command = list(command)
 
     # ── Semáforo: la suite toma un slot del MISMO pool que los builds ────
     # Caso de campo: once vitest en seis núcleos (503s y rojo vs 106s y verde
@@ -430,6 +482,7 @@ def command_run(args: argparse.Namespace) -> int:
     if contention:
         manifest["contention"] = contention
     atomic_json(evidence_dir / f"{evidence_id}.json", manifest)
+    log_executed_artifacts(task_dir, cwd, user_command, evidence_id)
     # Un sello que no va a servir se anuncia AHORA, no dos gates después.
     # Caso de campo: se selló evidencia con exit_code=1 y log vacío; verify la
     # rechazó recién en el ship, con un mensaje que hablaba de otra cosa.

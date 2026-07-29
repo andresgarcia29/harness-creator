@@ -143,7 +143,7 @@ assert_eq 0 $? "sin .harness/: sale 0 (fail-open)"
 
 echo
 echo "── on-compact.sh: la señal de contexto agotado"
-# record-cost mide dólares; nada medía ventana. Caso de campo: en un /auto de
+# record-cost mide dólares; nada medía ventana. Caso de campo: en un /smart de
 # nueve horas el humano avisó a mano varias veces "te estás quedando sin
 # contexto". La compactación es el único evento determinista de eso.
 

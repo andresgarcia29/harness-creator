@@ -71,7 +71,7 @@ emit() {
   return 0
 }
 
-# Ejecutado directamente (no sourceado) → CLI. Lo usa /auto desde Bash.
+# Ejecutado directamente (no sourceado) → CLI. Lo usa /smart desde Bash.
 # El :- importa: BASH_SOURCE no existe si te sourcean desde zsh o sh, y con
 # `set -u` eso revienta el script que te sourceó. Y OJO con la sintaxis:
 # ${BASH_SOURCE[0]} es un ARRAY — dash (el sh de Debian/Ubuntu) no lo parsea

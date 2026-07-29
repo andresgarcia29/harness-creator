@@ -21,7 +21,7 @@ Implementación de $ARGUMENTS según tasks/<task-id>/plan.md.
    no edites `state.json` a mano (`POLICY-STATE-003` lo detecta después).
 1. **Orden**: `bd ready --json` te da las tareas desbloqueadas del DAG.
    Si se indicó un repo, limita a ese repo.
-2. **Worktrees**: normalmente ya existen (el prefetch de /rfc o /auto
+2. **Worktrees**: normalmente ya existen (el prefetch de /rfc o /smart
    los creó en background). Si faltan:
    `scripts/worktree-task.sh <task-id> <repos-de-las-tareas-listas>` y
    `scripts/repo-brief.sh <repo>` por repo. NUNCA trabajes en repos/

@@ -20,7 +20,7 @@ entero.
 0. **Abre el estado de la tarea** antes que nada:
    `scripts/harness-policy.py init tasks/<task-id> --lane <express|standard|full>`.
    Sin esto no existe `state.json` y todo el resto del pipeline falla al
-   primer gate de policy. El carril sale del blast radius (ver `/auto` paso
+   primer gate de policy. El carril sale del blast radius (ver `/smart` paso
    de carril); en duda, el MAYOR.
 1. **Materializa.** Si es un ID de ticket ({{TICKET_PREFIX}}-N):
    `scripts/with-secrets.sh scripts/ticket-pull.sh <ID>`.

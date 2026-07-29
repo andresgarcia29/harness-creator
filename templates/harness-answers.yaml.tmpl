@@ -52,7 +52,7 @@ loop_budget: {{LOOP_BUDGET}}
 # hay dedupe por fingerprint y cuota de 3 issues por 24h.
 upstream_issues: {{UPSTREAM_ISSUES}}
 
-# Autonomía de /auto (ticket o prompt → producción, sin intervención):
+# Autonomía de /smart (ticket o prompt → producción, sin intervención):
 #   full       → no pausa DESPUÉS del enrichment; gates + canary + rollback
 #                son la red
 #   checkpoint → además, UNA pausa: resumen antes del primer ship a main
@@ -60,9 +60,9 @@ upstream_issues: {{UPSTREAM_ISSUES}}
 # antes de arrancar: es la única interacción sancionada, y solo ocurre si hay
 # algo que la evidencia del repo no puede responder. Concentrar ahí lo que el
 # humano sabe es lo que permite que el resto corra sin interrupciones.
-# Gradúa cuándo se toca main, NO cuánto piensa el humano: /auto redacta
+# Gradúa cuándo se toca main, NO cuánto piensa el humano: /smart redacta
 # criterios y resuelve ambigüedad solo en ambos modos (ledger de
-# supuestos). Para conducir fase por fase: comandos sueltos, no /auto.
+# supuestos). Para conducir fase por fase: comandos sueltos, no /smart.
 autonomy: {{AUTONOMY}}
 
 # MinionS (docs/harness/minions-decomposition.md): el supervisor descompone en

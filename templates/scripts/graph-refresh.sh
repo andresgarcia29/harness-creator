@@ -18,7 +18,7 @@
 # no escribe stamp: el próximo refresh lo reintenta.
 #
 # Lo llaman: el bootstrap (build inicial en el onboarding), el prefetch de
-# /auto y /rfc (background), harness-janitor (nightly) y tú (make graph).
+# /smart y /rfc (background), harness-janitor (nightly) y tú (make graph).
 # Fail-open: sin graphify instalado (capacidad no elegida) sale 0 en silencio;
 # jamás bloquea un pipeline.
 set -u
@@ -63,7 +63,7 @@ fi
 
 cd "$WS"
 # EL GRAFO ES ESTADO COMPARTIDO Y ESTE SCRIPT LO LANZAN CUATRO SITIOS EN
-# BACKGROUND (el prefetch de /auto, /rfc, pull-all.sh y el janitor), así que
+# BACKGROUND (el prefetch de /smart, /rfc, pull-all.sh y el janitor), así que
 # la concurrencia es el caso NORMAL, no el raro. Sin lock, dos corridas
 # peleaban por el mismo archivo; sin tmp+mv, un `graphify query` de otra
 # sesión leía JSON a medio escribir y respondía "0 nodos", y el agente caía

@@ -90,7 +90,7 @@ branch_exists roto T4 \
 
 echo
 echo "── modo creación: dos creadores del mismo (task, repo) no se pisan"
-# Caso de campo: /auto lanza la creación en paralelo; entre el chequeo "ya
+# Caso de campo: /smart lanza la creación en paralelo; entre el chequeo "ya
 # existe" y el worktree add hay un fetch de por medio, y dos procesos pasaban
 # juntos. El segundo moría mudo a mitad del bucle (el error iba a /dev/null) o,
 # peor, dos implementers terminaban compartiendo árbol y un git add se llevaba

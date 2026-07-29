@@ -9,7 +9,7 @@
 #
 # Uso:
 #   stamp-models.sh                       estampa .claude/agents/*.md
-#   stamp-models.sh resolve <alias|rol>   imprime el ID real (para /auto
+#   stamp-models.sh resolve <alias|rol>   imprime el ID real (para /smart
 #                                         --model, cron-runner, headless)
 #   stamp-models.sh check                 verifica sin tocar (doctor);
 #                                         exit 1 si hay drift

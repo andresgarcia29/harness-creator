@@ -5,7 +5,7 @@
 # owned, nunca lo pisa el update) que cuelga de una fase. NO es una fase de
 # policy: la máquina intake→archive es intocable. Este script decide qué
 # pasos corren en una fase, en qué orden, y si un gate rojo para el pipeline.
-# La lógica vive AQUÍ (testeable), no en la prosa de /auto.
+# La lógica vive AQUÍ (testeable), no en la prosa de /smart.
 #
 # Uso:
 #   pipeline-steps.sh list <task> <phase>   imprime, ordenados, los playbooks
@@ -106,7 +106,7 @@ $(list_steps)
 EOF
     if [ "$bad" -ne 0 ]; then
       echo "   ↳ remediación: arregla lo que el paso reporta, borra su result rojo"
-      echo "     (tasks/$TASK/pipeline/), 'harness-policy.py resume' y re-corre /auto $TASK"
+      echo "     (tasks/$TASK/pipeline/), 'harness-policy.py resume' y re-corre /smart $TASK"
       exit 3
     fi
     ;;

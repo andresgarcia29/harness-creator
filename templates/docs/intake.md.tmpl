@@ -5,7 +5,7 @@ Rebotar cuesta centavos; implementar un ticket ambiguo cuesta el
 pipeline completo más el retrabajo.
 
 Quién lo rebota depende de por dónde entre. Con un humano en el loop
-(comandos sueltos), se devuelve con preguntas. Con `/auto`, el rebote
+(comandos sueltos), se devuelve con preguntas. Con `/smart`, el rebote
 vive en el paso 1 (**enrichment**): el agente entiende primero el
 terreno (grafo, briefs, ADR, ownership), resuelve con evidencia todo lo
 resoluble, y solo pregunta lo que ninguna de esas fuentes contesta, en
@@ -80,9 +80,9 @@ Tres redes hacen segura la clasificación:
    Equivocarse de carril cuesta una re-entrada, jamás un ship sin la
    deliberación que tocaba.
 
-## Entrada por prompt (`/auto "…"`) — el mismo contrato, sin rebote
+## Entrada por prompt (`/smart "…"`) — el mismo contrato, sin rebote
 
-`/auto` acepta un prompt literal en vez de un ticket. La plantilla de
+`/smart` acepta un prompt literal en vez de un ticket. La plantilla de
 arriba sigue siendo obligatoria; lo que cambia es quién la llena: los
 campos que el prompt no trae los redacta el orquestador y los registra
 en `tasks/<id>/task.md` con `origin: prompt`.
@@ -90,7 +90,7 @@ en `tasks/<id>/task.md` con `origin: prompt`.
 Los criterios de rebote no se relajan, se TRANSFORMAN — no hay a quién
 rebotarle, así que cada uno tiene su salida:
 
-| Criterio | Con ticket | Con prompt (`/auto`) |
+| Criterio | Con ticket | Con prompt (`/smart`) |
 |---|---|---|
 | 1 · criterios no verificables | rebote | los reescribe verificables; el umbral elegido va al ledger |
 | 2 · bug sin repro | rebote | escribe el repro; si no logra reproducirlo, PARA (no hay bug demostrable que arreglar) |

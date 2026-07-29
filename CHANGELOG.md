@@ -7,6 +7,30 @@ contra una instalación real).
 ## [Sin publicar]
 
 ### Added
+- **Carril `quick` y comando `/quick`: cero deliberación, mismos gates.** Para
+  lo trivial que el humano ya dimensionó ("cambia estos logos"): sin
+  enrichment, sin abogados, sin RFC ni plan; la misma sesión implementa y el
+  reviewer independiente juzga. La promesa se mide, no se confía: `gate_lane`
+  aplica el patrón de express MÁS techos de tamaño (8 archivos / 200 líneas,
+  datos de `harness-policy.json` servidos por `harness-policy.py
+  lane-limits`), quick es de UN repo (`POLICY-LANE-005`) y el diff que excede
+  la promesa escala con `escalate --to express` conservando el trabajo. De
+  paso, `escalate` dejó de re-encauzar SIEMPRE por rfc: el punto de
+  re-entrada se valida contra el grafo del carril DESTINO (quick → express
+  cae en `intake`), porque antes una tarea escalada podía caer en una fase
+  que su carril nuevo no declara: trabada, solo rescatable con rollback.
+- **Tanda prosa-a-gates: seis leyes que eran prosa ahora tienen diente.** El
+  sello del precheck declara CUÁNTO se miró (`verificado:
+  completo|ninguno|desconocido`) y /review debe decirlo; los dos mapas de
+  leyes (CLAUDE.md y AGENTS.md) comparten numeración, con test de coherencia
+  en las dos direcciones y ratchet de líneas que solo baja; las actions de CI
+  van pinneadas por SHA y uv con versión explícita; el dedupe de harness-bug
+  cierra su TOCTOU (claim local atómico + reconciliación por el orden del
+  forge: gana el issue más viejo) y su huella deja de depender del locale
+  (`LC_ALL=C`); el update prefiere `harness generate` y sus migraciones son
+  script (`scripts/update-migrate.sh`, tres estados de exit, `--dry-run`
+  antes de escribir); y el reviewer declara `tools:` sin Write. La
+  verificación adversarial previa al merge se cobró seis bugs confirmados.
 - **`scripts/instance-ship.sh`: la puerta a main del repo de la INSTANCIA**
   (issue #37). El hook bloqueaba el push (Ley 1) y ship.sh solo opera sobre
   repos/, así que el commit de cada /harness-update terminaba pusheado a mano
@@ -17,6 +41,23 @@ contra una instalación real).
   script sancionado, igual que ship.sh. El hook ahora nombra las DOS puertas,
   ship.sh deja de mandar al callejón de crear un worktree de la instancia, y
   /harness-update cierra publicando por ella.
+
+### Changed
+- **El comando `/auto` pasa a llamarse `/smart`.** `/auto` chocaba con el
+  comando homónimo de Kimi Code, y el harness es multi-herramienta por diseño:
+  `AGENTS.md` es su puerta y promete que Cursor, Codex o Kimi operan el mismo
+  pipeline, así que un nombre que otra herramienta ya se llevó no es cosmética:
+  es el playbook equivocado ejecutándose con toda la confianza. El par de
+  entrada queda explícito por lo que hace cada uno: **`/smart` dimensiona el
+  carril por vos** (intake, blast radius, RFC solo si aplica) y **`/quick` es
+  el carril que vos ya dimensionaste**. `/auto` sobrevive UN ciclo como puntero
+  de deprecación (pocas líneas, cero reglas adentro, que mandan a correr
+  `/smart` con los mismos argumentos) para que nadie con la memoria vieja se
+  quede sin pipeline; después se borra, y un puntero que crece ya empezó a
+  mentir. Dos cosas NO cambian: el prefijo de task-ids `AUTO-`, que lo genera
+  el panel y lo contienen los ledgers viejos, y el panel mismo, que se
+  actualiza en el ciclo que viene porque sus hints de `/auto` siguen
+  funcionando mientras el puntero esté.
 
 ### Fixed
 - **#39: el precheck no sella con árbol sucio**. El fix de 0.52.0 degradó la

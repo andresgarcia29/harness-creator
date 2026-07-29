@@ -32,9 +32,9 @@ pones juicio donde hace falta (topología, entrevista, generación).
   5. Nada se pisa sin confirmación — salvo que los **PAQUETES ATADOS se
      aceptan/rechazan juntos** (a medias rompen la instancia; decláralo
      antes de que el humano elija). Los vigentes: **carriles**
-     (harness-policy.json + harness-policy.py + auto.md + ship.sh) y
-     **pasos-custom** (auto.md + harness-policy.json + pipeline-steps.sh +
-     doctor.sh: el /auto nuevo llama a pipeline-steps.sh y usa la parada
+     (harness-policy.json + harness-policy.py + smart.md + ship.sh) y
+     **pasos-custom** (smart.md + harness-policy.json + pipeline-steps.sh +
+     doctor.sh: el /smart nuevo llama a pipeline-steps.sh y usa la parada
      custom_step_failed que solo existe en el policy.json nuevo) y
      **modelos** (models.yaml esquema aliases + stamp-models.sh +
      cron-runner.sh + re-estampado). La lista completa y las migraciones
@@ -196,7 +196,7 @@ harness; cada agente es contexto y mantenimiento.
     ALIASES en `models.yaml`; los IDs reales los materializa
     `scripts/stamp-models.sh` en el frontmatter de los agentes.
     **Pregunta también el alias de ESCALACIÓN** (default: deep): es el que
-    usa /auto al relanzar un agente atascado y el tier `expensive` de los
+    usa /smart al relanzar un agente atascado y el tier `expensive` de los
     cronjobs. `models.yaml` lo referencia en dos lugares, así que sin
     respuesta el placeholder `{{MODEL_ESCALATION}}` queda literal,
     `stamp-models.sh resolve escalation` falla y cron-runner le pasa la
@@ -219,13 +219,13 @@ harness; cada agente es contexto y mantenimiento.
     Solo pregunta si el humano quiere apagarlo (`false`), y anota que el
     intercambio es: más razonamiento en el plan a cambio de menos rondas
     de review, que es donde se van los minutos.
-10b. **Autonomía de /auto**: full | checkpoint (recomendado para las
+10b. **Autonomía de /smart**: full | checkpoint (recomendado para las
     primeras semanas). checkpoint = UNA sola pausa, un resumen antes
     del primer ship a main; full = ninguna pausa, los gates y el canary
-    son la red. En ambos casos /auto redacta criterios y resuelve
+    son la red. En ambos casos /smart redacta criterios y resuelve
     ambigüedad solo (ledger de supuestos): la autonomía gradúa cuándo
     se toca main, NO cuánto piensa el humano. Si el humano quiere
-    conducir fase por fase, no usa /auto: usa los comandos sueltos.
+    conducir fase por fase, no usa /smart: usa los comandos sueltos.
 11. **Principios del proyecto** para la constitución: 2-4 reglas
     innegociables propias del dominio (ej. multi-tenancy, localización)
     — van a `docs/constitution.md` §6, DRAFT hasta ratificar.
@@ -316,10 +316,11 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `.claude/agents/{architect,implementer,reviewer}.md` | agents/*.tmpl | siempre |
 | `.claude/agents/qa.md` | agents/qa.md.tmpl | si hay frontend/mobile o canary |
 | `.claude/agents/<abogado>.md` | agents/svc-agent.md.tmpl | UNO por cluster; `status: DRAFT` |
-| `.claude/commands/{feature,rfc,implement,review,ship,promote,archive,auto}.md` | commands/*.tmpl | siempre — /auto es el pipeline completo sin intervención humana y acepta ticket O prompt literal (autonomy en answers: full \| checkpoint) |
+| `.claude/commands/{feature,rfc,implement,review,ship,promote,archive,smart,quick}.md` | commands/*.tmpl | siempre. El par de entrada es /smart y /quick: /smart es el pipeline completo sin intervención humana, dimensiona el carril por vos y acepta ticket O prompt literal (autonomy en answers: full \| checkpoint); /quick es el carril que YA dimensionaste vos, cero deliberación y los mismos gates |
+| `.claude/commands/auto.md` | commands/auto.md.tmpl | siempre POR AHORA, y es un archivo de DEPRECACIÓN: pocas líneas, cero reglas adentro, que mandan a correr `/smart` con los mismos argumentos. El comando se renombró porque el nombre viejo chocaba con el comando homónimo de otras herramientas (Kimi Code) y el harness es multi-herramienta por diseño. La fuente de verdad es `smart.md`: si este puntero crece o repite una regla, ya empezó a mentir. Se borra en el ciclo que viene, cuando el panel deje de emitir su hint al nombre viejo |
 | `models.yaml` | models.yaml.tmpl | siempre — LA perilla de modelos: provider + aliases (fast\|smart\|deep) por proveedor + rol→alias + overrides por agente |
 | `AGENTS.md` | AGENTS.md.tmpl | siempre — el mapa en el estándar multi-herramienta (Cursor, Kimi Code, Codex, Gemini CLI…): leyes, playbooks, modelos, dónde está la verdad. CLAUDE.md sigue siendo el de Claude Code; ambos se generan, ninguno es symlink |
-| `scripts/stamp-models.sh` | scripts/ | siempre — materializa models.yaml en el frontmatter de los agentes (`make models`); `resolve <alias\|rol>` lo usan /auto --model y cron-runner |
+| `scripts/stamp-models.sh` | scripts/ | siempre — materializa models.yaml en el frontmatter de los agentes (`make models`); `resolve <alias\|rol>` lo usan /smart --model y cron-runner |
 | `docs/constitution.md` | docs/constitution.md.tmpl | siempre (DRAFT; §6 desde entrevista #11) |
 | `specs/<capability>/spec.md` | docs/spec.md.tmpl | UNO por dominio de ownership (esqueleto DRAFT; la arqueología los llena) |
 | `docs/harness/testing-policy.md` | docs/testing-policy.md.tmpl | siempre |
@@ -333,8 +334,8 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `skills.yaml` | skills.yaml.tmpl | si NO existe (es ley local: declara TUS repos de skills; el update jamás lo pisa) |
 | `scripts/skills-sync.sh` | scripts/ | siempre (make skills: instala la capa compartida con marca .managed; la local siempre gana) |
 | `scripts/minion-probe.sh` | scripts/ | siempre (patrón MinionS: el supervisor descompone, workers responden en paralelo; activo por carril via `minion_decompose: auto`) |
-| `scripts/plan-lint.sh` | scripts/ | siempre: el plan es ejecutable o no es plan, por tarea exige repo/req/archivos/criterios/complexity/deps, cero decisiones abiertas y trazabilidad al delta-spec. Lo corren /rfc y /auto ANTES de implement; un hueco aquí se paga en rondas de review |
-| `scripts/pipeline-steps.sh` | scripts/ | siempre (el motor de los pasos custom del pipeline: list/gate; /auto lo llama tras cada fase) |
+| `scripts/plan-lint.sh` | scripts/ | siempre: el plan es ejecutable o no es plan, por tarea exige repo/req/archivos/criterios/complexity/deps, cero decisiones abiertas y trazabilidad al delta-spec. Lo corren /rfc y /smart ANTES de implement; un hueco aquí se paga en rondas de review |
+| `scripts/pipeline-steps.sh` | scripts/ | siempre (el motor de los pasos custom del pipeline: list/gate; /smart lo llama tras cada fase) |
 | `.claude/pipeline/.gitkeep` | inline vacío (Keep) | siempre (dir instance-owned de los pasos custom; el update jamás lo pisa) |
 | `.claude/skills/pipeline-step-creator/SKILL.md` | skills/pipeline-step-creator/SKILL.md | siempre (la skill que guía a crear un paso custom) |
 | `.claude/skills/harness-bug-report/SKILL.md` | skills/harness-bug-report/SKILL.md | siempre: el protocolo de verificación de un bug DEL HARNESS (¿es real? ¿es del plugin y no de tu instancia? ¿vale la pena arreglarlo?) antes de levantar el issue upstream |
@@ -344,12 +345,12 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `scripts/verdict-scaffold.sh` | scripts/ | siempre (esqueleto determinista del veredicto: el reviewer solo pone juicio; campos mecánicos de fuentes verificables) |
 | `scripts/pull-all.sh` | scripts/ | siempre (make pull: clones canónicos al último main en paralelo, sucios se saltan con aviso, dispara graph-refresh) |
 | `scripts/repo-brief.sh` | scripts/ | siempre — brief determinista por repo (`.cache/briefs/`); arranque en caliente de implementers/reviewers, $0 tokens |
-| `scripts/graph-refresh.sh` | scripts/ | si graphify elegido — el ciclo de vida del grafo: build inicial, `--update` incremental, stamp por HEADs. Sin esto, "usa graphify query" es un consejo vacío. Lo llama el BOOTSTRAP (build inicial en el onboarding, antes de la primera tarea), el prefetch de /auto y /rfc, harness-janitor y `make graph` |
-| `scripts/harness-policy.py`, `scripts/evidence.py` | scripts/ | siempre — el policy engine v1 (transiciones por carril, escalate, validate-ship) y evidence v1; ship.sh y /auto los invocan |
+| `scripts/graph-refresh.sh` | scripts/ | si graphify elegido — el ciclo de vida del grafo: build inicial, `--update` incremental, stamp por HEADs. Sin esto, "usa graphify query" es un consejo vacío. Lo llama el BOOTSTRAP (build inicial en el onboarding, antes de la primera tarea), el prefetch de /smart y /rfc, harness-janitor y `make graph` |
+| `scripts/harness-policy.py`, `scripts/evidence.py` | scripts/ | siempre — el policy engine v1 (transiciones por carril, escalate, validate-ship) y evidence v1; ship.sh y /smart los invocan |
 | `harness-policy.json` | policy.json.tmpl | siempre — leyes ejecutables del flujo: transiciones por carril (express\|standard\|full), paradas permitidas, límites |
 | `scripts/build-slot.sh` | scripts/ | siempre (semáforo de builds pesados, Ley 8; universal — perl/flock) |
 | `scripts/{gowork,py,fe}.sh` | scripts/ | siempre (loop interno nativo, Ley 9; no-op limpio si el stack no está: Go/Python/frontend) |
-| `scripts/emit.sh` | scripts/emit.sh | siempre — el bus del harness: lo que ship.sh y /auto DECIDEN. Fail-open, redacta antes de escribir. Sin esto el panel solo ve agentes y tokens (la mitad prestada), nunca las decisiones ni los gates (la nuestra) |
+| `scripts/emit.sh` | scripts/emit.sh | siempre — el bus del harness: lo que ship.sh y /smart DECIDEN. Fail-open, redacta antes de escribir. Sin esto el panel solo ve agentes y tokens (la mitad prestada), nunca las decisiones ni los gates (la nuestra) |
 | `scripts/secrets.sh` | scripts/secrets.sh.tmpl | siempre (fuente según answers; subcomandos pull\|check\|doctor: doctor cruza lo que los repos declaran necesitar contra lo provisto, con candidato best-effort desde la fuente) |
 | `scripts/ticket-pull.sh`, `scripts/ticket-close.sh` | scripts/ticket-*.tmpl | tickets=linear (github: adapta los mismos contratos a `gh issue`) |
 | `scripts/deploy-watch.sh` | scripts/deploy-watch.sh.tmpl | si hay CD (gha/argocd/kargo en inventory) |

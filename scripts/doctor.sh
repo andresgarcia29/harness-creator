@@ -621,6 +621,65 @@ if [ -d "$WS/.claude/pipeline" ]; then
     fi
   done
 fi
+# Reglas custom (.claude/rules/*.md): una regla sin diente es un párrafo, y un
+# párrafo no cambia lo que hace un agente apurado. El doctor NO juzga el
+# contenido de la regla (eso lo ratifica un humano): verifica lo mecánico, que
+# declare CÓMO se verifica y que ese verificador EXISTA. Una regla que apunta a
+# un semgrep o a un paso que nadie creó es peor que ninguna: se cita en los
+# reviews como si tuviera diente. Ver docs/harness/rules.md.
+if [ -d "$WS/.claude/rules" ]; then
+  rfm() { awk -v k="$2:" 'NR==1&&$0!="---"{exit} NR>1&&$0=="---"{exit} NR>1{l=$0;sub(/[ 	]*#.*$/,"",l);n=index(l,":");if(n>0){key=substr(l,1,n);val=substr(l,n+1);gsub(/[ 	]/,"",key);sub(/^[ 	]+/,"",val);sub(/[ 	]+$/,"",val);if(key==k){print val;exit}}}' "$1" 2>/dev/null; }
+  for rl in "$WS"/.claude/rules/*.md; do
+    [ -f "$rl" ] || continue
+    rn="$(basename "$rl")"; rid="${rn%.md}"
+    [ "$rid" = "README" ] && continue
+    fid="$(rfm "$rl" id)"
+    [ "$fid" = "$rid" ] || fail "regla $rn: el id del frontmatter ('$fid') no es el nombre del archivo" \
+      "renombra el archivo a <id>.md o corrige id: en $rn (las citas de los agentes usan el id)"
+    enf="$(rfm "$rl" enforcement)"; by="$(rfm "$rl" enforced_by)"
+    case "$enf" in
+      judgment)
+        ok "regla $rid (enforcement: judgment, la citan los agentes)" ;;
+      semgrep|hook|gate|pipeline-step|doctor|cronjob)
+        if [ -z "$by" ]; then
+          fail "regla $rid declara enforcement: $enf SIN enforced_by" \
+               "apunta al artefacto que la verifica (ruta relativa) o bájala a enforcement: judgment"
+        else
+          bypath="${by%%:*}"
+          case "$by" in
+            /*|*..*) fail "regla $rid: enforced_by sale del workspace: $by" "usa una ruta relativa dentro del workspace" ;;
+            *)
+              if [ ! -e "$WS/$bypath" ]; then
+                fail "regla $rid apunta a un verificador AUSENTE: $by" \
+                     "crea $bypath o baja la regla a enforcement: judgment (una regla que promete diente y no lo tiene se cita como si lo tuviera)"
+              elif [ "$enf" = "semgrep" ] && [ "$by" != "$bypath" ] && ! grep -q "id: ${by#*:}" "$WS/$bypath" 2>/dev/null; then
+                fail "regla $rid: $bypath existe pero no contiene la regla semgrep '${by#*:}'" \
+                     "añade esa regla a $bypath o corrige enforced_by en $rn"
+              else
+                ok "regla $rid ($enf → $by)"
+              fi ;;
+          esac
+        fi ;;
+      "") fail "regla $rn sin 'enforcement:'" "declara enforcement: judgment|semgrep|hook|gate|pipeline-step|doctor|cronjob" ;;
+      *)  fail "regla $rn con enforcement inválido: $enf" "usa uno de: judgment|semgrep|hook|gate|pipeline-step|doctor|cronjob" ;;
+    esac
+    case "$(rfm "$rl" status)" in
+      RATIFICADA) : ;;
+      DRAFT|"") warn "regla $rid en DRAFT: nadie la puede citar como ley hasta que un humano la ratifique (status: RATIFICADA)" ;;
+      *) warn "regla $rid con status desconocido: $(rfm "$rl" status) (usa DRAFT|RATIFICADA)" ;;
+    esac
+    rmcp="$(rfm "$rl" needs_mcp)"
+    if [ -n "$rmcp" ]; then
+      if [ -f "$WS/.mcp.json" ] && jq -e --arg m "$rmcp" '.mcpServers[$m]' "$WS/.mcp.json" >/dev/null 2>&1; then
+        ok "regla $rid: MCP '$rmcp' presente"
+      else
+        fail "regla $rid declara needs_mcp '$rmcp' AUSENTE en .mcp.json" \
+             "añade el MCP (elige la capacidad en /harness-init) o corrige needs_mcp en $rn"
+      fi
+    fi
+  done
+fi
+
 # Integridad de hooks: TODO hook referenciado en settings.json debe existir y
 # ser ejecutable. Un hook registrado pero ausente spamea "not found" en CADA
 # tool call del agente (visto en un VPS real: el generador olvidó un archivo).
@@ -686,6 +745,32 @@ if [ -d "$WS/scripts/cronjobs" ]; then
     [ "$(cat "$f")" -ge 3 ] && warn "circuit breaker ABIERTO: $(basename "$f" .fails) — revisar y borrar $f"
   done
 fi
+
+# ── Espacio en disco: el rojo que no es del código ────────────────────
+# Caso de campo: 3 de 8 corridas de la misma suite rojas con el disco al 100 por
+# ciento (los workers murieron por ENOSPC y ni colectaron el archivo de test);
+# 16 de 16 verdes con 29G libres, mismo código. Un rojo por disco se lee igual
+# que un defecto y manda a arreglar lo que no está roto.
+#
+# Acá es OBSERVADOR (el doctor informa), y avisa ANTES del umbral en el que
+# ship.sh se niega a correr, para que se limpie sin perder una corrida. El que
+# bloquea es el gate; este avisa. No mezclamos las familias.
+_libre_kb="$(df -Pk "$WS" 2>/dev/null | awk 'NR==2 {print $4}')"
+case "${_libre_kb:-x}" in
+  ''|*[!0-9]*) warn "no pude leer el espacio libre de $WS (df ilegible): si una suite se pone roja sin causa clara, mirá el disco a mano" ;;
+  *)
+    _libre_gb=$((_libre_kb / 1024 / 1024))
+    _min_gb="${HARNESS_MIN_FREE_GB:-2}"
+    case "$_min_gb" in ''|*[!0-9]*) _min_gb=2 ;; esac
+    if [ "$_libre_gb" -lt "$_min_gb" ]; then
+      fail "quedan ${_libre_gb}G libres (ship.sh se niega a correr gates bajo ${_min_gb}G): NO ES TU CÓDIGO, ES EL DISCO" \
+        "du -sh $WS/.cache $WS/worktrees | sort -h; scripts/worktree-task.sh --rm <task-id> de lo ya shippeado; docker system prune -a"
+    elif [ "$_libre_gb" -lt $((_min_gb * 5)) ]; then
+      warn "quedan ${_libre_gb}G libres: por encima del mínimo (${_min_gb}G) pero con poco margen. Un disco lleno produce rojos que PARECEN defectos de código (medido: 3 de 8 corridas). Lo que más crece: .cache/, worktrees/, imágenes de docker"
+    else
+      ok "espacio en disco: ${_libre_gb}G libres"
+    fi ;;
+esac
 
 echo "── resultado: $FAIL fallos, $WARN advertencias ──"
 [ "$FAIL" -eq 0 ]

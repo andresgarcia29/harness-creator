@@ -102,6 +102,159 @@ contra una instalación real).
   funcionando mientras el puntero esté.
 
 ### Fixed
+- **Un disco lleno deja de disfrazarse de defecto de código.** Medido: 3 de 8
+  corridas de la MISMA suite en rojo con el disco al 100 por ciento (56K libres
+  de 193G); dos ni llegaron a colectar el archivo de test porque los workers
+  murieron por ENOSPC. Con 29G libres, 16 de 16 verdes, mismo código. El daño
+  no es la corrida perdida: es que ese rojo se lee igual que un defecto y manda
+  al agente a arreglar lo que no está roto, quemando rondas. Es el mismo patrón
+  que el rojo por ceguera de `deploy-watch`, una causa ambiental disfrazada de
+  causa de código. Ahora `ship.sh` comprueba el espacio ANTES de los gates y se
+  niega a correr con un mensaje que empieza por "NO ES TU CÓDIGO, ES EL DISCO",
+  dice qué borrar primero y declara el escape (`HARNESS_MIN_FREE_GB=0`). El
+  umbral es configurable porque una suite de Go con cachés y una de docs no
+  necesitan lo mismo. `doctor.sh` avisa antes, como observador, para que se
+  limpie sin perder una corrida. Y un `df` ilegible no inventa un rojo: se
+  ausenta, como manda la ley de los gates que no pueden medir.
+- **El `.semgrepignore` por defecto escondía los tests, y el gate salía verde.**
+  semgrep trae un ignore propio que excluye `*_test.go` entre otras cosas, y
+  como `ship.sh` escanea el DIRECTORIO, las ramas de las reglas que apuntan a
+  tests no se evaluaban nunca: el workspace mostraba 0 matches de "no sleep en
+  tests" para Go, que se leía como ausencia de deuda cuando era un gate ciego.
+  Reproducido en la suite: el mismo archivo da 0 hallazgos como directorio y 1
+  como target explícito. Ahora hay una segunda pasada con los archivos como
+  target explícito, que es lo que los saca del ignore. Los globs salen de los
+  `include:` de las PROPIAS reglas, no de una lista cableada en el gate que
+  envejecería en silencio, y sin `include:` la segunda pasada no corre: un gate
+  que no encuentra qué mirar se ausenta. No se escribe un `.semgrepignore` en
+  el worktree aunque también funcione: ensuciaría un árbol que otros gates
+  están midiendo y pisaría el del repo si lo tiene.
+- **Ejecutar un artefacto por fin cuenta como tocarlo.** `gate_evidence`
+  intersecta lo CITADO por la compliance matrix con lo LEÍDO según
+  `tasks/<id>/evidence.log`, y ese log lo alimentaba SOLO el hook track-read,
+  o sea abrir el archivo. Correr la prueba con `evidence.py` no dejaba rastro
+  ahí, así que un reviewer que EJECUTABA el test y citaba su ruta quedaba rojo
+  por no haberlo "leído". Pasó tres veces en la misma tarea con tres
+  reviewers distintos, pese a que el mensaje del gate ya hablaba de abrir: un
+  gate que castiga la conducta más fuerte (ejecutar) para premiar la más débil
+  (leer) está midiendo lo que no quiso medir, y el propio hook ya declaraba
+  que "un test que CORRIÓ es la evidencia más fuerte que hay". Ahora
+  `evidence.py run` apunta en el log los archivos que el comando NOMBRA, y
+  solo los que resuelven a un archivo real: no se afloja "citado no es
+  verificado", porque nada entra sin haberse ejecutado. El mensaje del gate y
+  el prompt del reviewer nombran las dos formas válidas de tocar un artefacto
+  y advierten la trampa que queda: correr `go test ./internal/...` y citar
+  `internal/auth/auth_test.go` no registra nada, porque el comando nunca
+  nombró ese archivo.
+- **El árbol de trabajo compartido deja de ser tierra de nadie: dos casos de
+  campo, cuatro dientes nuevos.** (1) El reviewer hizo verificación por
+  mutación (editar `src/` para ver un test ponerse rojo) sobre el árbol donde
+  QA estaba buildeando EN PARALELO: el build absorbió el archivo mutado más un
+  test sin trackear, y la medición quedó corrupta. Lo cazó la diligencia de
+  QA, no el harness. Ahora `guard-canonical` hace del árbol clavado
+  (`worktrees/<task>/.review-<repo>`) una zona de SOLO LECTURA (fail-closed,
+  con la sonda descartable como remediación exacta), `evidence.py` se niega a
+  sellar si el árbol se ensució MIENTRAS corría el comando (el chequeo previo
+  solo miraba antes de empezar, y esa es justo la ventana que importa), y el
+  prompt del reviewer por fin lo manda al árbol clavado en vez de al vivo, con
+  la prohibición explícita y el recordatorio de que `gate_test_muerde` ya hace
+  esa verificación aislada. QA, por su lado, comprueba la identidad del ÁRBOL
+  antes de medir, igual que ya comprobaba la del servidor.
+  (2) Dos tareas del mismo repo lanzadas en paralelo compartieron worktree y
+  el `git add` amplio de una se llevó SEIS archivos de la otra a su commit. La
+  causa de fondo era una premisa FALSA escrita en los prompts ("cada tarea
+  tiene su worktree, así que las aristas del DAG van solo por conflicto de
+  archivos, jamás por repo"): el árbol es `worktrees/<task-id>/<repo>`, uno por
+  (tarea, repo), y las tareas del DAG lo comparten junto con la rama y el
+  index. Ahora `POLICY-DAG-010` rechaza el plan que deja dos tareas del mismo
+  repo sin ordenar (cualquiera de los dos órdenes sirve, y una cadena
+  transitiva vale), el hook nuevo `guard-broad-add` bloquea el add amplio
+  cuando el DAG declara hermanas sobre ese repo, y la doctrina se corrigió en
+  `rfc`, `architect`, `implement`, `smart` e `implementer`. El paralelo que da
+  ganancia de reloj, el de repos distintos, queda intacto.
+- **`deploy-watch` por fin puede DEJAR de ser ciego, y `Progressing` dejó de
+  leerse como "roto".** El tri-estado (observé y está sano / observé y está
+  enfermo / no pude observar) ya impedía el rollback por ceguera, pero el
+  watcher no tenía forma de salir de la ceguera y por eso esa era su vida
+  normal. (1) El respaldo por CLI era **código muerto**: exigía `ARGOCD_URL`,
+  un nombre nuestro, cuando el CLI lee `ARGOCD_SERVER` y lo quiere como HOST
+  (con el esquema adelante contesta "server address unspecified", con un path
+  detrás "unknown port": los dos síntomas de campo). Ahora se canonicaliza y
+  se exporta lo que el CLI lee de verdad. (2) El CLI de Kargo busca
+  `KARGO_API_ADDRESS`/`KARGO_API_TOKEN` y el harness guardaba
+  `KARGO_ADDRESS`/`KARGO_TOKEN`: el inyector metía credenciales correctas que
+  el CLI nunca miraba. Se puentea en los dos sentidos, solo con export (un
+  `kargo login` dejaría estado mutable en `$HOME` y puede colgarse pidiendo
+  input). (3) El catálogo declaraba el token y NO la dirección, así que el
+  bootstrap instalaba la herramienta, el doctor la veía presente, y el watcher
+  quedaba ciego por diseño: la cadena de la regla anti-consejo-vacío se
+  cortaba en el último eslabón. (4) `argocd app wait` quemaba el timeout
+  entero contra un host inalcanzable y recién después preguntaba si la app
+  existía; ahora el `get` barato va primero y sin VPN cuesta segundos.
+  (5) **Falso rojo nuevo, encontrado auditando lo anterior**: el health por
+  `kubectl` (que es el camino preferido) hacía UNA lectura instantánea, sin
+  loop y sin usar el timeout. Corriendo segundos después del push,
+  `OutOfSync`/`Progressing` es el estado normal de un deploy que va bien, y se
+  devolvía como enfermo, o sea rollback propuesto sobre un deploy sano. Ahora
+  re-consulta hasta el deadline y solo lo que sigue enfermo al vencer es rojo;
+  una salida vacía rompe el loop, porque eso es ceguera y no enfermedad. El
+  contrato de tres salidas viaja también en el prompt de `/ship`, que hasta
+  hoy solo modelaba verde y rojo.
+- **El callejón sin salida de `review → ship`: mecanismo completo, y ahora
+  también documentado y ejecutado por la suite.** Tres casos de campo
+  terminaron en la misma pregunta ("avancé la fase antes de tiempo, cómo
+  vuelvo"), y el mecanismo ya existía: `harness-policy.py rollback` deshace
+  hacia atrás con actor y motivo en el historial, y la transición la registra
+  `ship.sh` tras cada push, prosperando solo en el último repo por
+  `POLICY-SHIP-004`. Lo que faltaba era que se supiera y que tuviera diente.
+  (1) `docs/harness/policy.md`, que es EL doc del motor que se instala, no
+  mencionaba ni el rollback ni quién mueve la fase: quien lo leía encontraba
+  solo `transition`, que apunta hacia adelante, y concluía que no había vuelta.
+  De ahí sale "editá `state.json` a mano", que es justo lo que la constitución
+  prohíbe. Ahora documenta las dos cosas con sus códigos. (2)
+  `request_ship_phase` solo estaba cubierta por asserts de presencia de texto
+  en el template: podía romperse entera con la suite en verde. Ahora
+  `test_ship_gates.sh` la extrae y la ejecuta contra el `harness-policy.py`
+  real en sus cuatro ramas (faltan repos, último repo, fase ya avanzada, sin
+  estado), y muerde: devolverle el comportamiento viejo rompe cuatro
+  aserciones. (3) El paso 4 del prompt de `/ship` tenía dos redacciones de la
+  misma regla pegadas por una edición previa, con dos "Después:" colgando;
+  fusionadas, y ahora nombra el rollback como el rescate.
+- **El precheck avisa cuando la evidencia del repo no apunta al HEAD que está
+  sellando.** Caso de campo, dos veces en la misma sesión: sello `ok:true`
+  sobre el hijo con las únicas evidencias del repo apuntando al padre. El
+  desalineamiento lo cazaba recién `verdict-scaffold.sh`, o sea después de
+  lanzar la ronda de review, y con `--allow-empty` podía no verse nunca:
+  cuando se veía, la ronda ya estaba pagada. Ahora
+  `aviso_evidencia_desalineada` lo dice en el precheck, con la MISMA
+  remediación que da el scaffold para que las dos puertas no se contradigan.
+  Es un observador, no un gate: sigue verde, porque ponerlo en rojo sería la
+  mitad simétrica del defecto que el script ya rechazó (un repo sin stack no
+  puede sellar evidencia en HEAD y eso es legítimo). El rebase puro no dispara
+  falsa alarma: una evidencia de otra base con el mismo `patch_id` prueba el
+  mismo cambio, igual que para `evidence.py` y para el predicado del scaffold.
+  La regla viaja también en el prompt de `/implement`, porque un aviso que
+  ningún prompt explica se ignora.
+- **El cable que hace sobrevivir el review al rebase pasó a tener diente, y
+  el gate dejó de ser mudo cuando no hay identidad de cambio.** Los tres
+  eslabones que permiten que un rebase NO tire veredicto ni evidencia
+  (`change-id.sh`, la ventana de reuso de `harness-policy.py`, la
+  equivalencia por `patch_id` de `evidence.py`) estaban cada uno probado
+  contra su código real, pero la función que los CONECTA
+  (`gate_policy_and_evidence`) no la ejecutaba ningún test: está stubbeada
+  donde se mide el fan-out, que es lo correcto ahí, y dejaba el cable al
+  aire. Borrar el `--patch-id` o romper el parseo de `REVIEWED_COMMIT=`
+  dejaba la suite VERDE y devolvía a producción el bucle ceremonial de
+  POLICY-SHIP-002 (registrar evidencia, rebase, re-registrar, re-sellar, una
+  ronda por repo). Ahora `test_rebase_survival.sh` extrae la función del
+  template y la corre sobre git de verdad, con la base movida por un commit
+  ajeno y el SHA reescrito por un rebase real, con el caso de campo de los
+  TRES SHAs; y muerde: la mutación que corta el cable pone el test en rojo.
+  Además, el gate ya no tira el stderr de `change-id.sh`: cuando no puede
+  calcular el `patch_id` (diff vacío contra `origin/<base>`, o esa referencia
+  no existe) DICE la causa y la remediación en vez de dejar solo
+  "POLICY-SHIP-002: falta --patch-id", que nombra el síntoma, suena a bug del
+  harness y casi siempre es un worktree sin commits propios.
 - **Tres hallazgos de la primera corrida de campo de una instancia real
   (post 0.54.0), los tres verificados EJECUTANDO, no leyendo.** (1) El
   reviewer leía el worktree VIVO mientras el implementer (dueño del claim)

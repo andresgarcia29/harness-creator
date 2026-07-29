@@ -317,4 +317,125 @@ python3 "$POLICY_PY" --policy "$POL" transition "$TD4" ship --actor o >/dev/null
 python3 "$POLICY_PY" --policy "$POL" transition "$TD4" deploy --actor o >/dev/null 2>&1 \
   && pass "flow: trunk (sin campo landed) no se ve afectado" || fail "el gate rompio la compat con trunk"
 
+# ── EL CABLEADO, NO SOLO LAS PIEZAS ───────────────────────────────────
+# Los tres eslabones de la supervivencia al rebase (change-id.sh, la ventana de
+# harness-policy.py, la equivalencia de evidence.py) estaban probados cada uno
+# contra su codigo real, pero la funcion que los CONECTA no la ejecutaba nadie:
+# en tests/test_ship_gates.sh gate_policy_and_evidence esta stubbeada, que es lo
+# correcto ahi (mide el fan-out, no el gate) y dejaba el cable al aire.
+#
+# Lo que quedaba sin diente: borrar el `${pid:+--patch-id "$pid"}` o romper el
+# `sed -n 's/^REVIEWED_COMMIT=//p'` deja la suite VERDE y devuelve el bucle
+# ceremonial de POLICY-SHIP-002 a produccion. Fail-closed, si, pero el bug
+# renace intacto. Aca se ejecuta la funcion REAL extraida del template, sobre
+# git de verdad, con la base movida y el SHA reescrito por un rebase real.
+echo "── el cableado de ship.sh: extraido del template y ejecutado de verdad"
+
+SHIP_TMPL="$ROOT/templates/scripts/ship.sh.tmpl"
+awk '/^gate_policy_and_evidence\(\) \{/{f=1} f{print} f&&/^\}/{exit}' \
+  "$SHIP_TMPL" > "$WS/gate_pe.sh"
+grep -q 'change-id.sh' "$WS/gate_pe.sh" \
+  || fail "no pude extraer gate_policy_and_evidence del template"
+
+# El workspace que la funcion espera: scripts/ REALES, no copias de mentira.
+GWS="$WS/gws"; mkdir -p "$GWS/scripts" "$GWS/tasks/T9/evidence"
+cp "$CHANGE_ID" "$GWS/scripts/change-id.sh"
+cp "$POLICY_PY" "$GWS/scripts/harness-policy.py"
+cp "$EVIDENCE_PY" "$GWS/scripts/evidence.py"
+cp "$POL" "$GWS/harness-policy.json"
+python3 - "$GWS/harness-policy.json" <<'PY'
+import json, sys
+p = json.load(open(sys.argv[1]))
+p["ship"]["required_evidence_kinds"] = ["test"]   # el test de arriba le metio lint
+json.dump(p, open(sys.argv[1], "w"))
+PY
+cat > "$GWS/tasks/T9/state.json" <<'JSON'
+{"schema":1,"task_id":"T9","phase":"review","lane":"full","review_rounds":1,
+ "budget_usd":null,"spent_usd":0.0,
+ "history":[{"from":"implement","to":"review","actor":"orchestrator"}]}
+JSON
+
+# Un worktree con el caso de campo entero: el reviewer sello sobre R, despues
+# main avanzo con un commit ajeno (el "chore: Update image tag" del reporte) y
+# el rebase reescribio el SHA sin tocar una linea de lo revisado.
+GWT="$GWS/worktrees/T9/atlas"; mk_base "$GWT"
+printf 'def f():\n    return 2\n\nHELPER = 0\n' > "$GWT/app.py"
+g "$GWT" add -A; g "$GWT" commit -qm "el cambio de la tarea"
+REVISADO="$(g "$GWT" rev-parse HEAD)"
+PID_REAL="$(bash "$CHANGE_ID" "$GWT" main)"
+g "$GWT" checkout -q -b upstream origin/main
+printf 'image: v2\n' > "$GWT/deploy.yaml"
+g "$GWT" add -A; g "$GWT" commit -qm "chore: Update image tag"
+g "$GWT" update-ref refs/remotes/origin/main HEAD
+g "$GWT" checkout -q - >/dev/null 2>&1
+g "$GWT" rebase -q origin/main >/dev/null 2>&1
+HEAD_NUEVO="$(g "$GWT" rev-parse HEAD)"
+[ "$REVISADO" != "$HEAD_NUEVO" ] \
+  && pass "el rebase reescribio el SHA (el caso de campo se reproduce)" \
+  || fail "el fixture no movio el SHA: no prueba nada"
+
+TD9="$GWS/tasks/T9"
+jq -n --arg c "$REVISADO" --arg p "$PID_REAL" --arg t "$NOW" \
+  '{schema:1, task_id:"T9", repo:"atlas", commit:$c, patch_id:$p, reviewed_at:$t,
+    reviewer:"reviewer", implementation_agents:["impl-atlas"],
+    verdict:"pass", qa:"pass", evidence:["EV-TEST-cableado0001"],
+    blocking:[], non_blocking:[], docs_updated:true, compliance:[],
+    requirements_uncovered:0, snapshots_updated_justified:true}' \
+  > "$TD9/verdict-atlas.json"
+# La evidencia citada quedo sellada en un TERCER SHA (el precheck del
+# implementer, antes del review), que es lo que el reporte llama "huerfana":
+# sobrevive solo si el cableado le pasa el REVIEWED_COMMIT que publico policy
+# Y evidence.py resuelve la equivalencia por patch_id.
+printf 'ok\n' > "$TD9/evidence/EV-TEST-cableado0001.log"
+EVH="$(shasum -a 256 "$TD9/evidence/EV-TEST-cableado0001.log" | cut -d' ' -f1)"
+jq -n --arg c "cd4552b0000000000000000000000000000000a" --arg p "$PID_REAL" --arg h "$EVH" \
+  '{schema:1, id:"EV-TEST-cableado0001", task_id:"T9", repo:"atlas", kind:"test",
+    runner:"impl-atlas", commit:$c, commit_after:$c, exit_code:0, patch_id:$p,
+    output:"evidence/EV-TEST-cableado0001.log", output_sha256:$h}' \
+  > "$TD9/evidence/EV-TEST-cableado0001.json"
+
+corre_gate() {  # corre_gate <archivo-con-la-funcion> [worktree] [repo]
+  local fn="$1" wt="${2:-$GWT}" repo="${3:-atlas}"
+  ( cd "$wt" || exit 9
+    WS="$GWS"; TASK=T9; REPO="$repo"; WT="$wt"; BASE_REF=main
+    gate() { echo "── gate: $1 ──"; }
+    # shellcheck disable=SC1090
+    . "$fn"
+    gate_policy_and_evidence 2>&1 )
+}
+out="$(corre_gate "$WS/gate_pe.sh")"; rc=$?
+assert_eq 0 "$rc" "el gate real pasa con el SHA reescrito por el rebase"
+assert_contains "$out" "veredicto reusado" "el cableado SI le pasa --patch-id a policy"
+assert_contains "$out" "MISMO cambio" "y evidence.py recibe el REVIEWED_COMMIT que policy publico"
+
+# El diente: si alguien corta el cable del patch_id, esto tiene que ponerse rojo.
+# Sin esta mutacion el bloque de arriba pasaria igual con el cable cortado, y un
+# test que no puede fallar no prueba nada (la misma ley que gate_test_muerde).
+sed 's/\${pid:+--patch-id "\$pid"}//' "$WS/gate_pe.sh" > "$WS/gate_pe_roto.sh"
+cmp -s "$WS/gate_pe.sh" "$WS/gate_pe_roto.sh" \
+  && fail "la mutacion no cambio nada: el test no puede morder" \
+  || pass "la mutacion corta el cable de verdad"
+out="$(corre_gate "$WS/gate_pe_roto.sh")" || true
+assert_not_contains "$out" "veredicto reusado" "cortar el cable del patch_id SI rompe el gate (el test muerde)"
+assert_contains "$out" "falta --patch-id" "y el rojo nombra el cable cortado"
+
+# ── CUANDO NO HAY IDENTIDAD, EL ROJO TIENE QUE DECIR POR QUE ──────────
+# change-id.sh sabe exactamente por que no pudo calcular el id (diff vacio, o
+# no existe origin/<base>) y lo dice por stderr, pero el gate lo tiraba a
+# /dev/null. El operador se quedaba con "POLICY-SHIP-002: falta --patch-id",
+# que nombra el sintoma y no la causa, y encima suena a bug del harness cuando
+# suele ser un worktree sin commits propios. La ley de la casa es que el
+# mensaje de un gate es un prompt: causa + remediacion, no solo el codigo.
+GWT2="$GWS/worktrees/T9/vacio"; mk_base "$GWT2"   # HEAD == origin/main: sin cambio
+jq -n --arg t "$NOW" \
+  '{schema:1, task_id:"T9", repo:"vacio", commit:"0000000000000000000000000000000000000000",
+    patch_id:"PID-CUALQUIERA", reviewed_at:$t, reviewer:"reviewer",
+    implementation_agents:["impl"], verdict:"pass", qa:"pass", evidence:[],
+    blocking:[], non_blocking:[], docs_updated:true, compliance:[],
+    requirements_uncovered:0, snapshots_updated_justified:true}' \
+  > "$TD9/verdict-vacio.json"
+out="$(corre_gate "$WS/gate_pe.sh" "$GWT2" vacio)" || true
+assert_contains "$out" "vacío" "sin identidad de cambio, el gate DICE la causa (no solo el codigo)"
+assert_contains "$out" "patch_id" "y nombra lo que no pudo calcular"
+
 t_done

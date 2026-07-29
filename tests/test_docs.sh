@@ -117,6 +117,24 @@ done
 [ -z "$faltan" ] && pass "todos los scripts del plugin estan clasificados en harness-update.md" \
   || fail "scripts del plugin sin clasificar en harness-update.md:$faltan"
 
+# Y los HOOKS igual, que era el agujero que quedaba: este bloque solo miraba
+# templates/scripts/. Un hook nuevo no basta con copiarlo, hay que CABLEARLO en
+# .claude/settings.json, asi que si el update no lo nombra la instancia recibe
+# el archivo y el hook no corre nunca. Paso con guard-broad-add.sh.
+faltan_h=""
+for f in "$ROOT"/templates/hooks/*; do
+  b="$(basename "$f")"; n="${b%.sh}"
+  [ -n "$n" ] || continue
+  grep -q -- "$n" "$UPD" || faltan_h="$faltan_h $n"
+done
+[ -z "$faltan_h" ] && pass "todos los hooks del plugin estan clasificados en harness-update.md" \
+  || fail "hooks del plugin sin clasificar en harness-update.md:$faltan_h"
+# Y el archivo que los CABLEA tiene que tener dueno declarado, o un hook nuevo
+# llega al disco sin que nada lo invoque.
+grep -q "settings.json" "$UPD" \
+  && pass "harness-update.md declara quien es dueno de .claude/settings.json" \
+  || fail ".claude/settings.json sin propietario declarado: un hook nuevo llega pero no se cablea"
+
 echo
 echo "── AGENTS.md no se regenera: se mergea"
 # Caso real: el update lo trato como propiedad del plugin y lo reescribio
@@ -697,5 +715,24 @@ else
   assert_contains "$rev_flat" "dev server viejo de OTRO árbol" \
     "y el árbol equivocado que respondía"
 fi
+
+echo
+echo "── el doc del MOTOR enseña el camino de vuelta y quién mueve la fase"
+# Tres casos de campo distintos terminaron en la misma pregunta: "avancé la fase
+# antes de tiempo, cómo vuelvo". El mecanismo existe (harness-policy.py rollback,
+# y la transición review→ship la registra ship.sh solo), pero el doc que se
+# INSTALA con el motor no lo mencionaba: quien leía docs/harness/policy.md para
+# saber cómo se mueve una fase encontraba solo `transition`, que apunta hacia
+# adelante, y concluía que no había vuelta. De ahí sale "editá state.json a
+# mano", que es justo lo que la constitución prohíbe.
+pol="$(cat "$root/templates/docs/policy.md")"
+assert_contains "$pol" "harness-policy.py rollback" \
+  "policy.md nombra el comando que deshace un avance equivocado"
+assert_contains "$pol" "POLICY-ROLLBACK-003" \
+  "y su restricción: el rollback solo va hacia atrás"
+assert_contains "$pol" "POLICY-SHIP-004" \
+  "policy.md explica por qué la fase no avanza con repos sin shippear"
+assert_contains "$pol" "ship.sh" \
+  "y quién es el dueño de la transición review a ship"
 
 t_done

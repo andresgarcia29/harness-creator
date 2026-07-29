@@ -799,6 +799,56 @@ def load_dag_nodes(dag_path: Path) -> "tuple[dict, dict]":
 
     for node in nodes:
         visit(node)
+
+    # ── DOS TAREAS DEL MISMO REPO NO PUEDEN IR EN PARALELO ───────────────
+    # La doctrina decía "aristas solo por conflicto REAL de archivos, jamás por
+    # repo, porque cada tarea tiene su worktree". Esa premisa es FALSA:
+    # worktree-task.sh crea el árbol en worktrees/<task-id>/<repo>, o sea UNO
+    # por (tarea, repo), y todas las tareas del DAG de esa tarea lo comparten,
+    # junto con la rama task/<id> y el index de git.
+    #
+    # Caso de campo: dos tareas del mismo repo lanzadas en paralelo, el `git
+    # add` amplio de una se llevó 6 archivos de la otra a su commit. No se
+    # perdió trabajo de milagro (mismo trailer Task:), pero la atribución quedó
+    # mezclada y el index quedó a merced de una carrera.
+    #
+    # El arreglo va acá y no en el prompt porque el orquestador ya lo estaba
+    # haciendo a mano: una regla que depende de que alguien se acuerde ya falló.
+    # Basta con que exista un CAMINO de dependencia entre las dos (cualquier
+    # orden sirve, y una cadena T1 → T2 → T3 vale): el DAG serializado hace que
+    # `dag-order` y `bd ready` no las ofrezcan a la vez.
+    def reaches(src: str, dst: str) -> bool:
+        seen: set[str] = set()
+        stack = [src]
+        while stack:
+            cur = stack.pop()
+            if cur == dst:
+                return True
+            if cur in seen:
+                continue
+            seen.add(cur)
+            stack.extend(nodes.get(cur, []))
+        return False
+
+    by_repo: dict[str, list[str]] = {}
+    for task_id, repo in repos.items():
+        by_repo.setdefault(repo, []).append(task_id)
+    for repo, ids in by_repo.items():
+        if len(ids) < 2:
+            continue
+        ordered = sorted(ids)
+        for i, left in enumerate(ordered):
+            for right in ordered[i + 1:]:
+                if reaches(left, right) or reaches(right, left):
+                    continue
+                fail("POLICY-DAG-010",
+                     f"{left} y {right} comparten el repo '{repo}' y el DAG no las "
+                     f"ordena: en paralelo comparten worktrees/<task>/{repo}, la rama "
+                     "y el index de git, así que se pisan los commits (caso de campo: "
+                     "un `git add` amplio se llevó 6 archivos de la tarea vecina). "
+                     f"↳ remediación: agregá una arista de orden en depends_on "
+                     f"(cualquiera de los dos órdenes sirve: {left} → {right} o al "
+                     "revés), o dales repos distintos")
     return nodes, repos
 
 

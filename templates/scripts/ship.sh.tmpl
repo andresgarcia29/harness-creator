@@ -12,7 +12,9 @@
 # decir lo que un script dice en segundos y gratis. El implementer lo corre
 # antes de entregar; /review no lanza a nadie si el precheck no está verde.
 # Deja el sello en tasks/<task>/precheck-<repo>.json (commit + ok +
-# verificado, que dice cuánto se miró de verdad: ver stamp_precheck).
+# verificado, que dice cuánto se miró de verdad: ver stamp_precheck), y avisa
+# si la evidencia citable del repo quedó apuntando a otro commit
+# (aviso_evidencia_desalineada: observador, no gate, jamás pone rojo).
 #
 # Opera sobre el WORKTREE de la tarea (worktrees/<task>/<repo>), nunca
 # sobre el clon canónico. Serie solo lo que tiene orden real:
@@ -361,6 +363,52 @@ stamp_precheck() {  # stamp_precheck <ok:true|false>: sello que /review lee
   printf '{"schema":1,"task_id":"%s","repo":"%s","commit":"%s","ok":%s,"verificado":"%s","at":"%s"}\n' \
     "$TASK" "$REPO" "$head" "$ok" "$verificado" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     > "$WS/tasks/$TASK/precheck-$REPO.json"
+}
+# ── LA EVIDENCIA DEL REPO, ¿MIRA AL COMMIT QUE ESTOY SELLANDO? ────────
+# Caso de campo, dos veces en la misma sesión: el precheck selló ok:true sobre
+# el hijo mientras las ÚNICAS evidencias del repo apuntaban al padre. El
+# desalineamiento lo cazaba recién verdict-scaffold.sh, o sea DESPUÉS de lanzar
+# la ronda de review: cuando se veía, la ronda ya estaba pagada. Y con
+# --allow-empty el scaffold pasa igual, así que el aviso llegaba a veces nunca.
+#
+# ES UN OBSERVADOR, NO UN GATE: avisa y el precheck sigue verde. Ponerlo en rojo
+# sería la mitad simétrica del defecto que este script ya rechazó más arriba (un
+# repo sin stack no puede sellar evidencia en HEAD y eso es legítimo). Por la
+# misma ley de familias, acá TODO va dentro de `if` o con `|| true`: un
+# observador que mata el precheck mezcla las dos familias que CONTRIBUTING
+# separa a propósito.
+#
+# El rebase puro NO cuenta como desalineamiento: la evidencia sellada sobre otra
+# base con el MISMO patch_id es la misma prueba del mismo cambio (es lo que
+# acepta evidence.py y lo que mira el predicado del scaffold). Avisar ahí sería
+# fabricar una falsa alarma justo en el caso que el harness ya resolvió.
+aviso_evidencia_desalineada() {
+  local dir="$WS/tasks/$TASK/evidence" f head pid c p en_head=0 viejas=0
+  [ -d "$dir" ] || return 0
+  head="$(git -C "$WT" rev-parse HEAD 2>/dev/null || true)"
+  [ -n "$head" ] || return 0
+  pid="$(bash "$WS/scripts/change-id.sh" "$WT" "$BASE_REF" 2>/dev/null || true)"
+  for f in "$dir"/EV-*.json; do
+    [ -f "$f" ] || continue
+    c="$(jq -r --arg t "$TASK" --arg r "$REPO" \
+      'select(.task_id==$t and .repo==$r) | .commit // ""' "$f" 2>/dev/null || true)"
+    [ -n "$c" ] || continue
+    p="$(jq -r '.patch_id // ""' "$f" 2>/dev/null || true)"
+    if [ "$c" = "$head" ] || { [ -n "$pid" ] && [ "$p" = "$pid" ]; }; then
+      en_head=$((en_head+1))
+    else
+      viejas=$((viejas+1))
+    fi
+  done
+  [ "$viejas" -gt 0 ] && [ "$en_head" -eq 0 ] || return 0
+  echo "   ⚠️  las $viejas evidencia(s) de $REPO NO apuntan al HEAD que acabo de sellar"
+  echo "      (${head}): son de otro commit y ninguna es del cambio actual."
+  echo "      El sello dice que los gates pasaron acá, pero la prueba citable es de antes."
+  echo "      Si entregás así, verdict-scaffold.sh lo caza DESPUÉS, con la ronda pagada."
+  echo "      ↳ remediación: re-sellá la prueba sobre este HEAD:"
+  echo "        python3 scripts/evidence.py run --task-dir tasks/$TASK --repo $REPO \\"
+  echo "          --runner <implementer> --kind test --cwd worktrees/$TASK/$REPO -- <comando de test>"
+  emit assumption "precheck de $REPO: $viejas evidencia(s) de otro commit y ninguna del HEAD sellado"
 }
 # ── Procedencia: qué harness, de qué máquina, con qué gates ───────────
 # Con varios workspaces, los gates corren en la laptop del que pushea y NADA
@@ -1218,7 +1266,79 @@ run_security_gates() {
   if [ -f "$WS/semgrep/rules.yaml" ]; then
     gate semgrep
     semgrep scan --config "$WS/semgrep/rules.yaml" --error --quiet .
+    # ── LA SEGUNDA PASADA: LO QUE EL IGNORE POR DEFECTO ESCONDE ────────
+    # semgrep trae un .semgrepignore propio que excluye, entre otras cosas,
+    # *_test.go. En un escaneo de DIRECTORIO (el `.` de arriba) esos archivos
+    # ni se abren, así que las ramas de las reglas que apuntan a tests jamás
+    # se evalúan: el workspace mostraba 0 matches de "no sleep en tests" para
+    # Go, y eso se leía como ausencia de deuda cuando era un gate ciego.
+    # Reproducido: el mismo archivo da 0 hallazgos como directorio y 1 como
+    # target explícito.
+    #
+    # Se pasan los archivos como TARGET EXPLÍCITO, que es lo que los saca del
+    # ignore. No se escribe un .semgrepignore propio en el worktree aunque
+    # también funcione: ensuciaría un árbol que otros gates están midiendo, y
+    # pisaría el del repo si lo tiene.
+    #
+    # Los globs salen de las PROPIAS reglas (sus `include:`), no de una lista
+    # cableada acá: si mañana una regla mira *.spec.rb, el gate la sigue sola.
+    #
+    # ── Y RATCHETEA, COMO buf Y ruff ──────────────────────────────────
+    # Encender un gate que estuvo CIEGO no es lo mismo que agregar uno nuevo:
+    # del otro lado hay deuda acumulada que nadie pudo ver. El propio reporte
+    # lo dice ("era un falso verde, no una ausencia de deuda"), así que un
+    # bloqueo sobre todo el repo pondría en rojo cada ship hasta que alguien
+    # limpie sleeps que no escribió. Esa es la misma trampa que el ratchet de
+    # buf lint existe para no tener.
+    #
+    # Bloquean solo los archivos que ESTE cambio tocó; el resto se cuenta y se
+    # avisa, candidatos al ratchet-keeper. La deuda deja de ser invisible sin
+    # secuestrar el shipping ajeno.
+    local sg_glob sg_todos="" sg_tocados="" sg_f sg_viejos=0
+    for sg_glob in $(semgrep_test_globs "$WS/semgrep/rules.yaml"); do
+      sg_todos="$sg_todos $(git ls-files -- "$sg_glob" 2>/dev/null || true)"
+      sg_tocados="$sg_tocados $(git diff --name-only --diff-filter=d \
+        "origin/$BASE_REF...HEAD" -- "$sg_glob" 2>/dev/null || true)"
+    done
+    # shellcheck disable=SC2086
+    set -- $sg_tocados
+    if [ $# -gt 0 ]; then
+      echo "   segunda pasada sobre $# archivo(s) de test que este cambio tocó"
+      echo "   (el escaneo de directorio no los ve: los esconde el .semgrepignore)"
+      semgrep scan --config "$WS/semgrep/rules.yaml" --error --quiet "$@"
+    fi
+    # Lo preexistente: se MIRA y se cuenta, pero no bloquea. Sin `--error` el
+    # exit es 0 pase lo que pase, así que esto no puede tumbar el gate.
+    # shellcheck disable=SC2086
+    set -- $sg_todos
+    if [ $# -gt 0 ]; then
+      sg_viejos="$(semgrep scan --config "$WS/semgrep/rules.yaml" --quiet \
+        --json "$@" 2>/dev/null | jq '.results | length' 2>/dev/null || echo 0)"
+      case "$sg_viejos" in ''|*[!0-9]*) sg_viejos=0 ;; esac
+      if [ "$sg_viejos" -gt 0 ]; then
+        echo "⚠️  semgrep: $sg_viejos hallazgo(s) en archivos de test del repo"
+        echo "   (incluidos los que este cambio NO tocó). No bloquean: son deuda"
+        echo "   que el .semgrepignore por defecto mantuvo invisible hasta ahora,"
+        echo "   y ponerla en rojo de golpe frenaría ships que no la causaron."
+        echo "   ↳ candidatos al ratchet-keeper: semgrep scan --config \\"
+        echo "     \"$WS/semgrep/rules.yaml\" --quiet \$(git ls-files '*_test.*')"
+        emit assumption "$REPO: $sg_viejos hallazgo(s) de semgrep en tests preexistentes (no bloquean)"
+      fi
+    fi
   fi
+}
+
+# semgrep_test_globs <rules.yaml> → los globs que las reglas declaran mirar.
+# Sale de los `include:` del propio archivo de reglas para que el gate no
+# tenga una lista de extensiones cableada que envejece en silencio. Si no hay
+# ninguno, no imprime nada y la segunda pasada no corre: un gate que no
+# encuentra qué mirar se ausenta, no inventa un rojo.
+semgrep_test_globs() {
+  [ -f "$1" ] || return 0
+  grep -o 'include:[^]]*]' "$1" 2>/dev/null \
+    | tr ',' '\n' \
+    | sed -n 's/.*"\([^"]*\)".*/\1/p' \
+    | sort -u
 }
 
 # gate_tests_untouched — el gate confía en el test suite; el test suite es un
@@ -1683,9 +1803,16 @@ EOF
   if [ "$missing" -gt 0 ] || [ "$unread" -gt 0 ]; then
     echo "❌ la compliance matrix cita evidencia que no existe ($missing) o que nunca se leyó ($unread)"
     echo "   ↳ remediación: un requirement solo pasa a covered:true si el reviewer"
-    echo "     ABRIÓ el artefacto que lo prueba (test, log, screenshot). Corre el"
-    echo "     test, lee su salida, y cita la ruta real en .compliance[].evidence."
-    echo "     'Confía en mí' no es evidencia — por eso existe este gate."
+    echo "     TOCÓ el artefacto que lo prueba (test, log, screenshot), y hay dos"
+    echo "     formas de tocarlo, las dos válidas:"
+    echo "       · ABRIRLO (Read, o cat/sed/git show por Bash: el hook los registra)"
+    echo "       · EJECUTARLO con scripts/evidence.py run: la corrida apunta en el"
+    echo "         log los archivos que el COMANDO NOMBRA."
+    echo "     Ojo con la trampa que ya costó tres rondas: si corres"
+    echo "     'go test ./internal/...' y citas internal/auth/auth_test.go, el"
+    echo "     comando nunca nombró ese archivo, así que no queda registrado."
+    echo "     Cita la ruta que ejecutaste, o abrila."
+    echo "     'Confía en mí' no es evidencia, por eso existe este gate."
     echo "     Si operas el harness FUERA de Claude Code (sin el hook track-read),"
     echo "     el registro legítimo de una lectura real es:"
     echo "       bash scripts/mark-read.sh $TASK <ruta-del-artefacto>"
@@ -1770,7 +1897,24 @@ gate_policy_and_evidence() {
   # al mismo trunk, el rebase de más abajo reescribe los SHA sin tocar el
   # contenido: exigir SHA idéntico tiraba el review y el QA por un movimiento
   # que el reviewer nunca miró. Ver scripts/change-id.sh.
-  pid="$(bash "$WS/scripts/change-id.sh" "$WT" "$BASE_REF" 2>/dev/null || true)"
+  #
+  # El stderr NO se tira. change-id.sh sabe exactamente por qué no pudo calcular
+  # el id (el diff contra origin/<base> está vacío, o no existe esa referencia) y
+  # lo dice; tirarlo dejaba al operador con "POLICY-SHIP-002: falta --patch-id",
+  # que nombra el síntoma y no la causa, y encima suena a bug del harness cuando
+  # casi siempre es un worktree sin commits propios. Un gate mudo obliga a
+  # adivinar, y adivinar cuesta una ronda.
+  local pid_err
+  pid_err="$(mktemp "${TMPDIR:-/tmp}/ship-changeid.XXXXXX")"
+  pid="$(bash "$WS/scripts/change-id.sh" "$WT" "$BASE_REF" 2>"$pid_err" || true)"
+  if [ -z "$pid" ]; then
+    echo "⚠️  sin identidad de cambio (patch_id): el veredicto solo va a valer para"
+    echo "   el SHA exacto, así que si el trunk se movió esto corta abajo."
+    sed 's/^/   ↳ /' "$pid_err" 2>/dev/null
+    echo "   ↳ remediación: commitea tu cambio en el worktree y verificá que"
+    echo "     origin/$BASE_REF exista (git -C \"$WT\" fetch origin $BASE_REF)."
+  fi
+  rm -f "$pid_err"
 
   # Cuánto avanzó la base desde lo que se revisó: el juicio caduca en el
   # tiempo, no solo en el texto. Best-effort (el commit viejo puede haber sido
@@ -1871,6 +2015,7 @@ gate_fresh_evidence() {
 gate_ship_preflight() {
   local v="$WS/tasks/$TASK/verdict-$REPO.json" vc kinds kind kind_flags=""
   echo "── preflight (sin lock): el veredicto se valida ANTES de retener nada ──"
+  gate_espacio_en_disco
   check_verdict
   gate_evidence
   vc="$(jq -r '.commit // ""' "$v" 2>/dev/null)"
@@ -2033,7 +2178,65 @@ fi
 # cuestan milisegundos, y el carril rojo es el retroceso más caro del pipeline
 # (escala de carril → vuelta a /rfc → re-planear → re-implementar). Descubrirlo
 # en el momento de máximo costo hundido era el peor orden posible.
+# ── "NO ES TU CÓDIGO, ES EL DISCO" ───────────────────────────────────
+# Caso de campo medido: un lote de 8 corridas de la misma suite dio 3 rojas con
+# el disco al 100 por ciento (56K libres de 193G). Dos ni llegaron a colectar el
+# archivo de test (los workers murieron por ENOSPC, 99 de 113 tests) y la
+# tercera falló un assert por contención. Con 29G libres, 16 corridas seguidas
+# salieron verdes.
+#
+# El daño no es la corrida perdida: es que un rojo por disco se lee IGUAL que un
+# defecto de código, así que manda al agente a arreglar lo que no está roto y le
+# quema rondas del presupuesto. Es el mismo patrón que el rojo por ceguera de
+# deploy-watch: una causa ambiental disfrazada de causa de código.
+#
+# Corre ANTES de los gates, no después: la gracia es no pagar la suite entera
+# para descubrir que el resultado no significaba nada. Es fail-CLOSED a
+# propósito (se niega a correr en vez de producir un resultado que no vale), y
+# el mensaje dice exactamente qué borrar. El umbral es configurable porque una
+# suite de Go con cachés y una de docs no necesitan lo mismo.
+gate_espacio_en_disco() {
+  local libre_kb min_gb libre_gb
+  min_gb="${HARNESS_MIN_FREE_GB:-2}"
+  case "$min_gb" in ''|*[!0-9]*) min_gb=2 ;; esac
+  [ "$min_gb" -gt 0 ] || return 0            # 0 = apagado explícito
+  # Se miran DOS sistemas de archivos y manda el más apretado: el worktree y el
+  # de temporales. El caso de campo fue el disco RAÍZ, y los workers de test
+  # escriben su spill en TMPDIR, que muy seguido está en otro filesystem que el
+  # worktree (o al revés). Mirar uno solo dejaba pasar exactamente el escenario
+  # reportado: worktree holgado, raíz al 100 por ciento, suite roja por ENOSPC.
+  #
+  # -P: formato POSIX de una sola línea (sin él, un punto de montaje largo
+  # parte la salida en dos y el awk lee la columna equivocada). BSD y GNU.
+  local punto otro_kb
+  libre_kb=""
+  for punto in "$WT" "${TMPDIR:-/tmp}"; do
+    otro_kb="$(df -Pk "$punto" 2>/dev/null | awk 'NR==2 {print $4}')"
+    case "$otro_kb" in ''|*[!0-9]*) continue ;; esac
+    if [ -z "$libre_kb" ] || [ "$otro_kb" -lt "$libre_kb" ]; then libre_kb="$otro_kb"; fi
+  done
+  case "$libre_kb" in ''|*[!0-9]*) return 0 ;; esac   # sin df legible: no se inventa
+  libre_gb=$((libre_kb / 1024 / 1024))
+  [ "$libre_kb" -lt $((min_gb * 1024 * 1024)) ] || return 0
+  gate "espacio en disco"
+  echo "⛔ quedan ${libre_gb}G libres (mínimo ${min_gb}G): NO corro los gates."
+  echo "   NO ES TU CÓDIGO, ES EL DISCO. Con el disco lleno los workers de test"
+  echo "   mueren por ENOSPC y ni colectan los archivos: el rojo que verías no"
+  echo "   diría nada sobre el cambio, y arreglarlo te costaría rondas."
+  echo "   Medido: 3 de 8 corridas rojas con el disco al 100 por ciento; 16 de 16"
+  echo "   verdes con 29G libres, mismo código."
+  echo "   ↳ remediación, lo que más crece primero:"
+  echo "     du -sh \"$WS\"/.cache \"$WS\"/worktrees 2>/dev/null | sort -h"
+  echo "     scripts/worktree-task.sh --rm <task-id>   # worktrees ya shippeados"
+  echo "     docker system prune -a                    # si usás docker"
+  echo "   ↳ si de verdad querés correr así: HARNESS_MIN_FREE_GB=0 (y no confíes"
+  echo "     en el resultado)."
+  emit gate "gates de $REPO NO corridos: ${libre_gb}G libres de disco" false
+  exit 3
+}
+
 gate_entry_precheck() {
+  gate_espacio_en_disco
   local total
   total="$(git rev-list --count "origin/$BASE_REF..HEAD" 2>/dev/null || echo 0)"
   if [ "${total:-0}" -eq 0 ]; then
@@ -2112,6 +2315,7 @@ if [ "$PRECHECK" -eq 1 ]; then
         echo "      llegó a correr: falta el marcador que deja la corrida sellada."
         echo "      Va así en el sello, sin disfrazarlo de verde ni de rojo." ;;
     esac
+    aviso_evidencia_desalineada
     echo "→ siguiente: /review $TASK $REPO"
   fi
   exit 0

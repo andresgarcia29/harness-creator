@@ -1266,4 +1266,233 @@ assert_eq 2 "$rc" "productor real + entrega fuera del catálogo: ship se niega (
 assert_contains "$out" "no pude leer la entrega declarada" "con el rechazo honesto"
 assert_contains "$out" "POLICY-DELIVERY-001" "citando el código real del productor"
 
+echo
+echo "── el rojo que no es del código: disco lleno"
+# Caso de campo: 3 de 8 corridas de la MISMA suite rojas con el disco al 100 por
+# ciento (56K libres de 193G); dos ni colectaron el archivo de test porque los
+# workers murieron por ENOSPC. Con 29G libres, 16 de 16 verdes. El daño no es la
+# corrida perdida: es que ese rojo se lee igual que un defecto y manda al agente
+# a arreglar lo que no está roto.
+extract gate_espacio_en_disco > "$WS/disco.sh"
+grep -q 'ENOSPC' "$WS/disco.sh" || fail "no pude extraer gate_espacio_en_disco del template"
+
+corre_disco() {  # corre_disco <kb-libres-simulados> <min-gb> → salida, con RC=<n>
+  # El gate hace `exit 3`, así que el rc se captura del subshell entero y se
+  # anexa a la salida: un `echo` después del exit nunca correría.
+  local salida rc
+  salida="$( WS="$WS"; WT="$WS"; REPO=svc
+    HARNESS_MIN_FREE_GB="$2"
+    gate() { echo "── gate: $1 ──"; }
+    emit() { :; }
+    # df stubeado: lo que se mide es la DECISIÓN, no el df del host (que no se
+    # puede llenar en un test). El formato imita el -P real.
+    KB="$1"
+    df() { printf 'Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 100 100 %s 100%% /\n' "$KB"; }
+    # shellcheck disable=SC1090
+    . "$WS/disco.sh"
+    gate_espacio_en_disco 2>&1 )"; rc=$?
+  printf '%s\nRC=%s\n' "$salida" "$rc"
+}
+
+out="$(corre_disco 56 2)"          # 56K libres: el caso de campo literal
+assert_contains "$out" "RC=3" "con el disco lleno el gate se NIEGA a correr (fail-closed)"
+assert_contains "$out" "NO ES TU CÓDIGO, ES EL DISCO" "y lo dice con todas las letras"
+assert_contains "$out" "ENOSPC" "explicando por qué el rojo no significaría nada"
+assert_contains "$out" "worktree-task.sh --rm" "con la remediación ejecutable"
+assert_contains "$out" "HARNESS_MIN_FREE_GB=0" "y el escape declarado para quien insista"
+
+out="$(corre_disco 31457280 2)"    # 30G libres
+assert_contains "$out" "RC=0" "con espacio de sobra no molesta"
+assert_not_contains "$out" "DISCO" "y ni siquiera imprime el gate"
+
+# El umbral es configurable: una suite de Go con cachés y una de docs no
+# necesitan lo mismo, y cablear un número sería el eje que no se despacha.
+out="$(corre_disco 5242880 2)"     # 5G libres, mínimo 2G
+assert_contains "$out" "RC=0" "5G con mínimo 2G: pasa"
+out="$(corre_disco 5242880 10)"    # 5G libres, mínimo 10G
+assert_contains "$out" "RC=3" "5G con mínimo 10G: se niega (el umbral manda)"
+out="$(corre_disco 56 0)"
+assert_contains "$out" "RC=0" "HARNESS_MIN_FREE_GB=0 apaga el gate explícitamente"
+
+# UN GATE QUE NO PUEDE MEDIR NO REPORTA ROJO: la ley de la casa. Un df que no
+# devuelve un número es ceguera, y la ceguera no es un defecto del código.
+salida_ceguera="$( WS="$WS"; WT="$WS"; REPO=svc; HARNESS_MIN_FREE_GB=2
+        gate() { echo "── gate: $1 ──"; }; emit() { :; }
+        df() { echo "df: ilegible"; return 1; }
+        . "$WS/disco.sh"; gate_espacio_en_disco 2>&1 )"; rc_ceguera=$?
+assert_eq 0 "$rc_ceguera" "df ilegible: NO inventa un rojo (se ausenta)"
+assert_not_contains "$salida_ceguera" "DISCO" "y no imprime un veredicto que no puede sostener"
+
+# MANDA EL MÁS APRETADO DE LOS DOS. El caso de campo fue el disco RAÍZ, y los
+# workers de test escriben su spill en TMPDIR, que muy seguido vive en otro
+# filesystem que el worktree. Mirar solo el worktree dejaba pasar el escenario
+# exacto del reporte: worktree holgado, raíz llena, suite roja por ENOSPC.
+cat > "$WS/dos-fs.sh" <<'STUB'
+# df stubeado con DOS sistemas de archivos: el worktree holgado y el de
+# temporales al 100 por ciento. La invocación real es `df -Pk <punto>`, así que
+# el punto de montaje es $2 (no $3: los flags van juntos en un solo argumento).
+df() {
+  if [ "$2" = "/tmp-simulado" ]; then
+    printf 'F B U Avail C M\n/dev/root 100 100 56 100%% /\n'
+  else
+    printf 'F B U Avail C M\n/dev/wt 100 1 31457280 1%% /wt\n'
+  fi
+}
+STUB
+salida_dos="$( WS="$WS"; WT="$WS"; REPO=svc; HARNESS_MIN_FREE_GB=2
+        TMPDIR=/tmp-simulado
+        gate() { echo "── gate: $1 ──"; }; emit() { :; }
+        . "$WS/dos-fs.sh"
+        . "$WS/disco.sh"; gate_espacio_en_disco 2>&1 )"; rc_dos=$?
+assert_eq 3 "$rc_dos" "worktree holgado pero TMPDIR lleno: igual se niega (manda el peor)"
+assert_contains "$salida_dos" "NO ES TU CÓDIGO" "y con el mismo diagnóstico"
+
+echo
+echo "── semgrep: el ignore por defecto escondía los tests, y el gate salía verde"
+# Caso de campo: semgrep trae un .semgrepignore propio que excluye *_test.go.
+# Como ship.sh escanea el DIRECTORIO ('.'), las ramas de las reglas que apuntan
+# a tests NUNCA se evaluaban: todo el workspace mostraba 0 matches de
+# "no sleep en tests" para Go, y eso se leyó como ausencia de deuda cuando era
+# un gate ciego. Un falso verde es peor que un rojo: nadie lo investiga.
+extract semgrep_test_globs > "$WS/sgglobs.sh"
+grep -q 'include:' "$WS/sgglobs.sh" || fail "no pude extraer semgrep_test_globs del template"
+. "$WS/sgglobs.sh"
+
+# Los globs salen de las REGLAS, no de una lista cableada en el gate: si mañana
+# una regla mira *.spec.rb, la segunda pasada la sigue sola.
+globs="$(semgrep_test_globs "$ROOT/templates/semgrep-rules.yaml.tmpl" | tr '\n' ' ')"
+assert_contains "$globs" "*_test.go" "los globs salen de las reglas reales (Go)"
+assert_contains "$globs" "test_*.py" "y de las demás ramas declaradas (Python)"
+assert_contains "$globs" "*.spec.ts" "sin una lista cableada que envejezca en el gate"
+assert_eq "" "$(semgrep_test_globs "$WS/no-existe.yaml")" \
+  "sin archivo de reglas no imprime nada (la segunda pasada no corre)"
+printf 'rules:\n  - id: x\n    pattern: foo(...)\n' > "$WS/sinincludes.yaml"
+assert_eq "" "$(semgrep_test_globs "$WS/sinincludes.yaml")" \
+  "reglas sin include: tampoco (un gate sin qué mirar se ausenta, no inventa rojo)"
+
+if command -v semgrep >/dev/null 2>&1; then
+  # La prueba que importa: MISMO archivo, dos formas de invocar, dos resultados.
+  SG="$WS/sg"; mkdir -p "$SG/repo"
+  cat > "$SG/rules.yaml" <<'YAML'
+rules:
+  - id: no-sleep-en-tests
+    languages: [go]
+    severity: ERROR
+    message: sleep en test
+    pattern: time.Sleep(...)
+    paths:
+      include: ["*_test.go"]
+YAML
+  cat > "$SG/repo/app_test.go" <<'GO'
+package app
+import ("testing"; "time")
+func TestX(t *testing.T) { time.Sleep(time.Second) }
+GO
+  ( cd "$SG/repo" && git init -q . && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm init ) >/dev/null 2>&1
+  dir_out="$( cd "$SG/repo" && semgrep scan --config "$SG/rules.yaml" --error --quiet . 2>&1 )"
+  assert_not_contains "$dir_out" "sleep en test" \
+    "la premisa del bug se reproduce: el escaneo de directorio NO ve el _test.go"
+  tgt_out="$( cd "$SG/repo" && semgrep scan --config "$SG/rules.yaml" --error --quiet app_test.go 2>&1 )"
+  assert_contains "$tgt_out" "sleep en test" \
+    "y como target EXPLÍCITO sí lo ve (que es lo que hace la segunda pasada)"
+  # Y el gate tiene que encontrar ese archivo por sí solo, desde los globs.
+  found="$( cd "$SG/repo" && for g in $(semgrep_test_globs "$SG/rules.yaml"); do
+              git ls-files -- "$g"; done )"
+  assert_eq "app_test.go" "$found" "el gate resuelve el target desde los globs de la regla"
+
+  # ── EL RATCHET: encender un gate ciego no puede murar el repo ──────
+  # Del otro lado de un gate que estuvo ciego hay deuda que nadie pudo ver (el
+  # propio reporte lo dice: "era un falso verde, no una ausencia de deuda").
+  # Bloquear todo pondría en rojo cada ship hasta que alguien limpie sleeps que
+  # no escribió: la misma trampa que el ratchet de buf lint existe para evitar.
+  ( cd "$SG/repo" && git update-ref refs/remotes/origin/main HEAD ) >/dev/null 2>&1
+  # un archivo de test NUEVO con la violación: ese SÍ es tuyo
+  cat > "$SG/repo/nuevo_test.go" <<'GO'
+package app
+import ("testing"; "time")
+func TestY(t *testing.T) { time.Sleep(time.Second) }
+GO
+  ( cd "$SG/repo" && git add -A \
+    && git -c user.email=t@t -c user.name=t commit -qm nuevo ) >/dev/null 2>&1
+  tocados="$( cd "$SG/repo" && for g in $(semgrep_test_globs "$SG/rules.yaml"); do
+                git diff --name-only --diff-filter=d "origin/main...HEAD" -- "$g"; done )"
+  assert_eq "nuevo_test.go" "$tocados" \
+    "el bloqueo mira SOLO los tests que este cambio tocó (el viejo no es tuyo)"
+  todos="$( cd "$SG/repo" && for g in $(semgrep_test_globs "$SG/rules.yaml"); do
+              git ls-files -- "$g"; done | sort | tr '\n' ' ' )"
+  assert_contains "$todos" "app_test.go" "y el aviso sí cuenta la deuda preexistente"
+  assert_contains "$todos" "nuevo_test.go" "junto con la nueva"
+else
+  echo "  ! semgrep no instalado: los dos casos end-to-end no corrieron."
+  echo "    NO es un verde: la lógica de globs sí se probó arriba, pero la"
+  echo "    diferencia directorio-vs-target (que es el bug) quedó sin ejercitar."
+fi
+
+echo
+echo "── request_ship_phase: quien mueve la fase es el PUSH, y se ejecuta de verdad"
+# Tres bugs de campo distintos nacieron de que la transicion review->ship la
+# pedia el orquestador: si se adelantaba, los repos que faltaban se quedaban sin
+# camino (validate-ship exige phase=review y no hay arista ship->review).
+# La solucion fue mover el dueno: la registra ship.sh tras cada push. Pero la
+# funcion solo estaba cubierta por asserts de PRESENCIA DE TEXTO en el template,
+# o sea que nadie la ejecutaba: podia romperse entera con la suite en verde.
+# Aca se extrae del template y se corre contra el harness-policy.py REAL.
+RSP_FN="$WS/rsp.sh"
+extract request_ship_phase > "$RSP_FN"
+grep -q 'POLICY-SHIP-004' "$RSP_FN" || fail "no pude extraer request_ship_phase del template"
+
+RWS="$WS/rsp-ws"; mkdir -p "$RWS/scripts" "$RWS/tasks/T1"
+cp "$ROOT/templates/scripts/harness-policy.py" "$RWS/scripts/"
+cat > "$RWS/harness-policy.json" <<'JSON'
+{"schema":1,
+ "workflow":{"initial_phase":"intake",
+   "phase_order":["intake","rfc","implement","review","ship","deploy","archive"],
+   "allowed_transitions":{"intake":["rfc"],"rfc":["implement"],"implement":["review"],
+     "review":["implement","ship"],"ship":["deploy"],"deploy":["archive"],"archive":[],"blocked":[]},
+   "lanes":{"express":{},"standard":{},"full":{}},
+   "lane_escalation":["express","standard","full"],
+   "allowed_pause_reasons":["enrichment_questions"]},
+ "limits":{"max_review_rounds":3},
+ "ship":{"require_independent_review":true}}
+JSON
+cat > "$RWS/tasks/T1/state.json" <<'JSON'
+{"schema":1,"task_id":"T1","phase":"review","lane":"full","review_rounds":1,
+ "budget_usd":null,"spent_usd":0.0,"repos":["svc","api"],
+ "history":[{"from":"implement","to":"review","actor":"orchestrator"}]}
+JSON
+mk_verdict_rsp() {  # mk_verdict_rsp <repo>
+  jq -n --arg r "$1" '{schema:1, task_id:"T1", repo:$r, commit:"aaa", reviewer:"rev",
+    implementation_agents:["impl"], verdict:"pass", qa:"pass", evidence:[],
+    blocking:[], non_blocking:[], docs_updated:true, compliance:[],
+    requirements_uncovered:0, snapshots_updated_justified:true}' > "$RWS/tasks/T1/verdict-$1.json"
+}
+corre_rsp() { ( WS="$RWS"; TASK=T1; . "$RSP_FN"; request_ship_phase 2>&1 ); }
+
+# (a) faltan repos por shippear: NO avanza, y lo dice como lo correcto
+mk_verdict_rsp svc; mk_verdict_rsp api
+printf '%s\n' '{"repo":"svc","sha":"aaa"}' > "$RWS/tasks/T1/ship.log"
+out="$(corre_rsp)"; rc=$?
+assert_eq 0 "$rc" "faltando un repo: fail-open, el push ya ocurrio (exit 0)"
+assert_contains "$out" "sigue en review" "y lo declara como lo CORRECTO, no como un fallo"
+assert_eq "review" "$(jq -r .phase "$RWS/tasks/T1/state.json")" "la fase no se movio"
+
+# (b) shippeo el ultimo repo: ahora si avanza, y queda en el estado
+printf '%s\n' '{"repo":"api","sha":"bbb"}' >> "$RWS/tasks/T1/ship.log"
+out="$(corre_rsp)"; rc=$?
+assert_eq 0 "$rc" "con todos los repos shippeados: exit 0"
+assert_contains "$out" "la registró el push" "y declara quien movio la fase"
+assert_eq "ship" "$(jq -r .phase "$RWS/tasks/T1/state.json")" "la fase avanzo a ship SOLA"
+
+# (c) segunda llamada sobre una fase ya avanzada: no la mueve ni miente
+out="$(corre_rsp)"; rc=$?
+assert_eq 0 "$rc" "re-invocada sobre una fase ya avanzada: exit 0"
+assert_contains "$out" "ya estaba avanzada" "y lo dice en vez de fingir que la movio"
+
+# (d) sin state.json no hay nada que registrar: muda y fail-open
+rm -f "$RWS/tasks/T1/state.json"
+out="$(corre_rsp)"; rc=$?
+assert_eq 0 "$rc" "sin state.json: exit 0 (fail-open, el push ya ocurrio)"
+assert_eq "" "$out" "y muda: no inventa un fallo donde no hay tarea"
+
 t_done

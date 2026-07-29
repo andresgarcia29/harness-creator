@@ -415,6 +415,101 @@ class EvidenceTest(unittest.TestCase):
         result = self.verify(self.verdict(evidence_id))
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    # ── EL ÁRBOL SE MOVIÓ MIENTRAS CORRÍA ────────────────────────────────
+    # El chequeo de árbol limpio miraba solo ANTES de ejecutar, y esa ventana
+    # es justo la que importa: un worktree lo comparten varios agentes.
+    #
+    # Caso de campo: el reviewer hizo verificación por mutación (editar src/
+    # para ver un test ponerse rojo) mientras QA buildeaba sobre el MISMO
+    # árbol. El build absorbió el archivo mutado, el reviewer restauró, y para
+    # cuando se selló la evidencia el árbol estaba limpio otra vez: el sello
+    # certificaba un commit cuyo código no fue el que corrió, sin una sola
+    # señal. Lo cazó la diligencia de QA, no el harness.
+    def _run_mutating(self, command):
+        return subprocess.run(
+            ["python3", str(SCRIPT), "run", "--task-dir", str(self.task),
+             "--repo", "atlas", "--runner", "qa-atlas", "--kind", "test",
+             "--cwd", str(self.repo), "--", "sh", "-c", command],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+
+    def test_run_refuses_to_seal_when_the_tree_moved_during_the_command(self):
+        result = self._run_mutating("printf 'mutado\\n' >> README.md")
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn("ENSUCIÓ", result.stderr)
+        # El mensaje NO puede afirmar una causa que no puede saber: desde el
+        # `git status` solo, "otro agente mutó el árbol" y "el comando regeneró
+        # un golden" son indistinguibles. Se nombran las DOS con su remediación
+        # y se deja que los archivos listados decidan cuál es.
+        self.assertIn("OTRO AGENTE", result.stderr)
+        self.assertIn("worktree add --detach", result.stderr)   # remediación (a)
+        self.assertIn("EL COMANDO MISMO", result.stderr)
+        self.assertIn("commitea lo que regeneró", result.stderr)  # remediación (b)
+        self.assertNotIn("así que alguien lo tocó", result.stderr)
+        # y no queda un manifiesto sellando lo que no se puede afirmar
+        sealed = list((self.task / "evidence").glob("EV-*.json")) \
+            if (self.task / "evidence").is_dir() else []
+        self.assertEqual(sealed, [], "selló pese a que el árbol se movió")
+
+    def test_run_still_seals_when_the_command_only_touches_untracked(self):
+        # CONTRA-MITAD: sin esto, la guarda de arriba pasaría igual con un
+        # chequeo que rechace SIEMPRE. Un artefacto de build sin trackear no
+        # cambia lo que el commit contiene, y rechazar por eso sería inservible
+        # (es la misma razón por la que el chequeo previo usa -uno).
+        result = self._run_mutating("printf 'build\\n' > out.tmp")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("EVIDENCE_ID=", result.stdout)
+
+
+    # ── EJECUTAR UN ARTEFACTO CUENTA COMO ABRIRLO ────────────────────────
+    # gate_evidence intersecta lo CITADO por la compliance matrix con lo LEÍDO
+    # según tasks/<id>/evidence.log, y ese log lo alimentaba SOLO el hook
+    # track-read (o sea: abrir el archivo con Read). Correr la prueba con
+    # evidence.py no dejaba rastro ahí, así que un reviewer que EJECUTABA el
+    # test y citaba su ruta quedaba rojo por no haberlo "leído".
+    #
+    # Pasó tres veces en la misma tarea, con tres reviewers distintos, pese a
+    # que el mensaje del gate ya hablaba de "abrir". Un gate que castiga la
+    # conducta más fuerte (ejecutar) para premiar la más débil (leer) está
+    # midiendo lo que no quiso medir: el propio hook ya declara que "un test
+    # que CORRIÓ es la evidencia más fuerte que hay".
+    #
+    # Se registran SOLO los tokens del comando que resuelven a un archivo real:
+    # no se afloja "citado no es verificado", porque nada se apunta que no se
+    # haya ejecutado de verdad.
+    def _log_lines(self):
+        log = self.task / "evidence.log"
+        return log.read_text() if log.is_file() else ""
+
+    def test_run_registers_the_artifact_it_executed_as_read(self):
+        (self.repo / "auth_test.py").write_text("def test_ok():\n    assert True\n")
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-qm", "test"], cwd=self.repo, check=True)
+        result = subprocess.run(
+            ["python3", str(SCRIPT), "run", "--task-dir", str(self.task),
+             "--repo", "atlas", "--runner", "reviewer", "--kind", "test",
+             "--cwd", str(self.repo), "--", "sh", "-c", "echo ok auth_test.py"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("auth_test.py", self._log_lines(),
+                      "el artefacto ejecutado no quedó en evidence.log")
+        self.assertIn("ran-file", self._log_lines(),
+                      "y se marca como CORRIDO, no como leído a mano")
+
+    def test_run_does_not_register_paths_that_do_not_exist(self):
+        # CONTRA-MITAD: sin esto, la regla de arriba se cumpliría igual con un
+        # registro que apunte cualquier palabra del comando, y entonces citar
+        # una ruta inventada pasaría el gate. La ley "citado no es verificado"
+        # es la razón de ser del gate y no se afloja.
+        result = subprocess.run(
+            ["python3", str(SCRIPT), "run", "--task-dir", str(self.task),
+             "--repo", "atlas", "--runner", "reviewer", "--kind", "test",
+             "--cwd", str(self.repo), "--", "sh", "-c", "echo ok inventado_test.py"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("inventado_test.py", self._log_lines(),
+                         "apuntó como leído un archivo que no existe")
+
 
 if __name__ == "__main__":
     unittest.main()

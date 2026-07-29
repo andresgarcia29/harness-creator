@@ -165,7 +165,13 @@ capabilities:
     bin: argocd
     install: "brew install argocd"
     install_kind: auto
-    secrets: [{ key: ARGOCD_AUTH_TOKEN, source: "vault://<project>/harness/argocd" }]
+    # La DIRECCION va junto al token: un CLI no puede hablar con un servidor que
+    # no sabe cual es. Sin esta clave el bootstrap instalaba la herramienta, el
+    # doctor la veia presente, y el watcher quedaba ciego por diseno: la cadena
+    # completa (instala, alimenta, vigila, ejecuta) se cortaba en el ultimo
+    # eslabon. deploy-watch acepta host o URL y le saca el esquema.
+    secrets: [{ key: ARGOCD_AUTH_TOKEN, source: "vault://<project>/harness/argocd" },
+              { key: ARGOCD_URL, source: "vault://<project>/harness/argocd" }]
     permission_tier: read-only
     profiles: [deployer]
     detect: "manifests de ArgoCD"
@@ -180,7 +186,11 @@ capabilities:
     install_linux: "https://github.com/akuity/kargo/releases/latest"
     install_linux_kind: manual
     note: "la fórmula de brew solo publica binario macOS; en Linux se baja el asset kargo-linux-amd64 del release (install_linux)"
-    secrets: [{ key: KARGO_TOKEN, source: "vault://<project>/harness/kargo" }]
+    # Misma razon que argocd: sin direccion el CLI no llega a ningun lado.
+    # El CLI busca KARGO_API_ADDRESS/KARGO_API_TOKEN; deploy-watch puentea las
+    # dos grafias, asi que cualquiera de las dos sirve para alimentarlo.
+    secrets: [{ key: KARGO_TOKEN, source: "vault://<project>/harness/kargo" },
+              { key: KARGO_API_ADDRESS, source: "vault://<project>/harness/kargo" }]
     permission_tier: read-only
     profiles: [deployer]
     detect: "manifests de Kargo"

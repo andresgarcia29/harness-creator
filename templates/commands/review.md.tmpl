@@ -41,8 +41,11 @@ reporta el código de error.
    - Cambios backend cuyos criterios ya cubren tests que el reviewer
      verificará en la compliance matrix (y que ship.sh re-corre como
      gate) → QA es determinista: ejecuta esos tests con
-     `scripts/evidence.py run ... --kind test -- <comando>` y guarda el
-     `EVIDENCE_ID`. Un agente QA que solo re-lee lo que el review ya
+     `scripts/evidence.py run --task-dir tasks/<task-id> --repo <repo>
+     --runner qa --kind test --cwd worktrees/<task-id>/<repo> -- <comando>`
+     y guarda el `EVIDENCE_ID`. Los cuatro flags son OBLIGATORIOS (el
+     `...` de antes escondía `--repo` y `--runner`, y el script se niega
+     sin ellos). Un agente QA que solo re-lee lo que el review ya
      probó es ceremonia, no verificación.
 1b. **Scaffold determinista del veredicto** (antes de lanzar a nadie):
    `scripts/verdict-scaffold.sh <task-id> <repo>` (con `--allow-empty`

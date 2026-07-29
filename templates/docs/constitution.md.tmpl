@@ -74,3 +74,15 @@ de cualquier RFC. Cambiar este archivo = ADR ratificado por humanos.
 {{PROJECT_PRINCIPLES}}
 <!-- ej.: "multi-tenancy: toda query filtra por tenant_id, sin
 excepciones" · "LATAM-first: fechas/moneda localizadas" -->
+
+## 7. Reglas custom del workspace (punteros; el archivo manda)
+
+Las leyes propias de este proyecto que no vienen con el harness viven en
+`.claude/rules/<id>.md` y se crean con `/custom-build-rule`. Acá va UNA línea
+por regla, porque esta constitución se inyecta a todos los agentes y es lo que
+las hace visibles. El contrato: `docs/harness/rules.md`.
+
+<!-- una línea por regla, la escribe /custom-build-rule:
+- [<id>](../.claude/rules/<id>.md): <la regla en una línea> · <status>
+Jamás copies acá el contenido de la regla: dos copias divergen y la que se lee
+es la vieja. -->

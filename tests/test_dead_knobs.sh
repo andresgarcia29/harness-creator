@@ -103,6 +103,32 @@ assert_contains "$answ" "post_ship" "y las tres claves están documentadas en el
 assert_contains "$answ" "port_forwards:" "incluido el bloque de forwards"
 
 echo
+echo "── los techos del carril quick: si el policy los declara, alguien los mide"
+# La perilla nueva del carril quick nace como DATO en policy.json (max_files,
+# max_lines). Es la clase de perilla con más cara de garantía de todas: el
+# humano lee "hasta 8 archivos" y cree que hay un tope, y /quick lo PROMETE en
+# prosa. Un techo declarado que ningún gate compara es peor que no tener techo,
+# porque el que confía en él manda a revisar menos.
+pol_src="$(sed 's/{{LOOP_BUDGET}}/3/' "$root/templates/policy.json.tmpl")"
+case "$pol_src" in
+  *max_files*|*max_lines*)
+    assert_contains "$(cat "$root/templates/scripts/harness-policy.py")" "lane-limits" \
+      "el motor expone el lector de los techos (harness-policy.py es LA autoridad sobre el policy)"
+    assert_contains "$(cat "$root/templates/scripts/ship.sh.tmpl")" "lane-limits" \
+      "y gate_lane lo consume: el techo se mide contra el diff, no se archiva"
+    assert_contains "$(cat "$root/templates/commands/quick.md.tmpl")" "lane-limits quick" \
+      "y el playbook que hace la promesa manda a leerlos de ahí, no de una copia"
+    assert_contains "$(cat "$root/templates/commands/quick.md.tmpl")" "escalate tasks/<id> --to express" \
+      "con la remediación del techo excedido, que es lo que convierte el rojo en camino"
+    ;;
+  *)
+    echo "  ! no pude mirar: policy.json.tmpl todavía no declara techos de carril"
+    echo "    (max_files/max_lines); la aserción de que tienen lector queda SIN correr,"
+    echo "    y esto NO es un verde: es que la perilla que verifica aún no existe."
+    ;;
+esac
+
+echo
 echo "── con PRs, archive no puede correr antes del merge"
 am="$(cat "$root/templates/commands/archive.md.tmpl")"
 assert_contains "$am" "landed" "archive exige que el cambio haya aterrizado"

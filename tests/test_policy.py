@@ -679,6 +679,169 @@ class PolicyTest(unittest.TestCase):
         (self.task / "dag.json").write_text(json.dumps({
             "schema": 1, "tasks": items}))
 
+    # ── el carril quick: recorta DELIBERACIÓN, jamás verificación ──
+    # quick es una promesa del humano (un repo, diff chico). Todo lo que se
+    # puede comprobar sin ver el diff se comprueba al crear la tarea; el techo
+    # de tamaño lo confirma gate_lane contra el merge-base, leyendo el dato
+    # desde acá y no con un jq propio.
+
+    def test_quick_lane_skips_rfc_like_express(self):
+        self.assertEqual(self.run_policy("init", self.task, "--lane", "quick").returncode, 0)
+        for phase in ("implement", "review", "ship"):
+            moved = self.transition(phase)
+            self.assertEqual(moved.returncode, 0, moved.stderr)
+        self.assertEqual(self.state()["phase"], "ship")
+
+    def test_quick_lane_has_no_rfc_at_all(self):
+        # el grafo del carril es el que manda: quick no declara la fase rfc
+        self.assertEqual(self.run_policy("init", self.task, "--lane", "quick").returncode, 0)
+        blocked = self.transition("rfc")
+        self.assertEqual(blocked.returncode, 3)
+        self.assertIn("POLICY-TRANSITION-001", blocked.stderr)
+        self.assertIn("quick", blocked.stderr)          # el mensaje nombra el carril
+
+    def test_quick_ships_under_the_very_same_contract(self):
+        # lo que quick recorta es deliberación: el contrato de ship es idéntico
+        self.assertEqual(self.run_policy("init", self.task, "--lane", "quick").returncode, 0)
+        for phase in ("implement", "review"):
+            self.assertEqual(self.transition(phase).returncode, 0)
+        commit = "d" * 40
+        verdict = self.valid_verdict(commit)
+        data = json.loads(verdict.read_text())
+        data["implementation_agents"] = [data["reviewer"]]
+        verdict.write_text(json.dumps(data))
+        forged = self.run_policy("validate-ship", self.task, "--commit", commit,
+                                 "--verdict", verdict)
+        self.assertEqual(forged.returncode, 3)
+        self.assertIn("POLICY-ROLE-003", forged.stderr)   # reviewer independiente igual
+        ok = self.run_policy("validate-ship", self.task, "--commit", commit,
+                             "--verdict", self.valid_verdict(commit))
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+
+    def test_quick_with_more_than_one_repo_is_refused_at_init(self):
+        task = self.ws_task()
+        refused = self.run_policy("init", task, "--lane", "quick",
+                                  "--repos", "atlas,proto")
+        self.assertEqual(refused.returncode, 3)
+        self.assertIn("POLICY-LANE-005", refused.stderr)
+        self.assertIn("proto", refused.stderr)
+        self.assertIn("express", refused.stderr)      # la remediación nombra el carril
+        self.assertFalse((task / "state.json").exists())   # sin estado a medias
+
+    def test_quick_with_one_repo_records_it(self):
+        task = self.ws_task()
+        created = self.run_policy("init", task, "--lane", "quick", "--repos", "atlas")
+        self.assertEqual(created.returncode, 0, created.stderr)
+        self.assertEqual(json.loads((task / "state.json").read_text())["repos"], ["atlas"])
+
+    def test_quick_with_infra_repo_is_refused_at_init_too(self):
+        # mismo criterio que express: el carril corto promete cero infra, y
+        # descubrirlo en el precheck cuesta el trabajo del implementer
+        task = self.ws_task()
+        refused = self.run_policy("init", task, "--lane", "quick",
+                                  "--repos", "net-live")
+        self.assertEqual(refused.returncode, 3)
+        self.assertIn("POLICY-LANE-004", refused.stderr)
+        self.assertIn("quick", refused.stderr)
+        self.assertIn("net-live", refused.stderr)
+        self.assertIn("standard", refused.stderr)
+        self.assertFalse((task / "state.json").exists())
+
+    def test_escalate_from_quick_lands_where_the_new_lane_can_move(self):
+        # La trampa que abrió el carril nuevo: escalar mandaba SIEMPRE a rfc, y
+        # el grafo de express no declara rfc. La tarea quedaba en una fase sin
+        # ninguna transición válida, o sea trabada por el número de fase.
+        self.assertEqual(self.run_policy("init", self.task, "--lane", "quick").returncode, 0)
+        self.assertEqual(self.transition("implement").returncode, 0)
+        up = self.run_policy("escalate", self.task, "--to", "express",
+                             "--actor", "orchestrator", "--reason", "gate_lane: techo excedido")
+        self.assertEqual(up.returncode, 0, up.stderr)
+        state = self.state()
+        self.assertEqual(state["lane"], "express")
+        self.assertEqual(state["phase"], "intake")
+        self.assertEqual(self.transition("implement").returncode, 0)
+
+    def test_escalate_from_quick_to_standard_still_recovers_the_rfc(self):
+        self.assertEqual(self.run_policy("init", self.task, "--lane", "quick").returncode, 0)
+        self.assertEqual(self.transition("implement").returncode, 0)
+        up = self.run_policy("escalate", self.task, "--to", "standard", "--actor", "orch")
+        self.assertEqual(up.returncode, 0, up.stderr)
+        self.assertEqual(self.state()["phase"], "rfc")
+        self.assertEqual(self.transition("implement").returncode, 0)
+
+    def test_escalate_down_to_quick_is_rejected(self):
+        self.assertEqual(self.run_policy("init", self.task, "--lane", "express").returncode, 0)
+        down = self.run_policy("escalate", self.task, "--to", "quick", "--actor", "orch")
+        self.assertEqual(down.returncode, 3)
+        self.assertIn("POLICY-LANE-002", down.stderr)
+        self.assertEqual(self.state()["lane"], "express")
+
+    # ── lane-limits: el techo es DATO del policy, con un solo lector ──
+
+    def test_lane_limits_publishes_the_quick_ceiling(self):
+        limits = self.run_policy("lane-limits", "quick")
+        self.assertEqual(limits.returncode, 0, limits.stderr)
+        self.assertEqual(limits.stdout.split(), ["max_files=8", "max_lines=200"])
+
+    def test_lane_limits_reads_the_policy_and_not_a_hardcoded_number(self):
+        # si el techo estuviera cableado en el script, editar el policy no
+        # cambiaría nada y el humano creería haber movido algo
+        other = self.policy_with({"max_files": 3, "max_lines": 40})
+        limits = self.run_with_policy(other, "lane-limits", "quick")
+        self.assertEqual(limits.returncode, 0, limits.stderr)
+        self.assertEqual(limits.stdout.split(), ["max_files=3", "max_lines=40"])
+
+    def test_lane_limits_without_ceiling_is_empty_and_explains_why(self):
+        # express no promete techo de tamaño: stdout vacío con exit 0 es la
+        # respuesta, y el motivo va por stderr para que no parezca un silencio
+        limits = self.run_policy("lane-limits", "express")
+        self.assertEqual(limits.returncode, 0, limits.stderr)
+        self.assertEqual(limits.stdout.strip(), "")
+        self.assertIn("no declara limits", limits.stderr)
+
+    def test_lane_limits_of_an_unknown_lane_is_not_silence(self):
+        limits = self.run_policy("lane-limits", "turbo")
+        self.assertEqual(limits.returncode, 3)
+        self.assertIn("POLICY-LANE-001", limits.stderr)
+        self.assertEqual(limits.stdout.strip(), "")
+
+    def test_an_unreadable_ceiling_is_never_read_as_no_ceiling(self):
+        # el tercer estado: no poder leer el techo NO es "este carril no tiene
+        # techo" (fail-open) ni un rojo inventado; es un error tipado
+        for broken in ({"max_files": "ocho", "max_lines": 200},
+                       {"max_files": 0, "max_lines": 200},
+                       {"max_files": True, "max_lines": 200},
+                       "8 archivos"):
+            with self.subTest(limits=broken):
+                mutated = self.policy_with(broken)
+                limits = self.run_with_policy(mutated, "lane-limits", "quick")
+                self.assertEqual(limits.returncode, 3, limits.stdout)
+                self.assertIn("POLICY-SCHEMA-004", limits.stderr)
+                self.assertEqual(limits.stdout.strip(), "")
+
+    def test_a_ceiling_nobody_reads_is_refused(self):
+        # una clave dentro de limits sin lector es una perilla muerta con cara
+        # de garantía: el humano cree que puso un techo y ningún gate lo mide
+        mutated = self.policy_with({"max_files": 8, "max_lines": 200, "max_bytes": 4096})
+        limits = self.run_with_policy(mutated, "lane-limits", "quick")
+        self.assertEqual(limits.returncode, 3, limits.stdout)
+        self.assertIn("POLICY-SCHEMA-004", limits.stderr)
+        self.assertIn("max_bytes", limits.stderr)
+
+    def policy_with(self, limits):
+        """El policy renderizado, con OTRO limits en quick, en un archivo propio."""
+        data = json.loads(POLICY.read_text())
+        data["workflow"]["lanes"]["quick"]["limits"] = limits
+        path = Path(self.tmp.name) / "policy-mutado.json"
+        path.write_text(json.dumps(data))
+        return path
+
+    def run_with_policy(self, policy_path, *args):
+        return subprocess.run(
+            ["python3", str(SCRIPT), "--policy", str(policy_path), *map(str, args)],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+
     def test_dag_rejects_cycles_and_accepts_parallel_branches(self):
         dag = self.task / "dag.json"
         dag.write_text(json.dumps({"schema": 1, "tasks": [

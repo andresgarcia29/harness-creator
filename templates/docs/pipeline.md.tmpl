@@ -7,20 +7,20 @@ los agentes solo despiertan en rojo. Camino verde = cero tokens.
 ## El flujo
 
 Dos formas de recorrerlo. **A mano**, fase por fase (abajo), cuando
-quieres inspeccionar el trabajo entre pasos. O **`/auto <ticket |
+quieres inspeccionar el trabajo entre pasos. O **`/smart <ticket |
 "prompt">`**, que encadena TODAS las fases sin intervención: mismo
 pipeline, mismos gates, mismas paradas — lo único que cambia es que no
-hay humano entre fase y fase. El intake de `/auto` no rebota (no hay a
+hay humano entre fase y fase. El intake de `/smart` no rebota (no hay a
 quién): redacta los criterios faltantes y declara cada ambigüedad
 resuelta en `tasks/<id>/assumptions.md`.
 
 ```
 /feature (intake)          valida el ticket o lo rebota (needs-spec)
-   ↓ tasks/<id>/task.md + CARRIL (express | standard | full, por blast radius)
+   ↓ tasks/<id>/task.md + CARRIL por blast radius (quick|express|standard|full)
 /rfc                       solo standard/full · abogados SOLO si hay frontera cruzada
                            architect = hilo fino en ultrathink: probes en paralelo, no lectura
    ↓ plan.md (bloques ### T<n>) + delta-spec + beads · plan-lint.sh en verde
-   ↓                                       [express: mini-plan del orquestador, salta aquí]
+   ↓                    [express: mini-plan del orquestador · quick: ni eso, salta aquí]
 /implement                 worktrees + briefs YA prefetcheados · implementers en paralelo
    ↓ commits con trailer Task: <id> · ship.sh --precheck VERDE (gates mecánicos, $0)
 /review                    reviewer ∥ qa EN PARALELO · lista de blocking COMPLETA en ronda 1
@@ -68,21 +68,30 @@ blocking se entregan todos juntos; lo que no impide shippear va a
 
 ## Carriles (ver docs/harness/intake.md)
 
-El pipeline se dimensiona al blast radius: **express** (1 repo, 1 dominio,
-sin contratos) salta el RFC y va con 2 sesiones LLM (implementer +
-reviewer); **standard** usa architect sin abogados; **full** es el
-pipeline completo. Los gates de ship.sh son IDÉNTICOS en los tres — el
-carril recorta deliberación LLM, jamás verificación — y `gate_lane`
-verifica el diff real contra el carril declarado: la clasificación es
-propuesta, el gate es ley. Escalar carril (`harness-policy.py escalate`)
-es barato y conserva el worktree.
+El pipeline se dimensiona al blast radius: **quick** (UN repo, hasta 8
+archivos y 200 líneas cambiadas contra el merge-base, los dos techos
+como dato en `harness-policy.json`) no delibera nada, ni enrichment ni
+abogados ni RFC ni DAG ni briefs ni plan: worktree, implementer y a
+review; **express** (1 repo, 1 dominio, sin contratos) salta el RFC y va
+con 2 sesiones LLM (implementer + reviewer); **standard** usa architect
+sin abogados; **full** es el pipeline completo. Lo VERIFICADO no cambia
+en ninguno: worktree, trailer, precheck, todos los gates de ship.sh,
+reviewer independiente y QA determinista. El carril recorta deliberación
+LLM, jamás verificación, y `gate_lane` compara el diff real contra el
+carril declarado: la clasificación es propuesta, el gate es ley. Un diff
+que excede la promesa de quick es `gate_lane` en rojo, y la remediación
+que trae es escalar: `harness-policy.py escalate --to express`. La
+escalera (quick → express → standard → full) es barata y conserva el
+worktree. quick es promesa del humano, no clasificación: `/smart`
+jamás lo elige por su cuenta, solo lo SUGIERE en el reporte final si la
+tarea resultó trivial.
 
 ## Roles
 
 | Rol | Quién | Modelo | Regla dura |
 |---|---|---|---|
-| Orquestador | la sesión principal (o /auto) | — | orquesta, no implementa |
-| Intake | /feature (o el paso 0 de /auto) | {{MODEL_MECHANICAL}} | rebota ambigüedad; en /auto la resuelve con evidencia y la declara |
+| Orquestador | la sesión principal (o /smart) | — | orquesta, no implementa |
+| Intake | /feature (o el paso 0 de /smart) | {{MODEL_MECHANICAL}} | rebota ambigüedad; en /smart la resuelve con evidencia y la declara |
 | Abogados | agentes de cluster (svc-*, infra, frontends) | {{MODEL_ARCHITECT}} | responden UNA vez, JSON; no implementan |
 | Arquitecto | agente architect | {{MODEL_ARCHITECT}} + ultrathink | hilo fino: probes, no lectura cruda; máx 2 rondas de RFC y 2 de probes; produce plan+beads |
 | Implementer | agente implementer (por tarea) | {{MODEL_IMPLEMENTER}} | un worktree, un repo, un scope |
@@ -92,13 +101,18 @@ es barato y conserva el worktree.
 
 ## Artefactos por tarea (`tasks/<id>/`)
 
-`task.md` (ticket materializado, o redactado por /auto desde un prompt) ·
-`assumptions.md` (ledger de supuestos, solo /auto) · `probes.json` +
+`task.md` (ticket materializado, o redactado por /smart desde un prompt) ·
+`assumptions.md` (ledger de supuestos, solo /smart) · `probes.json` +
 `probes/*.md` (la descomposición del architect y sus respuestas citadas) ·
 `plan.md` (del arquitecto) · `precheck-<repo>.json` (gates mecánicos
-antes del review) · `verdict-<repo>.json` (reviewer+qa) · `ship.log` ·
+antes del review: `ok` dice si algún gate bloqueó, y `verificado` dice
+cuánto se miró de verdad, `completo` si al menos un gate de lenguaje
+compiló o testeó, `ninguno` si no corrió ninguno, `desconocido` si no se
+pudo saber. Un `ok:true` con `verificado` distinto de `completo` no es un
+verde verificado y /review lo declara en el veredicto) ·
+`verdict-<repo>.json` (reviewer+qa) · `ship.log` ·
 `deploy-<repo>.log`. Estado en ARCHIVOS, no en conversación: cualquier
-sesión puede retomar (`/auto <task-id>`).
+sesión puede retomar (`/smart <task-id>`).
 
 ### El ledger de supuestos (`assumptions.md`)
 
@@ -106,9 +120,9 @@ Cuando no hay humano al que rebotarle, la ambigüedad no desaparece: se
 hace explícita y barata de revertir. Cada línea dice qué se asumió, con
 qué evidencia (spec > ADR > CLAUDE.md del repo > patrón del código) y
 qué cuesta deshacerlo si el supuesto era falso. Es lo primero que audita
-un humano en el reporte de /auto, y su material de `/promote`: un
+un humano en el reporte de /smart, y su material de `/promote`: un
 supuesto que resultó falso se vuelve una regla para que el siguiente
-/auto no lo repita.
+/smart no lo repita.
 
 ## Presupuestos (Ley 6)
 

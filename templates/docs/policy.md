@@ -9,7 +9,7 @@ ship son válidos.
 Una tarea nueva ejecuta:
 
 ```bash
-scripts/harness-policy.py init tasks/<task-id> --lane <express|standard|full>
+scripts/harness-policy.py init tasks/<task-id> --lane <quick|express|standard|full>
 ```
 
 Toda transición usa:
@@ -23,18 +23,22 @@ review e historial. No se edita a mano.
 
 ## Carriles
 
-Las transiciones válidas dependen del carril: `express` permite
-`intake → implement` (salta rfc); `standard` y `full` exigen el grafo
-completo. `escalate` sube el carril (solo hacia arriba: express →
-standard → full) y re-encauza la tarea por `rfc` si ya había pasado esa
-fase — la deliberación saltada se recupera, el worktree se conserva:
+Las transiciones válidas dependen del carril: `quick` y `express` permiten
+`intake → implement` (saltan rfc); `standard` y `full` exigen el grafo
+completo. `escalate` sube el carril (solo hacia arriba: quick → express →
+standard → full) y re-encauza la tarea donde el carril DESTINO recupera la
+deliberación saltada: `rfc` si ese carril la declara (standard, full), o su
+fase inicial si no (quick → express cae en `intake`). El worktree se
+conserva siempre:
 
 ```bash
 scripts/harness-policy.py escalate tasks/<task-id> --to standard --actor orchestrator
 ```
 
 `gate_lane` en ship.sh es quien verifica que el diff real respete el
-carril declarado (códigos `POLICY-LANE-001..003`).
+carril declarado (códigos `POLICY-LANE-001..005`: carril desconocido,
+escalación solo hacia arriba, tarea bloqueada, aviso de infra en carriles
+chicos, y quick de un solo repo).
 
 `validate-dag` exige IDs únicos, repos válidos, dependencias existentes y un
 grafo sin ciclos. `record-cost` conserva un total monotónico y bloquea cuando

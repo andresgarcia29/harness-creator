@@ -2,7 +2,10 @@
 # test_ship_gates.sh — los dos añadidos de velocidad de ship.sh, contra el
 # CÓDIGO REAL del template (extraído con awk, como test_ship_lock.sh):
 #   · gate_lane: el carril express es una promesa que el diff debe cumplir —
-#     contratos/migraciones bloquean; full no se ve afectado.
+#     contratos/migraciones bloquean; full no se ve afectado. quick hereda esa
+#     promesa y suma techos de tamaño (max_files/max_lines del policy): los
+#     cuenta contra el merge-base, y si no puede leerlos lo dice en vez de
+#     inventarlos.
 #   · par/run_parallel_gates: un gate rojo NO oculta a los demás (todos los
 #     outputs salen juntos) y el verde agregado exige TODOS los grupos verdes.
 set -u
@@ -14,8 +17,9 @@ TMPL="$ROOT/templates/scripts/ship.sh.tmpl"
 extract() {  # extract <nombre-funcion> — de 'nombre() {' a su '}' de 1er nivel
   awk "/^$1\(\) \{/{f=1} f{print} f&&/^\}/{exit}" "$TMPL"
 }
-extract gate_lane > "$WS/gate_lane.sh"
+{ extract gate_lane; extract gate_quick_size; } > "$WS/gate_lane.sh"
 grep -q 'LANE_GUARD_PATTERN' "$WS/gate_lane.sh" || { echo "no pude extraer gate_lane"; exit 1; }
+grep -q 'lane-limits' "$WS/gate_lane.sh" || { echo "no pude extraer gate_quick_size"; exit 1; }
 { extract par; extract close_serial_gate; extract collect_gate_slots
   extract run_phase0_gates; extract run_parallel_gates; } > "$WS/pargates.sh"
 grep -q 'GDIR' "$WS/pargates.sh" || { echo "no pude extraer par/run_parallel_gates"; exit 1; }
@@ -30,11 +34,22 @@ mk_repo() {  # mk_repo <dir> — repo con origin/main simulado en el commit inic
   git update-ref refs/remotes/origin/main HEAD
 }
 
-run_gate_lane() {  # run_gate_lane <lane-json> — corre gate_lane en el repo actual
+# La salida de `lane-limits` se stubea porque lo que se mide acá es el DIENTE
+# (contar y comparar), no el productor de los techos. La corrida contra el
+# harness-policy.py real está más abajo: si el contrato cambia de forma, ese
+# caso muerde y estos siguen midiendo lo suyo.
+# LIMOUT/LIMRC en mayúsculas a propósito: bash tiene scope dinámico y un
+# `lim_rc` acá lo pisaría el `local lim_rc` de la función bajo prueba, o sea
+# que el stub devolvería SIEMPRE 0 y el caso del techo ilegible sería mudo.
+run_gate_lane() {  # run_gate_lane <lane-json> [salida-lane-limits] [rc]: en el repo actual
   mkdir -p "$WS/tasks/T1"
   printf '%s' "$1" > "$WS/tasks/T1/state.json"
-  ( set -u; WS="$WS"; TASK=T1; REPO=test; BASE_REF=main
+  # set -euo pipefail: el entorno REAL de ship.sh (mismo motivo que el runner
+  # de check_verdict). Con solo `set -u` el test probaría otro shell.
+  ( set -euo pipefail; WS="$WS"; TASK=T1; REPO=test; BASE_REF=main
     gate() { :; }; emit() { :; }
+    LIMOUT="${2-max_files=8\nmax_lines=200}"; LIMRC="${3:-0}"
+    python3() { printf '%b\n' "$LIMOUT"; return "$LIMRC"; }
     . "$WS/gate_lane.sh"; gate_lane )
 }
 
@@ -61,6 +76,136 @@ cd "$WS/r2"
 run_gate_lane '{"lane":"full"}' \
   && pass "full tocando proto: gate_lane no interviene" || fail "full: gate_lane bloqueó y no debía"
 
+echo
+echo "── carril quick: la promesa es el TAMAÑO, y el que lo mide es el gate"
+# quick recorta deliberación (RFC, DAG, briefs), no verificación. Lo único que
+# hace segura esa poda es que el cambio sea chico de verdad, y nadie decide
+# "voy a tocar 40 archivos": se llega ahí de a uno. El techo es dato del
+# policy; acá se mide que el gate lo pida, lo cuente y lo diga con números.
+
+# q1. quick con diff chico y rutas limpias → pasa
+mk_repo "$WS/q1"
+echo x > feature.go && git add . && git commit -qm feat
+run_gate_lane '{"lane":"quick"}' \
+  && pass "quick dentro de los techos y sin rutas prohibidas: pasa" \
+  || fail "quick chico y limpio: bloqueó"
+
+# q2. quick hereda ENTERO el patrón de express: un .proto lo tumba
+mk_repo "$WS/q2"
+mkdir -p proto && echo 'message X{}' > proto/api.proto && git add . && git commit -qm proto
+out="$(run_gate_lane '{"lane":"quick"}' 2>&1)"; rc=$?
+assert_eq 3 "$rc" "quick tocando proto/: bloquea (exit 3)"
+assert_contains "$out" "carril quick, pero el diff toca" "y el mensaje nombra el carril real, no express"
+
+# q3. 9 archivos contra un techo de 8 → rojo con los DOS números
+mk_repo "$WS/q3"
+for i in 1 2 3 4 5 6 7 8 9; do echo x > "f$i.go"; done
+git add . && git commit -qm nueve
+out="$(run_gate_lane '{"lane":"quick"}' 2>&1)"; rc=$?
+assert_eq 3 "$rc" "quick con 9 archivos: bloquea (exit 3)"
+assert_contains "$out" "archivos: 9 (techo 8)" "nombra el conteo real contra el techo"
+assert_contains "$out" "--to express" "y la remediación escala a express (no a standard)"
+assert_contains "$out" "--reason '9 archivos" "con el motivo ya escrito en el comando"
+
+# q4. 201 líneas contra un techo de 200 → rojo con los DOS números
+mk_repo "$WS/q4"
+awk 'BEGIN{for(i=1;i<=201;i++) print "linea " i}' > grande.go
+git add . && git commit -qm grande
+out="$(run_gate_lane '{"lane":"quick"}' 2>&1)"; rc=$?
+assert_eq 3 "$rc" "quick con 201 líneas: bloquea (exit 3)"
+assert_contains "$out" "líneas cambiadas: 201 (techo 200)" "nombra las líneas reales contra el techo"
+assert_not_contains "$out" "no pude leer" "y NO se disfraza del rojo de 'no pude mirar'"
+
+# Y las BAJAS cuentan igual que las altas: borrar 150 líneas es tanto trabajo
+# de revisar como escribirlas, y un carril que solo mira lo agregado deja
+# pasar como quick un cambio que arrasa medio archivo.
+mk_repo "$WS/q4b"
+awk 'BEGIN{for(i=1;i<=150;i++) print "viejo " i}' > viejo.go
+git add . && git commit -qm viejo
+git update-ref refs/remotes/origin/main HEAD
+git rm -q viejo.go
+awk 'BEGIN{for(i=1;i<=60;i++) print "nuevo " i}' > nuevo.go
+git add . && git commit -qm reemplazo
+out="$(run_gate_lane '{"lane":"quick"}' 2>&1)"; rc=$?
+assert_eq 3 "$rc" "quick que borra 150 y agrega 60: bloquea (las bajas cuentan)"
+assert_contains "$out" "líneas cambiadas: 210 (techo 200)" "y suma altas + bajas, no solo altas"
+
+# q5. el MISMO diff en express: los techos son de quick y de nadie más
+cd "$WS/q4"
+run_gate_lane '{"lane":"express"}' \
+  && pass "express con el mismo diff grande: gate_lane no aplica techos" \
+  || fail "express: los techos de quick se le aplicaron y no debían"
+run_gate_lane '{"lane":"express"}' "POLICY-LANE-001: carril desconocido" 3 \
+  && pass "express: ni siquiera le pregunta al policy por los techos" \
+  || fail "express consultó lane-limits y murió por una respuesta que no le incumbe"
+
+# q6. TERCER ESTADO: sin techos legibles el gate no inventa ni pasa callado.
+# La remediación es OPUESTA a la del exceso (actualizar la instancia o arreglar
+# el policy, no escalar el carril), así que el mensaje tiene que ser otro.
+cd "$WS/q1"   # diff chico y limpio: lo único que puede tumbarlo es el techo
+out="$(run_gate_lane '{"lane":"quick"}' "harness-policy.py: error: invalid choice: 'lane-limits'" 3 2>&1)"; rc=$?
+assert_eq 3 "$rc" "lane-limits que no responde: bloquea (exit 3)"
+assert_contains "$out" "no pude leer los límites del carril quick" "y lo dice con el motivo verdadero"
+assert_contains "$out" "invalid choice" "citando la respuesta real del subcomando"
+assert_contains "$out" "workflow.lanes.quick.limits" "y la remediación apunta al policy, no a escalar"
+assert_not_contains "$out" "excede lo que quick promete" "sin confundirse con el rojo del exceso"
+
+# stdout vacío con exit 0 ("este carril no promete techo") tampoco es verde
+# PARA QUICK: quick ES su techo, así que un carril quick sin límites declarados
+# es un policy roto, no un permiso.
+out="$(run_gate_lane '{"lane":"quick"}' "" 0 2>&1)"; rc=$?
+assert_eq 3 "$rc" "quick sin techos declarados: bloquea en vez de pasar sin medir"
+assert_contains "$out" "no pude leer los límites" "con el mismo rojo honesto"
+
+# q7. el techo se mide contra el MERGE-BASE, no contra la punta del trunk.
+# Sin eso, un commit ajeno grande que aterrizó en main mientras la tarea
+# trabajaba entra en la cuenta como borrado y manda a escalar por trabajo de
+# otro. En el precheck (que corre sin rebase) es el caso normal, no el raro.
+mk_repo "$WS/q7"
+base="$(git rev-parse HEAD)"
+echo x > feature.go && git add . && git commit -qm feat
+br="$(git rev-parse --abbrev-ref HEAD)"
+git checkout -q -b trunk-sim "$base"
+awk 'BEGIN{for(i=1;i<=300;i++) print "ajeno " i}' > ajeno.go
+git add . && git commit -qm ajeno
+git update-ref refs/remotes/origin/main HEAD
+git checkout -q "$br"
+run_gate_lane '{"lane":"quick"}' \
+  && pass "el trunk avanzó 300 líneas ajenas: no se las cobra al carril quick" \
+  || fail "las líneas de un commit ajeno del trunk contaron contra el techo"
+
+# q8. y si NI SIQUIERA se puede medir (sin ancestro común), tampoco inventa
+mk_repo "$WS/q8"
+git checkout -q --orphan huerfano
+git rm -rq --cached .
+rm -f main.go
+echo y > solo.go && git add . && git commit -qm huerfano
+out="$(run_gate_lane '{"lane":"quick"}' 2>&1)"; rc=$?
+assert_eq 3 "$rc" "sin ancestro común con el trunk: bloquea en vez de contar cero"
+assert_contains "$out" "no pude medir el diff" "y dice que no pudo medir, no que el diff cabía"
+assert_contains "$out" "no merge base" "citando lo que git contestó de verdad"
+
+# q9. contra el harness-policy.py y el policy.json REALES: si el contrato de
+# `lane-limits` cambia de forma, este caso muerde antes que producción.
+mkdir -p "$WS/scripts"
+cp "$ROOT/templates/scripts/harness-policy.py" "$WS/scripts/harness-policy.py"
+sed 's/{{LOOP_BUDGET}}/3/g' "$ROOT/templates/policy.json.tmpl" > "$WS/harness-policy.json"
+mkdir -p "$WS/tasks/T1"
+printf '{"lane":"quick"}' > "$WS/tasks/T1/state.json"
+cd "$WS/q1"
+( set -euo pipefail; WS="$WS"; TASK=T1; REPO=test; BASE_REF=main
+  gate() { :; }; emit() { :; }
+  . "$WS/gate_lane.sh"; gate_lane ) \
+  && pass "contra el policy real: los techos de quick se leen y el diff chico pasa" \
+  || fail "el gate no supo leer la salida real de harness-policy.py lane-limits"
+cd "$WS/q4"
+( set -euo pipefail; WS="$WS"; TASK=T1; REPO=test; BASE_REF=main
+  gate() { :; }; emit() { :; }
+  . "$WS/gate_lane.sh"; gate_lane ) >/dev/null 2>&1 \
+  && fail "contra el policy real: 201 líneas pasaron el techo de 200" \
+  || pass "contra el policy real: el diff que excede sigue siendo rojo"
+
+echo
 # 5. sin state.json → default full, no bloquea (compat con tareas viejas)
 cd "$WS/r2"
 rm -f "$WS/tasks/T1/state.json"

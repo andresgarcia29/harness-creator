@@ -35,6 +35,32 @@
       "blocked": []
     },
     "lanes": {
+      "quick": {
+        "limits": {
+          "max_files": 8,
+          "max_lines": 200
+        },
+        "allowed_transitions": {
+          "intake": [
+            "implement"
+          ],
+          "implement": [
+            "review"
+          ],
+          "review": [
+            "implement",
+            "ship"
+          ],
+          "ship": [
+            "deploy"
+          ],
+          "deploy": [
+            "archive"
+          ],
+          "archive": [],
+          "blocked": []
+        }
+      },
       "express": {
         "allowed_transitions": {
           "intake": [
@@ -61,6 +87,7 @@
       "full": {}
     },
     "lane_escalation": [
+      "quick",
       "express",
       "standard",
       "full"

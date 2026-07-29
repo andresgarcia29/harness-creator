@@ -54,11 +54,35 @@ cmd_check() {
   fi
   # El tag puede ir por detras legitimamente (commits sin release todavia), pero
   # NUNCA por delante: eso significa que se taggeo algo que los archivos no
-  # declaran.
+  # declaran. Con UNA excepcion, aprendida de una carrera real (2026-07-29):
+  # el release automatico taggea y alinea los archivos en un chore commit que
+  # va DESPUES del commit que disparo el release. El job de CI corre sobre el
+  # commit anterior, asi que desde ahi el tag se ve "adelantado" siendo el
+  # tren del release pasando. La excepcion es mecanica y doble: HEAD tiene
+  # que ser ancestro del commit del tag, Y el arbol DEL TAG tiene que
+  # declarar exactamente su version. Un humano que taggea por delante sin
+  # alinear archivos falla las dos.
   if [ -n "$t" ] && [ "$t" != "$p" ] && [ "$(printf '%s\n%s\n' "$p" "$t" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)" = "$t" ]; then
-    echo "❌ hay un tag v$t POR DELANTE de la versión declarada ($p)."
-    echo "   ↳ remediación: scripts/version.sh set $t, o borrá el tag si fue un error"
-    bad=1
+    tag_decl=""
+    # El stderr de git/jq se suprime porque su fallo tiene camino propio: un
+    # tag_decl vacio cae al error de abajo, que ya explica el estado.
+    if tag_blob="$(git -C "$ROOT" show "v$t:.claude-plugin/plugin.json" 2>/dev/null)"; then
+      tag_decl="$(printf '%s' "$tag_blob" | jq -r '.version' 2>/dev/null || echo "")"
+    fi
+    if git -C "$ROOT" merge-base --is-ancestor HEAD "v$t" 2>/dev/null && [ "$tag_decl" = "$t" ]; then
+      echo "ℹ️  el tag v$t va por delante de ESTE commit, pero apunta a un"
+      echo "   descendiente cuyos archivos ya declaran $t: es el tren del release"
+      echo "   pasando (el chore commit viaja detras del commit que lo disparo)."
+      echo "   Este arbol es historia; nada que corregir."
+    else
+      echo "❌ hay un tag v$t POR DELANTE de la versión declarada ($p)."
+      if [ -n "$tag_decl" ] && [ "$tag_decl" != "$t" ]; then
+        echo "   El commit del tag declara $tag_decl, no $t: el tag se escribió"
+        echo "   sobre archivos que dicen otra cosa."
+      fi
+      echo "   ↳ remediación: scripts/version.sh set $t, o borrá el tag si fue un error"
+      bad=1
+    fi
   fi
   [ "$bad" -eq 0 ] && echo "✅ versión coherente en los tres lugares"
   return "$bad"

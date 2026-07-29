@@ -106,7 +106,8 @@ Dirección de dependencias (ley, referencia del DAG de shipping):
 
 `/feature` → `/rfc` → `/implement` → `/review` → `/ship` → verificación
 canary. Rojo en deploy: ROLLBACK PRIMERO, diagnóstico después.
-`/auto <ticket | "prompt">` corre TODO eso sin intervención humana: la
+`/quick "<qué>"`: lo trivial ya dimensionado; cero deliberación, mismos gates.
+`/smart <ticket | "prompt">` corre TODO eso sin intervención humana: la
 ambigüedad se resuelve con evidencia y se declara en
 `tasks/<id>/assumptions.md`; solo para donde una ley lo exige.
 Semanal: `/promote` (memoria → ley). Roles: `.claude/agents/`.
@@ -122,8 +123,7 @@ Semanal: `/promote` (memoria → ley). Roles: `.claude/agents/`.
 ## Economía de tokens (el contexto es el recurso escaso)
 
 - CLIs ruidosos (kubectl logs, gh run view, gcloud) SIEMPRE vía
-  `scripts/quiet.sh <cmd>` — head+tail y dump completo en
-  `.cache/quiet/`.
+  `scripts/quiet.sh <cmd>`: head+tail y dump completo en `.cache/quiet/`.
 - Preguntas cross-repo → grafo (`graphify query`), no grep masivo.
   "¿Dónde está X?" → `semble` (búsqueda semántica local) si está
   instalado; abrir 20 archivos para ubicar uno es el anti-patrón.
@@ -151,5 +151,5 @@ Semanal: `/promote` (memoria → ley). Roles: `.claude/agents/`.
 
 ## Si algo aquí está desactualizado
 
-Presupuesto: ~110 líneas; doctor.sh valida que los links resuelvan.
-Drift → corrígelo en el mismo PR de tu tarea.
+Tope: lo fija el ratchet del repo del plugin (hoy 155 líneas) y solo baja;
+la meta de fondo es ~110. doctor.sh valida los links. Drift → corrígelo ya.

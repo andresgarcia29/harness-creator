@@ -180,10 +180,14 @@ falta de conocimiento: es que la regla estaba en prosa y no en un test.
 - [x] **`skills-sync.sh` hace `rm -rf` + `cp -R` sobre skills vivas**, y si
   muere entre medio la skill queda instalada sin su marca `.managed`, o sea que
   el próximo sync la trata como local y ya nadie la actualiza jamás.
-- [ ] **El dedupe de `harness-bug.sh` tiene dos llamadas de red entre el chequeo
+- [x] **El dedupe de `harness-bug.sh` tiene dos llamadas de red entre el chequeo
   y la escritura del ledger.** Diez sesiones tropezando con el mismo bug del
   plugin (que es exactamente el escenario) pasan todas los tres controles antes
   de que la primera escriba: issues duplicados en el repo público.
+  Lo cerró un claim local atómico sobre la huella antes de la primera llamada de
+  red (misma máquina) más la reconciliación post-create por el orden del forge
+  (gana el número menor, el mayor se cierra solo enlazando al superviviente),
+  fijado por `tests/test_harness_bug.sh`.
 - [x] **`stamp-models.sh` usa un temporal con nombre fijo** al reescribir los
   agentes. Ventana de milisegundos, pero el costo es un frontmatter corrupto y
   el arreglo es `mktemp`, que otros scripts del repo ya usan.

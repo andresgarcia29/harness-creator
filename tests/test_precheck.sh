@@ -139,6 +139,25 @@ assert_eq "0" "$(ls "$WS/tasks/T9/evidence/"EV-*.json 2>/dev/null | wc -l | tr -
   "sin stack: NO queda evidencia acuñada"
 assert_contains "$out" "NO sello evidencia" "y lo dice explícitamente"
 assert_contains "$out" "sin que ninguna suite haya corrido" "explicando por qué sería una mentira"
+# ── Y EL SELLO TIENE QUE DECIRLO, no solo el stdout ──────────────────────
+# Hasta acá el aviso vivía únicamente en la salida del comando, que ningún
+# consumidor parsea: /review leía {commit, ok} y un precheck donde NINGÚN gate
+# de lenguaje corrió era, desde el sello, idéntico a un verde con la suite
+# pasada. El UNKNOWN se volvía PASS en el único artefacto que sobrevive.
+# `ok` NO se endurece a propósito: un repo de docs sin stack no es un rojo, y
+# convertirlo en uno fabricaría falsos rojos (la mitad simétrica del defecto).
+sello="$(cat "$WS/tasks/T9/precheck-svc.json")"
+assert_contains "$sello" '"ok":true' "sin stack: ok:true (no bloquea: un repo sin stack puede ser legítimo)"
+assert_contains "$sello" '"verificado":"ninguno"' \
+  "pero el sello DECLARA que ningún gate de lenguaje llegó a correr"
+# El campo extra no puede romper a quien ya lee el sello: /review lo consume
+# con jq, así que el sello tiene que seguir siendo JSON válido y `.ok` tiene
+# que seguir contestando lo mismo que antes.
+if jq -e '.ok == true and .verificado == "ninguno"' "$WS/tasks/T9/precheck-svc.json" >/dev/null; then
+  pass "el sello sigue siendo JSON válido y .ok no cambió de semántica"
+else
+  fail "el sello no parsea con jq o .ok cambió de semántica"
+fi
 # Caso de campo: el precheck imprimía EVIDENCE_ID= y dos líneas después
 # borraba el sello; cuatro agentes distintos parsearon ese ID fantasma y
 # fallaron recién en el ship. El anuncio ahora va después de la decisión.
@@ -204,9 +223,181 @@ fi
 
 # El camino feliz del mismo stack sigue verde: el arreglo no rompio el verde.
 printf '#!/bin/sh\nexit 0\n' > "$WS/bin/cargo"; chmod +x "$WS/bin/cargo"
-( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/ship.sh --precheck T10 svc >/dev/null 2>&1 ) \
-  && pass "el mismo stack en verde sigue pasando (no se rompio el camino feliz)" \
-  || fail "el camino feliz quedo roto"
+out="$( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/ship.sh --precheck T10 svc 2>&1 )"; rc=$?
+assert_eq 0 "$rc" "el mismo stack en verde sigue pasando (no se rompio el camino feliz)"
+# La otra mitad del campo: un stack que SÍ compiló y testeó se sella
+# "completo". Sin este caso, un sello que dijera "ninguno" siempre pasaría el
+# test de arriba y el campo no distinguiría nada.
+sello="$(cat "$WS/tasks/T10/precheck-svc.json")"
+assert_contains "$sello" '"ok":true' "stack reconocido y verde: ok:true"
+assert_contains "$sello" '"verificado":"completo"' \
+  "y el sello declara que un gate de lenguaje SÍ compiló y testeó"
+assert_not_contains "$out" "verificado: ninguno" "y la última línea no lo desmiente"
 rm -f "$WS/bin/cargo"
+
+echo
+echo "── 'no pude saberlo' es un TERCER estado, no un verde ni un rojo"
+# Sin evidence.py los gates corren igual pero NADIE deja el marcador que dice
+# si algún tramo llegó a compilar o testear. Sellar "ninguno" ahí sería inventar
+# un rojo (quizá corrió todo) y sellar "completo" sería inventar un verde. El
+# sello dice "desconocido" y el reviewer decide: es la misma regla que ya
+# gobierna el pid ilegible del lock y la baseline de ruff que no se pudo sacar.
+mkdir -p "$WS/worktrees/T12/svc" "$WS/tasks/T12"
+cp -R "$WS/repos/svc/." "$WS/worktrees/T12/svc/"
+( cd "$WS/worktrees/T12/svc"; echo x > g.txt; git add -A; git commit -qm "sin evidence.py
+
+Task: T12" )
+mv "$WS/scripts/evidence.py" "$WS/evidence.py.guardado"
+out="$( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/ship.sh --precheck T12 svc 2>&1 )"; rc=$?
+mv "$WS/evidence.py.guardado" "$WS/scripts/evidence.py"
+assert_eq 0 "$rc" "sin evidence.py el precheck sigue corriendo (el sello es lo que cambia)"
+sello="$(cat "$WS/tasks/T12/precheck-svc.json")"
+assert_contains "$sello" '"verificado":"desconocido"' "el sello declara que no se pudo saber"
+assert_contains "$out" "verificado: desconocido" "y la última línea que alguien lee también"
+
+echo
+echo "── marcador ausente al sellar: se BORRA el EV, no se conserva"
+# El marcador vive en tasks/<task>/ y lo comparten precheck y ship del mismo
+# task+repo, sin lock entre ellos: un precheck concurrente hace `rm -f` y puede
+# llevárselo entre que el hijo --lang-gates lo escribe y el padre lo lee para
+# decidir si sella. La lectura era `cat ... || echo 1`, o sea que la ausencia
+# CONSERVABA el sello: un EV-TEST que satisface --require-fresh-kind test
+# salido de una corrida de la que no sabemos si ejecutó una sola suite. Un
+# fail-open sobre evidencia es el mismo verde silencioso de siempre.
+#
+# La carrera se reproduce en el punto exacto donde ocurre: un evidence.py de
+# palo que corre los gates de verdad, acuña el EV y BORRA el marcador antes de
+# devolver el ID, que es justo lo que hace el `rm -f` del vecino. El resto del
+# camino (la decisión de sellar, el mensaje y el sello) es el código real.
+mkdir -p "$WS/worktrees/T13/svc" "$WS/tasks/T13"
+cp -R "$WS/repos/svc/." "$WS/worktrees/T13/svc/"
+( cd "$WS/worktrees/T13/svc"; : > Cargo.toml; git add -A; git commit -qm "stack que sí corre
+
+Task: T13" )
+printf '#!/bin/sh\nexit 0\n' > "$WS/bin/cargo"; chmod +x "$WS/bin/cargo"
+mv "$WS/scripts/evidence.py" "$WS/evidence.py.guardado"
+cat > "$WS/scripts/evidence.py" <<'PY'
+import os, subprocess, sys
+a = sys.argv[1:]
+td = a[a.index('--task-dir') + 1]
+repo = a[a.index('--repo') + 1]
+cwd = a[a.index('--cwd') + 1]
+rc = subprocess.call(a[a.index('--') + 1:], cwd=cwd)
+d = os.path.join(td, 'evidence')
+os.makedirs(d, exist_ok=True)
+open(os.path.join(d, 'EV-CARRERA.json'), 'w').write('{"schema":1,"kind":"test","exit_code":%d}' % rc)
+open(os.path.join(d, 'EV-CARRERA.log'), 'w').write('salida\n')
+m = os.path.join(td, '.langseen-' + repo)
+if os.path.exists(m):
+    os.remove(m)          # el precheck del vecino, en la peor ventana posible
+print('EVIDENCE_ID=EV-CARRERA')
+sys.exit(rc)
+PY
+out="$( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/ship.sh --precheck T13 svc 2>&1 )"; rc=$?
+mv "$WS/evidence.py.guardado" "$WS/scripts/evidence.py"
+rm -f "$WS/bin/cargo"
+assert_eq 0 "$rc" "el precheck no se rompe por perder el marcador (los gates sí corrieron)"
+assert_no_file "$WS/tasks/T13/evidence/EV-CARRERA.json" \
+  "sin marcador NO queda EV-TEST: no sé si probó algo, así que no lo certifico"
+assert_no_file "$WS/tasks/T13/evidence/EV-CARRERA.log" "y su log se va con él"
+assert_contains "$out" "no hay rastro de si algo corrió" "y dice el motivo exacto, no 'ninguna suite'"
+assert_not_contains "$out" "EVIDENCE_ID=" "sin anunciar un ID que acaba de borrar"
+sello="$(cat "$WS/tasks/T13/precheck-svc.json")"
+assert_contains "$sello" '"verificado":"desconocido"' "y el sello declara el tercer estado, no un verde"
+
+echo
+echo "── un ship en vuelo es dueño del marcador: el precheck NO se lo pisa"
+# El `rm -f` del arranque existe para no heredar el 'completo' de una corrida
+# anterior, pero con un ship vivo del mismo task+repo ese archivo es SUYO: su
+# hijo lo escribe y su padre lo lee dos veces. Borrarlo le arranca la evidencia
+# y encima en la dirección cara (el ship tira su EV recién acuñado y repite la
+# suite). El lock del repo es el único indicio de que hay un ship vivo.
+# El commit va SIN trailer a propósito: así el precheck muere en gate_trailer,
+# después del bloque del marcador y antes de los gates de lenguaje, que es lo
+# único que reescribiría el archivo y taparía la diferencia.
+mkdir -p "$WS/worktrees/T14/svc" "$WS/tasks/T14"
+cp -R "$WS/repos/svc/." "$WS/worktrees/T14/svc/"
+( cd "$WS/worktrees/T14/svc"; echo h > h.txt; git add -A; git commit -qm "sin trailer, muere temprano" )
+mkdir -p "$WS/locks/svc.lock.d"
+echo 999999 > "$WS/locks/svc.lock.d/pid"
+printf '1' > "$WS/tasks/T14/.langseen-svc"
+out="$( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/ship.sh --precheck T14 svc 2>&1 )"
+assert_eq "1" "$(cat "$WS/tasks/T14/.langseen-svc" 2>/dev/null)" \
+  "con el lock de ship tomado: el marcador del vecino sobrevive intacto"
+assert_contains "$out" "NO borro el marcador" "y el precheck avisa que no lo tocó"
+assert_contains "$out" "puede venir de esa corrida" "diciendo qué significa eso para su sello"
+
+# Y sin ship en vuelo el borrado sigue ocurriendo: sin esta mitad, el test de
+# arriba pasaría igual con un `rm -f` que nunca borra nada.
+rm -rf "$WS/locks/svc.lock.d"
+printf '1' > "$WS/tasks/T14/.langseen-svc"
+out="$( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/ship.sh --precheck T14 svc 2>&1 )"
+assert_no_file "$WS/tasks/T14/.langseen-svc" \
+  "sin lock: el marcador viejo SÍ se borra (nadie hereda un 'completo' ajeno)"
+assert_not_contains "$out" "NO borro el marcador" "y no avisa de un ship que no existe"
+
+echo
+echo "── el campo 'verificado' clasifica contenido raro sin inventar un verde"
+# El case estaba ordenado `0) ninguno; no-dígitos) desconocido; *) completo`, y
+# ese `*` final se comía todo lo que no fuera exactamente "0": '00', '10' y '2'
+# sellaban 'completo' sin que nadie hubiera escrito ese 1. Se prueba la función
+# REAL, extraída del script instanciado, con las entradas adversas.
+awk '/^precheck_verificado\(\) \{/,/^\}/' "$WS/scripts/ship.sh" > "$WS/pv.sh"
+[ -s "$WS/pv.sh" ] && pass "extraje precheck_verificado del script (si sale vacía, el chequeo sería vacuo)" \
+  || fail "no pude extraer precheck_verificado: el chequeo no probaría nada"
+printf 'set -u\n. "$PV_FN"\nprecheck_verificado\n' > "$WS/pv-run.sh"
+clasifica() {  # clasifica <contenido-del-marcador>|--sin-marcador → veredicto
+  # Las rutas se resuelven ANTES de la línea que reasigna WS: en un prefijo de
+  # asignaciones no está garantizado que una vea a la anterior, y este test no
+  # se juega en una sutileza de expansión.
+  local probe="$WS/probe" fn="$WS/pv.sh" runner="$WS/pv-run.sh"
+  rm -rf "$probe"
+  mkdir -p "$probe/tasks/TP"
+  if [ "$1" != "--sin-marcador" ]; then printf '%s' "$1" > "$probe/tasks/TP/.langseen-svc"; fi
+  WS="$probe" TASK=TP REPO=svc PV_FN="$fn" bash "$runner"
+}
+assert_eq "ninguno"     "$(clasifica '00')"  "'00' es solo ceros: ninguno (antes: completo)"
+assert_eq "completo"    "$(clasifica '10')"  "'10' trae un dígito 1-9: completo"
+assert_eq "ninguno"     "$(clasifica '0 0')" "'0 0' se normaliza y sigue siendo ninguno (antes: completo)"
+assert_eq "completo"    "$(clasifica '2')"   "'2' es un conteo, no un cero: completo"
+assert_eq "desconocido" "$(clasifica 'x')"   "'x' no es un número: desconocido, no un verde"
+assert_eq "desconocido" "$(clasifica '')"    "vacío: desconocido"
+assert_eq "desconocido" "$(clasifica '--sin-marcador')" "sin marcador: desconocido"
+assert_eq "ninguno"     "$(clasifica '0')"   "el caso de siempre no se movió: '0' es ninguno"
+assert_eq "completo"    "$(clasifica '1')"   "ni el otro: '1' es completo"
+
+echo
+echo "── el reviewer no fabrica el veredicto que no existe"
+# Lanzado a mano sin verdict-scaffold.sh, el reviewer no tiene camino para
+# crear el archivo (su frontmatter no trae Write), así que el modo de fallo es
+# un atasco mudo o una redirección por Bash que se salta el esqueleto: el
+# veredicto nace sin patch_id, sin evidence[] ni implementation_agents, que son
+# los únicos campos verificables. La regla vive en el prompt, y esta aserción
+# está acá porque este carril es dueño de reviewer.md.tmpl.
+revd="$(cat "$ROOT/templates/agents/reviewer.md.tmpl")"
+assert_contains "$revd" "NO lo crees por ningún medio" "el prompt prohíbe fabricar el veredicto ausente"
+assert_contains "$revd" "verdict-scaffold.sh" "y nombra el comando que sí lo crea"
+
+echo
+echo "── el header declara los códigos de salida REALES, ni uno más ni uno menos"
+# Quien automatiza alrededor de ship.sh (CI, wrappers, /smart) decide por lo que
+# dice esa tabla. Un código inventado hace que alguien trate como "lock ocupado"
+# lo que fue otra cosa; uno omitido lo deja sin caso. Las dos direcciones se
+# comprueban mecánicamente contra el código, que es la única fuente que no
+# envejece. Las lecciones de los comentarios citan exits AJENOS (el 128 de
+# `git rebase --abort`, el 127 de una toolchain ausente) que este script no
+# devuelve: por eso se descartan las líneas de comentario antes de contar.
+ship="$WS/scripts/ship.sh"
+reales="$(grep -vE '^[[:space:]]*#' "$ship" \
+  | grep -oE '(^|[^[:alnum:]_-])exit [0-9]+' | grep -oE '[0-9]+' | sort -u)"
+tabla="$(grep -oE '^# exit [0-9]+' "$ship" | grep -oE '[0-9]+' | sort -u)"
+[ -n "$reales" ] && pass "la extracción encontró códigos (si sale vacía, el test no probaría nada)" \
+  || fail "no extraje ningún 'exit N' del script: el chequeo sería vacuo"
+[ -n "$tabla" ] && pass "el header trae la tabla de códigos" \
+  || fail "el header NO trae tabla de códigos de salida"
+faltan="$(comm -23 <(printf '%s\n' "$reales") <(printf '%s\n' "$tabla") | tr '\n' ' ' | sed 's/ *$//')"
+sobran="$(comm -13 <(printf '%s\n' "$reales") <(printf '%s\n' "$tabla") | tr '\n' ' ' | sed 's/ *$//')"
+assert_eq "" "$faltan" "cada 'exit N' del código está documentado en la tabla"
+assert_eq "" "$sobran" "y la tabla no inventa códigos que el script nunca devuelve"
 
 t_done

@@ -81,7 +81,11 @@ for root in $scan_roots; do
     INDEX="${INDEX}${nm}	${d}
 "
   done < <(find "$root" \( -name .git -o -name node_modules -o -name .venv \
-                           -o -name vendor -o -name .cache \) -prune -o -name pyproject.toml -print)
+                           -o -name vendor -o -name .cache \
+                           -o -name '.review-*' \) -prune -o -name pyproject.toml -print)
+  # `.review-*` (arbol clavado del reviewer) trae los MISMOS paquetes que el
+  # worktree vivo, y lookup_name devuelve el primer match: sin la poda, un
+  # shim podia apuntar al commit sellado en vez de a las ediciones vivas.
 done
 # dir del paquete llamado $1 (primer match = ganador)
 lookup_name() { printf '%s' "$INDEX" | awk -F'\t' -v n="$1" '$1==n{print $2; exit}'; }

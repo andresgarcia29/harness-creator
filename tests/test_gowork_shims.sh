@@ -108,4 +108,39 @@ EOF
 ( cd "$PY" && PATH="$PY/fakebin:$PATH" bash "$PY/scripts/py.sh" '--version' app2 ) >/dev/null 2>&1 || true
 assert_no_file "$PY/repos/app2/vendored/dep"        "py.sh: NUNCA planta un shim dentro de un dir con .git (repo hijo)"
 
+# ══ C. el árbol clavado del reviewer (.review-*) es INVISIBLE para los escáneres ══
+# verdict-scaffold clava worktrees/<task>/.review-<repo> al commit sellado: mismos
+# module-paths y paquetes que el árbol vivo. Sin la poda, gowork podía apuntar el
+# loop nativo al commit sellado (ganador por orden de readdir: no determinista,
+# demostrado en campo) y un shim de py.sh podía resolver al pin. Los decoys son
+# deterministas a propósito: el módulo/paquete existe SOLO en el pin, así que con
+# la poda desaparece del resultado y sin ella aparece siempre.
+mkdir -p "$GA/repos/.review-decoy"
+cat > "$GA/repos/.review-decoy/go.mod" <<'EOF'
+module example.com/pinned-decoy
+
+go 1.22
+EOF
+bash "$GA/scripts/gowork.sh" >/dev/null 2>&1 || true
+content="$(cat "$GW" 2>/dev/null)"
+assert_not_contains "$content" ".review-decoy"      "gowork: el árbol clavado del reviewer NO entra al go.work"
+assert_contains "$content" "./repos/svc"            "gowork: y los módulos vivos siguen adentro"
+
+mkdir -p "$PY/repos/.review-pin" "$PY/repos/app3/.git"
+cat > "$PY/repos/.review-pin/pyproject.toml" <<'EOF'
+[project]
+name = "pinned"
+version = "0.1.0"
+EOF
+cat > "$PY/repos/app3/pyproject.toml" <<'EOF'
+[project]
+name = "app3"
+version = "0.1.0"
+
+[tool.uv.sources]
+pinned = { path = "../pkg/pinned" }
+EOF
+( cd "$PY" && PATH="$PY/fakebin:$PATH" bash "$PY/scripts/py.sh" '--version' app3 ) >/dev/null 2>&1 || true
+assert_no_file "$PY/repos/pkg/pinned"               "py.sh: un paquete que solo vive en el pin del reviewer no gana shim"
+
 t_done

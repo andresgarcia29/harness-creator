@@ -521,6 +521,21 @@ def cmd_init(args: argparse.Namespace) -> int:
         # trabajó. Caso de campo: un carril se clasificó por el tamaño del
         # cambio en vez de por lo que toca, y el error se pagó al final.
         kinds = repo_kinds(task_dir.parent.parent)   # tasks/<id> vive bajo el WS
+        if not kinds:
+            # Degradar sin decir fue el bug (caso de campo): con repo_kinds
+            # vacio se salteaban EN SILENCIO el freno de infra Y el aviso de
+            # repos desconocidos, y quien probaba leia ese silencio como
+            # "chequeo pasado". Fail-open se queda (el backstop es gate_lane
+            # en ship.sh); lo que no se queda es el silencio.
+            manifest = task_dir.parent.parent / "manifest.yaml"
+            if manifest.exists():
+                estado = "presente pero sin repos con kind legibles"
+            else:
+                estado = f"ausente en {manifest.parent}"
+            print(f"⚠️  manifest.yaml {estado}: el chequeo carril/kind NO "
+                  "corrio (ni el freno de infra ni el aviso de repos "
+                  "desconocidos); el backstop es gate_lane en ship.sh",
+                  file=sys.stderr)
         if args.lane in ("quick", "express"):
             infra = [r for r in repos if kinds.get(r) in ("infra-live", "infra-module")]
             if infra:

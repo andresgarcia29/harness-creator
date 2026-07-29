@@ -510,6 +510,26 @@ class PolicyTest(unittest.TestCase):
                             "--repos", "terraform-core")
         self.assertEqual(r.returncode, 0, r.stderr)   # aviso, no bloqueo
 
+    def test_missing_manifest_screams_instead_of_skipping_silently(self):
+        # Caso de campo: repo_kinds vacio salteaba el chequeo carril/kind SIN
+        # una linea, y el silencio se leyo como "chequeo pasado". El fail-open
+        # se conserva; el silencio no.
+        task = self.ws_task(manifest=None)
+        r = self.run_policy("init", task, "--lane", "express",
+                            "--repos", "terraform-core")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("el chequeo carril/kind NO corrio", r.stderr)
+        self.assertIn("gate_lane", r.stderr)          # el backstop, nombrado
+
+    def test_readable_manifest_does_not_scream(self):
+        # El aviso existe para la ausencia, no como ruido de fondo: con
+        # manifest legible y kinds resueltos no puede aparecer, o el dia que
+        # importe ya nadie lo leera.
+        task = self.ws_task()
+        r = self.run_policy("init", task, "--lane", "express", "--repos", "atlas")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("el chequeo carril/kind NO corrio", r.stderr)
+
     # ── el presupuesto de rondas POR REPO (primer test que pasa --repo) ──
 
     def test_review_rounds_counted_per_repo(self):

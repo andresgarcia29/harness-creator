@@ -10,6 +10,10 @@
 #   implementation_agents  = runners únicos de esa evidencia, excluyendo al
 #                            reviewer y a "qa" (beads no guarda identidad;
 #                            el runner del EV es la fuente honesta)
+# Al sellar clava además un árbol DESACOPLADO del commit sellado en
+# worktrees/<task>/.review-<repo>: el reviewer juzga ESE árbol, nunca el vivo,
+# que sigue siendo del implementer (ver "ÁRBOL CLAVADO" más abajo).
+#
 # Placeholders INESCAPABLES para los gates: verdict:"PENDING_REVIEWER",
 # qa:"pending", y requirements_uncovered:-1 (JAMÁS null/0: el check hace
 # (// 0)==0 y null pasaría).
@@ -398,17 +402,60 @@ if [ "$REBASE" -eq 1 ]; then
   rejudge="$(jq '[.compliance[] | select(.rejudge)] | length' "$tmp")"
   echo "↻ rebase desde ${PREV_COMMIT:0:12}: $(printf '%s' "$changed" | jq 'length') archivos en el delta"
   echo "  compliance: $carried arrastrada(s), $rejudge a re-juzgar"
-  # El delta viaja al reviewer, no se re-deriva (caso de campo: el reviewer
-  # quemaba su presupuesto reconstruyendo qué cambió cuando este script ya lo
-  # sabía). SHAs completos y rutas @sh; queda persistido en .delta_files.
-  nfiles="$(printf '%s' "$changed" | jq 'length')"
-  if [ "$nfiles" -gt 0 ] && [ "$nfiles" -le 50 ]; then
-    echo "→ delta para el reviewer (pégalo VERBATIM en su mensaje):"
-    echo "  git -C worktrees/$TASK/$REPO diff $PREV_COMMIT..$HEAD -- $(printf '%s' "$changed" | jq -r 'map(@sh) | join(" ")')"
-  elif [ "$nfiles" -gt 50 ]; then
-    echo "→ delta para el reviewer: git -C worktrees/$TASK/$REPO diff $PREV_COMMIT..$HEAD  ($nfiles archivos; lista completa en delta_files)"
-  fi
 fi
+
+# ── El ÁRBOL CLAVADO que el reviewer juzga ────────────────────────────
+# Caso de campo (P1): el reviewer leía el worktree VIVO mientras el implementer,
+# que es el dueño del claim, seguía editándolo sin commitear. El veredicto sella
+# el commit X y el juicio se emitió sobre X MÁS ediciones transitorias: un verde
+# que nadie puede reproducir y que ship valida contra otra cosa.
+#
+# Al sellar se clava un checkout DESACOPLADO del commit sellado en
+# worktrees/<task>/.review-<repo>. Detached y sin rama a propósito: no puede
+# esconder trabajo sin publicar, así que --rm lo borra sin drama. Y va BAJO
+# worktrees/<task>/ también a propósito: track-read.sh deriva la tarea de la
+# RUTA (worktrees/<task>/...), así que las lecturas del reviewer ahí adentro se
+# atribuyen solas a esta tarea y gate_evidence las ve.
+#
+# NO ES UN GATE. Si git worktree falla (repo raro, disco, metadata rota que no
+# se deja podar), el veredicto sale IGUAL y el scaffold lo DICE, dejando el
+# supuesto en el bus. Morir acá sería un falso rojo: el pin es protección extra,
+# no la prueba.
+PIN="$WS/worktrees/$TASK/.review-$REPO"
+PIN_WHY=""
+one_line() { printf '%s' "$1" | tr '\n' ' ' | cut -c1-160; }
+pin_review_tree() {  # pin_review_tree <commit> → 0 clavado; 1 no, con el motivo en PIN_WHY
+  local commit="$1" out=""
+  PIN_WHY=""
+  # Camino rápido: si el pin de la ronda anterior sigue sano, re-clavarlo es
+  # mover su HEAD desacoplado, no volver a copiar el árbol entero.
+  if [ -e "$PIN/.git" ]; then
+    if out="$(git -C "$PIN" checkout --detach --force "$commit" 2>&1)"; then
+      return 0
+    fi
+    PIN_WHY="re-clavado in situ: $(one_line "$out")"
+  fi
+  # Pin roto: el dir borrado a mano con la metadata viva (git se niega a
+  # re-crearlo: "missing but already registered"), o el dir ocupado por algo que
+  # no es un worktree (ahí `worktree remove` dice "is not a working tree" y hace
+  # falta el rm). Se desarma entero y se rehace. Ningún motivo se tira: si el
+  # rehacer tampoco funciona, todos viajan al mensaje.
+  if ! out="$(git -C "$WT" worktree remove --force "$PIN" 2>&1)"; then
+    PIN_WHY="$PIN_WHY${PIN_WHY:+; }remove: $(one_line "$out")"
+  fi
+  if [ -e "$PIN" ] && ! out="$(rm -rf "$PIN" 2>&1)"; then
+    PIN_WHY="$PIN_WHY${PIN_WHY:+; }rm -rf: $(one_line "$out")"
+  fi
+  if ! out="$(git -C "$WT" worktree prune 2>&1)"; then
+    PIN_WHY="$PIN_WHY${PIN_WHY:+; }prune: $(one_line "$out")"
+  fi
+  if out="$(git -C "$WT" worktree add --detach "$PIN" "$commit" 2>&1)"; then
+    PIN_WHY=""
+    return 0
+  fi
+  PIN_WHY="$PIN_WHY${PIN_WHY:+; }add: $(one_line "$out")"
+  return 1
+}
 
 # Detección temprana de violación de roles: si TODA la evidencia la corrió
 # qa o el propio reviewer, ship morirá en POLICY-ROLE-002/003. Mejor aquí.
@@ -425,6 +472,44 @@ jq -e '.evidence | map(select(startswith("EV-TEST-"))) | length > 0' "$tmp" >/de
 
 mv "$tmp" "$OUT"
 echo "✅ scaffold: tasks/$TASK/verdict-$REPO.json ($(jq '.evidence|length' "$OUT") evidencias, agents=$(jq -c '.implementation_agents' "$OUT"), commit ${HEAD:0:12})"
+
+# El árbol clavado va DESPUÉS del sello: si el scaffold se negó (evidencia
+# stale, roles, juicio incorrupto), no queda un pin apuntando a un commit que
+# ningún veredicto sella.
+REVIEW_DIR="worktrees/$TASK/$REPO"
+if pin_review_tree "$HEAD"; then
+  REVIEW_DIR="worktrees/$TASK/.review-$REPO"
+  echo "📌 árbol clavado al commit sellado: $REVIEW_DIR (${HEAD:0:12}, detached)"
+  echo "   el reviewer LEE y difea AHÍ, no en el worktree vivo: el vivo es del"
+  echo "   implementer y puede seguir moviéndose mientras se emite el juicio."
+else
+  echo "⚠️  no pude clavar el árbol de review en worktrees/$TASK/.review-$REPO: $PIN_WHY"
+  echo "   el veredicto SALE IGUAL (el pin es protección extra, no un gate:"
+  echo "   morir acá sería un falso rojo), pero queda un SUPUESTO abierto: el"
+  echo "   reviewer leerá el worktree VIVO, así que su juicio puede incluir"
+  echo "   ediciones sin commitear que este veredicto no sella."
+  echo "   ↳ remediación: git -C worktrees/$TASK/$REPO worktree prune y re-corre el scaffold"
+  if [ -f "$WS/scripts/emit.sh" ]; then
+    ( export WS ACTOR="verdict-scaffold"
+      bash "$WS/scripts/emit.sh" assumption \
+        "sin árbol clavado para el review de $REPO@${HEAD:0:12}: el reviewer lee el worktree vivo ($PIN_WHY)" \
+        "" "$TASK" )
+  fi
+fi
+
+# El delta viaja al reviewer, no se re-deriva (caso de campo: el reviewer
+# quemaba su presupuesto reconstruyendo qué cambió cuando este script ya lo
+# sabía). Corre en el árbol CLAVADO, que tiene los dos commits y no se mueve
+# bajo sus pies. SHAs completos y rutas @sh; queda persistido en .delta_files.
+if [ "$REBASE" -eq 1 ]; then
+  nfiles="$(printf '%s' "$changed" | jq 'length')"
+  if [ "$nfiles" -gt 0 ] && [ "$nfiles" -le 50 ]; then
+    echo "→ delta para el reviewer (pégalo VERBATIM en su mensaje):"
+    echo "  git -C $REVIEW_DIR diff $PREV_COMMIT..$HEAD -- $(printf '%s' "$changed" | jq -r 'map(@sh) | join(" ")')"
+  elif [ "$nfiles" -gt 50 ]; then
+    echo "→ delta para el reviewer: git -C $REVIEW_DIR diff $PREV_COMMIT..$HEAD  ($nfiles archivos; lista completa en delta_files)"
+  fi
+fi
 [ "$REBASE" -eq 1 ] && echo "→ re-review INCREMENTAL: juzga solo las entradas con .rejudge; el resto trae carried_from."
 echo "→ el reviewer reemplaza SOLO el juicio: verdict, blocking, non_blocking,"
 echo "  compliance, requirements_uncovered, docs_updated, snapshots_updated_justified."

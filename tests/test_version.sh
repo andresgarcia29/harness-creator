@@ -58,6 +58,34 @@ out="$(run check)"; rc=$?
 assert_eq 1 "$rc" "tag adelantado: falla"
 assert_contains "$out" "POR DELANTE" "lo nombra"
 
+echo "── el tren del release NO es un tag adelantado (carrera del 2026-07-29)"
+# El release taggea y alinea en un chore commit DESPUES del commit que lo
+# disparo; el CI corre sobre el commit anterior y desde ahi el tag se ve
+# adelantado. Las dos condiciones de la excepcion: HEAD ancestro del tag,
+# y el arbol del tag declara su propia version.
+mk_repo 0.10.0 ""
+( cd "$WS/r"
+  jq '.version="0.10.1"' .claude-plugin/plugin.json > p.tmp && mv p.tmp .claude-plugin/plugin.json
+  jq '.plugins[0].version="0.10.1"' .claude-plugin/marketplace.json > m.tmp && mv m.tmp .claude-plugin/marketplace.json
+  git commit -qam "chore(release): v0.10.1"
+  git tag v0.10.1
+  git checkout -q 'HEAD~1'
+) >/dev/null 2>&1
+out="$(run check)"; rc=$?
+assert_eq 0 "$rc" "tag adelantado con el tren alineado: pasa"
+assert_contains "$out" "tren del release" "y lo nombra como lo que es"
+
+echo "── pero un tag en un descendiente que NO declara la version sigue rojo"
+mk_repo 0.10.0 ""
+( cd "$WS/r"
+  git commit -q --allow-empty -m "x"
+  git tag v0.99.0
+  git checkout -q 'HEAD~1'
+) >/dev/null 2>&1
+out="$(run check)"; rc=$?
+assert_eq 1 "$rc" "descendiente sin alinear: falla"
+assert_contains "$out" "declara 0.10.0, no 0.99.0" "y dice que declara el commit del tag"
+
 echo "── set escribe los DOS lugares o ninguno"
 mk_repo 0.10.0 ""
 run set 0.20.0 >/dev/null

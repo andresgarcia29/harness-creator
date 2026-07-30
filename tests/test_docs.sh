@@ -79,7 +79,7 @@ assert_contains "$(cat "$root/templates/docs/intake.md.tmpl")" "enrichment" \
 # de terminal "──" (U+2500) son otro carácter y no cuentan.
 # El tope es el conteo REAL del día, sin holgura: dejarlo por encima (487 con
 # 447 medidos) regala 40 guiones largos gratis y el ratchet deja de morder.
-EMDASH_MAX=444
+EMDASH_MAX=438
 emdash_now=$(grep -ro "—" --include="*.md" --include="*.tmpl" --include="*.yaml" \
   --include="*.sh" --include="*.py" --include="*.json" "$root" 2>/dev/null \
   | grep -v "/\.git/" | grep -v "templates/ui/dist" | wc -l | tr -d ' ')

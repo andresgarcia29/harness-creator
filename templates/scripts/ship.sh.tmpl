@@ -305,16 +305,33 @@ esac
 
 # Instrumentación en UN solo punto: si estamos empezando un gate, el anterior
 # pasó. El trap sabe cuál falló. Cero riesgo de olvidarse de instrumentar uno.
+#
+# ── CUÁNTO TARDÓ, MEDIDO CON `SECONDS` Y NO CON `date` ────────────────
+# `SECONDS` es un BUILTIN de bash (desde el 3.2, el de macOS): leerlo no
+# cuesta un fork ni una syscall, es una variable que el shell ya mantiene.
+# `date` costaría un fork+exec POR CADA gate DE CADA repo, y esto corre en el
+# camino caliente: la medición no puede pagarse con velocidad de ship. Se
+# emite como el 5º argumento de emit (`dur`), en vez de dejar que el panel lo
+# derive restando timestamps: con dos ships de la misma tarea intercalados en
+# el bus esa resta le atribuye el tiempo al gate equivocado.
+# El 4º argumento va vacío a propósito: emit hace `${4:-${TASK:-}}`, así que
+# "" es idéntico a no pasarlo, y es la única forma de llegar al 5º.
 gate() {
   [ -n "${CURRENT_GATE:-}" ] && [ "$CURRENT_GATE" != "preflight" ] \
-    && emit gate "$CURRENT_GATE" true
-  echo "── gate: $1 ──"; CURRENT_GATE="$1"
+    && emit gate "$CURRENT_GATE" true "" "$((SECONDS - ${_G0:-$SECONDS}))"
+  echo "── gate: $1 ──"; CURRENT_GATE="$1"; _G0=$SECONDS
 }
 
 # El error de un gate es un PROMPT: al fallar cualquier gate, el trap
 # imprime la instrucción de autocorrección (el agente que lee esto
 # arregla en una iteración, sin adivinar). También libera el lock.
-CURRENT_GATE="preflight"; LOCK_HELD=""
+# _G0: el `SECONDS` en que arrancó el gate en curso. Se declara ACÁ, junto a
+# CURRENT_GATE y ANTES de armar el trap: bajo `set -u` una variable sin
+# declarar mata el script, y on_exit puede dispararse antes del primer gate().
+# Igual cada uso lleva ${_G0:-$SECONDS} (dur 0), porque los tests extraen
+# estas funciones sueltas y una función que solo corre "en contexto" no es
+# verificable.
+CURRENT_GATE="preflight"; LOCK_HELD=""; _G0=$SECONDS
 # ── "OK" NO ES "VERIFICADO" ───────────────────────────────────────────
 # El sello decía solo {commit, ok}, y un precheck donde NINGÚN gate de lenguaje
 # llegó a compilar ni testear (stack no reconocido, toolchain ausente) sellaba
@@ -514,12 +531,12 @@ on_exit() {
   fi
   [ -n "$LOCK_HELD" ] && rm -rf "$LOCKDIR"
   if [ "$rc" -eq 0 ]; then
-    [ -n "${CURRENT_GATE:-}" ] && emit gate "$CURRENT_GATE" true
+    [ -n "${CURRENT_GATE:-}" ] && emit gate "$CURRENT_GATE" true "" "$((SECONDS - ${_G0:-$SECONDS}))"
     return 0
   fi
   if [ "$PRECHECK" -eq 1 ] && [ "${CI_MODE:-0}" -eq 0 ]; then
     stamp_precheck false
-    emit gate "precheck de $REPO rojo ($CURRENT_GATE): ronda de review AHORRADA" false
+    emit gate "precheck de $REPO rojo ($CURRENT_GATE): ronda de review AHORRADA" false "" "$((SECONDS - ${_G0:-$SECONDS}))"
     echo ""
     echo "⛔ precheck rojo en '$CURRENT_GATE' (exit $rc). NO entregues a review."
     echo "   → Los errores completos están arriba. Corrígelos TODOS en una"
@@ -531,7 +548,7 @@ on_exit() {
   fi
   # UN GATE QUE BLOQUEA ES LA MEJOR NOTICIA DEL SISTEMA: es la prueba de que el
   # harness frena a su propio agente. Se cuenta igual de fuerte que un éxito.
-  emit gate "$CURRENT_GATE — BLOQUEÓ el ship de $REPO (exit $rc)" false
+  emit gate "$CURRENT_GATE — BLOQUEÓ el ship de $REPO (exit $rc)" false "" "$((SECONDS - ${_G0:-$SECONDS}))"
   echo ""
   echo "⛔ gate '$CURRENT_GATE' falló (exit $rc)."
   echo "   → Lee el error de arriba. Corrige SOLO eso en el worktree $WT,"
@@ -2422,12 +2439,17 @@ par() {  # par <slot> <gate-fn>... — corre un grupo de gates en background
     # (bash 3.2 y 5.x): referenciar $slot ahí es unbound variable.
     PAR_SLOT="$slot"
     CURRENT_GATE=""
+    # SECONDS sigue contando dentro del subshell (arranca en el mismo cero que
+    # el padre), así que el delta contra un _G0 tomado ACÁ mide lo que corrió
+    # en ESTE slot, no lo que llevaba el ship. Se toma antes del primer gate()
+    # por si el grupo muere sin llegar a abrir ninguno.
+    _G0=$SECONDS
     group_exit() {
       local rc=$?
       if [ "$rc" -eq 0 ]; then
-        [ -n "${CURRENT_GATE:-}" ] && emit gate "$CURRENT_GATE" true
+        [ -n "${CURRENT_GATE:-}" ] && emit gate "$CURRENT_GATE" true "" "$((SECONDS - ${_G0:-$SECONDS}))"
       else
-        emit gate "$CURRENT_GATE — BLOQUEÓ el ship de $REPO (exit $rc)" false
+        emit gate "$CURRENT_GATE — BLOQUEÓ el ship de $REPO (exit $rc)" false "" "$((SECONDS - ${_G0:-$SECONDS}))"
         echo "⛔ gate '$CURRENT_GATE' falló (exit $rc)"
       fi
       echo "$rc" > "$GDIR/$PAR_SLOT.rc"
@@ -2440,10 +2462,10 @@ par() {  # par <slot> <gate-fn>... — corre un grupo de gates en background
 }
 
 close_serial_gate() {
-  # cierra el gate serial anterior (mismo contrato que gate())
+  # cierra el gate serial anterior (mismo contrato que gate(), `dur` incluido)
   [ -n "${CURRENT_GATE:-}" ] && [ "$CURRENT_GATE" != "preflight" ] \
-    && emit gate "$CURRENT_GATE" true
-  CURRENT_GATE=""
+    && emit gate "$CURRENT_GATE" true "" "$((SECONDS - ${_G0:-$SECONDS}))"
+  CURRENT_GATE=""; _G0=$SECONDS
 }
 
 collect_gate_slots() {  # collect_gate_slots <etiqueta>: espera, imprime TODO, agrega
@@ -2593,6 +2615,10 @@ gate_espacio_en_disco() {
   echo "     docker system prune -a                    # si usás docker"
   echo "   ↳ si de verdad querés correr así: HARNESS_MIN_FREE_GB=0 (y no confíes"
   echo "     en el resultado)."
+  # SIN `dur`, a propósito (y lo mismo en los tres emit `gate` de más abajo que
+  # tampoco lo llevan: el resumen del precheck y el reintento de push). `dur`
+  # significa "cuánto tardó ESTE gate", y estos eventos no cierran un tramo:
+  # aquí nada corrió. Ponerle el delta contra _G0 sería inventar una medición.
   emit gate "gates de $REPO NO corridos: ${libre_gb}G libres de disco" false
   exit 3
 }
@@ -2770,7 +2796,7 @@ El sha que aterrice NO sera este si la cola de merge rebasea o hace squash." 2>/
     printf '{"repo":"%s","sha":"%s","short":"%s","branch":"%s","pr":"%s","landed":false,"shipped_at":"%s"}\n' \
       "$REPO" "$sha" "$short" "$branch" "${pr:-}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$WS/tasks/$TASK/ship.log"
     stamp_provenance "$sha"
-    [ -n "${CURRENT_GATE:-}" ] && emit gate "$CURRENT_GATE" true && CURRENT_GATE=""
+    [ -n "${CURRENT_GATE:-}" ] && emit gate "$CURRENT_GATE" true "" "$((SECONDS - ${_G0:-$SECONDS}))" && CURRENT_GATE=""
     emit ship "$REPO: PR abierto desde $branch @ $short (falta el merge)" true
     # El anuncio final NO puede afirmar lo que el aviso de arriba acaba de
     # negar: si no hubo PR, decir "PR abierto" seria la mentira mas barata de
@@ -2799,7 +2825,7 @@ El sha que aterrice NO sera este si la cola de merge rebasea o hace squash." 2>/
     # Cierra el último gate ANTES de anunciar el ship: si lo dejara al trap,
     # el "veredicto ✅" saldría en el bus DESPUÉS del "shippeé" y la historia
     # tendría el penúltimo paso después del último.
-    [ -n "${CURRENT_GATE:-}" ] && emit gate "$CURRENT_GATE" true && CURRENT_GATE=""
+    [ -n "${CURRENT_GATE:-}" ] && emit gate "$CURRENT_GATE" true "" "$((SECONDS - ${_G0:-$SECONDS}))" && CURRENT_GATE=""
     emit ship "$REPO @ $short — pasó los gates y está en main" true
     echo "✅ shipped $REPO @ $short"
     request_ship_phase

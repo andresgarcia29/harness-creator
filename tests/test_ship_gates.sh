@@ -299,6 +299,79 @@ lk_line="$(grep -n '^acquire_lock$' "$TMPL" | head -1 | cut -d: -f1)"
   || fail "el preflight no precede al lock (pf=$pf_line lock=$lk_line)"
 
 
+echo
+echo "── cada gate dice CUÁNTO tardó (dur), y medirlo no cuesta un fork"
+# La duración se derivaba restando el ts de dos eventos `gate` consecutivos.
+# Con dos ships de la MISMA tarea intercalados en el bus (ship-wave corre los
+# repos en paralelo) esa resta mide el hueco entre corridas distintas y le
+# atribuye el tiempo al gate equivocado. Ahora lo dice quien sí sabe cuándo
+# empezó su propio gate, con el builtin SECONDS: cero forks en el camino
+# caliente de cada gate de cada repo.
+extract gate > "$WS/gatefn.sh"
+grep -q 'CURRENT_GATE="$1"' "$WS/gatefn.sh" || { echo "no pude extraer gate()"; exit 1; }
+
+# emit de captura: imprime los 5 argumentos, el 5º es el que importa
+EMIT_STUB='emit() { printf "EMIT|%s|%s|%s|%s|%s\n" "${1:-}" "${2:-}" "${3:-}" "${4:-}" "${5:-}"; }'
+
+dur_de() {  # dur_de <salida> <nombre-del-gate> → el 5º argumento de ese emit
+  printf '%s\n' "$1" | awk -F'|' -v g="$2" '$1=="EMIT" && $3==g {print $6; exit}'
+}
+assert_num() {  # assert_num <valor> <nombre>
+  case "${1:-}" in
+    ''|*[!0-9]*) fail "$2 (esperaba un entero, fue '${1:-}')" ;;
+    *)           pass "$2" ;;
+  esac
+}
+
+# gate(): al abrir el siguiente, el anterior se cierra CON su duración
+out="$( ( set -euo pipefail
+  eval "$EMIT_STUB"
+  . "$WS/gatefn.sh"
+  gate uno; gate dos; gate tres ) 2>&1 )"
+assert_num "$(dur_de "$out" uno)" "gate(): el cierre de 'uno' lleva un dur numérico"
+assert_num "$(dur_de "$out" dos)" "gate(): el cierre de 'dos' lleva un dur numérico"
+assert_eq "true" "$(printf '%s\n' "$out" | awk -F'|' '$3=="uno"{print $4; exit}')" \
+  "gate(): el ok del cierre no se movió de sitio por meter dur detrás"
+
+# el primer gate no puede morir por _G0 sin declarar: bajo `set -u` una
+# variable sin inicializar mata el ship entero, y esto corre en todos.
+( set -euo pipefail; eval "$EMIT_STUB"; . "$WS/gatefn.sh"; CURRENT_GATE="viejo"; gate nuevo ) >/dev/null 2>&1 \
+  && pass "gate(): con CURRENT_GATE heredado y _G0 sin declarar NO revienta bajo set -u" \
+  || fail "gate(): _G0 sin inicializar mata el script bajo set -u"
+
+# la medición es del builtin, no de un proceso: `date` acá costaría un
+# fork+exec por gate y por repo, que es justo lo que no se puede pagar.
+grep -q 'SECONDS' "$WS/gatefn.sh" \
+  && pass "gate() mide con el builtin SECONDS" || fail "gate() no usa SECONDS"
+grep -qE '(^|[^a-z_])date[[:space:]]' "$WS/gatefn.sh" \
+  && fail "gate() llama a date: un fork por gate y por repo" \
+  || pass "gate() NO llama a date (cero forks en el camino caliente)"
+
+# close_serial_gate: mismo contrato que gate()
+out="$( ( set -euo pipefail; eval "$EMIT_STUB"
+  CURRENT_GATE="serial"; _G0=$SECONDS
+  . "$WS/pargates.sh"; close_serial_gate ) 2>&1 )"
+assert_num "$(dur_de "$out" serial)" "close_serial_gate: cierra con dur numérico"
+
+# par/group_exit: los slots paralelos son EL caso que rompía la resta de
+# timestamps, así que son los que más necesitan el dur explícito.
+out="$( ( set -eu; WS="$WS"; REPO=test; GDIR="$WS/gd"; PAR_PIDS=""; PAR_SLOTS=""
+  mkdir -p "$GDIR"
+  eval "$EMIT_STUB"
+  gate() { CURRENT_GATE="$1"; }
+  g_ok() { gate "en-paralelo"; }
+  . "$WS/pargates.sh"
+  par slot1 g_ok
+  for p in $PAR_PIDS; do wait "$p" 2>/dev/null || true; done
+  cat "$GDIR/slot1.out"; rm -rf "$GDIR" ) 2>&1 )"
+assert_num "$(dur_de "$out" en-paralelo)" "par/group_exit: el gate de un slot paralelo cierra con dur numérico"
+
+# y ningún cierre de gate se quedó sin instrumentar en el template
+sin_dur="$(grep -c 'emit gate "$CURRENT_GATE"' "$TMPL" 2>/dev/null || echo 0)"
+con_dur="$(grep 'emit gate "$CURRENT_GATE"' "$TMPL" 2>/dev/null | grep -c 'SECONDS' || echo 0)"
+assert_eq "$sin_dur" "$con_dur" "TODOS los cierres de gate del template pasan dur ($sin_dur sitios)"
+
+
 echo "── gate_tests_untouched v2: neto real, escape que declara"
 
 # delta_seccion viaja CON el gate: es quien lee el delta-spec, y sin ella

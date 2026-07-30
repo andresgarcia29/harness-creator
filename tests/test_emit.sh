@@ -56,7 +56,57 @@ if command -v dash >/dev/null; then
   dash -uc ". '$EMIT' && emit phase 'desde dash'" && pass "sourceable desde dash -u (el sh de Ubuntu)" || fail "revienta al sourcearlo desde dash -u"
 fi
 
-# 6. sin kind → no escribe, no falla
+# 6. `dur`: el 5º argumento, opcional, NÚMERO y no string.
+#    Existe porque la duración de un gate se derivaba restando timestamps de
+#    eventos `gate` consecutivos, y con dos ships de la misma tarea
+#    intercalados en el bus esa resta le atribuye el tiempo al gate equivocado.
+"$EMIT" gate x true T1 12
+line="$(tail -1 "$WS/.harness/events.jsonl")"
+printf '%s' "$line" | jq -e '.dur == 12' >/dev/null 2>&1 \
+  && pass "dur presente y con el valor pasado" || fail "dur ausente o distinto (línea: $line)"
+printf '%s' "$line" | jq -e '.dur | type == "number"' >/dev/null 2>&1 \
+  && pass "dur es número JSON, no string" || fail "dur no es número (línea: $line)"
+# y el resto del evento no se movió por llevar dur encima
+assert_eq "true" "$(printf '%s' "$line" | jq -r '.ok')" "con dur, ok sigue siendo booleano true"
+assert_eq "T1" "$(printf '%s' "$line" | jq -r '.task')" "con dur, task sigue en su lugar"
+assert_eq "x" "$(printf '%s' "$line" | jq -r '.summary')" "con dur, summary sigue en su lugar"
+
+# 6b. sin 5º argumento → la clave NO aparece. Compat hacia atrás: un llamador
+#     viejo produce el MISMO objeto de siempre, sin claves nuevas.
+"$EMIT" gate x true T1
+line="$(tail -1 "$WS/.harness/events.jsonl")"
+printf '%s' "$line" | jq -e 'has("dur") | not' >/dev/null 2>&1 \
+  && pass "sin 5º argumento: el objeto sale SIN la clave dur" || fail "apareció dur sin pedirlo (línea: $line)"
+
+# 6c. un dur basura NO puede romper la línea del bus. El bus es fail-open por
+#     ley: se descarta el dato malo, jamás el evento.
+"$EMIT" gate x true T1 basura
+line="$(tail -1 "$WS/.harness/events.jsonl")"
+printf '%s' "$line" | jq -e . >/dev/null 2>&1 \
+  && pass "dur basura: la línea sigue siendo JSON válido" || fail "dur basura rompió la línea (línea: $line)"
+printf '%s' "$line" | jq -e 'has("dur") | not' >/dev/null 2>&1 \
+  && pass "dur basura: sale sin la clave dur" || fail "dur basura se coló al bus (línea: $line)"
+assert_eq "x" "$(printf '%s' "$line" | jq -r '.summary')" "dur basura: el evento se emite igual"
+# "007" es dígitos pero NO es JSON válido: si se colara, jq muere y el evento
+# entero se pierde en silencio. Es el borde que hace que validar no alcance con
+# "son todos números".
+"$EMIT" gate ceros true T1 007
+line="$(tail -1 "$WS/.harness/events.jsonl")"
+assert_eq "ceros" "$(printf '%s' "$line" | jq -r '.summary')" "dur con ceros a la izquierda: el evento no se pierde"
+printf '%s' "$line" | jq -e 'has("dur") | not' >/dev/null 2>&1 \
+  && pass "dur con ceros a la izquierda: descartado, no emitido" || fail "007 se coló como dur (línea: $line)"
+# 0 SÍ es un dur legítimo: un gate que tarda menos de un segundo existe.
+"$EMIT" gate rapido true T1 0
+tail -1 "$WS/.harness/events.jsonl" | jq -e '.dur == 0' >/dev/null 2>&1 \
+  && pass "dur 0 es un valor válido (gate de menos de un segundo)" || fail "dur 0 se descartó"
+
+# 6d. el 5º argumento llega también por la forma SOURCEADA (las dos formas de
+#     usar emit.sh tienen que aceptarlo, no solo el CLI).
+( . "$EMIT" && emit gate "sourceado" true T1 7 )
+tail -1 "$WS/.harness/events.jsonl" | jq -e '.dur == 7' >/dev/null 2>&1 \
+  && pass "sourceado: emit acepta el 5º argumento igual que el CLI" || fail "sourceado: se perdió dur"
+
+# 7. sin kind → no escribe, no falla
 before="$(wc -l < "$WS/.harness/events.jsonl")"
 "$EMIT"
 assert_eq "0" "$?" "sin argumentos: exit 0"

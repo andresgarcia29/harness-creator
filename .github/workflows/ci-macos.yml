@@ -1,0 +1,47 @@
+name: ci-macos
+
+# NUNCA corre solo. Ni en push, ni en PR, ni por cron: workflow_dispatch y nada
+# más, o sea que no gasta un minuto hasta que un humano lo dispara desde la
+# pestaña Actions.
+#
+# POR QUÉ VIVE APARTE EN VEZ DE SER UNA MATRIZ DE ci.yml: una matriz condicional
+# igual deja a macOS a un `if` de distancia de volver a correr en cada push, y
+# eso fue justamente lo que agotó la cuota de Actions (los runners de macOS
+# gastan 10 veces los minutos; un día normal de diez pushes se la comió entera,
+# y con la cuota agotada no arranca NINGÚN job, ni el de Linux ni el release).
+# Un archivo aparte no tiene forma de dispararse por accidente.
+#
+# CUÁNDO DISPARARLO, y no es decorativo: antes de publicar una versión. El tag
+# sale de main y se instala en máquinas macOS, así que ese es el momento en que
+# la promesa de portabilidad (bash 3.2 de fábrica, userland BSD) se cobra de
+# verdad. También cuando el cambio toca algo sensible al userland: sed, stat,
+# date, grep, awk, mktemp. Este repo ya pagó esa familia de bugs más de una vez
+# (un `sed -E` con \b que BSD ignora EN SILENCIO, `stat -f` contra `stat -c`).
+#
+# Y si estás en una macOS, esto mismo corre gratis y sin Actions:
+#   /bin/bash tests/run.sh
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts-macos:
+    runs-on: macos-latest
+    steps:
+      # Pineada por SHA de 40, igual que en ci.yml y por el mismo motivo: un tag
+      # es un puntero MUTABLE y quien pueda moverlo corre su código acá.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+      - name: Contratos Python compilan
+        run: python3 -m py_compile templates/scripts/evidence.py templates/scripts/harness-policy.py
+      - name: Templates shell parsean
+        run: |
+          bash -n templates/scripts/ship.sh.tmpl
+          bash -n templates/scripts/bootstrap.sh.tmpl
+          bash -n templates/hooks/block-direct-push.sh
+      # /bin/bash y no `bash`: el de fábrica en macOS es 3.2, que es la versión
+      # contra la que este repo promete portabilidad. Con el bash de brew (5.x)
+      # en el PATH, esta pata probaría otra cosa y la promesa quedaría sin red.
+      - name: Suite del installer (bash 3.2 de fábrica)
+        run: /bin/bash tests/run.sh

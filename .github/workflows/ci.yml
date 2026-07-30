@@ -17,13 +17,25 @@ permissions:
 # vez. tests/test_ci_gates.sh falla si una action vuelve a colgar de un tag.
 jobs:
   contracts:
-    # La promesa de portabilidad (macOS/Linux, bash 3.2) se PRUEBA, no se
-    # declara: en macOS la suite corre con /bin/bash (3.2 de fábrica).
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    # SOLO LINUX, y es una decisión de costo tomada con un número: los runners
+    # de macOS gastan 10 veces los minutos de los de Linux, y un día normal de
+    # trabajo (diez pushes) agotó la cuota entera de Actions. Con la cuota
+    # agotada NO arranca ningún job, ni el de Linux ni el release: la matriz de
+    # dos plataformas no compraba más portabilidad, compraba quedarse sin CI.
+    #
+    # LO QUE ESTO CUESTA, dicho de frente: una regresión que solo rompa en
+    # macOS (bash 3.2 de fábrica, userland BSD) puede aterrizar en main sin que
+    # nadie la vea. Este repo ya pagó varias de esa familia (`sed -E` con \b que
+    # BSD ignora en silencio, `stat -f` contra `-c`), así que el riesgo no es
+    # teórico.
+    #
+    # DÓNDE SE CUBRE AHORA, que es lo que hace que esto no sea solo aflojar:
+    #   · .github/workflows/ci-macos.yml, a pedido y sin gastar un minuto hasta
+    #     que alguien lo dispare. El momento para hacerlo es antes de publicar
+    #     una versión: el tag sale de main y va a máquinas macOS.
+    #   · en cualquier máquina macOS, gratis: `/bin/bash tests/run.sh`, que es
+    #     exactamente lo que corre ese workflow.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
       - name: Contratos Python compilan
@@ -33,12 +45,8 @@ jobs:
           bash -n templates/scripts/ship.sh.tmpl
           bash -n templates/scripts/bootstrap.sh.tmpl
           bash -n templates/hooks/block-direct-push.sh
-      - name: Suite del installer (Linux)
-        if: runner.os == 'Linux'
+      - name: Suite del installer
         run: bash tests/run.sh
-      - name: Suite del installer (macOS, bash 3.2 de fábrica)
-        if: runner.os == 'macOS'
-        run: /bin/bash tests/run.sh
 
   version:
     runs-on: ubuntu-latest

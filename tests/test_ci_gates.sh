@@ -166,4 +166,42 @@ assert_contains "$out" "SIN verificar" "y el ✓ de instalado admite que no veri
 assert_not_contains "$out" "sha256 verificado" "jamas una verificacion fingida"
 assert_contains "$out" "HARNESSD RUN" "avisado, sigue: es el tercer estado, no un rojo"
 
+echo
+echo "── la pata de macOS existe, pero a pedido: barata sin dejar de ser probable"
+# Caso de campo: la matriz corria macOS en CADA push, y los runners de macOS
+# gastan 10 veces los minutos. Un dia normal de trabajo (diez pushes) agoto la
+# cuota de Actions, y con la cuota agotada NO arranca ningun job: ni el de
+# Linux ni el release. La matriz completa no compraba mas portabilidad,
+# compraba quedarse sin CI. Ahora macOS corre por workflow_dispatch.
+#
+# Lo que este bloque protege es que el camino a pedido SIGA EXISTIENDO. Que
+# macOS salga de la matriz automatica es una decision de costo; que desaparezca
+# del repo entero seria perder la unica forma de probar la promesa de bash 3.2
+# y userland BSD, y nadie se enteraria hasta que un usuario de macOS reporte.
+ci="$(cat "$ROOT/.github/workflows/ci.yml")"
+# El aserto es sobre el RUNNER, no sobre la palabra: el comentario de ci.yml
+# explica a proposito por que macOS no esta ahi, y prohibir la palabra
+# prohibiria justamente la explicacion.
+assert_not_contains "$ci" "macos-latest" \
+  "ci.yml es SOLO Linux: un runner macOS ahi vuelve a agotar la cuota y a dejar al repo sin CI"
+
+mac="$ROOT/.github/workflows/ci-macos.yml"
+[ -f "$mac" ] && pass "la pata de macOS existe en su propio workflow" \
+  || fail "sin ci-macos.yml no hay NINGUNA forma de probar bash 3.2 y BSD"
+macyml="$(cat "$mac" 2>/dev/null)"
+assert_contains "$macyml" "workflow_dispatch" "y se dispara a mano"
+assert_contains "$macyml" "/bin/bash tests/run.sh" \
+  "corriendo la suite con el bash 3.2 DE FABRICA (con el de brew probaria otra cosa)"
+# Que no corra solo es el punto entero: si alguien le agrega push, pull_request
+# o schedule, vuelve el gasto que dejo al repo sin CI un dia entero.
+if printf '%s' "$macyml" | grep -qE '^\s*(push|pull_request|schedule):' ; then
+  fail "ci-macos.yml gano un disparador automatico: eso es lo que agoto la cuota"
+else
+  pass "ci-macos.yml NO tiene disparadores automaticos (solo a pedido)"
+fi
+assert_contains "$macyml" "antes de publicar una versión" \
+  "y dice CUANDO dispararlo, o el camino manual no se usa nunca"
+assert_contains "$macyml" "actions/checkout@11d5960a326750d5838078e36cf38b85af677262" \
+  "con la action pineada por SHA, igual que sus vecinas"
+
 t_done

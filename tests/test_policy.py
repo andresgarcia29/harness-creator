@@ -549,6 +549,36 @@ class PolicyTest(unittest.TestCase):
         self.assertEqual(state["review_rounds_by_repo"]["proto"], 1)
         self.assertEqual(state["review_rounds"], 3)   # el máximo entre repos
 
+    def test_second_repo_can_register_its_review_entry(self):
+        """La fase es GLOBAL y el review es POR REPO: en cuanto el primer repo
+        entraba a review, el segundo chocaba con POLICY-TRANSITION-001 y su
+        entrada nunca se registraba. Caso de campo: tarea de cinco repos que
+        terminó con rondas contadas para dos, o sea tres repos revisados sin
+        que el presupuesto los gobernara."""
+        self.reach("rfc", "implement")
+        self.assertEqual(self.transition_repo("review", "atlas").returncode, 0)
+        segundo = self.transition_repo("review", "proto")
+        self.assertEqual(segundo.returncode, 0, segundo.stderr)
+        state = self.state()
+        self.assertEqual(state["review_rounds_by_repo"]["atlas"], 1)
+        self.assertEqual(state["review_rounds_by_repo"]["proto"], 1)
+
+    def test_self_transition_still_needs_a_repo_and_still_has_a_ceiling(self):
+        """Las dos contra-mitades: sin --repo la auto-transición sigue
+        prohibida (sería una ronda anónima que ningún presupuesto cobra), y con
+        --repo el techo por repo se sigue cobrando igual."""
+        self.reach("rfc", "implement")
+        self.assertEqual(self.transition_repo("review", "atlas").returncode, 0)
+        anonima = self.transition("review")
+        self.assertEqual(anonima.returncode, 3)
+        self.assertIn("POLICY-TRANSITION-001", anonima.stderr)
+        self.assertIn("--repo", anonima.stderr)
+        for _ in range(2):
+            self.assertEqual(self.transition_repo("review", "atlas").returncode, 0)
+        techo = self.transition_repo("review", "atlas")
+        self.assertEqual(techo.returncode, 3)
+        self.assertIn("POLICY-LIMIT-001", techo.stderr)
+
     def test_last_round_warns_with_repo_and_only_then(self):
         self.reach("rfc", "implement")
         first = self.transition_repo("review", "atlas")

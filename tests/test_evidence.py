@@ -380,6 +380,52 @@ class EvidenceTest(unittest.TestCase):
         self.assertEqual(module._foreign_test_procs(rows, excluded), 1)
         self.assertFalse(module._looks_like_test_cmd("docker ps"))
 
+    def test_classifier_matches_delimited_tokens_not_substrings(self):
+        """Caso de campo: un MCP de navegador con `@scope/mcp@latest` clavaba
+        foreign_peak en 6 PERMANENTES por el `test` de `latest`, y con la mitad
+        izquierda de _suspect vuelta constante el detector degradaba a
+        `load > cores` y bloqueaba ships con los repos en verde."""
+        module = self._load_module()
+        for cmd in ("npm exec @scope/mcp@latest --browser chromium",
+                    "/o/.cache/ms-browser/chromium-1/chrome --type=renderer",
+                    "npm exec contest-tool@1",
+                    "cat latest.log",
+                    "go build ./...",
+                    "cargo build"):
+            self.assertFalse(module._looks_like_test_cmd(cmd), cmd)
+        for cmd in ("go test ./...", "cargo test", "npm test",
+                    "npm run test:unit", "python3 -m pytest tests/",
+                    "node_modules/.bin/vitest --watch", "setsid nice go test ./pkg"):
+            self.assertTrue(module._looks_like_test_cmd(cmd), cmd)
+
+    def test_classifier_reads_command_position_not_the_whole_line(self):
+        """El vigía que el propio harness sugiere para diagnosticar contención
+        NOMBRA una suite en sus argumentos sin correrla; contarlo hacía que el
+        detector se contara a sí mismo. Su contra-mitad: un script que de verdad
+        ejecuta una suite sí cuenta, aunque lo lance un envoltorio."""
+        module = self._load_module()
+        self.assertFalse(module._looks_like_test_cmd("bash vigia.sh argos go test ./..."))
+        self.assertFalse(module._looks_like_test_cmd("vim internal/auth/auth_test.go"))
+        self.assertTrue(module._looks_like_test_cmd("bash test_secrets.sh"))
+        self.assertTrue(module._looks_like_test_cmd("bash -c go test ./..."))
+
+    def test_suspect_message_names_the_foreign_suites_and_both_remedies(self):
+        """HARNESS_TEST_SLOTS solo baja el paralelismo PROPIO: recomendarlo a
+        secas no ayuda cuando la carga es de otra sesión, que es el caso de
+        campo. El mensaje tiene que nombrar quién carga y las dos salidas."""
+        evidence_id = self.run_evidence()
+        path = self.task / f"evidence/{evidence_id}.json"
+        data = json.loads(path.read_text())
+        data["contention"] = {"suspect": True, "foreign_test_procs_peak": 3,
+                              "foreign_test_cmds": ["go test ./internal/..."],
+                              "load_avg_max": 12.0, "cores": 6}
+        path.write_text(json.dumps(data))
+        result = self.verify(self.verdict(evidence_id))
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("go test ./internal/...", result.stderr)
+        self.assertIn("OTRA sesión", result.stderr)
+        self.assertIn("HARNESS_TEST_SLOTS", result.stderr)
+
     def test_verify_rejects_suspect_cited_evidence(self):
         evidence_id = self.run_evidence()
         manifest_path = self.task / f"evidence/{evidence_id}.json"

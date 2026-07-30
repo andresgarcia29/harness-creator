@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,26 @@ SCHEMA = 1
 _TEST_TOKENS = ("test", "spec", "pytest", "jest", "vitest", "rspec",
                 "go test", "gradle", "mvn", "cargo")   # espejo de track-read.sh
 
+# Binarios que SON un runner por sí solos: verlos en posición de comando basta.
+_TEST_RUNNERS = frozenset((
+    "pytest", "py.test", "jest", "vitest", "rspec", "phpunit", "tox", "nose2",
+))
+# Palabras que nombran una suite cuando aparecen como subcomando o script.
+_TEST_WORDS = frozenset(("test", "tests", "spec", "specs"))
+# Runners que solo corren tests con su subcomando: `cargo build` no es un test.
+_SUBCOMMAND_RUNNERS = frozenset((
+    "go", "cargo", "mvn", "gradle", "gradlew", "dotnet", "swift", "make",
+    "npm", "pnpm", "yarn", "bun", "deno",
+))
+# Envoltorios que NO dicen nada del trabajo: el runner real es el token siguiente.
+_WRAPPERS = frozenset((
+    "sh", "bash", "zsh", "dash", "ksh", "env", "setsid", "nohup", "time", "nice",
+    "ionice", "stdbuf", "sudo", "doas", "timeout", "python", "python2", "python3",
+    "node", "uv", "uvx", "poetry", "pdm", "pipenv", "hatch", "rye",
+))
+# Subcomandos de gestor de paquetes que preceden al script real (`npm run test`).
+_PKG_PASSTHROUGH = frozenset(("run", "run-script", "exec", "x", "dlx"))
+
 
 def _cores() -> int:
     return os.cpu_count() or 1
@@ -44,8 +65,70 @@ def _load1() -> float:
         return -1.0     # plataforma sin loadavg: sin sello de contención
 
 
+def _cmd_word(token: str) -> str:
+    """El nombre con el que se INVOCA algo: basename sin extensión de script."""
+    word = token.rsplit("/", 1)[-1]
+    for suffix in (".exe", ".sh", ".bash", ".py", ".js", ".mjs", ".cjs"):
+        if word.endswith(suffix):
+            return word[: -len(suffix)]
+    return word
+
+
+def _names_a_suite(word: str) -> bool:
+    """`test`, `test:unit`, `spec-e2e` sí; `latest`, `inspect`, `contest` no.
+
+    La regla es TOKEN DELIMITADO, no substring. Caso de campo: con un MCP de
+    navegador conectado, `npm exec @scope/mcp@latest` daba positivo por el
+    `test` de `latest`; eran seis procesos PERMANENTES, así que foreign_peak
+    quedaba clavado en 6 para siempre y la mitad izquierda de la conjunción de
+    _suspect se volvía constante. El detector degradaba a `load > cores`, que
+    su propio docstring reconoce como fuente de falsos positivos, y bloqueaba
+    ships con los repos en verde.
+    """
+    return any(part in _TEST_WORDS for part in re.split(r"[:\-_.@/]", word) if part)
+
+
 def _looks_like_test_cmd(cmd: str) -> bool:
-    return any(tok in cmd for tok in _TEST_TOKENS)
+    """¿Este proceso está corriendo una SUITE DE TESTS?
+
+    Se mira la POSICIÓN DE COMANDO, no la línea entera. Un comando que apenas
+    NOMBRA una suite (`bash vigia.sh <repo> 'go test ./...'`, que es el vigía
+    que el propio harness sugiere para diagnosticar contención) no es una
+    suite corriendo: contarlo hacía que el detector se contara a sí mismo y
+    reportara como ajena la carga que él mismo había pedido observar.
+    """
+    tokens = [t for t in cmd.split() if t]
+    index = 0
+    # 1. saltar envoltorios, sus flags y las asignaciones de entorno
+    while index < len(tokens):
+        token = tokens[index]
+        if token.startswith("-") or "=" in token.split("/", 1)[0]:
+            index += 1
+        elif _cmd_word(token) in _WRAPPERS:
+            index += 1
+        else:
+            break
+    if index >= len(tokens):
+        return False
+    head = _cmd_word(tokens[index])
+    if head in _TEST_RUNNERS:
+        return True
+    # Un script que se LLAMA como una suite y se está EJECUTANDO sí cuenta:
+    # `bash test_secrets.sh` o `./run_tests.sh` queman CPU igual que un pytest.
+    # Es el head, no cualquier argumento: `vim test_foo.py` no corre nada.
+    if head not in _SUBCOMMAND_RUNNERS:
+        return _names_a_suite(head)
+    # 2. con estos, el subcomando manda: `go test` sí, `go build` no
+    for token in tokens[index + 1:]:
+        if token.startswith("-"):
+            continue
+        word = _cmd_word(token)
+        if word in _PKG_PASSTHROUGH:
+            continue                       # `npm run <script>`: el script decide
+        if word in _TEST_RUNNERS:
+            return True
+        return _names_a_suite(word)
+    return False
 
 
 def _ps_rows() -> list:
@@ -115,6 +198,7 @@ class ContentionSampler:
         self.interval = interval
         self.foreign_start = None
         self.foreign_peak = 0
+        self.foreign_cmds = []
         self.load_start = -1.0
         self.load_max = -1.0
         self.ok = False
@@ -125,11 +209,19 @@ class ContentionSampler:
         rows = _ps_rows()
         if not rows:
             return
-        foreign = _foreign_test_procs(rows, _excluded_pids(rows, os.getpid()))
+        excluded = _excluded_pids(rows, os.getpid())
+        cmds = [cmd for pid, _, cmd in rows
+                if pid not in excluded and _looks_like_test_cmd(cmd)]
+        foreign = len(cmds)
         load = _load1()
         if self.foreign_start is None:
             self.foreign_start = foreign
             self.load_start = load
+        if foreign > self.foreign_peak:
+            # Se guardan los del PICO: son los que explican el veredicto, y sin
+            # ellos el operador no puede saber si la carga es suya o de otra
+            # sesión, que es lo único que decide la remediación.
+            self.foreign_cmds = [c[:120] for c in cmds[:5]]
         self.foreign_peak = max(self.foreign_peak, foreign)
         self.load_max = max(self.load_max, load)
         self.ok = self.ok or load >= 0.0
@@ -163,6 +255,7 @@ class ContentionSampler:
             "cores": cores,
             "foreign_test_procs_start": self.foreign_start,
             "foreign_test_procs_peak": self.foreign_peak,
+            "foreign_test_cmds": self.foreign_cmds,
             "load_avg_start": round(self.load_start, 2),
             "load_avg_max": round(self.load_max, 2),
             "suspect": _suspect(self.foreign_peak, self.load_max, cores),
@@ -583,11 +676,16 @@ def verify_one(task_dir: Path, evidence_id: str, repo: str, commit: str,
         die(f"{evidence_id}: runner vacío", 3)
     contention = data.get("contention")
     if isinstance(contention, dict) and contention.get("suspect") is True:
+        quienes = contention.get("foreign_test_cmds") or []
+        detalle = "".join(f"\n     - {c}" for c in quienes)
         die(f"{evidence_id}: sellada bajo contención (suspect: "
             f"{contention.get('foreign_test_procs_peak')} procesos de test ajenos, "
             f"load {contention.get('load_avg_max')} con {contention.get('cores')} "
-            "cores). Un resultado bajo esa carga no prueba nada: re-corre con "
-            "menos contención (HARNESS_TEST_SLOTS=N) y sella de nuevo.", 3)
+            f"cores). Un resultado bajo esa carga no prueba nada.{detalle}\n"
+            "   ↳ si esas suites son TUYAS (varias en paralelo en esta misma "
+            "tarea), bajá tu paralelismo con HARNESS_TEST_SLOTS=N y sellá de "
+            "nuevo. Si son de OTRA sesión, HARNESS_TEST_SLOTS no las toca: "
+            "esperá a que terminen y sellá dentro de esa ventana.", 3)
     output = data.get("output")
     if not isinstance(output, str) or not output:
         die(f"{evidence_id}: output inválido", 3)

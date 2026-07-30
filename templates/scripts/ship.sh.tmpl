@@ -1393,6 +1393,31 @@ semgrep_test_globs() {
 # filas de una tabla Go table-driven, y reemplazos tautológicos
 # (expect(true).toBe(true)). -M explícito en TODOS los git diff: sin él, un
 # rename cuenta como D+A según la config diff.renames del usuario.
+# ── delta_seccion: el contenido bajo un encabezado, SUBSECCIONES INCLUIDAS ──
+# Caso de campo: el parser apagaba la sección con CUALQUIER línea que empezara
+# por '#', así que un '### SOC-M1' bajo '## MODIFIED Requirements' descartaba
+# todo lo que venía debajo. La remediación que el propio gate imprime pide
+# nombrar cada archivo BAJO ese encabezado, que es justo lo que el código
+# tiraba si estaba anidado: el operador hacía lo que le mandaban y seguía en
+# rojo. El workaround que quedó registrado fue pegar los basenames en un
+# párrafo suelto contra el '##', que no es lo que el formato pide.
+#
+# La regla correcta es por NIVEL: un encabezado más PROFUNDO es una subsección
+# y no cierra nada; uno del mismo nivel o más superficial sí cierra.
+# Portable a awk de BSD: se cuentan los '#' a mano, sin match() ni RSTART.
+delta_seccion() {  # delta_seccion <archivo> <regex-extendida> → contenido
+  awk -v pat="$2" '
+    /^#/ {
+      d = 0
+      while (substr($0, d + 1, 1) == "#") d++
+      if (toupper($0) ~ pat) { insec = 1; lvl = d }
+      else if (insec && d <= lvl) { insec = 0 }
+      next
+    }
+    insec { print }
+  ' "$1"
+}
+
 gate_tests_untouched() {
   gate "tests no debilitados"
   local pat="${TEST_PATH_PATTERN:-(test|spec|Test|_test\.|\.test\.|\.spec\.|/tests?/|/spec/)}"
@@ -1465,10 +1490,7 @@ gate_tests_untouched() {
   # las dos, un debilitamiento BLOQUEA: no hay forma de declararlo, y el
   # sesgo correcto es fail-closed.
   local delta="${HARNESS_DELTA_SPEC_FILE:-$WS/tasks/$TASK/delta-spec.md}" declared=""
-  [ -f "$delta" ] && declared="$(awk '
-    /^#/ { insec = (toupper($0) ~ /(MODIFIED|REMOVED)/); next }
-    insec { print }
-  ' "$delta")"
+  [ -f "$delta" ] && declared="$(delta_seccion "$delta" '(MODIFIED|REMOVED)')"
   declares() { printf '%s\n' "$declared" | grep -qiF "$(basename "$1")"; }
 
   local bad=0 global_na=0 f na ns
@@ -1585,10 +1607,42 @@ muerde_pytest() {  # → MUERDE_PY, o 1 con el motivo en MUERDE_MOTIVO
   MUERDE_MOTIVO="no encuentro pytest: ni .venv/bin/pytest del proyecto ni uno en el PATH ('uv sync --extra dev' lo deja en el venv)"
   return 1
 }
+# ── ¿este archivo YA EXISTENTE trae tests NUEVOS? ─────────────────────
+# El gate razonaba por ARCHIVO: solo los archivos de test AÑADIDOS entraban al
+# alcance. Pero el caso más común en la práctica es agregar un test DENTRO de
+# un archivo que ya existía, y esa capacidad de morder no se verificaba nunca.
+# Combinado con el falso verde de Go, la cobertura real del gate era casi nula.
+#
+# Se mira la DECLARACIÓN añadida, no cualquier línea: un archivo de test al que
+# solo se le tocó un helper o un fixture no trae conducta nueva que probar, y
+# meterlo al alcance haría correr la base para nada.
+declara_tests_nuevos() {  # declara_tests_nuevos <archivo>
+  git diff -M "origin/$BASE_REF...HEAD" -- "$1" \
+    | grep -qE '^\+[[:space:]]*((func[[:space:]]+(Test|Benchmark|Fuzz|Example))|(def[[:space:]]+test_)|((it|test|Scenario)[[:space:]]*\()|((it|test)\.(each|only|concurrent)))'
+}
 muerde_go() {  # → 0 si hay toolchain Go
   if command -v go >/dev/null; then return 0; fi
   MUERDE_MOTIVO="'go' no está en el PATH"
   return 1
+}
+# ── ¿el ÁRBOL BASE resuelve su grafo de módulos? ──────────────────────
+# Caso de campo: en un monorepo con `replace ... => ../../pkg`, el worktree
+# temporal del gate nace SIN el go.work que hace resolver ese replace, así que
+# la base ni compila:
+#   pkg@v0.0.0: replacement directory ../../pkg does not exist
+# El gate leía ese fallo de compilación como "el test MUERDE" y salía verde con
+# CUALQUIER contenido de test, sin ningún test nuevo de por medio.
+#
+# La distinción que importa: que NO compile el TEST porque le falta el símbolo
+# nuevo es exactamente lo que este gate quiere ver (muerde de verdad). Que no
+# resuelva el grafo del módulo es ambiental y no prueba nada. Por eso se
+# compila el paquete SIN sus tests: si eso ya falla, la base nunca fue
+# construible y el rojo no es del test.
+#
+# Misma asimetría que muerde_node ya aplica con node_modules: un gate honesto
+# que se salta es mejor que uno que aprueba todo.
+muerde_go_base_compila() {  # muerde_go_base_compila <paquete>
+  ( cd "$MUERDE_BASE"; go build "$1" )
 }
 muerde_node() {  # → MUERDE_NODE/MUERDE_NODE_ARGS solo si el runner es INEQUÍVOCO
   local pkg="$WT/package.json" kind=""
@@ -1646,6 +1700,15 @@ muerde_corre_grupo() {  # muerde_corre_grupo <clase> <lista>: unidad por unidad
   # el rojo no podría nombrar cuál es cuál. Son archivos NUEVOS: son pocos.
   while IFS= read -r u; do
     [ -n "$u" ] || continue
+    # Go: si la BASE no compila sin el cambio, su exit != 0 es ambiental y
+    # cobrarlo como MUERDE es el falso verde que este bloque existe para matar.
+    if [ "$clase" = "go" ] && ! muerde_go_base_compila "$u" > "$MUERDE_SALIDA" 2>&1; then
+      echo "   ⚠️  $u: el ÁRBOL BASE no compila sin tu cambio: NO puedo verificar este test"
+      MUERDE_CIEGOS="$MUERDE_CIEGOS   · $u
+"
+      tail -3 "$MUERDE_SALIDA" | sed 's/^/       /'
+      continue
+    fi
     if muerde_corre "$clase" "$u" > "$MUERDE_SALIDA" 2>&1; then rc=0; else rc=$?; fi
     if [ "$rc" -eq 0 ]; then
       echo "   ✗ $u: PASA sobre el árbol base"
@@ -1687,13 +1750,14 @@ gate_test_muerde() {
     | grep -E "$pat" | grep -vE "$artifacts" | sort -u || true)"
   delta="${HARNESS_DELTA_SPEC_FILE:-$WS/tasks/$TASK/delta-spec.md}"
   if [ -f "$delta" ]; then
-    added="$(awk '/^#/ { insec = (toupper($0) ~ /ADDED/); next } insec { print }' "$delta")"
-    escape="$(awk '/^#/ { insec = (toupper($0) ~ /(MODIFIED|REMOVED)/); next } insec { print }' "$delta")"
+    added="$(delta_seccion "$delta" 'ADDED')"
+    escape="$(delta_seccion "$delta" '(MODIFIED|REMOVED)')"
   fi
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     if printf '%s\n' "$nuevos" | grep -qxF -- "$f"; then :
     elif printf '%s\n' "$added" | grep -qiF -- "$(basename "$f")"; then :
+    elif declara_tests_nuevos "$f"; then :
     else continue
     fi
     if printf '%s\n' "$escape" | grep -qiF -- "$(basename "$f")"; then
@@ -1768,7 +1832,7 @@ SCOPEOF
   # dependa de acordarse de llamarla en cada rama.
   (
     MUERDE_TMP="$tmp"; MUERDE_WT=""; MUERDE_BASE="$tmp/base"
-    MUERDE_SALIDA="$tmp/salida"; MUERDE_VACUOS=""
+    MUERDE_SALIDA="$tmp/salida"; MUERDE_VACUOS=""; MUERDE_CIEGOS=""
     trap muerde_limpia EXIT
     if ! git -C "$WT" worktree add --detach --quiet "$MUERDE_BASE" "$mb"; then
       echo "⚠️  no pude crear el worktree temporal del árbol base ($mb): el gate NO CORRIÓ."
@@ -1799,8 +1863,23 @@ CKEOF
     if [ "$corre_py" -eq 1 ];   then muerde_corre_grupo py   "$py_files";   fi
     if [ "$corre_go" -eq 1 ];   then muerde_corre_grupo go   "$go_dirs";    fi
     if [ "$corre_node" -eq 1 ]; then muerde_corre_grupo node "$node_files"; fi
+    # Los CIEGOS no son verdes ni rojos: se dicen, y viajan como supuesto para
+    # que el veredicto no herede un "todo verificado" que nadie verificó.
+    if [ -n "$MUERDE_CIEGOS" ]; then
+      echo "⚠️  tests nuevos que NO pude verificar contra la base (la base no compila):"
+      printf '%s' "$MUERDE_CIEGOS"
+      echo "   ↳ el árbol base no resuelve su grafo de módulos, así que su rojo NO"
+      echo "     prueba que tu test muerda. Esto NO es un verde: es un tramo sin"
+      echo "     mirar. Si el repo usa go.work, verificá el rojo a mano sobre la"
+      echo "     base y pegá la salida en el veredicto."
+      emit assumption "$REPO (Go): tests nuevos NO verificados contra la base (el árbol base no compila: replace/go.work sin resolver)"
+    fi
     if [ -z "$MUERDE_VACUOS" ]; then
-      echo "   ✅ todo el alcance falla sobre la base: estos tests prueban conducta nueva"
+      if [ -z "$MUERDE_CIEGOS" ]; then
+        echo "   ✅ todo el alcance falla sobre la base: estos tests prueban conducta nueva"
+      else
+        echo "   ✅ lo que SÍ pude correr falla sobre la base; el resto queda declarado arriba"
+      fi
       exit 0
     fi
     echo "❌ estos tests PASAN también SIN tu cambio (sobre el árbol base):"

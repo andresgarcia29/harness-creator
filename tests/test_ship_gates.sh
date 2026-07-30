@@ -286,7 +286,9 @@ lk_line="$(grep -n '^acquire_lock$' "$TMPL" | head -1 | cut -d: -f1)"
 
 echo "── gate_tests_untouched v2: neto real, escape que declara"
 
-extract gate_tests_untouched > "$WS/gate_tests.sh"
+# delta_seccion viaja CON el gate: es quien lee el delta-spec, y sin ella
+# el gate extraido muere con 127 en vez de decir lo que decide.
+{ extract delta_seccion; extract gate_tests_untouched; } > "$WS/gate_tests.sh"
 grep -q "contabilidad NETA" "$WS/gate_tests.sh" || grep -q "global_na" "$WS/gate_tests.sh" || { echo "no pude extraer gate_tests_untouched"; exit 1; }
 
 run_tests_gate() {  # corre el gate en el repo actual; usa $WS/tasks/T1 para delta
@@ -431,7 +433,11 @@ echo "── gate_test_muerde: un test que no puede fallar no prueba nada"
 # mecánica: ¿este test falla sobre el árbol base?
 
 extract muerde_limpia > "$WS/gate_muerde.sh"
-for fn in muerde_pytest muerde_go muerde_node muerde_corre muerde_corre_grupo \
+# delta_seccion, declara_tests_nuevos y muerde_go_base_compila viajan CON el
+# gate: son sus tres lecturas (el delta-spec, el diff y el grafo de modulos de
+# la base). Sin ellas el gate extraido muere con 127 en vez de decidir.
+for fn in delta_seccion declara_tests_nuevos muerde_pytest muerde_go \
+          muerde_go_base_compila muerde_node muerde_corre muerde_corre_grupo \
           muerde_salto gate_test_muerde; do
   extract "$fn" >> "$WS/gate_muerde.sh"
 done
@@ -1541,5 +1547,87 @@ rm -f "$RWS/tasks/T1/state.json"
 out="$(corre_rsp)"; rc=$?
 assert_eq 0 "$rc" "sin state.json: exit 0 (fail-open, el push ya ocurrio)"
 assert_eq "" "$out" "y muda: no inventa un fallo donde no hay tarea"
+
+
+echo "── delta_seccion: una subsección no apaga la sección (caso de campo)"
+# El parser apagaba la sección con CUALQUIER línea que empezara por '#', así que
+# un '### SOC-M1' bajo '## MODIFIED Requirements' descartaba todo lo de abajo. La
+# remediación que el propio gate imprime pide nombrar cada archivo BAJO ese
+# encabezado: el operador hacía exactamente lo que le mandaban y seguía en rojo.
+extract delta_seccion > "$WS/delta.sh"
+grep -q 'insec' "$WS/delta.sh" || { echo "no pude extraer delta_seccion"; exit 1; }
+. "$WS/delta.sh"
+
+cat > "$WS/delta.md" <<'DELTAEOF'
+# Delta-spec
+prosa suelta que no declara nada
+
+## ADDED Requirements
+### SOC-A1
+- nuevo_test.go
+
+## MODIFIED Requirements
+### SOC-M1
+El test cambia de forma: llm_metering_usecase_test.go
+
+### SOC-M2
+- admin_finance_test.go
+
+## Notas
+no_declarado_test.go
+DELTAEOF
+
+out="$(delta_seccion "$WS/delta.md" '(MODIFIED|REMOVED)')"
+assert_contains "$out" "llm_metering_usecase_test.go" "el contenido bajo un ### anidado SI cuenta"
+assert_contains "$out" "admin_finance_test.go" "y el de la segunda subseccion tambien"
+assert_not_contains "$out" "no_declarado_test.go" "pero un ## del mismo nivel SI cierra la seccion"
+assert_not_contains "$out" "prosa suelta" "y lo anterior al encabezado nunca entra"
+
+out="$(delta_seccion "$WS/delta.md" 'ADDED')"
+assert_contains "$out" "nuevo_test.go" "la misma regla aplica a ADDED"
+assert_not_contains "$out" "llm_metering_usecase_test.go" "sin llevarse lo de MODIFIED"
+
+echo "── declara_tests_nuevos: un test nuevo dentro de un archivo que ya existia"
+# El gate razonaba por ARCHIVO (solo los AÑADIDOS entraban al alcance), y el caso
+# mas comun en la practica es agregar un Test dentro de un archivo viejo: su
+# capacidad de morder no se verificaba nunca.
+extract declara_tests_nuevos > "$WS/decl.sh"
+grep -q 'Benchmark' "$WS/decl.sh" || { echo "no pude extraer declara_tests_nuevos"; exit 1; }
+. "$WS/decl.sh"
+
+mk_repo "$WS/declrepo" >/dev/null 2>&1
+BASE_REF=main
+cat > svc_test.go <<'GOEOF'
+package svc
+import "testing"
+func TestViejo(t *testing.T) {}
+GOEOF
+git add -A >/dev/null && git commit -qm "test viejo" >/dev/null
+git update-ref refs/remotes/origin/main HEAD
+
+cat >> svc_test.go <<'GOEOF'
+
+func TestNuevo(t *testing.T) {}
+GOEOF
+git add -A >/dev/null && git commit -qm "test nuevo en archivo existente" >/dev/null
+if declara_tests_nuevos svc_test.go; then
+  pass "ve el Test nuevo dentro de un archivo que ya existia"
+else
+  fail "ve el Test nuevo dentro de un archivo que ya existia"
+fi
+
+# Contra-mitad: sin ella, cualquier retoque a un archivo de test entraria al
+# alcance y haria pagar un checkout del arbol base para nada.
+git update-ref refs/remotes/origin/main HEAD
+cat >> svc_test.go <<'GOEOF'
+
+func ayudante() int { return 7 }
+GOEOF
+git add -A >/dev/null && git commit -qm "solo un helper" >/dev/null
+if declara_tests_nuevos svc_test.go; then
+  fail "un helper que no declara test NO entra al alcance"
+else
+  pass "un helper que no declara test NO entra al alcance"
+fi
 
 t_done

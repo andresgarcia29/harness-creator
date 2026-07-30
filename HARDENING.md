@@ -606,3 +606,28 @@ vuelo de un atasco; los drivers de deploy; `app_name` sin concatenación ciega;
 la evidencia en el prompt del implementer; `loop_budget` gobernando de verdad;
 la Ley 13; la fase de enrichment; y las reglas 7 y 8 de `CONTRIBUTING.md` con su
 test de neutralidad.
+
+## Cerrado el 2026-07-30
+
+- [x] **`gate_tests_untouched` bloqueaba todo spec e2e NUEVO por su guard de
+  entorno.** En un archivo de alta TODAS las lineas son `+`, asi que un solo
+  `test.skip(!reachable, ...)` (el que Playwright pide para no correr contra un
+  servicio caido, el `t.Skip` de Go cuando falta una dependencia) daba neto 1 y
+  salia exit 3. Y no habia salida legitima: el unico escape del gate es nombrar
+  el archivo bajo `MODIFIED`/`REMOVED` del delta-spec, que en un archivo nuevo
+  es una declaracion FALSA (el requirement es `ADDED`), o sea que la unica forma
+  de shippear un spec nuevo era mentirle al gate que existe para impedir
+  exactamente eso. Ahora los skips de un archivo de test anadido no cuentan, y
+  el archivo se nombra igual en la salida para que el hecho quede auditable.
+  Aserciones netas eliminadas, borrados sin declarar y skips sobre archivos
+  EXISTENTES siguen bloqueando. Queda un residual DECLARADO en el comentario del
+  gate: un spec e2e nuevo enteramente skipeado tampoco lo caza
+  `gate_test_muerde`, porque su red solo llega hasta donde el runner declarado
+  colecta el archivo.
+- [x] **`verdict-scaffold.sh` citaba evidencia que el propio ship iba a
+  rechazar.** `gate_preflight` rechaza el veredicto que cite un EV con
+  `contention.suspect` y manda a re-sellar, pero el predicado de elegibilidad no
+  miraba esa marca: al re-sellar limpio, `--force` re-incluia el contaminado (y
+  tiraba el juicio del reviewer) y `--rebase` se negaba porque el commit no se
+  habia movido. La remediacion impresa era inalcanzable y la tarea quedaba
+  trabada con el veredicto ya en `pass`.

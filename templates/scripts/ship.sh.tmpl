@@ -1367,10 +1367,27 @@ semgrep_test_globs() {
 # skips sobre archivos EXISTENTES siguen bloqueando con exit 3, y el conteo de
 # aserciones netas (por archivo y global) no cambia.
 #
-# Por qué no abre un agujero: el residual (un archivo nuevo íntegramente
-# skipeado, que pasaría por test sin serlo) lo caza gate_test_muerde, que corre
-# cada test NUEVO contra el árbol base y exige que falle ahí. Un test que nunca
-# corre no falla, así que no pasa ese gate.
+# El residual que esto DEJA ABIERTO, con su cobertura real medida: un archivo
+# nuevo íntegramente skipeado pasa por test sin serlo. La red de abajo es
+# gate_test_muerde, que corre cada test NUEVO contra el árbol base y exige que
+# falle ahí (un test que nunca corre no falla). Pero esa red NO tapa el hueco
+# entero, y conviene saber dónde termina:
+#   · pytest y go test: cubren, porque el runner colecta el archivo por ruta.
+#   · vitest/jest: cubren SOLO si están declarados en package.json, instalados
+#     en node_modules, y su propia config COLECTA ese archivo (muerde_node).
+#   · specs con runner propio (Playwright y todo .ts/.js fuera del include del
+#     runner declarado): SIN RED, y de dos formas distintas. Sin vitest/jest,
+#     muerde_salto declara el tramo sin mirarlo y retorna 0. Con vitest
+#     declarado pero un include que no alcanza a e2e/, la invocación sale con
+#     exit != 0 y ese gate lee cualquier exit != 0 como "el test muerde" (es
+#     una decisión escrita, no un descuido: "el MOTIVO del fallo no se juzga"),
+#     o sea que cobra verde por el error del runner equivocado.
+# Traducido: un spec e2e nuevo enteramente skipeado hoy pasa los DOS gates. Se
+# acepta a conciencia porque la alternativa era peor (bloquear todo spec e2e
+# nuevo, sin salida legítima), la línea informativa deja el rastro para el
+# reviewer, y el hueco está registrado para arreglarse en gate_test_muerde, que
+# es donde vive la causa. No lo tapes acá: contar skips de un archivo que no
+# existía es medir debilitamiento donde no hay nada que debilitar.
 #
 # Residuales conscientes (rúbrica del reviewer, no de este gate): borrar
 # filas de una tabla Go table-driven, y reemplazos tautológicos

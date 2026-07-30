@@ -108,6 +108,39 @@ out="$( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/tp-sinrepo.sh 5 2>&1 )"; r
 assert_eq 2 "$rc" "github sin tickets.repo: falla en vez de adivinar"
 assert_contains "$out" "no sé de qué repo" "y dice exactamente qué le falta"
 
+# ── linear: "no existe" vs "la key es de OTRA organización" ───────────
+# El driver decidía con `[ "$issue" != "null" ]` sin mirar `.errors`, así que
+# una key válida de otra org daba "el ticket no existe": el usuario iba a
+# verificar lo único que estaba bien. Caso de campo (COR-622): dos orgs
+# comparten el team key COR. El stub responde el error tipado real de Linear
+# (data:null + errors[].extensions.code) y el alcance real de la credencial.
+cat > "$WS/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+data=""
+while [ $# -gt 0 ]; do
+  case "$1" in --data) data="${2:-}"; shift 2 ;; *) shift ;; esac
+done
+case "$data" in
+  *"issue("*)
+    printf '%s' '{"data":{"issue":null},"errors":[{"extensions":{"code":"ENTITY_NOT_FOUND"}}]}' ;;
+  *organization*)
+    printf '%s' '{"data":{"organization":{"urlKey":"corvux"},"teams":{"nodes":[{"key":"ACME"}]}}}' ;;
+  *) printf '%s' '{"data":{}}' ;;
+esac
+STUB
+chmod +x "$WS/bin/curl"
+
+out="$( cd "$WS" && PATH="$WS/bin:$PATH" LINEAR_API_KEY=lin_x bash scripts/tp-lin.sh ZZZ-9 2>&1 )"; rc=$?
+assert_eq 6 "$rc" "linear: key de otra org (team ZZZ inalcanzable): exit 6, no 'no existe'"
+assert_contains "$out" "corvux" "nombra la org que la key sí alcanza"
+assert_contains "$out" "ACME" "y los team keys alcanzables"
+
+out="$( cd "$WS" && PATH="$WS/bin:$PATH" LINEAR_API_KEY=lin_x bash scripts/tp-lin.sh ACME-9 2>&1 )"; rc=$?
+assert_eq 2 "$rc" "team alcanzable y ticket ausente: sigue siendo exit 2"
+assert_contains "$out" "corvux" "pero el 'no existe' nombra la org, para poder dudar de la key"
+
+rm -f "$WS/bin/curl"
+
 echo
 echo "── forge: el CI y la entrega dejan de ser 'gh' por decreto"
 

@@ -23,15 +23,26 @@ cwd="$(printf '%s' "$input" | jq -r '.cwd // empty')"
 WS="${CLAUDE_PROJECT_DIR:-$PWD}"
 
 # 1. sanitizar: mismo filtro que guard-build-slot (heredocs y comillas fuera)
+#    El estado (heredoc abierto, cadena entrecomillada abierta) CRUZA líneas,
+#    así que todo vive en UN bloque: un sanitizador por línea suelta olvida en
+#    la línea 2 lo que la línea 1 dejó abierto.
 sanitized="$(printf '%s\n' "$cmd" | awk '
-  BEGIN { q = sprintf("%c", 39); skip = 0 }
-  skip == 1 {
-    t = $0; gsub(/^[[:space:]]+/, "", t)
-    if (t == delim) skip = 0
-    next
-  }
+  BEGIN { q = sprintf("%c", 39); skip = 0; instr = "" }
   {
     line = $0
+    if (skip == 1) {
+      t = line; gsub(/^[[:space:]]+/, "", t)
+      if (t == delim) skip = 0
+      next
+    }
+    # venimos de una comilla sin cerrar: hasta que aparezca su pareja, la línea
+    # entera es DATO. Si cierra acá, lo de después del cierre sí es comando.
+    if (instr != "") {
+      ci = index(line, instr)
+      if (ci == 0) next
+      line = substr(line, ci + 1)
+      instr = ""
+    }
     if (match(line, "<<-?[[:space:]]*[\"" q "]?[A-Za-z_][A-Za-z0-9_]+")) {
       delim = substr(line, RSTART, RLENGTH)
       sub("^<<-?[[:space:]]*", "", delim)
@@ -41,15 +52,28 @@ sanitized="$(printf '%s\n' "$cmd" | awk '
     }
     gsub("\"[^\"]*\"", "", line)
     gsub(q "[^" q "]*" q, "", line)
+    # una comilla sin cierre abre una cadena multilínea: lo que sigue es DATO
+    # (la descripción de un ticket que MENCIONA scripts/x.sh, COR-318), no un
+    # comando
+    di = index(line, "\""); si = index(line, q)
+    if (di > 0 && (si == 0 || di < si)) { instr = "\""; line = substr(line, 1, di - 1) }
+    else if (si > 0) { instr = q; line = substr(line, 1, si - 1) }
     print line
   }
 ' 2>/dev/null)" || sanitized="$cmd"
 
 # 2. cwd EFECTIVO: el del payload es el de la SESIÓN (documentado en
-#    track-read.sh); un `cd <...>worktrees<...>` en el mismo comando manda.
+#    track-read.sh); el último `cd <ruta>` del comando manda, sea hacia
+#    adentro O HACIA AFUERA del worktree. Caso de campo (COR-376): un comando
+#    que abre con `cd <raíz-del-workspace> && bash scripts/emit.sh` quedaba
+#    bloqueado evaluando el cwd viejo, cuando el cd ya lo había arreglado.
+#    Tradeoff aceptado, coherente con "bloquea solo cuando sabe": en
+#    `bash scripts/ship.sh; cd /tmp` el cd manda igual y el hook calla — un
+#    falso negativo, que cuesta un round-trip; un falso positivo bloquea un
+#    comando correcto y cuesta la confianza en el hook.
 eff="$cwd"
 tgt="$(printf '%s\n' "$sanitized" \
-  | sed -nE 's/.*(^|[;&|(])[[:space:]]*cd[[:space:]]+([^;&|[:space:]]*worktrees[^;&|[:space:]]*).*/\2/p' \
+  | sed -nE 's/.*(^|[;&|(])[[:space:]]*cd[[:space:]]+([^;&|)[:space:]]+).*/\2/p' \
   | head -1)"
 if [ -n "$tgt" ]; then
   case "$tgt" in /*) eff="$tgt" ;; *) eff="${cwd:-$WS}/$tgt" ;; esac

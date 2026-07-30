@@ -291,6 +291,41 @@ jq -n --arg c "$OTHER_SHA" '{schema:1, task_id:"T1", repo:"atlas", qa:"pass",
 out="$(bash "$WS/scripts/verdict-scaffold.sh" --merge-qa T1 atlas 2>&1)"; rc=$?
 assert_eq 3 "$rc" "EV de QA de OTRO cambio: exit 3"
 assert_contains "$out" "OTRO cambio" "nombra la causa"
+assert_contains "$out" "evidence_baseline" "y ofrece el campo para el rojo primero, que antes no tenía salida"
+
+# ── el rojo primero: la prueba vive en OTRO commit por definición ──────
+# Caso de campo (COR-650): el requirement se demuestra corriendo el test sobre
+# el árbol BASE, así que ese EV se sella en otro SHA y en rojo. Exigirle
+# igualdad de commit y exit 0 lo volvía inaceptable SIEMPRE, y el agente QA
+# terminaba inventando campos ad hoc que ningún gate leía.
+PARENT="$(git -C "$WT1" rev-parse "$HEADQ^")"
+jq -n --arg id EV-TEST-rojobase001 --arg c "$PARENT" \
+  '{schema:1, id:$id, task_id:"T1", repo:"atlas", kind:"test", runner:"qa",
+    commit:$c, commit_after:$c, exit_code:1,
+    output:("evidence/"+$id+".log"), output_sha256:"deadbeef"}' \
+  > "$WS/tasks/T1/evidence/EV-TEST-rojobase001.json"
+jq -n --arg c "$HEADQ" '{schema:1, task_id:"T1", repo:"atlas", qa:"pass", commit:$c,
+  evidence:["EV-TEST-qa000000001"], evidence_baseline:["EV-TEST-rojobase001"]}' \
+  > "$WS/tasks/T1/qa-atlas.json"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --merge-qa T1 atlas 2>&1)"; rc=$?
+assert_eq 0 "$rc" "baseline sellado sobre un ANCESTRO: merge-qa lo acepta"
+assert_contains "$(jq -c '.evidence_baseline' "$V")" "EV-TEST-rojobase001" \
+  "el rojo primero queda citado y auditable en el veredicto"
+assert_not_contains "$(jq -c '.evidence' "$V")" "EV-TEST-rojobase001" \
+  "sin colarse en evidence[], que sigue exigiendo verde y commit exacto"
+
+# la contra-mitad: un baseline de un commit AJENO (no ancestro) no prueba nada
+jq -n --arg id EV-TEST-rojoajeno01 --arg c "$OTHER_SHA" \
+  '{schema:1, id:$id, task_id:"T1", repo:"atlas", kind:"test", runner:"qa",
+    commit:$c, commit_after:$c, exit_code:1,
+    output:("evidence/"+$id+".log"), output_sha256:"deadbeef"}' \
+  > "$WS/tasks/T1/evidence/EV-TEST-rojoajeno01.json"
+jq -n --arg c "$HEADQ" '{schema:1, task_id:"T1", repo:"atlas", qa:"pass", commit:$c,
+  evidence:["EV-TEST-qa000000001"], evidence_baseline:["EV-TEST-rojoajeno01"]}' \
+  > "$WS/tasks/T1/qa-atlas.json"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --merge-qa T1 atlas 2>&1)"; rc=$?
+assert_eq 3 "$rc" "baseline de un commit ajeno (no ancestro): exit 3"
+assert_contains "$out" "NO es ancestro" "y lo dice: probar el pasado de ESTE cambio es el punto"
 
 # exclusión de flags y qa:"fail" también mecánico
 out="$(bash "$WS/scripts/verdict-scaffold.sh" --merge-qa --force T1 atlas 2>&1)"; rc=$?
@@ -456,10 +491,45 @@ rm -f "$WS/tasks/T6/evidence/EV-TEST-l1mp10l1mp1.json" "$V6"
 out="$(bash "$WS/scripts/verdict-scaffold.sh" T6 atlas revisor-6 2>&1)"; rc=$?
 assert_eq 3 "$rc" "único EV marcado por contención: exit 3, no lo cita"
 assert_contains "$out" "evidence.py run" "y da la remediación de sellar de nuevo"
+# El DIAGNÓSTICO importa tanto como el exit: el commit es el CORRECTO y nadie
+# movió HEAD. Decir "de OTRO commit" mandaba a cazar una causa inexistente, y
+# al mensaje se le cree: costaba una ronda entera antes de mirar el manifiesto.
+assert_contains "$out" "CONTENCIÓN" "el diagnóstico nombra la contención, que es la causa real"
+assert_not_contains "$out" "OTRO commit" "y NO culpa a un HEAD que nadie movió"
 bash "$WS/scripts/verdict-scaffold.sh" --allow-empty T6 atlas revisor-6 >/dev/null 2>&1 \
   && pass "--allow-empty sigue siendo la salida consciente (la decide un humano)" \
   || fail "--allow-empty no pudo emitir el veredicto sin evidencia"
 assert_eq "0" "$(jq '.evidence | length' "$V6")" \
   "ni con --allow-empty entra el EV marcado al veredicto"
+
+echo
+echo "── --rebase --renew con el MISMO commit: re-liga la evidencia y CONSERVA el juicio"
+# Caso de campo (COR-360): el precheck selló bajo contención, ship rechazó el EV
+# suspect, se re-selló limpio en ventana tranquila... y no había camino de
+# vuelta. --rebase se negaba ("no hay delta que rebasear") y --force borraba el
+# juicio, así que la única salida era pagar un re-review completo de un diff
+# idéntico al ya aprobado. La evidencia caduca por contención igual que caduca
+# por cambio de base; el juicio no.
+mk_ev6 EV-TEST-l1mp10l1mp1 "$H6" false
+rm -f "$V6"
+bash "$WS/scripts/verdict-scaffold.sh" T6 atlas revisor-6 >/dev/null 2>&1
+# el reviewer ya escribió su juicio, y el veredicto cita el EV contaminado
+jq '.verdict="pass" | .qa="pass" | .requirements_uncovered=0
+    | .compliance=[{id:"R-1",covered:true,tests:["t.js"]}]
+    | .evidence=["EV-TEST-c0ntam1nad0"]' "$V6" > "$V6.tmp" && mv "$V6.tmp" "$V6"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --rebase --renew T6 atlas revisor-6 2>&1)"; rc=$?
+assert_eq 0 "$rc" "rebind: exit 0 con el commit sin moverse"
+assert_contains "$out" "rebind" "y lo llama por su nombre, no 're-review incremental'"
+assert_eq "pass" "$(jq -r .verdict "$V6")" "rebind: el juicio se CONSERVA (no vuelve a PENDING)"
+assert_eq "EV-TEST-l1mp10l1mp1" "$(jq -r '.evidence | join(",")' "$V6")" \
+  "rebind: cita el limpio y suelta el contaminado"
+assert_eq "1" "$(jq '.compliance | length' "$V6")" "rebind: la matriz de compliance sobrevive entera"
+assert_eq "0" "$(jq '.requirements_uncovered' "$V6")" "y los campos de juicio del reviewer también"
+
+# Sin --renew el mismo commit sigue siendo un error, pero ahora ENSEÑA la salida
+jq '.evidence=["EV-TEST-c0ntam1nad0"]' "$V6" > "$V6.tmp" && mv "$V6.tmp" "$V6"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --rebase T6 atlas revisor-6 2>&1)"; rc=$?
+assert_eq 3 "$rc" "--rebase solo, con el commit sin moverse: sigue siendo exit 3"
+assert_contains "$out" "--rebase --renew" "pero nombra el camino de vuelta, que antes no existía"
 
 t_done

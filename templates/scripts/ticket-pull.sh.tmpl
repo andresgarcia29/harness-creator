@@ -16,6 +16,7 @@
 #   linear → LINEAR_API_KEY · github → gh autenticado (GH_TOKEN)
 # Exit: 0 ok · 2 no existe · 3 sin label agent-ready · 4 error auth/red
 #       5 otro workspace ya tomó este ticket
+#       6 la LINEAR_API_KEY alcanza otra organizacion de Linear
 set -euo pipefail
 ID="${1:?uso: ticket-pull.sh <TICKET-ID>}"
 WS="$(cd "$(dirname "$0")/.." && pwd)"
@@ -99,7 +100,26 @@ gql() { # gql <query-json>  → respuesta cruda
 # 1 · Traer el ticket
 resp="$(gql "$(jq -n --arg id "$ID" '{query: "query($id:String!){ issue(id:$id){ id identifier title description priority url state{name} team{id} labels{nodes{id name}} } }", variables: {id:$id}}')")"
 issue="$(echo "$resp" | jq '.data.issue')"
-[ "$issue" != "null" ] || { echo "❌ ticket $ID no existe"; exit 2; }
+if [ "$issue" = "null" ] || [ -z "$issue" ]; then
+  # Linear no responde null-por-inexistente: responde un error tipado con
+  # data:null. Y "no existe" tiene dos causas con remediaciones opuestas: el
+  # ticket no está, o la key es de OTRA organización. Caso de campo (COR-622):
+  # dos orgs comparten el team key COR y todo COR-N salía "no existe" con la
+  # auth válida, mandando al usuario a verificar lo único que estaba bien.
+  errcode="$(echo "$resp" | jq -r '.errors[0].extensions.code // empty')"
+  scope="$(gql '{"query":"query{ organization { urlKey } teams { nodes { key } } }"}')"
+  orgkey="$(echo "$scope" | jq -r '.data.organization.urlKey // "desconocida"')"
+  teamkeys="$(echo "$scope" | jq -r '[.data.teams.nodes[].key] | join(", ")' 2>/dev/null || echo "")"
+  prefix="${ID%%-*}"
+  if [ -n "$errcode" ] && ! printf '%s\n' "$teamkeys" | tr ', ' '\n\n' | grep -qx "$prefix"; then
+    echo "❌ $ID está fuera del alcance de esta credencial: la key entra a la org '$orgkey' (teams: ${teamkeys:-ninguno}) y ahí no existe el team '$prefix'."
+    echo "   ↳ la LINEAR_API_KEY es de otra organización: mintea una de la org dueña de '$prefix' y recargala vía with-secrets."
+    exit 6
+  fi
+  echo "❌ ticket $ID no existe en la org '$orgkey' (teams alcanzables: ${teamkeys:-ninguno})"
+  echo "   ↳ ojo: si otra organización comparte el prefijo '$prefix', esta key no la ve; compará el urlKey de la URL del ticket con '$orgkey'."
+  exit 2
+fi
 
 labels="$(echo "$issue" | jq -r '.labels.nodes[].name')"
 echo "$labels" | grep -qx "agent-ready" || {

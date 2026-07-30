@@ -47,6 +47,16 @@ echo cambio-local >> "$WS/repos/versionado/f.txt"
 # roto: origin desaparece
 rm -rf "$WS/origins/roto.git"
 
+# sinup: rama local SIN upstream (el caso de campo COR-642). El origin avanza;
+# sin upstream, pull --rebase no sabe contra que rebasar y el clon se queda
+# atras con un "✗" que miente ("red o conflicto"). El arreglo lo reconfigura.
+mk_pair sinup
+git -C "$WS/repos/sinup" config --unset branch.main.remote
+git -C "$WS/repos/sinup" config --unset branch.main.merge
+git_id "$WS/seed-sinup" commit -q --allow-empty -m avance2
+git -C "$WS/seed-sinup" push -q origin main
+nuevo_sinup="$(git -C "$WS/seed-sinup" rev-parse --short HEAD)"
+
 echo "── pull-all: paralelo, seguro con mugre, honesto con fallos"
 
 out="$(bash "$WS/scripts/pull-all.sh" 2>&1)"; rc=$?
@@ -65,13 +75,16 @@ grep -q cambio-local "$WS/repos/versionado/f.txt" \
 assert_contains "$out" "✗ roto" "el origin roto se reporta como fallo"
 assert_contains "$out" "NO ACTUALIZADOS" "el RESUMEN nombra los repos salteados (no se van al scroll)"
 assert_contains "$out" "versionado" "y dice cuáles"
+assert_contains "$out" "upstream reconfigurado a origin/main" "sin upstream: se configura solo y se dice"
+assert_eq "$nuevo_sinup" "$(git -C "$WS/repos/sinup" rev-parse --short HEAD)" "sinup quedo al HEAD nuevo (antes quedaba atras)"
+assert_not_contains "$out" "✗ sinup" "sin upstream ya no es un fallo criptico"
 
 # sin el roto: exit 0, pero el resumen NO puede decir 'todo al día' con saltados
 rm -rf "$WS/repos/roto"
 out="$(bash "$WS/scripts/pull-all.sh" 2>&1)"; rc=$?
 assert_eq 0 "$rc" "sin fallos reales: exit 0 (saltado es aviso, no fallo)"
 assert_not_contains "$out" "todo al día" "con repos saltados el resumen NO miente 'todo al día'"
-assert_contains "$out" "al día: 3 de 4 repos" "dice cuántos sí quedaron al día"
+assert_contains "$out" "al día: 4 de 5 repos" "dice cuántos sí quedaron al día"
 
 # limpio el versionado: ahora sí, todo al día
 git -C "$WS/repos/versionado" checkout -q -- f.txt

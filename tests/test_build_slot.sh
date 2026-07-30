@@ -11,6 +11,14 @@ set -u
 . "$(dirname "$0")/lib.sh"
 t_ws
 
+# ── aislamiento del semáforo (COR-630) ─────────────────────────────────────────
+# POR QUÉ: el semáforo de producción es cross-sesión A PROPÓSITO (/tmp por uid),
+# así que este test, que CUENTA slots ocupados, contaba también los de otras
+# sesiones de la máquina: con el equipo ocupado el "máximo ≤ 2" salía rojo sin
+# que una sola línea del código hubiera cambiado. Cada corrida usa su propio dir
+# de locks, dentro del workspace temporal que t_ws borra al salir.
+export HARNESS_SLOT_DIR="$WS/slots"
+
 SLOT="$ROOT/templates/scripts/build-slot.sh"
 [ -f "$SLOT" ] || { echo "no encuentro $SLOT"; exit 1; }
 
@@ -46,6 +54,11 @@ maxn="$(sort -n "$D/counts" 2>/dev/null | tail -1)"; maxn="${maxn:-0}"
                   || fail "concurrencia se pasó de 2: fue $maxn"
 [ "$maxn" -ge 2 ] && pass "hubo paralelismo real: 2 corrieron a la vez" \
                   || fail "todo se serializó (max=$maxn) — los slots no dejan pasar 2"
+
+# el aislamiento tiene que ser REAL, no una variable que nadie lee: si los locks
+# no aparecieron acá, el conteo de arriba se hizo sobre el /tmp compartido.
+[ -e "$WS/slots/slot-0.lock" ] && pass "los locks viven en HARNESS_SLOT_DIR (aislados de otras sesiones)" \
+  || fail "HARNESS_SLOT_DIR ignorado: el test sigue compartiendo /tmp con la máquina entera"
 
 # ── 2. sin locks huérfanos (kill -9 al holder → el siguiente entra en <2s) ──────
 H="$WS/holder"; mkdir -p "$H"

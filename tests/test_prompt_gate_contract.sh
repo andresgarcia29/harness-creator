@@ -336,6 +336,18 @@ case "$ship_tmpl" in
 esac
 
 echo
+echo "── ampliar el alcance: el prompt manda un comando que el motor tiene"
+# Caso de campo: el enrichment descubrió que el bug vivía también en otros dos
+# repos; worktree-task.sh los aceptó, pero state.repos quedó con tres de cinco
+# y la fase avanzó a ship sin el veredicto del repo nuevo. init no se re-corre
+# y editar state.json a mano está prohibido: si el prompt no nombra la vía
+# registrada, el orquestador vuelve a la edición a mano.
+assert_contains "$smart" "harness-policy.py repos" \
+  "/smart manda registrar el repo descubierto por el comando, no a mano"
+assert_contains "$pol_src" "POLICY-REPOS-002" \
+  "y el motor declara el rechazo de sumar un repo cuando ya no hay review posible"
+
+echo
 echo "── el árbol compartido: cada regla nueva tiene su diente y su prompt"
 # Dos bugs de campo por lo mismo: agentes concurrentes sobre un árbol mutable.
 # (1) el reviewer mutó src/ para verificar mientras QA medía sobre ese árbol;

@@ -920,9 +920,32 @@ def cmd_transition(args: argparse.Namespace) -> int:
     state = load(path, "estado")
     current = state.get("phase")
     allowed = lane_transitions(policy, state).get(current, [])
+    # ── review → review con --repo: la FASE es global, el REVIEW es por repo ──
+    # /review manda solicitar la transición antes de CADA entrada a review
+    # nombrando el repo, porque el presupuesto de rondas se cuenta POR REPO.
+    # Pero la fase es una sola: en cuanto el primer repo entraba a review, el
+    # segundo chocaba con POLICY-TRANSITION-001 y su entrada NUNCA se
+    # registraba. Caso de campo: una tarea de cinco repos terminó con rondas
+    # contadas para dos; los otros tres pasaron por reviewer y QA sin que el
+    # presupuesto los gobernara, que es exactamente lo que el --repo existe
+    # para evitar. Choca además con el pipeline por repo (T1 en review
+    # mientras T4 se implementa) que los propios prompts endosan.
+    #
+    # No afloja nada: el techo lo sigue cobrando POLICY-LIMIT-001 sobre
+    # review_rounds_by_repo[repo] más abajo, que es el contador que importa.
+    # Sin --repo la auto-transición sigue prohibida: sería una ronda anónima
+    # que ningún presupuesto puede cobrar.
+    if args.phase == current == "review" and args.repo:
+        allowed = list(allowed) + ["review"]
     if args.phase not in allowed:
         lane = state.get("lane", "full")
-        fail("POLICY-TRANSITION-001", f"transición no permitida ({lane}): {current} → {args.phase}")
+        extra = ""
+        if args.phase == current == "review":
+            extra = (". Si es la entrada a review de OTRO repo de la tarea, "
+                     "pasá --repo <repo>: la fase es global pero las rondas se "
+                     "cuentan por repo")
+        fail("POLICY-TRANSITION-001",
+             f"transición no permitida ({lane}): {current} → {args.phase}{extra}")
     if args.phase == "ship":
         unreviewed = repos_missing_verdict(task_dir, state.get("repos") or ())
         if unreviewed:

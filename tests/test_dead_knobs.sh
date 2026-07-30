@@ -53,6 +53,38 @@ claude="$(cat "$root/templates/CLAUDE.md.tmpl")"
 assert_contains "$claude" "{{MEMORY_PROFILES}}" "el CLAUDE.md usa la respuesta del humano"
 assert_not_contains "$claude" "Solo perfiles orquestador" "y ya no hardcodea el default"
 
+# {{MEMORY_TOOL}} era la peor version de esta misma perilla: vivia SOLO en el
+# CLAUDE.md, la entrevista jamas lo preguntaba y nada lo sustituia, asi que
+# toda instancia nacia con el placeholder literal y el agente leia "llama a
+# {{MEMORY_TOOL}}", una instruccion sobre una herramienta sin nombre. El
+# proveedor ya se pregunta y ya se estampa: no hace falta una segunda perilla.
+assert_not_contains "$claude" "{{MEMORY_TOOL}}" \
+  "el CLAUDE.md no nombra un placeholder que nadie alimenta"
+assert_eq "0" "$(grep -rl "{{MEMORY_TOOL}}" "$root/templates" "$root/skills" "$root/commands" 2>/dev/null | grep -cv '^$')" \
+  "y no quedo vivo en ningun otro template"
+assert_contains "$claude" "{{MEMORY_PROVIDER}}" \
+  "la memoria se nombra por el proveedor que el humano eligio"
+skillmem="$(cat "$root/skills/harness-init/SKILL.md")"
+assert_contains "$skillmem" "MEMORY_PROVIDER" \
+  "y la entrevista sabe que esa respuesta viaja al CLAUDE.md"
+assert_contains "$skillmem" "provider: none" \
+  "con none, la entrevista manda BORRAR el bloque en vez de dejar una tool fantasma"
+
+echo
+echo "── metricas: recolectar sin que nadie lea es otra perilla muerta"
+# collect corria en /archive y ahi moria: el jsonl crecia y ningun proceso lo
+# miraba nunca. Una metrica que nadie lee no es telemetria, es basura con
+# formato JSON. El ritual semanal es quien la lee, y quien escala upstream lo
+# que resulta ser del harness y no de este workspace.
+promote="$(cat "$root/templates/commands/promote.md.tmpl")"
+assert_contains "$promote" "make metrics" "el ritual semanal LEE el informe"
+assert_contains "$promote" "metrics-escalate" "y escala la friccion del harness upstream"
+archive="$(cat "$root/templates/commands/archive.md.tmpl")"
+assert_contains "$archive" "harness-metrics.py collect" "y /archive es quien la recolecta"
+mk="$(cat "$root/templates/Makefile.tmpl")"
+assert_contains "$mk" "metrics:" "con su target en el Makefile"
+assert_contains "$mk" "metrics-escalate:" "y el de escalacion"
+
 echo
 echo "── tier de un MCP: la única perilla muerta con perfil de seguridad"
 # El .mcp.json se genera del campo config del catálogo y nadie lee tier:. El

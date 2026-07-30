@@ -141,7 +141,18 @@ harness; cada agente es contexto y mantenimiento.
    `123`. En los dos casos el harness solo lee, mueve labels y comenta;
    nunca edita el cuerpo ni cierra el ticket fuera de `/archive`.
 7. **Memoria**: engram sí/no; perfiles (default: orquestador y
-   arquitecto SOLAMENTE).
+   arquitecto SOLAMENTE). La respuesta va a `memory.provider` del answers
+   Y a `{{MEMORY_PROVIDER}}` del CLAUDE.md: es la MISMA respuesta en los
+   dos lados, y si no la estampas la constitución queda diciendo el
+   nombre de una variable en vez del de la herramienta. Antes vivía en
+   una perilla propia (MEMORY_TOOL) que la entrevista nunca preguntaba,
+   así que TODAS las instancias nacían con el placeholder literal y el
+   agente leía una instrucción sobre una herramienta sin nombre.
+   **Con `provider: none` no dejes el bloque puesto**: borra la sección
+   `## Memoria` del CLAUDE.md y los pasos `mem_search`/`mem_save` de los
+   prompts (arquitecto, /ship, /smart, /promote, docs/pipeline.md). Una
+   instrucción que manda llamar a una herramienta que no existe se paga
+   en cada tarea, con el agente buscando una tool que nadie configuró.
 8. **Secretos**: vault | gcp-secret-manager | aws-secrets-manager |
    doppler | sops | 1password | env. RECOMIENDA desde
    `inventory.json → secret_hints` (el discovery detecta .sops.yaml,

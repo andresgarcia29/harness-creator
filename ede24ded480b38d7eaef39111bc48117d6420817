@@ -1,0 +1,4 @@
+harness_version: 0.56.3
+gates_manifest: c938bdcb28acbf52
+workspace: andres@vmi3423417
+task: AUTO-20260730-gate-skips-nuevos-andr

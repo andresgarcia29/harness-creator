@@ -55,6 +55,30 @@ assert_contains "$out" "NO entregues a review" "el mensaje es el prompt del fix"
 assert_contains "$out" "NO consume presupuesto de loop" "deja claro que no cuenta como ronda"
 sello="$(cat "$WS/tasks/T1/precheck-svc.json")"
 assert_contains "$sello" '"ok":false' "sello rojo (el /review no debe lanzar a nadie)"
+assert_not_contains "$out" "FALTA DE DISCO" "con disco de sobra no inventa una causa ambiental"
+
+# ── el rojo que NO es del código: disco lleno ────────────────────────
+# Caso de campo (COR-567): el disco raíz lleno puso en rojo gates de varios
+# workspaces a la vez, ningún mensaje lo dijo, y el agente quemó su presupuesto
+# de autofix persiguiendo un bug que no existía. El aviso CONTEXTUALIZA: no
+# cambia el exit ni el sello, solo dice que el rojo puede no ser del código.
+printf '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted"\necho "/dev/x 100 100 1024 100%% /"\n' > "$WS/bin/df"
+chmod +x "$WS/bin/df"
+out="$(run_precheck)"; rc=$?
+[ "$rc" -ne 0 ] && pass "con el disco al límite el gate sigue rojo (el aviso no lo tapa)" \
+  || fail "el aviso de disco cambió el veredicto del gate"
+assert_contains "$out" "FALTA DE DISCO" "y avisa que el rojo puede ser ambiental"
+assert_contains "$out" "1 MB libres" "diciendo cuánto queda, no una vaguedad"
+assert_contains "$out" "Libera espacio ANTES de tocar nada" "con la remediación en el orden correcto"
+sello="$(cat "$WS/tasks/T1/precheck-svc.json")"
+assert_contains "$sello" '"ok":false' "y el sello sigue siendo rojo, no un ausente"
+# df ilegible: el aviso se calla en vez de tumbar el trap con set -u
+printf '#!/bin/sh\necho "no puedo leer nada"\n' > "$WS/bin/df"; chmod +x "$WS/bin/df"
+out="$(run_precheck)"; rc=$?
+[ "$rc" -ne 0 ] && pass "df ilegible: el precheck sigue funcionando igual" \
+  || fail "df ilegible rompió el camino rojo del precheck"
+assert_not_contains "$out" "FALTA DE DISCO" "y no inventa un diagnóstico que no puede sostener"
+rm -f "$WS/bin/df"
 
 echo "── trailer y carril: se cazan ACÁ, donde el arreglo todavía es gratis"
 # Antes los dos vivían SOLO en el camino de ship, o sea que un commit sin

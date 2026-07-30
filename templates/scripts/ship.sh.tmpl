@@ -480,6 +480,27 @@ request_ship_phase() {
   return 0
 }
 
+# Un rojo por falta de disco no es del código: el compilador que no puede
+# escribir su objeto y el runner sin espacio para su cache salen != 0 igual que
+# un test roto, y el agente quema su presupuesto de autofix persiguiendo un bug
+# que no existe. Caso de campo (COR-567): el disco raíz lleno puso en rojo
+# gates de varios workspaces a la vez y ningún mensaje lo dijo.
+#
+# CONTEXTUALIZA, no juzga: se llama SOLO en los caminos rojos, no cambia el exit
+# code ni el sello, y si df no está o contesta cualquier cosa se calla. Un aviso
+# que pudiera tumbar el trap sería peor que el problema que describe.
+disco_avisa() {
+  local libre
+  libre="$(df -Pk "$WS" 2>/dev/null | awk 'NR == 2 { print $4 }')"
+  case "$libre" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$libre" -lt 1048576 ] || return 0
+  echo "   ⚠️  quedan $((libre / 1024)) MB libres en el disco del workspace:"
+  echo "      este rojo puede ser por FALTA DE DISCO, no por tu código."
+  echo "      Libera espacio ANTES de tocar nada (docker system prune, worktrees"
+  echo "      viejos) y re-corre: un fix sobre un rojo ambiental es ruido que"
+  echo "      después hay que revertir."
+  emit assumption "$REPO: gate '${CURRENT_GATE:-?}' rojo con menos de 1 GB libre (posible causa ambiental)"
+}
 on_exit() {
   local rc=$?
   # El marcador se escribe DESDE EL TRAP, no después de llamar a run_lang_gates.
@@ -505,6 +526,7 @@ on_exit() {
     echo "     iteración (el error de cada gate trae su remediación) y re-corre"
     echo "     scripts/ship.sh --precheck $TASK $REPO."
     echo "   → Esto NO consume presupuesto de loop: el reviewer todavía no vio nada."
+    disco_avisa
     return 0
   fi
   # UN GATE QUE BLOQUEA ES LA MEJOR NOTICIA DEL SISTEMA: es la prueba de que el
@@ -516,6 +538,7 @@ on_exit() {
   echo "     commitea con el trailer 'Task: $TASK' y re-corre ship.sh."
   echo "   → Presupuesto de autofix: 2 rondas. Si esta es la tercera, PARA"
   echo "     y escala a humano con el error completo (Ley 6)."
+  disco_avisa
 }
 trap on_exit EXIT
 

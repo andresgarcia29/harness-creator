@@ -48,12 +48,44 @@ assert_contains "$out" "nada que pushear" "y lo dice"
 
 echo "── los gates de la puerta"
 
-# árbol sucio: no se publica a medias
-echo x > "$IWS/scripts/nuevo.sh"; git -C "$IWS" add scripts/nuevo.sh
+# lo INNEGOCIABLE: una edición sin commitear sobre un archivo QUE ESTE PUSH
+# PUBLICA. Commiteo una versión (sin pushear) y edito el MISMO archivo otra vez:
+# publicar ese commit con el archivo a medias es justo lo que el gate impide.
+echo v1 > "$IWS/scripts/nuevo.sh"
+git -C "$IWS" add scripts/nuevo.sh
+git -C "$IWS" commit -qm "script nuevo"
+echo v2 >> "$IWS/scripts/nuevo.sh"
 out="$(run_is)"; rc=$?
-assert_eq 3 "$rc" "cambios sin commitear: exit 3"
+assert_eq 3 "$rc" "edición sin commitear sobre un archivo DEL push: exit 3"
 assert_contains "$out" "SIN COMMITEAR" "nombra la causa"
-git -C "$IWS" -c user.email=t@t -c user.name=t commit -qm "script nuevo"
+assert_contains "$out" "scripts/nuevo.sh" "y nombra el archivo que se solapa"
+git -C "$IWS" commit -qam "script nuevo v2"
+
+# árbol sucio POR OTRA TAREA (COR-319): el árbol de la instancia es COMPARTIDO
+# (Ley 7 manda los ADR a docs/adr, /archive fusiona delta-specs en specs/), así
+# que otra tarea en vuelo lo ensucia. Si no se solapa con el push: avisa, NO
+# bloquea, y la edición ajena SOBREVIVE (el autostash la aparta y la devuelve).
+mkdir -p "$IWS/docs/adr"; echo "adr v1" > "$IWS/docs/adr/ADR-0001.md"
+git -C "$IWS" add docs/adr/ADR-0001.md
+git -C "$IWS" commit -qm "adr"
+run_is >/dev/null   # publico lo pendiente: el ADR queda FUERA del rango a pushear
+echo y > "$IWS/scripts/otro.sh"
+git -C "$IWS" add scripts/otro.sh
+git -C "$IWS" commit -qm "commit propio, otro archivo"
+echo "otra tarea, en vuelo" >> "$IWS/docs/adr/ADR-0001.md"
+out="$(run_is)"; rc=$?
+assert_eq 0 "$rc" "suciedad AJENA al push: no bloquea (exit 0)"
+assert_contains "$out" "NO se publican" "avisa que el rebase la aparta y la devuelve"
+assert_contains "$out" "ADR-0001" "y nombra el archivo ajeno"
+assert_contains "$out" "instancia publicada" "y publica igual: hay camino legítimo"
+assert_contains "$(git -C "$IWS" status --porcelain)" "ADR-0001.md" \
+  "el trabajo ajeno SOBREVIVE al push (nadie lo barrió)"
+
+# vuelvo a dejar un commit pendiente para los gates que siguen (con el árbol
+# sucio de la otra tarea todavía en vuelo: ninguno de ellos debe cambiar)
+echo z > "$IWS/scripts/pendiente.sh"
+git -C "$IWS" add scripts/pendiente.sh
+git -C "$IWS" commit -qm "commit pendiente"
 
 # doctor con FALLOS: una instancia rota no se publica a sí misma
 touch "$IWS/.doctor-red"

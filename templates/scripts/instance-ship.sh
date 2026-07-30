@@ -14,7 +14,8 @@
 # Qué contiene el repo de la instancia: specs maestras, ADRs, constitución,
 # scripts del harness, harness-answers (REFERENCIAS a secretos, jamás
 # valores). No hay suite de producto que correr; los gates que importan son:
-#   1. árbol limpio (lo mismo que exige la evidencia: no publicar a medias)
+#   1. ningún archivo DEL PUSH con ediciones sin commitear (no publicar a
+#      medias); el resto de la suciedad es de otras tareas y solo avisa
 #   2. rebase sobre origin (la misma disciplina que ship.sh)
 #   3. gitleaks sobre el rango a pushear (el riesgo número UNO acá: un
 #      token o un .secrets colado a main en el repo que versiona la config)
@@ -42,14 +43,46 @@ fi
 BB="${HARNESS_BASE_BRANCH:-$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')}"
 [ -n "$BB" ] || BB=main
 
-# ── 1. Árbol limpio: no se publica a medias ───────────────────────────
-dirty="$(git status --porcelain -uno 2>/dev/null || echo "?")"
-if [ -n "$dirty" ]; then
-  echo "❌ el repo de la instancia tiene cambios SIN COMMITEAR:"
-  printf '%s\n' "$dirty" | head -5 | sed 's/^/   /'
-  echo "   ↳ remediación: commitea primero (tasks/ y .harness/ van gitignorados;"
-  echo "     si aparecen acá, el .gitignore de la instancia perdió sus entradas)"
+# ── 1. Árbol limpio POR SOLAPAMIENTO: no se publica un archivo a medias ─
+# El árbol de la instancia es COMPARTIDO entre tareas concurrentes: la Ley 7
+# manda los ADR a docs/adr y /archive fusiona las delta-specs en specs/, así que
+# varias tareas en vuelo lo ensucian a la vez. Caso de campo (COR-319): 55
+# archivos sucios de OTRAS tareas y este gate en rojo, sin camino legítimo para
+# publicar; la única salida era barrer trabajo ajeno, que es peor que el bug.
+# Lo INNEGOCIABLE sigue intacto: un archivo que ESTE push toca no puede tener
+# ediciones sin commitear (publicar el commit con el archivo a medias es justo
+# lo que este gate impide). La suciedad que NO se solapa avisa y sigue: el
+# rebase --autostash la aparta y la devuelve.
+dirty="$(git status --porcelain -uno 2>/dev/null || true)"
+# el path de cada línea de porcelain: "XY path" (y "old -> new" en los renames)
+dirty_paths="$(printf '%s\n' "$dirty" | sed -e 's/^...//' -e 's/^.* -> //')"
+outgoing="$(git diff --name-only "origin/$BB..HEAD" 2>/dev/null || true)"
+
+# intersección sucio ∩ saliente. bash 3.2: sin arrays asociativos ni `comm`
+# sobre process substitution; un bucle con `grep -F -x` es lo más simple.
+overlap=""
+if [ -n "$dirty" ] && [ -n "$outgoing" ]; then
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if printf '%s\n' "$outgoing" | grep -qFx -- "$f"; then
+      overlap="${overlap}${f}
+"
+    fi
+  done <<EOF
+$dirty_paths
+EOF
+fi
+
+if [ -n "$overlap" ]; then
+  echo "❌ hay ediciones SIN COMMITEAR sobre archivos que este push publica:"
+  printf '%s' "$overlap" | sed -n '1,5s/^/   /p'
+  echo "   ↳ remediación: commitea o descarta ESAS ediciones (publicar el commit"
+  echo "     con el archivo a medias es justo lo que este gate impide)"
   exit 3
+elif [ -n "$dirty" ]; then
+  echo "⚠️  árbol con cambios ajenos a este push (trabajo en vuelo de otras tareas):"
+  printf '%s\n' "$dirty" | sed -n '1,5s/^/   /p'
+  echo "   NO se publican: el rebase los aparta y los devuelve (autostash)."
 fi
 
 # ── lock: dos sesiones publicando la instancia no se pisan ────────────
@@ -70,8 +103,11 @@ echo $$ > "$LOCKDIR/pid"
 trap 'rm -rf "$LOCKDIR"' EXIT
 
 # ── 2. Rebase sobre origin: misma disciplina que ship.sh ──────────────
+# --autostash porque el gate de arriba ya permite suciedad AJENA al push: sin
+# esto el rebase moriría con "cannot rebase: you have unstaged changes" y el
+# camino legítimo se cerraría de nuevo. El autostash la aparta y la devuelve.
 git fetch origin
-if ! rebase_out="$(git rebase "origin/$BB" 2>&1)"; then
+if ! rebase_out="$(git rebase --autostash "origin/$BB" 2>&1)"; then
   git rebase --abort >/dev/null 2>&1 || true
   echo "❌ no pude rebasear sobre origin/$BB:"
   printf '%s\n' "$rebase_out" | sed 's/^/   /'

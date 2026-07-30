@@ -313,7 +313,8 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
    éxito: es un update **sin verificar**, y se dice así.
 
 7. **Publica el commit del update por la puerta**: commitea los cambios del
-   workspace y corre `bash scripts/instance-ship.sh` (árbol limpio, rebase,
+   workspace y corre `bash scripts/instance-ship.sh` (sin ediciones a medias
+   sobre lo que publica, rebase,
    gitleaks, doctor, push). El repo de la instancia tiene su propia puerta a
    main desde el issue #37: pushearlo a mano por fuera del harness era el
    único camino y eso era un bug, no una regla.

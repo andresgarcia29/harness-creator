@@ -98,9 +98,23 @@ OUT="$WS/tasks/$TASK/verdict-$REPO.json"
 # aceptaría evidencia que el scaffold rechaza (o al revés) y volvería el
 # tercer SHA. Un EV es elegible si es de este task/repo, salió en verde,
 # no movió HEAD, y es del commit pedido O del MISMO cambio (patch_id).
+#
+# Y NO está marcado por contención. Esa condición no es un capricho: es la
+# única forma de que la remediación del ship sea alcanzable. gate_preflight
+# rechaza el veredicto que cite un EV con contention.suspect, y manda a
+# re-sellar con menos carga; pero si el scaffold vuelve a elegir el
+# contaminado, el sello nuevo no sirve de nada: --rebase se niega porque el
+# commit no se movió, y --force re-incluye el sucio junto al limpio (y encima
+# tira el juicio que el reviewer ya había escrito). Caso de campo: una tarea
+# quedó trabada con el veredicto ya en pass, con EV-TEST-01066c3b5ea5 (suspect)
+# y EV-TEST-29565073a05f (mismo comando, mismo commit, limpio) conviviendo.
+# Un sello que el propio harness declara no probatorio no puede entrar al
+# veredicto: si el resultado es cero evidencia, eso es exactamente lo que
+# --allow-empty existe para decidir, y lo decide un humano.
 ELIGIBLE_JQ='def eligible($t; $r; $c; $p):
   type == "object" and .schema == 1 and .task_id == $t and .repo == $r
   and .exit_code == 0 and .commit == .commit_after
+  and ((.contention.suspect // false) != true)
   and ((.commit == $c) or (($p != "") and ((.patch_id // "") == $p)));'
 
 merge_qa() {

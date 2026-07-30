@@ -94,6 +94,24 @@ assert_eq "0.20.0" "$(jq -r '.plugins[0].version' "$WS/r/.claude-plugin/marketpl
 run set 9 >/dev/null 2>&1 && fail "acepto una version invalida" || pass "version invalida: rechaza"
 
 echo "── este repo esta coherente"
-bash "$V" check >/dev/null 2>&1 && pass "harness-creator: version coherente" || fail "harness-creator desalineado"
+# La coherencia se exige donde MANDA: en un arbol que contiene el ultimo
+# release. En una rama de tarea con commits propios encima, plugin.json declara
+# la version vieja y el tag del release que aterrizo DESPUES del branch point no
+# es alcanzable desde HEAD: version.sh sale 1 con razon, pero eso no es un
+# defecto de este repo, es la rama estando por detras. Caso de campo (COR-660):
+# cuatro releases aterrizaron en una tarde y cada uno ponia la suite en rojo por
+# esta sola asercion, o sea una corrida completa (~7 min) tirada por vuelta.
+#
+# Saltarse NO es callarse: se dice cual es el tag que falta. Y no afloja nada,
+# porque los dos casos que el gate existe para cazar siguen midiendose: el trunk
+# (el tag es ancestro de HEAD) y el tren del release (HEAD es ancestro del tag).
+ult="$(git -C "$ROOT" tag --list 'v*' --sort=-v:refname 2>/dev/null | head -1)"
+if [ -n "$ult" ] \
+   && ! git -C "$ROOT" merge-base --is-ancestor "$ult" HEAD 2>/dev/null \
+   && ! git -C "$ROOT" merge-base --is-ancestor HEAD "$ult" 2>/dev/null; then
+  pass "harness-creator: $ult no esta en el historial de HEAD (rama por detras del release): la coherencia se mide en el trunk"
+else
+  bash "$V" check >/dev/null 2>&1 && pass "harness-creator: version coherente" || fail "harness-creator desalineado"
+fi
 
 t_done

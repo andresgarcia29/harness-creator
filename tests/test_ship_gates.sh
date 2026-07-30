@@ -374,6 +374,35 @@ printf 'def test_x():\n    assert calc() == 4\n' > tests/test_calc.py
 git add . && git commit -qm quita-bare
 run_tests_gate >/dev/null 2>&1 && fail "bare assert borrado no bloqueó" || pass "bare assert de Python borrado: bloquea"
 
+# 9. archivo de test AÑADIDO con un guard .skip( y aserciones nuevas → NO bloquea,
+#    pero lo NOMBRA. En un archivo de alta todas las líneas son "+": el guard de
+#    entorno que Playwright pide daba neto 1 y salía exit 3 sin salida legítima.
+mk_test_repo "$WS/g6"
+mkdir -p e2e
+cat > e2e/dashboard.spec.ts <<'FIX'
+import { test, expect } from '@playwright/test'
+test('dashboard responsive', async ({ page }) => {
+  test.skip(!reachable, 'no hay servidor')
+  expect(await page.title()).toBe('Dashboard')
+  expect(await page.locator('nav').count()).toBe(1)
+})
+FIX
+git add . && git commit -qm spec-nuevo
+rm -f "$WS/tasks/T1/delta-spec.md"
+out="$(run_tests_gate 2>&1)"; rc=$?
+assert_eq 0 "$rc" "test AÑADIDO con .skip( de guard: NO bloquea"
+assert_contains "$out" "dashboard.spec.ts" "la línea informativa nombra el archivo añadido"
+
+# 10. el MISMO .skip( pero sobre un archivo de test que YA existía → bloquea
+mk_test_repo "$WS/g7"
+python3 -c "
+s=open('tests/auth.test.js').read()
+open('tests/auth.test.js','w').write(s.replace(\"  it('valida token', () => {\", \"  it('valida token', () => {\n    test.skip(!reachable, 'no hay servidor')\"))"
+git add . && git commit -qm skip-en-existente
+out="$(run_tests_gate 2>&1)"; rc=$?
+assert_eq 3 "$rc" ".skip( añadido a un archivo de test EXISTENTE: bloquea"
+assert_contains "$out" "auth.test.js" "el mensaje nombra el archivo existente debilitado"
+
 echo
 echo "── gate_test_muerde: un test que no puede fallar no prueba nada"
 # Caso de campo: un assert que evaluaba ANTES de que llegara el dato pasó la

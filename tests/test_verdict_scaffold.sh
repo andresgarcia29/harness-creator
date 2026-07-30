@@ -418,4 +418,48 @@ bash "$WS/scripts/worktree-task.sh" --rm T5 >/dev/null 2>&1
 assert_not_contains "$(git -C "$WS/repos/beta" worktree list --porcelain)" ".review-beta" \
   "--rm poda también el pin registrado cuyo dir ya no existe"
 
+echo
+echo "── un EV marcado por contención NO entra al veredicto"
+# Caso de campo: gate_preflight rechaza el veredicto que cite un EV con
+# contention.suspect y manda a re-sellar, pero el scaffold volvía a elegir el
+# contaminado, así que la remediación era inalcanzable (--rebase se niega
+# porque el commit no se movió y --force re-incluye el sucio).
+mkdir -p "$WS/tasks/T6/evidence" "$WS/worktrees/T6"
+WT6="$WS/worktrees/T6/atlas"
+git init -q -b main "$WT6"
+git -C "$WT6" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+git -C "$WT6" update-ref refs/remotes/origin/main HEAD
+echo "cambio de la tarea" > "$WT6/feature.txt"
+git -C "$WT6" add -A
+git -C "$WT6" -c user.email=t@t -c user.name=t commit -q -m x
+H6="$(git -C "$WT6" rev-parse HEAD)"
+
+mk_ev6() {  # mk_ev6 <id> <commit> <suspect true|false>
+  jq -n --arg id "$1" --arg c "$2" --argjson s "$3" \
+    '{schema:1, id:$id, task_id:"T6", repo:"atlas", kind:"test",
+      runner:"impl-atlas", commit:$c, commit_after:$c, exit_code:0,
+      output:("evidence/"+$id+".log"), output_sha256:"deadbeef",
+      contention:{suspect:$s}}' > "$WS/tasks/T6/evidence/$1.json"
+}
+
+# (a) dos EVs del MISMO commit, uno marcado y otro limpio: cita solo el limpio
+mk_ev6 EV-TEST-c0ntam1nad0 "$H6" true
+mk_ev6 EV-TEST-l1mp10l1mp1 "$H6" false
+bash "$WS/scripts/verdict-scaffold.sh" T6 atlas revisor-6 >/dev/null 2>&1 \
+  && pass "con un EV limpio disponible: exit 0" || fail "el scaffold falló con evidencia limpia"
+V6="$WS/tasks/T6/verdict-atlas.json"
+assert_eq "EV-TEST-l1mp10l1mp1" "$(jq -r '.evidence | join(",")' "$V6")" \
+  "cita SOLO el EV limpio (el marcado por contención queda fuera)"
+
+# (b) el degenerado: el ÚNICO EV está marcado → se comporta como sin evidencia
+rm -f "$WS/tasks/T6/evidence/EV-TEST-l1mp10l1mp1.json" "$V6"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" T6 atlas revisor-6 2>&1)"; rc=$?
+assert_eq 3 "$rc" "único EV marcado por contención: exit 3, no lo cita"
+assert_contains "$out" "evidence.py run" "y da la remediación de sellar de nuevo"
+bash "$WS/scripts/verdict-scaffold.sh" --allow-empty T6 atlas revisor-6 >/dev/null 2>&1 \
+  && pass "--allow-empty sigue siendo la salida consciente (la decide un humano)" \
+  || fail "--allow-empty no pudo emitir el veredicto sin evidencia"
+assert_eq "0" "$(jq '.evidence | length' "$V6")" \
+  "ni con --allow-empty entra el EV marcado al veredicto"
+
 t_done

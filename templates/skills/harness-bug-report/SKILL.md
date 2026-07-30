@@ -16,6 +16,29 @@ Lo verificable lo hace `scripts/harness-bug.sh` (propiedad del artefacto,
 drift local, versión, dedupe, cuota, redacción). Lo que pones tú es el juicio:
 ¿es real, y vale la pena arreglarlo?
 
+## Ley 0 operativa: el harness NO es tu tarea
+
+Caso de campo, y es el que hace falta cortar: un agente haciendo una tarea de
+producto choca con un gate que da falso rojo, se pone a "arreglar" el harness
+para desatascarse, y ahí se pierde la tarea. No entrega lo que le pidieron,
+toca la ley que lo juzga, y suele terminar en bucle.
+
+Si el bug te BLOQUEA, el orden es LEY y no admite improvisación:
+
+1. **NO edites el artefacto del harness y NO lo "pruebes arreglado".** El hook
+   `guard-canonical` te lo bloquea, y con razón: es el juez, no el producto.
+   Un agente atascado que edita el gate no está pasando el gate, lo está
+   borrando, y con él todos los demás para siempre.
+2. **Reportá** (los pasos de abajo). Reportar es la PRECONDICIÓN del paso 3:
+   sin issue en el ledger, el desbloqueo no te lo da nadie.
+3. **Desbloqueate DECLARANDO el bug**, no rodeándolo:
+   `HARNESS_KNOWN_BUG='<slot>=<url-del-issue>'` en tu ship o precheck. El rojo
+   queda como condición declarada (bus, sello, veredicto), nunca como verde.
+   Los slots `security` y `veredicto` no se declaran jamás: un secreto
+   filtrado no es un bug del harness, y sin veredicto no hubo review.
+4. **Volvé a TU tarea.** El fix del harness llega por `/harness-update`, hecho
+   por sus mantenedores, nunca por tu mano y nunca dentro de esta tarea.
+
 ## Paso 0: ¿es un bug DEL HARNESS?
 
 | Lo que ves | Qué es |
@@ -122,8 +145,11 @@ secretos). El repro debe ser genérico: si no lo es, vuelve al paso 1.2.
 
 - Emite al bus lo que decidiste: reportado (con URL) o descartado (con la
   razón). El humano lee el panel, no tu consola.
-- Si tuviste que poner un workaround local para seguir, déjalo comentado con
-  la URL del issue y quítalo cuando llegue el fix.
+- El ÚNICO workaround legítimo para un gate del harness es
+  `HARNESS_KNOWN_BUG='<slot>=<url>'`, que se audita solo. Si además tuviste
+  que parchear TU código de producto para rodear al harness, déjalo comentado
+  con la URL del issue y quítalo cuando llegue el fix. Lo que no existe es un
+  workaround dentro del harness: eso es editarlo, y eso está prohibido.
 - Si el fix es de una línea y lo tienes claro, dilo en el issue (o manda el PR):
   un issue con diagnóstico y parche se arregla el mismo día.
 - Nunca desactives un gate ni un hook para esquivar un bug del harness. Eso no

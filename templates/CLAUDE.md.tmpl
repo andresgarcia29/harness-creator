@@ -59,12 +59,12 @@ Dirección de dependencias (ley, referencia del DAG de shipping):
 11. **Prohibido el guion largo "—"** en todo texto que produzcas
    (docs, reportes, commits, specs): delata texto de IA. Usa coma, dos
    puntos o paréntesis. (El "──" de cajas de terminal es otro carácter.)
-12. **Un bug del HARNESS se verifica y se reporta upstream, siempre.** Si un
-   artefacto del plugin (scripts/, hooks, comandos, gates, panel) falla o
-   contradice lo que documenta: repro mínimo dos veces con `bash -c`, descartar
-   que sea tuyo o versión vieja, y `scripts/harness-bug.sh report` abre el issue
-   (redacta secretos, deduplica, cuota 3/24h). Un workaround silencioso condena
-   al siguiente; protocolo: `.claude/skills/harness-bug-report/SKILL.md`.
+12. **El harness NO se arregla en medio de una tarea: se reporta upstream.**
+   Si un artefacto del plugin (scripts/, hooks, gates, panel) falla: NO lo
+   edites NI lo pruebes, el hook te lo bloquea (Ley 0).
+   `scripts/harness-bug.sh report` abre el issue, y
+   `HARNESS_KNOWN_BUG='<slot>=<url>'` desbloquea TU ship declarándolo (exige
+   el issue ya reportado). Seguí con tu tarea: el fix es de los mantenedores.
 13. **Un repo ARCHIVADO en el forge se ignora SIEMPRE.** No entra al grafo,
    ni al inventario, ni a los briefs, ni a los pulls, ni lo cites como
    referencia: está muerto por decisión explícita de alguien y es de solo

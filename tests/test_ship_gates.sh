@@ -20,10 +20,19 @@ extract() {  # extract <nombre-funcion> — de 'nombre() {' a su '}' de 1er nive
 { extract gate_lane; extract gate_quick_size; } > "$WS/gate_lane.sh"
 grep -q 'LANE_GUARD_PATTERN' "$WS/gate_lane.sh" || { echo "no pude extraer gate_lane"; exit 1; }
 grep -q 'lane-limits' "$WS/gate_lane.sh" || { echo "no pude extraer gate_quick_size"; exit 1; }
-{ extract par; extract close_serial_gate; extract collect_gate_slots
-  extract run_phase0_gates; extract run_parallel_gates; } > "$WS/pargates.sh"
+{ extract par; extract close_serial_gate; extract known_bug_cubre
+  extract collect_gate_slots
+  extract run_phase0_gates; extract run_parallel_gates
+  # El knob va DESPUES de las funciones a proposito: se sourcea y recien
+  # despues se invoca run_phase0_gates, asi que el orden alcanza. Extraerlo
+  # del template (y no redeclararlo aca) es lo que hace que el test mida el
+  # default real: si manana el knob cambia de nombre, esto se queda mudo y el
+  # grep de abajo lo caza.
+  grep -E '^KNOWN_BUG(_USED)?=' "$TMPL"; } > "$WS/pargates.sh"
 grep -q 'GDIR' "$WS/pargates.sh" || { echo "no pude extraer par/run_parallel_gates"; exit 1; }
 grep -q 'fase 0' "$WS/pargates.sh" || { echo "no pude extraer run_phase0_gates"; exit 1; }
+grep -q 'HARNESS_KNOWN_BUG' "$WS/pargates.sh" || { echo "no pude extraer el knob HARNESS_KNOWN_BUG"; exit 1; }
+grep -q '^known_bug_cubre() {' "$WS/pargates.sh" || { echo "no pude extraer known_bug_cubre"; exit 1; }
 
 echo "── gate_lane: el carril lo verifica el diff, no la fe"
 
@@ -288,6 +297,107 @@ assert_eq 0 "$rc" "precheck: verde sin veredicto"
 assert_contains "$out" "LANG-EVIDENCIA" "precheck: corre los gates mecánicos"
 assert_contains "$out" "TESTS-EVIDENCIA" "precheck: la fase 0 corre tests-no-debilitados"
 assert_not_contains "$out" "VERDICT-EVIDENCIA" "precheck: NO corre el grupo de veredicto"
+
+echo
+echo "── HARNESS_KNOWN_BUG: la unica salida legitima cuando el rojo es del harness"
+# Caso de campo: un agente en una tarea de PRODUCTO choca con un gate del
+# HARNESS que da falso rojo. Hoy sus dos opciones son ilegitimas (arreglar el
+# harness, que no es su tarea y descarrila la corrida en un bucle) o quedarse
+# bloqueado. El knob abre UNA salida: declarar el bug ya reportado y seguir.
+# Lo que se mide aca son los CANDADOS, porque un knob sin candados es una
+# puerta trasera para saltarse gates.
+KB_BIN="$WS/kbbin"; mkdir -p "$KB_BIN" "$WS/.harness"
+KB_URL="https://github.com/anthropics/harness-creator/issues/77"
+kb_ledger_on() {  # la fila que solo puede haber puesto harness-bug.sh report|record
+  printf '{"ts":"2026-07-30T00:00:00Z","epoch":1,"fp":"deadbeef","file":"scripts/ship.sh","url":"%s","status":"creado"}\n' \
+    "$KB_URL" > "$WS/.harness/upstream-issues.jsonl"
+}
+kb_ledger_off() { rm -f "$WS/.harness/upstream-issues.jsonl"; }
+kb_gh_off() { rm -f "$KB_BIN/gh"; }
+kb_gh_state() {  # stub de gh que contesta el estado pedido
+  printf '#!/bin/sh\necho %s\n' "$1" > "$KB_BIN/gh"; chmod +x "$KB_BIN/gh"
+}
+
+run_kb() {  # run_kb <valor-del-knob> "<slots rojos>": las dos fases con esos slots en rojo
+  ( set -eu; WS="$WS"; REPO=test; CURRENT_GATE=""; PRECHECK=0
+    PATH="$KB_BIN:$PATH"
+    HARNESS_KNOWN_BUG="$1"; export HARNESS_KNOWN_BUG
+    KB_ROJOS=" $2 "
+    emit() { :; }; gate() { CURRENT_GATE="$1"; }
+    # KB_ROJOS en mayusculas por el scope dinamico de bash: un `rojos` local
+    # de la funcion bajo prueba lo pisaria y todos los slots saldrian verdes.
+    kb_rojo() { case "$KB_ROJOS" in *" $1 "*) return 3 ;; esac; return 0; }
+    gate_tests_untouched()     { echo TESTS-EVIDENCIA;      kb_rojo tests; }
+    check_verdict()            { echo VERDICT-EVIDENCIA;    kb_rojo veredicto; }
+    gate_evidence()            { echo COMPLIANCE-EVIDENCIA; kb_rojo compliance; }
+    gate_policy_and_evidence() { echo POLICY-EVIDENCIA;     kb_rojo policy; }
+    run_lang_gates_sealed()    { echo LANG-EVIDENCIA;       kb_rojo lang; }
+    run_security_gates()       { echo SEC-EVIDENCIA;        kb_rojo security; }
+    . "$WS/pargates.sh"; run_phase0_gates; run_parallel_gates )
+}
+
+# 1. el camino feliz: slot declarable, reportado, y sin gh para verificar estado
+kb_ledger_on; kb_gh_off
+out="$(run_kb "tests=$KB_URL" "tests" 2>&1)"; rc=$?
+assert_eq 0 "$rc" "slot 'tests' rojo + knob + fila en el ledger: el ship sigue (exit 0)"
+assert_contains "$out" "condición DECLARADA" "y NO se disfraza de verde: lo dice con esas palabras"
+assert_contains "$out" "$KB_URL" "citando el issue que lo respalda"
+assert_contains "$out" "TESTS-EVIDENCIA" "sin esconder la salida del gate que igual salio roja"
+assert_contains "$out" "sin verificar" "y declara que no pudo confirmar el estado del issue"
+
+# 2. sin fila en el ledger: reportar es la PRECONDICION, no un tramite posterior
+kb_ledger_off; kb_gh_off
+out="$(run_kb "tests=$KB_URL" "tests" 2>&1)"; rc=$?
+assert_eq 3 "$rc" "knob sin reporte previo: sigue rojo (exit 3)"
+assert_contains "$out" "PRECONDICIÓN" "y dice que reportar es la precondicion de desbloquearse"
+assert_contains "$out" "harness-bug.sh" "con el comando que la cumple"
+
+# 3. LA DEFENSA PRINCIPAL: security no es declarable. Un secreto filtrado jamas
+#    es un bug del harness, y ese slot junta gitleaks con semgrep: abrir uno
+#    seria abrir los dos.
+kb_ledger_on; kb_gh_off
+out="$(run_kb "security=$KB_URL" "security" 2>&1)"; rc=$?
+assert_eq 3 "$rc" "knob sobre 'security': rechazado aunque el reporte exista (exit 3)"
+assert_contains "$out" "no se rodean" "y dice por que ese slot no se negocia"
+
+# 4. veredicto tampoco: sin veredicto no hubo review
+out="$(run_kb "veredicto=$KB_URL" "veredicto" 2>&1)"; rc=$?
+assert_eq 3 "$rc" "knob sobre 'veredicto': rechazado (exit 3)"
+assert_contains "$out" "no se rodean" "por el mismo motivo estructural"
+
+# 5. issue CERRADO = workaround vencido: el fix existe, hay que traerlo
+kb_ledger_on; kb_gh_state CLOSED
+out="$(run_kb "tests=$KB_URL" "tests" 2>&1)"; rc=$?
+assert_eq 3 "$rc" "issue cerrado: el workaround caduca (exit 3)"
+assert_contains "$out" "CERRADO" "y lo nombra"
+assert_contains "$out" "harness-update" "mandando a traer el fix, no a re-declarar"
+
+# 5b. contra-mitad: con el issue ABIERTO el mismo stub deja pasar. Sin esto,
+#     el caso de arriba pasaria igual con un gh que siempre falla.
+kb_gh_state OPEN
+out="$(run_kb "tests=$KB_URL" "tests" 2>&1)"; rc=$?
+assert_eq 0 "$rc" "el mismo gh contestando OPEN: el ship sigue (exit 0)"
+assert_not_contains "$out" "sin verificar" "y con gh contestando NO declara estado desconocido"
+
+# 6. UN solo slot por invocacion: el otro rojo sigue mordiendo
+kb_gh_off
+out="$(run_kb "tests=$KB_URL" "tests lang" 2>&1)"; rc=$?
+assert_eq 3 "$rc" "dos slots rojos y knob para uno: el otro sigue bloqueando (exit 3)"
+assert_contains "$out" "condición DECLARADA" "el declarado se declara"
+assert_contains "$out" "lang" "y el resumen nombra al que sigue rojo"
+
+# 7. REGRESION: sin knob, un slot rojo es rojo y nada cambio
+out="$(run_kb "" "tests" 2>&1)"; rc=$?
+assert_eq 3 "$rc" "sin knob: el rojo de siempre sigue siendo rojo (exit 3)"
+assert_not_contains "$out" "BUG CONOCIDO" "y no aparece ni una linea del camino declarado"
+
+# 8. la url tiene que tener forma de issue del forge: un slot=cualquier-cosa no
+#    es una declaracion, es un salto sin rastro.
+kb_ledger_on
+out="$(run_kb "tests=porque-si" "tests" 2>&1)"; rc=$?
+assert_eq 3 "$rc" "knob sin url de issue: rechazado (exit 3)"
+assert_contains "$out" "https://github.com/" "diciendo que forma se espera"
+kb_ledger_off; kb_gh_off
 
 # el preflight existe y precede estructuralmente al lock
 extract gate_ship_preflight > "$WS/preflight.sh"

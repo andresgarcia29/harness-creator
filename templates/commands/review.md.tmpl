@@ -26,6 +26,11 @@ reporta el código de error.
    hasta que quede verde** (rojo vuelve al implementer con el error
    completo). Un reviewer que descubre un test roto gastó una ronda de
    10-20 minutos en algo que un script dice en segundos.
+   **Si el sello trae `known_bug`, NÓMBRALO en tu veredicto.** Ese verde
+   carga una condición declarada: un slot quedó rojo por un bug conocido
+   del harness (con su issue upstream), y ese tramo NO se verificó. Tu
+   juicio tiene que decir si el cambio es shippeable aun con eso sin mirar,
+   no dar por bueno un verde que no lo es del todo.
    **El sello también dice CUÁNTO se miró: el campo `verificado`.**
    `"completo"` = al menos un gate de lenguaje compiló o testeó de verdad;
    `"ninguno"` = no corrió ninguno (stack no reconocido o toolchain

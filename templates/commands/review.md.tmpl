@@ -62,6 +62,19 @@ reporta el código de error.
    pasás al reviewer en el paso 2. Si el scaffold avisa que NO pudo clavarlo, no
    se cae nada (el pin es protección extra, no un gate), pero ese supuesto viaja
    al veredicto: se revisó un árbol que podía moverse.
+   **Si el veredicto trae `evidence_under_contention`, NÓMBRALO en tu juicio**,
+   igual que con el `known_bug` del sello. Ese campo lista los EV que se
+   sellaron con la máquina cargada. NO son evidencia inválida y por eso entran:
+   para llegar ahí ya pasaron `exit_code 0`, y la contención produce timeouts,
+   o sea ROJOS, no verdes falsos. Excluirlos dejaba al agente re-sellando a la
+   espera de una máquina calma, sin condición de salida (caso de campo: 5
+   minutos de trabajo que tardaron 3 horas). Lo que sí queda es un residuo real:
+   una suite cuyos guards de entorno SALTAN tests cuando un servicio está lento
+   sale verde con MENOS tests corridos de los que el verde aparenta. Abrí el log
+   de esos EV, mirá el conteo de tests saltados y decí si eso te cambia el
+   juicio; si no podés descartarlo, va como supuesto en `notes`, o como blocking
+   si lo salteado toca lo que este cambio tenía que probar. Callarlo convierte
+   un "corrieron menos tests" en un "pasó todo".
 2. **Lanza reviewer y QA EN PARALELO** — QA ejercita comportamiento y no
    necesita el veredicto; serializarlos regala la fase entera al camino
    crítico:

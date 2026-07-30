@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 
 SCHEMA = 1
@@ -52,6 +53,38 @@ _WRAPPERS = frozenset((
 ))
 # Subcomandos de gestor de paquetes que preceden al script real (`npm run test`).
 _PKG_PASSTHROUGH = frozenset(("run", "run-script", "exec", "x", "dlx"))
+
+# ── COR-350: CLASIFICAR como test no es ESTAR corriendo ───────────────
+# Se contaba cualquier proceso que clasificara como suite, estuviera haciendo
+# algo o no. Un `vitest --watch` ocioso de otra sesión, o el árbol de Chromium
+# del MCP de Playwright, mantenían foreign_peak > 0 PARA SIEMPRE, y entonces la
+# conjunción de _suspect (`ajenos > 0 AND load > cores`) degeneraba en
+# `load > cores` a secas: en una máquina de 6 núcleos con varias sesiones ese
+# es el estado NORMAL. Medido en campo: suspect=True con load_max 6.17 y 6
+# cores, o sea fallo por 0.17.
+#
+# TRAMPA CARA, ya pagada por otro agente con una ronda entera de review, y por
+# eso hay un test estructural que la prohíbe: NO se usa `ps -o pcpu`. Esa
+# columna NO es CPU actual: es cputime/etime, el promedio sobre TODA la vida
+# del proceso. Medido en vivo, un proceso al 100% de un core leía 7.4 y
+# BAJANDO. La ley que sale de ahí: un proceso vivo T segundos que corre una
+# suite de d segundos lee d/T*100, así que con T > 20d nunca cruza un umbral
+# del 5% y un watcher de días de otra sesión se escapa entero. Con esa columna
+# el gate queda MÁS FLOJO que antes, no más limpio.
+#
+# Lo correcto es el DELTA de tiempo de CPU acumulado entre dos muestras.
+#
+# UMBRAL: 0.2 de un core. Una suite realmente corriendo sostiene bastante más
+# que eso aunque sea I/O-bound; un watcher parado o un renderer dormido gastan
+# ~0 (solo wakeups). Deja además margen para el ruido de cuantización: `ps`
+# reporta el tiempo con resolución de 1s en Linux, así que en la ventana mínima
+# de abajo un tick entero equivale justo a este umbral.
+_ACTIVE_CORE_FRACTION = 0.2
+# VENTANA MÍNIMA: 5s. Con resolución de 1s en la columna de tiempo, una ventana
+# de 5s deja el error de cuantización en ±0.2 de un core; más corta que eso el
+# cociente no significa nada. El sampler muestrea cada 15s, así que la única
+# ventana que puede quedar corta es la última (la de `stop()`).
+_MIN_SAMPLE_WINDOW = 5.0
 
 
 def _cores() -> int:
@@ -131,25 +164,94 @@ def _looks_like_test_cmd(cmd: str) -> bool:
     return False
 
 
-def _ps_rows() -> list:
+def _cpu_seconds(raw: str) -> "float | None":
+    """La columna TIME de `ps` a segundos, o None si no se puede leer.
+
+    No tiene UN formato: macOS da `MM:SS.ss` y pasa a `HH:MM:SS` con las horas;
+    Linux agrega `DD-HH:MM:SS` para los procesos de días, que es exactamente lo
+    que son los watchers de otra sesión que este parser existe para descartar.
+    None (no se pudo leer) NO es cero: quien lo consume cuenta el proceso como
+    activo, porque aflojar por no poder medir es justo el error a evitar."""
+    text = raw.strip()
+    if not text:
+        return None
+    days = 0.0
+    if "-" in text:
+        head, _, text = text.partition("-")
+        try:
+            days = float(head)
+        except ValueError:
+            return None
+    parts = text.split(":")
+    if len(parts) not in (2, 3):
+        return None
     try:
-        out = subprocess.run(["ps", "-axo", "pid,ppid,command"], text=True,
+        values = [float(piece) for piece in parts]
+    except ValueError:
+        return None
+    hours, minutes, seconds = ([0.0] + values) if len(values) == 2 else values
+    return days * 86400.0 + hours * 3600.0 + minutes * 60.0 + seconds
+
+
+def _ps_rows() -> list:
+    """(pid, ppid, cputime_segundos|None, command).
+
+    Se pide `time` porque el conteo de ajenos ACTIVOS necesita el DELTA de CPU
+    acumulado entre muestras (ver el bloque de COR-350 arriba). El comando
+    queda ÚLTIMO a propósito y los consumidores lo leen por row[-1]: agregar
+    columnas no puede romperles la lectura."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid,ppid,time,command"], text=True,
                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                              check=False).stdout
     except OSError:
         return []
     rows = []
     for line in out.splitlines()[1:]:
-        parts = line.strip().split(None, 2)
-        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
-            rows.append((int(parts[0]), int(parts[1]), parts[2]))
+        parts = line.strip().split(None, 3)
+        if len(parts) == 4 and parts[0].isdigit() and parts[1].isdigit():
+            rows.append((int(parts[0]), int(parts[1]),
+                         _cpu_seconds(parts[2]), parts[3]))
     return rows
+
+
+def _classify_active(rows, excluded, prev, prev_time, now,
+                     min_window: float = _MIN_SAMPLE_WINDOW):
+    """Ajenos que clasifican como suite, y cuáles de ellos QUEMAN CPU.
+
+    Devuelve (ajenos, activos, snapshot, medible): las líneas de comando de los
+    ajenos, las de los que están activos, el {pid: cputime} de ESTA muestra para
+    la siguiente, y si la ventana daba para medir algo.
+
+    SESGO CONSERVADOR, declarado: lo que no se puede medir cuenta como ACTIVO.
+    Un proceso visto por primera vez (arrancó recién: lo más probable es que
+    esté quemando), una ventana demasiado corta, un `ps` sin columna de tiempo.
+    Aflojar por no poder medir sería exactamente el error del promedio de %CPU
+    que el bloque de arriba explica."""
+    window = None if prev_time is None else (now - prev_time)
+    medible = window is not None and window >= min_window
+    ajenos, activos, snapshot = [], [], {}
+    for row in rows:
+        pid, cpu, cmd = row[0], row[2], row[-1]
+        if cpu is not None:
+            snapshot[pid] = cpu
+        if pid in excluded or not _looks_like_test_cmd(cmd):
+            continue
+        ajenos.append(cmd)
+        antes = prev.get(pid)
+        if not medible or cpu is None or antes is None:
+            activos.append(cmd)
+            continue
+        if (cpu - antes) / window >= _ACTIVE_CORE_FRACTION:
+            activos.append(cmd)
+    return ajenos, activos, snapshot, medible
 
 
 def _excluded_pids(rows, me: int) -> set:
     """El propio árbol (descendientes por ppid) MÁS los ancestros (mi sesión)."""
     children, parent = {}, {}
-    for pid, ppid, _ in rows:
+    for row in rows:
+        pid, ppid = row[0], row[1]
         children.setdefault(ppid, []).append(pid)
         parent[pid] = ppid
     excluded, stack = set(), [me]
@@ -167,15 +269,20 @@ def _excluded_pids(rows, me: int) -> set:
 
 
 def _foreign_test_procs(rows, excluded) -> int:
-    return sum(1 for pid, _, cmd in rows
-               if pid not in excluded and _looks_like_test_cmd(cmd))
+    # row[-1] es el comando: la fila puede traer más columnas (ver _ps_rows).
+    return sum(1 for row in rows
+               if row[0] not in excluded and _looks_like_test_cmd(row[-1]))
 
 
-def _suspect(foreign_peak: int, load_max: float, cores: int) -> bool:
+def _suspect(foreign_active_peak: int, load_max: float, cores: int) -> bool:
     """Cada señal sola da falsos positivos (load alto en corridas sanas con
     make -j; procesos ajenos con máquina que da abasto). Juntas describen el
-    régimen exacto donde los timeouts mienten."""
-    return foreign_peak > 0 and load_max > float(cores)
+    régimen exacto donde los timeouts mienten.
+
+    La mitad izquierda cuenta los ajenos ACTIVOS (COR-350), no los que apenas
+    existen: con el conteo viejo, un watcher ocioso permanente la volvía
+    constante y la conjunción degeneraba en `load > cores`."""
+    return foreign_active_peak > 0 and load_max > float(cores)
 
 
 def _test_slots(cores: int):
@@ -199,9 +306,14 @@ class ContentionSampler:
         self.foreign_start = None
         self.foreign_peak = 0
         self.foreign_cmds = []
+        self.active_peak = 0
+        self.active_cmds = []
+        self.measured = False
         self.load_start = -1.0
         self.load_max = -1.0
         self.ok = False
+        self._prev = {}
+        self._prev_time = None
         self._stop = threading.Event()
         self._thread = None
 
@@ -209,9 +321,11 @@ class ContentionSampler:
         rows = _ps_rows()
         if not rows:
             return
+        now = time.monotonic()
         excluded = _excluded_pids(rows, os.getpid())
-        cmds = [cmd for pid, _, cmd in rows
-                if pid not in excluded and _looks_like_test_cmd(cmd)]
+        cmds, activos, snapshot, medible = _classify_active(
+            rows, excluded, self._prev, self._prev_time, now)
+        self._prev, self._prev_time = snapshot, now
         foreign = len(cmds)
         load = _load1()
         if self.foreign_start is None:
@@ -223,6 +337,15 @@ class ContentionSampler:
             # sesión, que es lo único que decide la remediación.
             self.foreign_cmds = [c[:120] for c in cmds[:5]]
         self.foreign_peak = max(self.foreign_peak, foreign)
+        # El pico de ACTIVOS solo se toca con muestras que se pudieron medir:
+        # la primera muestra JAMÁS tiene delta, así que dejarla entrar clavaría
+        # el pico en el total de ajenos para siempre y no habríamos arreglado
+        # nada. Si NINGUNA muestra fue medible, `stop()` cae al conteo viejo.
+        if medible:
+            self.measured = True
+            if len(activos) > self.active_peak:
+                self.active_cmds = [c[:120] for c in activos[:5]]
+            self.active_peak = max(self.active_peak, len(activos))
         self.load_max = max(self.load_max, load)
         self.ok = self.ok or load >= 0.0
 
@@ -251,14 +374,27 @@ class ContentionSampler:
         if not self.ok or self.foreign_start is None:
             return {}    # ausencia honesta: sin ps o sin loadavg no se inventa
         cores = _cores()
+        # Corrida tan corta que ninguna ventana entre muestras dio para medir un
+        # delta: no se puede distinguir al watcher ocioso de la suite ajena, así
+        # que valen TODOS los ajenos. Mismo sesgo conservador declarado en
+        # _classify_active, y queda dicho en el sello (active_measured) para que
+        # quien lea sepa si el número está medido o supuesto.
+        active_peak = self.active_peak if self.measured else self.foreign_peak
+        active_cmds = self.active_cmds if self.measured else self.foreign_cmds
         return {
             "cores": cores,
             "foreign_test_procs_start": self.foreign_start,
             "foreign_test_procs_peak": self.foreign_peak,
             "foreign_test_cmds": self.foreign_cmds,
+            # ADITIVO (COR-350): el conteo de ACTIVOS viaja junto al viejo, no
+            # en su lugar. Agregar campos al sello no invalida evidencia ya
+            # emitida; reemplazarlos sí.
+            "foreign_active_test_procs_peak": active_peak,
+            "foreign_active_test_cmds": active_cmds,
+            "active_measured": self.measured,
             "load_avg_start": round(self.load_start, 2),
             "load_avg_max": round(self.load_max, 2),
-            "suspect": _suspect(self.foreign_peak, self.load_max, cores),
+            "suspect": _suspect(active_peak, self.load_max, cores),
         }
 
 
@@ -632,6 +768,57 @@ def load_json(path: Path, label: str) -> dict:
     return value
 
 
+def declara_contencion(evidence_id: str, contention: dict) -> None:
+    """La contención se DECLARA, no bloquea. Y esto no es aflojar un estándar.
+
+    CASO DE CAMPO, medido: el sello `contention.suspect` dejó a un agente
+    esperando a que la máquina se calmara y una tarea de 5 minutos tardó 3
+    HORAS hasta que hubo que matarla. La remediación impresa decía "esperá a
+    que terminen las otras sesiones", que en un workspace multi-sesión puede no
+    pasar NUNCA.
+
+    LA ASIMETRÍA QUE EL GATE IGNORABA: `verify_one` construye `expected` con
+    exit_code 0 y muere ahí, ANTES de mirar la contención, y `fresh_evidence`
+    hace lo mismo. O sea que TODA evidencia que llegaba a este chequeo ya había
+    salido VERDE. Y la contención hace que los tests se caigan por TIMEOUT: no
+    hace que las aserciones pasen. El gate bloqueaba justo la única clase de
+    resultado que la contención no puede haber falsificado. Un verde bajo carga
+    es, si acaso, MÁS confiable que uno en máquina libre; el rojo bajo carga sí
+    puede ser mentira, y ese lo sigue rechazando el chequeo de exit_code (y lo
+    avisa `command_run` en el momento de sellar).
+
+    EL RESIDUO QUE SÍ QUEDA ABIERTO, y por eso esto se imprime en vez de
+    callarse: una suite cuyos guards de entorno SALTAN tests cuando un servicio
+    está lento puede salir verde con MENOS tests corridos de los que cree. Eso
+    no lo cubre ningún otro gate, así que se declara para que el reviewer lo
+    mire."""
+    peak = contention.get("foreign_active_test_procs_peak")
+    if peak is None:      # manifiestos previos a COR-350: solo el conteo viejo
+        peak = contention.get("foreign_test_procs_peak")
+    quienes = (contention.get("foreign_active_test_cmds")
+               or contention.get("foreign_test_cmds") or [])
+    detalle = "".join(f"\n     - {c}" for c in quienes)
+    print(
+        f"EVIDENCE: ⚠️  {evidence_id}: SELLADA BAJO CONTENCIÓN "
+        f"({peak} proceso(s) de test ajenos activos, load "
+        f"{contention.get('load_avg_max')} con {contention.get('cores')} "
+        f"cores). Se DECLARA, no bloquea.{detalle}\n"
+        "   Por qué no bloquea: este sello ya pasó el chequeo de exit_code 0, "
+        "o sea que es un VERDE, y la contención no fabrica verdes: fabrica "
+        "TIMEOUTS, o sea rojos, que este mismo verify rechaza antes de llegar "
+        "acá. Bloquearlo dejaba al agente esperando a que la máquina se "
+        "calmara, que en un workspace multi-sesión puede no pasar nunca.\n"
+        "   EL RESIDUO QUE SÍ QUEDA ABIERTO, reviewer, miralo: una suite cuyos "
+        "guards de entorno SALTAN tests cuando un servicio está lento sale "
+        "VERDE con menos tests corridos de los que cree. Ningún otro gate lo "
+        "cubre.\n"
+        "   ↳ compará el conteo de tests del log contra el esperado. Si la "
+        "suite tiene skips condicionales por timeout o healthcheck, re-corré "
+        "en ventana tranquila: HARNESS_TEST_SLOTS=N baja tu paralelismo "
+        "PROPIO, y si la carga es de OTRA sesión no la toca.",
+        file=sys.stderr)
+
+
 def verify_one(task_dir: Path, evidence_id: str, repo: str, commit: str,
                verdict_patch_id: "str | None" = None) -> dict:
     if not evidence_id.startswith("EV-") or "/" in evidence_id or ".." in evidence_id:
@@ -676,16 +863,7 @@ def verify_one(task_dir: Path, evidence_id: str, repo: str, commit: str,
         die(f"{evidence_id}: runner vacío", 3)
     contention = data.get("contention")
     if isinstance(contention, dict) and contention.get("suspect") is True:
-        quienes = contention.get("foreign_test_cmds") or []
-        detalle = "".join(f"\n     - {c}" for c in quienes)
-        die(f"{evidence_id}: sellada bajo contención (suspect: "
-            f"{contention.get('foreign_test_procs_peak')} procesos de test ajenos, "
-            f"load {contention.get('load_avg_max')} con {contention.get('cores')} "
-            f"cores). Un resultado bajo esa carga no prueba nada.{detalle}\n"
-            "   ↳ si esas suites son TUYAS (varias en paralelo en esta misma "
-            "tarea), bajá tu paralelismo con HARNESS_TEST_SLOTS=N y sellá de "
-            "nuevo. Si son de OTRA sesión, HARNESS_TEST_SLOTS no las toca: "
-            "esperá a que terminen y sellá dentro de esa ventana.", 3)
+        declara_contencion(evidence_id, contention)
     output = data.get("output")
     if not isinstance(output, str) or not output:
         die(f"{evidence_id}: output inválido", 3)
@@ -715,8 +893,13 @@ def fresh_evidence(task_dir: Path, repo: str, commit: str) -> list:
     movía el trunk, cuando lo único que hacía falta era re-correr los tests
     (determinista, gratis en tokens).
 
-    Devuelve (found, suspect_kinds): los kinds que EXISTEN pero solo sellados
-    bajo contención, para que el mensaje del gap diga la causa real."""
+    Devuelve (found, suspect_kinds). ``suspect_kinds`` es INFORMATIVO: los kinds
+    de los que hay evidencia sellada bajo contención, para que quien consuma
+    pueda DECLARARLO. Ya no son un motivo de descarte (ver declara_contencion:
+    la contención produce timeouts, o sea rojos, y un rojo lo saca el chequeo de
+    exit_code de abajo; descartar además los verdes dejaba al agente esperando
+    una ventana tranquila que en un workspace multi-sesión puede no llegar
+    nunca, y costó una tarea de 5 minutos convertida en 3 horas)."""
     found = []
     suspect_kinds = set()
     evidence_dir = task_dir / "evidence"
@@ -750,8 +933,10 @@ def fresh_evidence(task_dir: Path, repo: str, commit: str) -> list:
             continue          # el log no respalda al manifiesto
         contention = data.get("contention")
         if isinstance(contention, dict) and contention.get("suspect") is True:
+            # Se ANOTA y ENTRA: el manifiesto ya probó exit_code 0 y hash del
+            # log. La contención viaja declarada, no borra la prueba.
             suspect_kinds.add(data.get("kind"))
-            continue          # sellada bajo contención: no prueba nada
+            declara_contencion(str(data.get("id")), contention)
         found.append(data)
     return found, suspect_kinds
 
@@ -802,18 +987,22 @@ def command_verify(args: argparse.Namespace) -> int:
         fresh_kinds = {item.get("kind") for item in fresh}
         gaps = sorted(fresh_required - fresh_kinds)
         if gaps:
-            tainted = sorted(set(gaps) & suspect_kinds)
-            extra = ""
-            if tainted:
-                extra = (f" OJO: hay evidencia de {', '.join(tainted)} pero está "
-                         "marcada suspect (se selló bajo contención): re-corre "
-                         "con menos contención (HARNESS_TEST_SLOTS=N).")
+            # NO se explica el gap por contención: desde que suspect declara en
+            # vez de descartar, un manifiesto suspect ENTRA a `found`, así que
+            # su kind nunca puede estar en `gaps`. El aviso vive donde vale, en
+            # declara_contencion, y viaja con la evidencia que sí se aceptó.
             die(f"falta evidencia FRESCA sobre el árbol que se pushea "
                 f"({args.repo}@{args.commit[:12]}): {', '.join(gaps)}. "
                 "El veredicto se revisó sobre otro commit, así que la prueba de "
                 "que ESTE árbol pasa la suite tiene que producirse ahora: "
                 "evidence.py run --runner ship --kind test ... sobre el HEAD "
-                f"actual.{extra}", 3)
+                "actual.", 3)
+        declarados = sorted(k for k in suspect_kinds if k in fresh_required)
+        if declarados:
+            print(f"⚠️  la evidencia fresca de {', '.join(declarados)} se selló "
+                  "bajo contención: se acepta y se DECLARA (ver el detalle de "
+                  "arriba); el residuo a mirar son los tests que la suite pudo "
+                  "haber SALTADO por guards de entorno.")
         print(f"✅ evidencia fresca sobre {args.repo}@{args.commit[:12]}: "
               f"{', '.join(sorted(k for k in fresh_kinds if k in fresh_required))} "
               f"(runners: {', '.join(sorted({str(i.get('runner')) for i in fresh}))})")

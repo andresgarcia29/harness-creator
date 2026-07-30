@@ -335,6 +335,53 @@ jq -n --arg c "$HEADQ" '{schema:1, task_id:"T1", repo:"atlas", qa:"fail",
 bash "$WS/scripts/verdict-scaffold.sh" --merge-qa T1 atlas >/dev/null 2>&1
 assert_eq "fail" "$(jq -r .qa "$V")" "qa fail se fusiona igual de mecánico"
 
+# ── QA sellada bajo CONTENCIÓN: fusiona y DECLARA (antes: exit 3) ──────
+# ESTE CASO CAMBIÓ DE SENTIDO, por el mismo motivo que el bloque de más abajo:
+# merge_qa exige exit_code 0 ANTES de mirar el sello, así que el EV que llegaba
+# a la rama de contención YA ERA VERDE, y la contención produce timeouts (rojos)
+# que exit_code ya rechaza. Rechazarlo mandaba a "re-sellá con la máquina
+# descargada", que es una espera sin condición de salida: 5 minutos de trabajo
+# convertidos en 3 horas en campo.
+jq -n --arg id EV-TEST-qasuspect01 --arg c "$HEADQ" \
+  '{schema:1, id:$id, task_id:"T1", repo:"atlas", kind:"test", runner:"qa",
+    commit:$c, commit_after:$c, exit_code:0, contention:{suspect:true},
+    output:("evidence/"+$id+".log"), output_sha256:"deadbeef"}' \
+  > "$WS/tasks/T1/evidence/EV-TEST-qasuspect01.json"
+jq -n --arg c "$HEADQ" '{schema:1, task_id:"T1", repo:"atlas", qa:"pass",
+  commit:$c, evidence:["EV-TEST-qasuspect01"]}' > "$WS/tasks/T1/qa-atlas.json"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --merge-qa T1 atlas 2>&1)"; rc=$?
+assert_eq 0 "$rc" "EV de QA suspect del commit CORRECTO: fusiona (antes: exit 3)"
+assert_contains "$(jq -c .evidence "$V")" "EV-TEST-qasuspect01" "el EV de QA entra al veredicto"
+assert_contains "$(jq -c '.evidence_under_contention' "$V")" "EV-TEST-qasuspect01" \
+  "y queda DECLARADO, que es lo que el reviewer necesita para juzgarlo"
+assert_contains "$out" "CONTENCIÓN" "el merge lo dice por pantalla, no solo en el JSON"
+assert_contains "$out" "SALTAN" "nombrando el residuo: guards de entorno que saltan tests"
+
+# La contra-mitad, que NO cambió: un EV de OTRO cambio sigue rechazado, y su
+# mensaje sigue siendo el del cambio ajeno, jamás el de contención.
+jq -n --arg c "$OTHER_SHA" '{schema:1, task_id:"T1", repo:"atlas", qa:"pass",
+  commit:$c, evidence:["EV-TEST-qaotro00001"]}' > "$WS/tasks/T1/qa-atlas.json"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --merge-qa T1 atlas 2>&1)"; rc=$?
+assert_eq 3 "$rc" "EV de QA de OTRO cambio: sigue siendo exit 3"
+assert_contains "$out" "OTRO cambio" "con SU diagnóstico"
+assert_not_contains "$out" "CONTENCIÓN" "sin confundirlo con el de contención"
+
+# La otra mitad que NO cambió: el EV de QA del commit correcto pero en ROJO
+# bajo carga. Ese sí sigue rechazado, y con el diagnóstico de COR-655: el
+# commit es el bueno, y re-sellar puede cambiar el resultado porque la
+# contención produce timeouts.
+jq -n --arg id EV-TEST-qarojo00001 --arg c "$HEADQ" \
+  '{schema:1, id:$id, task_id:"T1", repo:"atlas", kind:"test", runner:"qa",
+    commit:$c, commit_after:$c, exit_code:1, contention:{suspect:true},
+    output:("evidence/"+$id+".log"), output_sha256:"deadbeef"}' \
+  > "$WS/tasks/T1/evidence/EV-TEST-qarojo00001.json"
+jq -n --arg c "$HEADQ" '{schema:1, task_id:"T1", repo:"atlas", qa:"pass",
+  commit:$c, evidence:["EV-TEST-qarojo00001"]}' > "$WS/tasks/T1/qa-atlas.json"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --merge-qa T1 atlas 2>&1)"; rc=$?
+assert_eq 3 "$rc" "EV de QA en ROJO bajo contención: exit 3"
+assert_contains "$out" "ROJO" "nombrando el rojo, que es lo que descalifica"
+assert_not_contains "$out" "OTRO cambio" "y no un commit ajeno que no lo es (COR-655)"
+
 echo
 echo "── el ÁRBOL CLAVADO: el reviewer juzga el commit sellado, no el árbol vivo"
 # P1 de campo: el reviewer leía worktrees/<task>/<repo> mientras el implementer
@@ -454,11 +501,27 @@ assert_not_contains "$(git -C "$WS/repos/beta" worktree list --porcelain)" ".rev
   "--rm poda también el pin registrado cuyo dir ya no existe"
 
 echo
-echo "── un EV marcado por contención NO entra al veredicto"
-# Caso de campo: gate_preflight rechaza el veredicto que cite un EV con
-# contention.suspect y manda a re-sellar, pero el scaffold volvía a elegir el
-# contaminado, así que la remediación era inalcanzable (--rebase se niega
-# porque el commit no se movió y --force re-incluye el sucio).
+echo "── un EV sellado bajo contención ENTRA al veredicto, DECLARADO"
+# ESTE BLOQUE CAMBIÓ DE SENTIDO A PROPÓSITO, y su historia importa porque la
+# conducta vieja costó caro. Antes afirmaba lo contrario ("un EV marcado por
+# contención NO entra al veredicto"): el scaffold lo excluía para que la
+# remediación de gate_preflight fuera alcanzable.
+#
+# CASO DE CAMPO MEDIDO: esa exclusión convirtió una tarea de 5 minutos en 3
+# HORAS y hubo que matarla. El agente sellaba, el scaffold salía exit 3 por
+# contención, y volvía a sellar esperando a que la máquina se calmara: un
+# bucle sin condición de salida, porque la carga no dependía de él.
+#
+# Y el gate bloqueaba justo la única clase de resultado que la contención NO
+# puede falsificar: la elegibilidad exige exit_code 0 ANTES de mirar el sello,
+# o sea que todo EV que llega al chequeo de contención YA SALIÓ VERDE, y la
+# contención produce TIMEOUTS, o sea ROJOS. Un rojo ya lo rechaza exit_code.
+#
+# Así que la contención deja de EXCLUIR y pasa a DECLARARSE: el EV entra y el
+# veredicto lo lista en evidence_under_contention. El residuo real que queda
+# (una suite cuyos guards de entorno SALTAN tests cuando un servicio está
+# lento sale verde con MENOS tests corridos) es JUICIO del reviewer, y para
+# juzgarlo tiene que saberlo: taparlo no lo hacía desaparecer.
 mkdir -p "$WS/tasks/T6/evidence" "$WS/worktrees/T6"
 WT6="$WS/worktrees/T6/atlas"
 git init -q -b main "$WT6"
@@ -477,30 +540,66 @@ mk_ev6() {  # mk_ev6 <id> <commit> <suspect true|false>
       contention:{suspect:$s}}' > "$WS/tasks/T6/evidence/$1.json"
 }
 
-# (a) dos EVs del MISMO commit, uno marcado y otro limpio: cita solo el limpio
+# (a) dos EVs del MISMO commit, uno marcado y otro limpio: entran los DOS, y
+# solo el marcado queda declarado.
 mk_ev6 EV-TEST-c0ntam1nad0 "$H6" true
 mk_ev6 EV-TEST-l1mp10l1mp1 "$H6" false
 bash "$WS/scripts/verdict-scaffold.sh" T6 atlas revisor-6 >/dev/null 2>&1 \
-  && pass "con un EV limpio disponible: exit 0" || fail "el scaffold falló con evidencia limpia"
+  && pass "con evidencia verde del commit: exit 0" || fail "el scaffold falló con evidencia verde"
 V6="$WS/tasks/T6/verdict-atlas.json"
-assert_eq "EV-TEST-l1mp10l1mp1" "$(jq -r '.evidence | join(",")' "$V6")" \
-  "cita SOLO el EV limpio (el marcado por contención queda fuera)"
+assert_eq "EV-TEST-c0ntam1nad0,EV-TEST-l1mp10l1mp1" "$(jq -r '.evidence | join(",")' "$V6")" \
+  "cita los dos: la contención ya no descarta un verde"
+assert_eq "EV-TEST-c0ntam1nad0" "$(jq -r '.evidence_under_contention | join(",")' "$V6")" \
+  "y DECLARA solo el sellado bajo carga, que es lo que el reviewer tiene que mirar"
 
-# (b) el degenerado: el ÚNICO EV está marcado → se comporta como sin evidencia
+# el campo es ADITIVO: sin EV bajo contención, el veredicto no lo inventa
+rm -f "$WS/tasks/T6/evidence/EV-TEST-c0ntam1nad0.json" "$V6"
+bash "$WS/scripts/verdict-scaffold.sh" T6 atlas revisor-6 >/dev/null 2>&1
+assert_eq "false" "$(jq 'has("evidence_under_contention")' "$V6")" \
+  "sin contención, el veredicto no inventa el campo"
+
+# (b) el que causaba el bucle de 3 horas: el ÚNICO EV está marcado.
+mk_ev6 EV-TEST-c0ntam1nad0 "$H6" true
 rm -f "$WS/tasks/T6/evidence/EV-TEST-l1mp10l1mp1.json" "$V6"
 out="$(bash "$WS/scripts/verdict-scaffold.sh" T6 atlas revisor-6 2>&1)"; rc=$?
-assert_eq 3 "$rc" "único EV marcado por contención: exit 3, no lo cita"
-assert_contains "$out" "evidence.py run" "y da la remediación de sellar de nuevo"
-# El DIAGNÓSTICO importa tanto como el exit: el commit es el CORRECTO y nadie
-# movió HEAD. Decir "de OTRO commit" mandaba a cazar una causa inexistente, y
-# al mensaje se le cree: costaba una ronda entera antes de mirar el manifiesto.
-assert_contains "$out" "CONTENCIÓN" "el diagnóstico nombra la contención, que es la causa real"
-assert_not_contains "$out" "OTRO commit" "y NO culpa a un HEAD que nadie movió"
-bash "$WS/scripts/verdict-scaffold.sh" --allow-empty T6 atlas revisor-6 >/dev/null 2>&1 \
-  && pass "--allow-empty sigue siendo la salida consciente (la decide un humano)" \
-  || fail "--allow-empty no pudo emitir el veredicto sin evidencia"
-assert_eq "0" "$(jq '.evidence | length' "$V6")" \
-  "ni con --allow-empty entra el EV marcado al veredicto"
+assert_eq 0 "$rc" "único EV sellado bajo contención: exit 0 (antes: exit 3, y a re-sellar para siempre)"
+assert_eq "EV-TEST-c0ntam1nad0" "$(jq -r '.evidence | join(",")' "$V6")" \
+  "el EV entra: es un VERDE, y la contención produce rojos, no verdes falsos"
+assert_eq "EV-TEST-c0ntam1nad0" "$(jq -r '.evidence_under_contention | join(",")' "$V6")" \
+  "y queda declarado, no colado en silencio"
+# El razonamiento va A PANTALLA: un veredicto que declara un campo que nadie
+# explica se lee como ruido y el reviewer lo saltea.
+assert_contains "$out" "CONTENCIÓN" "el scaffold lo DICE, no solo lo escribe en el JSON"
+assert_contains "$out" "SALTAN" "y nombra el residuo concreto: guards de entorno que saltan tests"
+assert_not_contains "$out" "OTRO commit" "sin culpar a un HEAD que nadie movió"
+
+# (c) REGRESIÓN: la contención dejó de excluir, pero el commit ajeno NO. Un EV
+# de otro cambio, marcado o no, sigue afuera y con SU diagnóstico.
+rm -f "$V6"
+mk_ev6 EV-TEST-4jen0suspec "0000000000000000000000000000000000000000" true
+rm -f "$WS/tasks/T6/evidence/EV-TEST-c0ntam1nad0.json"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" T6 atlas revisor-6 2>&1)"; rc=$?
+assert_eq 3 "$rc" "EV de OTRO commit (aunque esté marcado): sigue siendo exit 3"
+assert_contains "$out" "OTRO commit" "y su mensaje sigue siendo el del commit ajeno"
+assert_contains "$out" "evidence.py run" "con la remediación de sellar sobre el HEAD actual"
+rm -f "$WS/tasks/T6/evidence/EV-TEST-4jen0suspec.json"
+
+# (d) El diagnóstico de COR-655 sobrevive, MUDADO al único caso donde la
+# contención sigue explicando por qué falta un verde: el EV del commit correcto
+# que salió en ROJO bajo carga. Ahí re-sellar SÍ puede cambiar el resultado
+# (la contención produce timeouts), al revés que con un verde.
+rm -f "$V6"
+jq -n --arg id EV-TEST-r0j0b4j0c4r --arg c "$H6" \
+  '{schema:1, id:$id, task_id:"T6", repo:"atlas", kind:"test", runner:"impl-atlas",
+    commit:$c, commit_after:$c, exit_code:1, contention:{suspect:true},
+    output:("evidence/"+$id+".log"), output_sha256:"deadbeef"}' \
+  > "$WS/tasks/T6/evidence/EV-TEST-r0j0b4j0c4r.json"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" T6 atlas revisor-6 2>&1)"; rc=$?
+assert_eq 3 "$rc" "EV en ROJO bajo contención: exit 3 (un rojo no lo salva ningún sello)"
+assert_contains "$out" "ROJO" "el diagnóstico dice que el problema es el rojo"
+assert_contains "$out" "CONTENCIÓN" "y que la carga puede ser su causa"
+assert_not_contains "$out" "OTRO commit" "sin culpar a un HEAD que nadie movió (COR-655)"
+rm -f "$WS/tasks/T6/evidence/EV-TEST-r0j0b4j0c4r.json"
 
 echo
 echo "── el veredicto HEREDA la condición declarada del precheck (bug conocido)"
@@ -532,25 +631,32 @@ rm -f "$WS/tasks/T6/precheck-atlas.json" "$V6" \
 
 echo
 echo "── --rebase --renew con el MISMO commit: re-liga la evidencia y CONSERVA el juicio"
-# Caso de campo (COR-360): el precheck selló bajo contención, ship rechazó el EV
-# suspect, se re-selló limpio en ventana tranquila... y no había camino de
-# vuelta. --rebase se negaba ("no hay delta que rebasear") y --force borraba el
-# juicio, así que la única salida era pagar un re-review completo de un diff
-# idéntico al ya aprobado. La evidencia caduca por contención igual que caduca
-# por cambio de base; el juicio no.
+# Caso de campo (COR-360): un veredicto ya juzgado cita evidencia que dejó de
+# valer (se re-selló, se movió el archivo, cambió qué EV la respalda) y el
+# commit NO se movió: --rebase se negaba ("no hay delta que rebasear") y
+# --force borraba el juicio, así que la única salida era pagar un re-review
+# completo de un diff idéntico al ya aprobado. La evidencia caduca; el juicio
+# no. El REBIND sigue siendo válido y es lo único que re-liga sin re-juzgar.
 mk_ev6 EV-TEST-l1mp10l1mp1 "$H6" false
+mk_ev6 EV-TEST-c0ntam1nad0 "$H6" true
 rm -f "$V6"
 bash "$WS/scripts/verdict-scaffold.sh" T6 atlas revisor-6 >/dev/null 2>&1
-# el reviewer ya escribió su juicio, y el veredicto cita el EV contaminado
+# el reviewer ya escribió su juicio, y el veredicto cita una sola evidencia
 jq '.verdict="pass" | .qa="pass" | .requirements_uncovered=0
     | .compliance=[{id:"R-1",covered:true,tests:["t.js"]}]
-    | .evidence=["EV-TEST-c0ntam1nad0"]' "$V6" > "$V6.tmp" && mv "$V6.tmp" "$V6"
+    | .evidence=["EV-TEST-c0ntam1nad0"] | del(.evidence_under_contention)' \
+  "$V6" > "$V6.tmp" && mv "$V6.tmp" "$V6"
 out="$(bash "$WS/scripts/verdict-scaffold.sh" --rebase --renew T6 atlas revisor-6 2>&1)"; rc=$?
 assert_eq 0 "$rc" "rebind: exit 0 con el commit sin moverse"
 assert_contains "$out" "rebind" "y lo llama por su nombre, no 're-review incremental'"
 assert_eq "pass" "$(jq -r .verdict "$V6")" "rebind: el juicio se CONSERVA (no vuelve a PENDING)"
-assert_eq "EV-TEST-l1mp10l1mp1" "$(jq -r '.evidence | join(",")' "$V6")" \
-  "rebind: cita el limpio y suelta el contaminado"
+assert_eq "EV-TEST-c0ntam1nad0,EV-TEST-l1mp10l1mp1" "$(jq -r '.evidence | join(",")' "$V6")" \
+  "rebind: re-liga toda la evidencia elegible del commit"
+# El rebind también DECLARA: si re-ligó un EV sellado bajo carga, el campo
+# tiene que aparecer aunque el veredicto previo no lo trajera. Si no, el
+# rebind sería la puerta trasera por donde la contención entra sin decirlo.
+assert_eq "EV-TEST-c0ntam1nad0" "$(jq -r '.evidence_under_contention | join(",")' "$V6")" \
+  "rebind: la declaración de contención se recalcula, no se hereda del previo"
 assert_eq "1" "$(jq '.compliance | length' "$V6")" "rebind: la matriz de compliance sobrevive entera"
 assert_eq "0" "$(jq '.requirements_uncovered' "$V6")" "y los campos de juicio del reviewer también"
 

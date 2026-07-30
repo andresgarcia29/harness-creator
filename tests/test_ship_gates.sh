@@ -1630,4 +1630,51 @@ else
   pass "un helper que no declara test NO entra al alcance"
 fi
 
+
+echo "── gate_test_muerde: la implementacion bajo tests/ NO viaja al arbol base"
+# Caso de campo: en un repo cuyos helpers viven bajo tests/, el patron GRUESO
+# (que incluye el DIRECTORIO) clasificaba tests/helpers/clientes.ts como archivo
+# de test y lo copiaba al arbol base junto a su propio test. Con la
+# implementacion presente el test PASA, y el gate cantaba "PASA sobre el arbol
+# base": un rojo FALSO cuya remediacion impresa empujaba a declarar la
+# implementacion bajo MODIFIED, o sea a mentirle a un artefacto para apagar un
+# gate. Medido: 4 de 8 archivos del alcance eran implementacion.
+mk_muerde_repo "$WS/mu_impl"
+mkdir -p tests/helpers
+printf 'export function crearCliente() { return { id: 1 } }\n' > tests/helpers/clientes.ts
+printf "import { crearCliente } from './helpers/clientes'\nit('crea', () => {})\n" > tests/clientes.spec.ts
+git add -A && git commit -qm "spec nuevo mas su helper"
+
+out="$(run_muerde)"
+assert_contains "$out" "NO son tests" "el helper se declara como implementacion"
+assert_contains "$out" "tests/helpers/clientes.ts" "nombrandolo, no en silencio"
+assert_not_contains "$out" "PASA sobre el árbol base" "sin el rojo falso que producia copiarlo"
+
+# Contra-mitad 1: el filtro fino no puede tragarse un test legitimo. El .spec.
+# sigue entrando al alcance, y por eso el gate lo nombra al declarar el salto.
+assert_contains "$out" "clientes.spec.ts" "el spec legitimo SI entra al alcance"
+
+# Contra-mitad 2: un test de nombre normal bajo tests/ tampoco se confunde con
+# implementacion, o el filtro estaria apagando el gate entero.
+mk_muerde_repo "$WS/mu_impl2"
+printf 'def f(): pass\n' > feature.py
+printf 'def test_feature():\n    import feature\n' > tests/test_feature.py
+git add -A && git commit -qm feat
+out="$(run_muerde)"
+assert_not_contains "$out" "NO son tests" "un test_*.py normal no se declara implementacion"
+
+# Contra-mitad 3: las DOS grafias de cada convencion. Portar este filtro con
+# solo `\.spec\.` clasificaba algo_spec.rb (RSpec, sin punto) como
+# implementacion y apagaba el gate para todo Ruby. Se cazo al correr la suite:
+# el caso (e) se puso rojo.
+mk_muerde_repo "$WS/mu_impl3"
+printf 'assert true\n' > tests/algo_spec.rb
+printf 'func TestX(t *testing.T) {}\n' > tests/svc_test.go
+git add -A && git commit -qm "dos grafias"
+out="$(run_muerde)"
+# El bloque de implementacion no puede ni aparecer: los dos son tests. Se
+# afirma sobre su ENCABEZADO, no sobre el nombre del archivo, porque el
+# archivo aparece igual en la lista de muerde_salto y ahi es correcto.
+assert_not_contains "$out" "NO son tests" "_spec.rb y _test.go: ninguno se declara implementacion"
+
 t_done

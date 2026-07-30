@@ -1735,8 +1735,32 @@ muerde_salto() {  # muerde_salto <qué> <lista>: saltar se DICE, no se calla
 gate_test_muerde() {
   local pat="${TEST_PATH_PATTERN:-(test|spec|Test|_test\.|\.test\.|\.spec\.|/tests?/|/spec/)}"
   local artifacts="${TEST_ARTIFACT_PATTERN:-(__pycache__/|\.pyc$|\.pyo$|\.class$|\.pytest_cache/|/node_modules/)}"
+  # `pat` es el filtro GRUESO de descubrimiento: incluye el DIRECTORIO
+  # (/tests?/, /spec/) para no perderse un test con nombre raro. Pero para
+  # decidir QUÉ ARCHIVO se copia al árbol base hace falta el patrón FINO, a
+  # nivel de nombre de archivo, y son dos preguntas distintas.
+  #
+  # POR QUÉ: en un repo cuyos helpers viven bajo tests/ (convención común, y
+  # varios CLAUDE.md la mandan explícitamente), el grueso clasifica
+  # tests/helpers/clientes.ts (la IMPLEMENTACIÓN) como archivo de test y la
+  # copia al árbol base junto a su propio test. Con la implementación presente
+  # el test pasa, y el gate lo canta como "PASA sobre el árbol base": un rojo
+  # FALSO cuya remediación impresa empuja a declarar la implementación bajo
+  # MODIFIED en el delta-spec, o sea a escribir algo falso en un artefacto para
+  # apagar un gate. Caso de campo: 4 de 8 archivos del alcance eran
+  # implementación.
+  #
+  # El mismo error compraba un VERDE por la otra punta: tests/helpers/pagos.ts
+  # entraba al alcance y "MUERDE" porque vitest sale 1 con "No test files
+  # found", que es el runner quejándose, no el test mordiendo.
+  #
+  # El fino tiene que cubrir las DOS grafías de cada convención, o se come
+  # tests legítimos y apaga el gate en silencio, que es peor que el bug que
+  # arregla: `_test.go` y `.test.ts` pero también `_spec.rb` (RSpec no usa
+  # punto), `test_x.py` y `conftest.py`, y el sufijo Tests de la familia JVM.
+  local filepat="${TEST_FILE_PATTERN:-(_test\.|_spec\.|\.test\.|\.spec\.|(^|/)test_[^/]*\.|(^|/)spec_[^/]*\.|(^|/)conftest\.py$|[Tt]ests?\.(java|kt|cs|scala)$)}"
   local nuevos tocados delta added="" escape="" f dir
-  local scope="" escapados=""
+  local scope="" escapados="" implementaciones=""
   local py_files="" go_dirs="" node_files="" otros=""
   local corre_py=0 corre_go=0 corre_node=0
   local MUERDE_PY="" MUERDE_NODE="" MUERDE_NODE_ARGS="" MUERDE_MOTIVO=""
@@ -1765,12 +1789,27 @@ gate_test_muerde() {
 "
       continue
     fi
+    # Entró por el DIRECTORIO pero su NOMBRE no es de test: es implementación
+    # que vive junto a los tests. No se copia al árbol base (copiarla es lo que
+    # hace pasar al test por construcción), y se DICE, que es la misma doctrina
+    # de muerde_salto: un tramo que no se mira no se calla.
+    if ! printf '%s\n' "$f" | grep -qE "$filepat"; then
+      implementaciones="$implementaciones   · $f
+"
+      continue
+    fi
     scope="$scope$f
 "
   done <<TOCEOF
 $tocados
 TOCEOF
   if [ -n "$escapados" ]; then printf '%s' "$escapados"; fi
+  if [ -n "$implementaciones" ]; then
+    echo "ℹ️  archivos bajo un directorio de tests que NO son tests (implementación"
+    echo "   que vive junto a ellos). NO se copian al árbol base: hacerlo haría"
+    echo "   pasar a su propio test por construcción."
+    printf '%s' "$implementaciones"
+  fi
   if [ -z "$scope" ]; then
     echo "ℹ️  sin tests nuevos que verificar contra el árbol base"
     return 0

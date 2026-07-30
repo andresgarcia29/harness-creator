@@ -76,6 +76,21 @@ cd "$WS/r2"
 run_gate_lane '{"lane":"full"}' \
   && pass "full tocando proto: gate_lane no interviene" || fail "full: gate_lane bloqueó y no debía"
 
+# 5. el TRUNK avanza con un proto ajeno y la rama no lo toca → NO bloquea.
+#    Con dos puntos se comparan las PUNTAS: el proto que otro sumó aparece en
+#    este diff (como borrado) y el carril acusaba una promesa que nadie rompió.
+mk_repo "$WS/r5"
+echo x > feature.go && git add . && git commit -qm feat
+rama="$(git rev-parse --abbrev-ref HEAD)"
+git checkout -q --detach refs/remotes/origin/main
+mkdir -p proto && echo 'message Ajeno{}' > proto/ajeno.proto
+git add . && git commit -qm "avance ajeno del trunk"
+git update-ref refs/remotes/origin/main HEAD
+git checkout -q "$rama"
+run_gate_lane '{"lane":"express"}' \
+  && pass "el trunk avanzó con un proto ajeno: express NO bloquea (ancla en el merge-base)" \
+  || fail "express bloqueó por un proto que la rama jamás tocó (diff de puntas)"
+
 echo
 echo "── carril quick: la promesa es el TAMAÑO, y el que lo mide es el gate"
 # quick recorta deliberación (RFC, DAG, briefs), no verificación. Lo único que
@@ -423,6 +438,41 @@ assert_eq 3 "$rc" "test BORRADO sin declarar: bloquea"
 assert_contains "$out" "test BORRADO sin declarar: tests/auth.test.js" \
   "el mensaje distingue el borrado y nombra el archivo"
 
+# 12. el TRUNK avanza con tests ajenos y la rama no toca ninguno → NO bloquea.
+#     Con dos puntos, el diff de puntas INVIERTE el avance del trunk: el test
+#     que otro AGREGÓ se lee acá como borrado y la aserción que otro AÑADIÓ
+#     como aserción eliminada. El gate acusaba de debilitar a quien no tocó
+#     un solo test. El precheck corre SIN rebase, así que es el caso normal.
+mk_test_repo "$WS/g9"
+echo x > feature.go && git add . && git commit -qm feat
+rama="$(git rev-parse --abbrev-ref HEAD)"
+git checkout -q --detach refs/remotes/origin/main
+cat > tests/pagos.test.js <<'FIX'
+describe('pagos', () => {
+  it('cobra', () => {
+    expect(pay()).toEqual(true)
+  })
+})
+FIX
+python3 -c "
+s=open('tests/auth.test.js').read()
+open('tests/auth.test.js','w').write(s.replace(\"    expect(logout()).toEqual(true)\", \"    expect(logout()).toEqual(true)\n    expect(audit()).toEqual(true)\"))"
+git add . && git commit -qm "avance ajeno del trunk"
+git update-ref refs/remotes/origin/main HEAD
+git checkout -q "$rama"
+rm -f "$WS/tasks/T1/delta-spec.md"
+out="$(run_tests_gate 2>&1)"; rc=$?
+assert_eq 0 "$rc" "el trunk avanzó con tests ajenos: NO bloquea (ancla en el merge-base)"
+assert_not_contains "$out" "BORRADO" "ni acusa el borrado del test que OTRO agregó"
+assert_not_contains "$out" "aserciones netas eliminadas" "ni invierte la aserción ajena"
+
+# Y la regla queda fijada en el template, no solo en este caso: ningún `git
+# diff` contra el trunk puede volver a comparar PUNTAS. rev-list/log/gitleaks
+# sí usan dos puntos, y a propósito: cuentan los commits DE LA RAMA.
+dosdot="$(grep -nE 'git diff[^|)]*origin/\$BASE_REF"?\.\.HEAD' "$TMPL" || true)"
+assert_eq "" "$dosdot" \
+  "ningún git diff del template compara PUNTAS contra origin/\$BASE_REF"
+
 echo
 echo "── gate_test_muerde: un test que no puede fallar no prueba nada"
 # Caso de campo: un assert que evaluaba ANTES de que llegara el dato pasó la
@@ -437,22 +487,38 @@ extract muerde_limpia > "$WS/gate_muerde.sh"
 # gate: son sus tres lecturas (el delta-spec, el diff y el grafo de modulos de
 # la base). Sin ellas el gate extraido muere con 127 en vez de decidir.
 for fn in delta_seccion declara_tests_nuevos muerde_pytest muerde_go \
-          muerde_go_base_compila muerde_node muerde_corre muerde_corre_grupo \
-          muerde_salto gate_test_muerde; do
+          muerde_go_base_compila muerde_node muerde_node_colecta muerde_corre \
+          muerde_corre_grupo muerde_salto gate_test_muerde; do
   extract "$fn" >> "$WS/gate_muerde.sh"
 done
 grep -q 'MUERDE_VACUOS' "$WS/gate_muerde.sh" || { echo "no pude extraer gate_test_muerde"; exit 1; }
 grep -q 'worktree remove --force' "$WS/gate_muerde.sh" || { echo "no pude extraer muerde_limpia"; exit 1; }
 
-# Los DOS gates que miran archivos de test tienen que reconocerlos IGUAL. Si el
-# literal se separa, uno empieza a proteger rutas que el otro ya no mira y nadie
-# se entera: el gate viejo sigue verde y el nuevo deja de correr. Se comparan los
-# literales, que es lo único que no envejece.
-pat_untouched="$(grep 'TEST_PATH_PATTERN:-' "$WS/gate_tests.sh" | head -1 | tr -d '[:space:]')"
-pat_muerde="$(grep 'TEST_PATH_PATTERN:-' "$WS/gate_muerde.sh" | head -1 | tr -d '[:space:]')"
+# Los DOS gates miran archivos de test, pero NO con el mismo alcance, y la
+# diferencia es deliberada: untouched protege la SUITE por RUTA (borrar un
+# helper de tests/ debilita la red), mientras que muerde COPIA lo que matchea
+# al árbol base y le corre un runner encima. Con el patrón por directorio, la
+# implementación que vive bajo tests/ viajaba a la base junto a su propio test
+# (el test pasaba ahí por construcción: falso rojo) y un helper sin casos hacía
+# salir 1 al runner, que el gate cobraba como MUERDE (falso verde).
+# Lo que se fija acá es la relación que no puede romperse: SUBSET.
+pat_untouched="$(sed -n 's/.*TEST_PATH_PATTERN:-\(.*\)}".*/\1/p' "$WS/gate_tests.sh" | head -1)"
+pat_muerde="$(sed -n 's/.*TEST_FILE_PATTERN:-\(.*\)}".*/\1/p' "$WS/gate_muerde.sh" | head -1)"
 [ -n "$pat_untouched" ] && pass "extraje el patrón de test de gate_tests_untouched (vacío haría vacuo el chequeo)" \
   || fail "no extraje el patrón de gate_tests_untouched"
-assert_eq "$pat_untouched" "$pat_muerde" "los dos gates detectan 'archivo de test' con el MISMO literal"
+[ -n "$pat_muerde" ] && pass "extraje el patrón de ARCHIVO de gate_test_muerde" \
+  || fail "no extraje TEST_FILE_PATTERN de gate_test_muerde"
+if echo "tests/helpers/pagos.ts" | grep -qE "$pat_muerde"; then
+  fail "un helper bajo tests/ entró al alcance de muerde (el falso rojo y el falso verde de COR-651)"
+else
+  pass "la implementación que vive bajo tests/ NO es un archivo de test para muerde"
+fi
+subset_ok=1
+for f in src/pagos.test.ts tests/test_calc.py e2e/checkout.spec.ts pkg/x_test.go spec/carro_spec.rb; do
+  echo "$f" | grep -qE "$pat_muerde"    || { fail "muerde perdió de vista $f"; subset_ok=0; }
+  echo "$f" | grep -qE "$pat_untouched" || { fail "subset roto: muerde corre $f pero untouched no lo protege"; subset_ok=0; }
+done
+[ "$subset_ok" -eq 1 ] && pass "muerde corre solo ARCHIVOS de test, y untouched los protege a todos (subset)"
 art_untouched="$(grep 'TEST_ARTIFACT_PATTERN:-' "$WS/gate_tests.sh" | head -1 | tr -d '[:space:]')"
 art_muerde="$(grep 'TEST_ARTIFACT_PATTERN:-' "$WS/gate_muerde.sh" | head -1 | tr -d '[:space:]')"
 assert_eq "$art_untouched" "$art_muerde" "y excluyen los MISMOS artefactos compilados"
@@ -466,6 +532,8 @@ cat > "$WS/bin-muerde/pytest" <<'SH'
 #!/bin/sh
 for a in "$@"; do t="$a"; done
 case "$t" in *vacuo*) echo "1 passed"; exit 0 ;; esac
+# exit 5 = "no collected any tests", el código que pytest reserva para eso
+case "$t" in *sincasos*) echo "no tests ran in 0.01s"; exit 5 ;; esac
 if [ -f feature.py ]; then echo "1 passed"; exit 0; fi
 echo "ImportError: cannot import name 'feature'"
 exit 1
@@ -572,6 +640,105 @@ assert_eq 0 "$rc" "sin tests nuevos: verde sin hacer nada"
 assert_contains "$out" "sin tests nuevos que verificar" "con UNA línea, no un informe"
 assert_not_contains "$out" "❌" "sin ruido de rojo"
 assert_eq "1" "$(git worktree list | grep -c .)" "y sin pagar el checkout del árbol base"
+
+# ── el alcance por ARCHIVO, no por directorio, y la COLECCIÓN antes del rojo ──
+# node_modules NO se versiona: el gate ya presta el del worktree por enlace, así
+# que el runner de palo vive fuera del árbol que se juzga, como en la realidad.
+mk_node_muerde() {  # mk_node_muerde <dir> <package.json> <bin> <script-stub>
+  mk_muerde_repo "$1"
+  printf 'node_modules/\n' > .gitignore
+  printf '%s\n' "$2" > package.json
+  mkdir -p "node_modules/.bin"
+  printf '%s\n' "$4" > "node_modules/.bin/$3"
+  chmod +x "node_modules/.bin/$3"
+  git add -A && git commit -qm node
+  git update-ref refs/remotes/origin/main HEAD
+}
+PKG_VITEST='{"devDependencies":{"vitest":"^2"}}'
+# vitest de palo: `list` colecta lo que le pasen; `run` pasa solo si el helper
+# está en el cwd (o sea, solo si el gate lo copió al árbol base, que es el bug).
+STUB_VITEST='#!/bin/sh
+case "$1" in
+  list) shift; echo "$1"; exit 0 ;;
+  run)  shift ;;
+esac
+for a; do t="$a"; done
+case "$t" in *helpers*) echo "No test files found"; exit 1 ;; esac
+if [ -f tests/helpers/flujo.ts ]; then echo "1 passed"; exit 0; fi
+echo "Cannot resolve ./helpers/flujo"; exit 1'
+
+# (h) falso VERDE de COR-651: un helper sin casos bajo tests/ hacía salir 1 al
+#     runner ("No test files found") y el gate cobraba ese exit como MUERDE.
+mk_node_muerde "$WS/mu6" "$PKG_VITEST" vitest "$STUB_VITEST"
+mkdir -p tests/helpers && printf 'export const pago = 1\n' > tests/helpers/pagos.ts
+git add -A && git commit -qm helper
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "un helper bajo tests/ no es un test: verde sin correr nada"
+assert_contains "$out" "sin tests nuevos que verificar" "y queda fuera del alcance"
+assert_not_contains "$out" "MUERDE" "su 'No test files found' ya no compra una verificación"
+
+# (i) falso ROJO de COR-651: la implementación que vive bajo tests/ viajaba al
+#     árbol base junto a su propio test, el test pasaba ahí POR CONSTRUCCIÓN y
+#     el gate lo declaraba vacuo. Un archivo NUEVO no tiene escape legítimo.
+mk_node_muerde "$WS/mu7" "$PKG_VITEST" vitest "$STUB_VITEST"
+mkdir -p tests/helpers
+printf 'export const flujoNuevo = 1\n' > tests/helpers/flujo.ts
+printf "import { flujoNuevo } from './helpers/flujo'\ntest('paga', () => {})\n" > tests/pago.test.ts
+git add -A && git commit -qm feat-y-test
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "el test importa un helper NUEVO de tests/: muerde (la base no lo tiene)"
+assert_contains "$out" "MUERDE" "porque el helper ya no viaja al árbol base con él"
+assert_not_contains "$out" "PASA sobre el árbol base" "sin el falso rojo que no tenía salida"
+
+# (j) COR-656: vitest declarado pero con un include que no alcanza a e2e/. La
+#     invocación salía 1 ("No test files found") y el gate, que por decisión
+#     escrita no juzga el MOTIVO del fallo, lo cobraba como MUERDE.
+STUB_VITEST_SRC='#!/bin/sh
+case "$1" in
+  list) shift; case "$1" in src/*) echo "$1"; exit 0 ;; esac
+        echo "No test files found"; exit 1 ;;
+  run)  shift ;;
+esac
+echo "No test files found"; exit 1'
+mk_node_muerde "$WS/mu8" "$PKG_VITEST" vitest "$STUB_VITEST_SRC"
+mkdir -p e2e && printf "test('checkout', () => {})\n" > e2e/checkout.spec.ts
+git add -A && git commit -qm e2e
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "spec fuera del include del runner: ni verde ni rojo"
+assert_contains "$out" "COLECTA" "lo dice: ningún runner declarado lo colecta"
+assert_contains "$out" "EMIT assumption" "y el supuesto viaja al bus"
+assert_not_contains "$out" "o sea que MUERDE" "sin cobrar como verificación el exit del runner equivocado"
+
+# (k) COR-656: con @playwright/test declarado e instalado, el spec e2e SÍ se
+#     verifica. Antes muerde_node devolvía 1 ('no declara vitest ni jest') y el
+#     tramo entero quedaba sin mirar.
+PKG_PW='{"devDependencies":{"@playwright/test":"^1"}}'
+STUB_PW='#!/bin/sh
+[ "$1" = "test" ] || exit 2
+shift
+if [ "$1" = "--list" ]; then shift; echo "$1"; exit 0; fi
+if [ -f feature.ts ]; then echo "1 passed"; exit 0; fi
+echo "cannot find ./feature"; exit 1'
+mk_node_muerde "$WS/mu9" "$PKG_PW" playwright "$STUB_PW"
+mkdir -p e2e
+printf 'export const f = 1\n' > feature.ts
+printf "test('flujo', () => {})\n" > e2e/flujo.spec.ts
+git add -A && git commit -qm pw
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "spec e2e con @playwright/test declarado: se verifica de verdad"
+assert_contains "$out" "MUERDE" "y falla sobre la base, como debe"
+assert_not_contains "$out" "NO pude verificar" "sin declararse ciego por no conocer el runner"
+
+# (l) pytest exit 5 = 'no colecté ningún caso': ahí no corrió NINGÚN test, así
+#     que ese rojo no dice nada del cambio.
+mk_muerde_repo "$WS/mu10"
+printf 'def _fabrica_sincasos():\n    return 1\n' > tests/test_sincasos.py
+git add -A && git commit -qm "archivo test_ sin casos"
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "pytest exit 5 (nada colectado): no bloquea"
+assert_contains "$out" "no colectó ningún caso" "y lo dice como tramo sin red"
+assert_contains "$out" "EMIT assumption" "con el supuesto en el bus"
+assert_not_contains "$out" "o sea que MUERDE" "sin cobrarlo como verificación"
 
 # ── DÓNDE corre: --precheck y --ci, jamás el camino de ship ──────────
 # El ship reintenta el push hasta 20 veces por contención: meterlo ahí pagaría un

@@ -635,7 +635,10 @@ gate_lane() {
   esac
   local pat="${LANE_GUARD_PATTERN:-(\.proto\$|(^|/)proto/|(^|/)migrations?/|\.sql\$|(^|/)helm/|(^|/)charts/|(^|/)terraform/|(^|/)openapi\.|(^|/)swagger\.)}"
   local hits
-  hits="$(git diff origin/$BASE_REF..HEAD --name-only | grep -E "$pat" || true)"
+  # Tres puntos: el carril promete sobre EL CAMBIO DE LA RAMA. Con dos puntos se
+  # comparan las PUNTAS, así que un .proto que el trunk sumó después del branch
+  # point aparece en el diff de esta rama y rompe una promesa que nadie hizo.
+  hits="$(git diff "origin/$BASE_REF...HEAD" --name-only | grep -E "$pat" || true)"
   if [ -n "$hits" ]; then
     echo "❌ carril $lane, pero el diff toca contratos/migraciones/infra:"
     echo "$hits" | sed 's/^/   · /'
@@ -1073,7 +1076,9 @@ run_lang_gates() {
   # agujero que squawk existe para cerrar. import-linter y go-arch-lint, sus
   # vecinos de arriba, ya avisaban honestamente; este era el único que no.
   local migs
-  migs="$(git diff origin/$BASE_REF..HEAD --name-only --diff-filter=A | grep -E '(^|/)migrations?/.*\.sql$' || true)"
+  # Tres puntos: con puntas, una migración que el trunk BORRÓ tras el branch
+  # point reaparece como "A" en el diff de la rama y se re-litiga como nueva.
+  migs="$(git diff "origin/$BASE_REF...HEAD" --name-only --diff-filter=A | grep -E '(^|/)migrations?/.*\.sql$' || true)"
   if [ -n "$migs" ]; then
     if command -v squawk >/dev/null; then
       gate "squawk (migraciones)"; squawk $migs
@@ -1428,27 +1433,32 @@ gate_tests_untouched() {
   # Un falso positivo aca cuesta una ronda y ensena a desconfiar del gate.
   # Ninguno de estos puede contener una asercion, asi que se excluyen por nombre.
   local artifacts="${TEST_ARTIFACT_PATTERN:-(__pycache__/|\.pyc$|\.pyo$|\.class$|\.pytest_cache/|/node_modules/)}"
+  # Tres puntos, el mismo ancla que gate_test_muerde y gate_quick_size: el
+  # precheck corre SIN rebase, así que con dos puntos los commits que el trunk
+  # sumó después del branch point aparecen INVERTIDOS en este diff. El test que
+  # OTRO agregó se lee acá como borrado, y la aserción que OTRO añadió como
+  # aserción eliminada: el gate acusaba de debilitar tests a quien no los tocó.
   local touched
-  touched="$(git diff -M origin/$BASE_REF..HEAD --name-status \
+  touched="$(git diff -M "origin/$BASE_REF...HEAD" --name-status \
     | awk -F'\t' '{ for (i = 2; i <= NF; i++) print $i }' \
     | grep -E "$pat" | grep -vE "$artifacts" | sort -u || true)"
   [ -n "$touched" ] || return 0
 
   local deleted
-  deleted="$(git diff -M origin/$BASE_REF..HEAD --diff-filter=D --name-only \
+  deleted="$(git diff -M "origin/$BASE_REF...HEAD" --diff-filter=D --name-only \
     | grep -E "$pat" | grep -vE "$artifacts" || true)"
 
   # Archivos de test de ALTA: sus skips no cuentan (ver v3 en la cabecera).
   # Mismo filtrado por $pat y $artifacts que `deleted`.
   local added
-  added="$(git diff -M origin/$BASE_REF..HEAD --diff-filter=A --name-only \
+  added="$(git diff -M "origin/$BASE_REF...HEAD" --diff-filter=A --name-only \
     | grep -E "$pat" | grep -vE "$artifacts" || true)"
   is_added() { printf '%s\n' "$added" | grep -qxF "$1"; }
 
   # UN pase del diff completo en awk (BSD-safe: sin \b ni \s; gsub cuenta
   # OCURRENCIAS, no líneas). Salida: "<aserciones_netas>\t<skips_netos>\t<archivo>".
   local report
-  report="$(git diff -M origin/$BASE_REF..HEAD | TESTPAT="$pat" awk '
+  report="$(git diff -M "origin/$BASE_REF...HEAD" | TESTPAT="$pat" awk '
     BEGIN {
       pat  = ENVIRON["TESTPAT"]
       asrt = "assert[A-Za-z_]*[[:space:]]*\\(|assert\\.[A-Za-z_]+[[:space:]]*\\(" \
@@ -1576,10 +1586,20 @@ REPEOF
 # MODIFIED/REMOVED lo SACA del alcance, porque esa es la remediación que este
 # gate imprime: una remediación que no funcionara sería peor que ninguna.
 #
-# El patrón de "esto es un archivo de test" es EL MISMO de gate_tests_untouched,
-# literal: dos detecciones distintas de la misma cosa divergen en la primera
-# edición, y tests/test_ship_gates.sh compara los dos literales para que no
-# puedan separarse en silencio.
+# El patrón de "esto es un archivo de test" acá es MÁS ANGOSTO que el de
+# gate_tests_untouched, y la divergencia es deliberada, no un descuido:
+# untouched protege la SUITE entera por RUTA (borrar un helper de tests/ sí
+# debilita la red), pero este gate COPIA lo que matchea al árbol base y le
+# corre un runner encima. Con el patrón por directorio, la implementación que
+# vive bajo tests/ (helpers, fixtures, factories de una suite E2E) viajaba a la
+# base junto a su propio test: el test pasaba ahí POR CONSTRUCCIÓN y el gate lo
+# declaraba vacuo, o sea un falso rojo sin salida legítima (declarar un archivo
+# NUEVO bajo MODIFIED sería escribir algo falso para apagar un gate). Y por la
+# otra puerta, un helper sin casos hacía salir 1 al runner ("No test files
+# found") y el gate cobraba ese exit como MUERDE: un falso verde.
+# La relación que tests/test_ship_gates.sh fija ahora es SUBSET, no igualdad:
+# todo lo que este gate corre, untouched lo protege; un helper bajo tests/ no
+# entra acá jamás.
 muerde_limpia() {  # trap EXIT del subshell: el worktree temporal se va SIEMPRE
   local rc=$?
   # Un worktree fantasma no es basura inofensiva: queda registrado en el repo y
@@ -1644,34 +1664,77 @@ muerde_go() {  # → 0 si hay toolchain Go
 muerde_go_base_compila() {  # muerde_go_base_compila <paquete>
   ( cd "$MUERDE_BASE"; go build "$1" )
 }
-muerde_node() {  # → MUERDE_NODE/MUERDE_NODE_ARGS solo si el runner es INEQUÍVOCO
-  local pkg="$WT/package.json" kind=""
+muerde_node() {  # → MUERDE_NODE_RUNNERS con los runners declarados E instalados
+  local pkg="$WT/package.json" unit=""
+  MUERDE_NODE_RUNNERS=""
   if [ ! -f "$pkg" ]; then
     MUERDE_MOTIVO="no hay package.json en la raíz: no sé con qué runner correrlos"
     return 1
   fi
-  if jq -e '.devDependencies.vitest // .dependencies.vitest' "$pkg" >/dev/null 2>&1; then kind="vitest"; fi
+  if jq -e '.devDependencies.vitest // .dependencies.vitest' "$pkg" >/dev/null 2>&1; then unit="vitest"; fi
   if jq -e '.devDependencies.jest // .dependencies.jest' "$pkg" >/dev/null 2>&1; then
-    if [ -n "$kind" ]; then
+    if [ -n "$unit" ]; then
       MUERDE_MOTIVO="package.json declara vitest Y jest: el runner no es inequívoco, y elegir uno sería inventar el veredicto"
       return 1
     fi
-    kind="jest"
-  fi
-  if [ -z "$kind" ]; then
-    MUERDE_MOTIVO="package.json no declara vitest ni jest: el runner no es inequívoco"
-    return 1
+    unit="jest"
   fi
   # Sin deps instaladas el árbol base fallaría por FALTA DE HERRAMIENTA, y este
   # gate lee cualquier exit != 0 como "el test muerde": sería un verde comprado
   # con una excusa. Se declara saltado en vez de cobrarlo como verificación.
-  if [ ! -x "$WT/node_modules/.bin/$kind" ]; then
-    MUERDE_MOTIVO="$kind declarado pero falta node_modules/.bin/$kind: sin deps no puedo distinguir 'el test falló' de 'no arrancó el runner'"
+  if [ -n "$unit" ] && [ -x "$WT/node_modules/.bin/$unit" ]; then
+    MUERDE_NODE_RUNNERS="$unit"
+  elif [ -n "$unit" ]; then
+    MUERDE_MOTIVO="$unit declarado pero falta node_modules/.bin/$unit: sin deps no puedo distinguir 'el test falló' de 'no arrancó el runner'"
+  fi
+  # Playwright CONVIVE con el runner de unit y no lo vuelve ambiguo: e2e/ y src/
+  # son jurisdicciones distintas, y quién colecta cada archivo lo decide la
+  # COLECCIÓN (muerde_node_colecta), no una elección a ciegas hecha acá.
+  if jq -e '.devDependencies["@playwright/test"] // .dependencies["@playwright/test"]' "$pkg" >/dev/null 2>&1 \
+     && [ -x "$WT/node_modules/.bin/playwright" ]; then
+    MUERDE_NODE_RUNNERS="${MUERDE_NODE_RUNNERS:+$MUERDE_NODE_RUNNERS }playwright"
+  fi
+  if [ -z "$MUERDE_NODE_RUNNERS" ]; then
+    [ -n "$MUERDE_MOTIVO" ] || MUERDE_MOTIVO="package.json no declara vitest, jest ni @playwright/test: el runner no es inequívoco"
     return 1
   fi
-  MUERDE_NODE="$WT/node_modules/.bin/$kind"
-  if [ "$kind" = "vitest" ]; then MUERDE_NODE_ARGS="run"; else MUERDE_NODE_ARGS=""; fi
   return 0
+}
+# ── ¿el runner declarado COLECTA este archivo? ────────────────────────
+# Caso de campo: vitest.config.ts con include: ['src/**/*.{test,spec}.*'] y un
+# spec nuevo en e2e/. La invocación directa salía exit != 0 ("No test files
+# found") y este gate, que por decisión escrita no juzga el MOTIVO del fallo,
+# lo cobraba como MUERDE: un verde comprado con un runner que jamás abrió el
+# archivo. Antes de invocar se pregunta por la COLECCIÓN; lo que ningún runner
+# declarado colecta es un tramo SIN RED, que no es ni verde ni rojo.
+#
+# La pregunta se hace con el cwd en el ÁRBOL BASE a propósito: la config que va
+# a gobernar la invocación real es la de ese árbol, no la del worktree.
+muerde_node_colecta() {  # muerde_node_colecta <archivo> → MUERDE_NODE_RUNNER
+  local r out
+  # shellcheck disable=SC2086
+  for r in $MUERDE_NODE_RUNNERS; do
+    out=""
+    case "$r" in
+      vitest)
+        out="$( cd "$MUERDE_BASE" && "$WT/node_modules/.bin/vitest" list "$1" 2>&1 )" || true
+        # vitest < 2.1 no conoce `list`. "No pude preguntar" no es "no colecta":
+        # se cae a la invocación directa, que es el statu quo exacto de antes.
+        case "$out" in
+          *"Unknown command"*|*"unknown option"*|*"Unknown option"*)
+            MUERDE_NODE_RUNNER="vitest"; return 0 ;;
+        esac ;;
+      jest)
+        out="$( cd "$MUERDE_BASE" && "$WT/node_modules/.bin/jest" --listTests "$1" 2>&1 )" || true ;;
+      playwright)
+        out="$( cd "$MUERDE_BASE" && "$WT/node_modules/.bin/playwright" test --list "$1" 2>&1 )" || true ;;
+    esac
+    if printf '%s' "$out" | grep -qF -- "$(basename "$1")"; then
+      MUERDE_NODE_RUNNER="$r"
+      return 0
+    fi
+  done
+  return 1
 }
 muerde_corre() {  # muerde_corre <clase> <unidad> → el exit REAL sobre el árbol base
   case "$1" in
@@ -1689,8 +1752,11 @@ muerde_corre() {  # muerde_corre <clase> <unidad> → el exit REAL sobre el árb
     go)
       ( cd "$MUERDE_BASE"; go test "$2" ) ;;
     node)
-      # shellcheck disable=SC2086
-      ( cd "$MUERDE_BASE"; "$MUERDE_NODE" $MUERDE_NODE_ARGS "$2" ) ;;
+      case "$MUERDE_NODE_RUNNER" in
+        vitest)     ( cd "$MUERDE_BASE"; "$WT/node_modules/.bin/vitest" run "$2" ) ;;
+        jest)       ( cd "$MUERDE_BASE"; "$WT/node_modules/.bin/jest" "$2" ) ;;
+        playwright) ( cd "$MUERDE_BASE"; "$WT/node_modules/.bin/playwright" test "$2" ) ;;
+      esac ;;
   esac
 }
 muerde_corre_grupo() {  # muerde_corre_grupo <clase> <lista>: unidad por unidad
@@ -1709,7 +1775,25 @@ muerde_corre_grupo() {  # muerde_corre_grupo <clase> <lista>: unidad por unidad
       tail -3 "$MUERDE_SALIDA" | sed 's/^/       /'
       continue
     fi
+    # Node: si ningún runner declarado COLECTA el archivo, su exit != 0 sería el
+    # "No test files found" del runner equivocado, no el rojo del test.
+    if [ "$clase" = "node" ] && ! muerde_node_colecta "$u"; then
+      echo "   ⚠️  $u: ningún runner declarado lo COLECTA (el include/testDir no lo alcanza): NO puedo verificarlo"
+      MUERDE_SINRED="$MUERDE_SINRED   · $u
+"
+      continue
+    fi
     if muerde_corre "$clase" "$u" > "$MUERDE_SALIDA" 2>&1; then rc=0; else rc=$?; fi
+    # pytest reserva el exit 5 para "no colecté ningún caso": ahí no corrió
+    # NINGÚN test, así que ese rojo no dice nada del cambio. Cobrarlo como
+    # MUERDE sería un verde comprado con un runner que no miró nada.
+    if [ "$clase" = "py" ] && [ "$rc" -eq 5 ]; then
+      echo "   ⚠️  $u: pytest no colectó ningún caso (exit 5): NO hay test que verificar"
+      MUERDE_SINRED="$MUERDE_SINRED   · $u
+"
+      tail -3 "$MUERDE_SALIDA" | sed 's/^/       /'
+      continue
+    fi
     if [ "$rc" -eq 0 ]; then
       echo "   ✗ $u: PASA sobre el árbol base"
       MUERDE_VACUOS="$MUERDE_VACUOS   · $u
@@ -1733,13 +1817,13 @@ muerde_salto() {  # muerde_salto <qué> <lista>: saltar se DICE, no se calla
   emit assumption "$REPO ($1): tests nuevos NO verificados contra la base ($MUERDE_MOTIVO)"
 }
 gate_test_muerde() {
-  local pat="${TEST_PATH_PATTERN:-(test|spec|Test|_test\.|\.test\.|\.spec\.|/tests?/|/spec/)}"
+  local pat="${TEST_FILE_PATTERN:-(_test\.|\.test\.|_spec\.|\.spec\.|(^|/)test_)}"
   local artifacts="${TEST_ARTIFACT_PATTERN:-(__pycache__/|\.pyc$|\.pyo$|\.class$|\.pytest_cache/|/node_modules/)}"
   local nuevos tocados delta added="" escape="" f dir
   local scope="" escapados=""
   local py_files="" go_dirs="" node_files="" otros=""
   local corre_py=0 corre_go=0 corre_node=0
-  local MUERDE_PY="" MUERDE_NODE="" MUERDE_NODE_ARGS="" MUERDE_MOTIVO=""
+  local MUERDE_PY="" MUERDE_NODE_RUNNERS="" MUERDE_NODE_RUNNER="" MUERDE_MOTIVO=""
   local mb head tmp
   # Tres puntos, el mismo ancla que gate_quick_size y por el mismo motivo: el
   # precheck corre SIN rebase, así que la punta del trunk trae commits ajenos que
@@ -1810,7 +1894,7 @@ SCOPEOF
     if muerde_node; then corre_node=1; else muerde_salto Node "$node_files"; fi
   fi
   if [ -n "$otros" ]; then
-    MUERDE_MOTIVO="corro pytest (.py), go test (.go) y vitest/jest (.ts/.js); para el resto NO invento un comando, porque un runner adivinado diría 'el test muerde' cuando lo que falló fue la invocación"
+    MUERDE_MOTIVO="corro pytest (.py), go test (.go) y vitest/jest/playwright (.ts/.js); para el resto NO invento un comando, porque un runner adivinado diría 'el test muerde' cuando lo que falló fue la invocación"
     muerde_salto "sin runner dirigido" "$otros"
   fi
   if [ "$corre_py" -eq 0 ] && [ "$corre_go" -eq 0 ] && [ "$corre_node" -eq 0 ]; then
@@ -1832,7 +1916,7 @@ SCOPEOF
   # dependa de acordarse de llamarla en cada rama.
   (
     MUERDE_TMP="$tmp"; MUERDE_WT=""; MUERDE_BASE="$tmp/base"
-    MUERDE_SALIDA="$tmp/salida"; MUERDE_VACUOS=""; MUERDE_CIEGOS=""
+    MUERDE_SALIDA="$tmp/salida"; MUERDE_VACUOS=""; MUERDE_CIEGOS=""; MUERDE_SINRED=""
     trap muerde_limpia EXIT
     if ! git -C "$WT" worktree add --detach --quiet "$MUERDE_BASE" "$mb"; then
       echo "⚠️  no pude crear el worktree temporal del árbol base ($mb): el gate NO CORRIÓ."
@@ -1874,8 +1958,17 @@ CKEOF
       echo "     base y pegá la salida en el veredicto."
       emit assumption "$REPO (Go): tests nuevos NO verificados contra la base (el árbol base no compila: replace/go.work sin resolver)"
     fi
+    # SIN RED: el runner existe pero no colecta el archivo (o el archivo no
+    # trae casos). No es verde ni rojo, y decirlo es la diferencia entre un
+    # tramo declarado y un verde comprado con el exit del runner equivocado.
+    if [ -n "$MUERDE_SINRED" ]; then
+      echo "⚠️  tests nuevos SIN un caso que correr (ningún runner declarado los colectó):"
+      printf '%s' "$MUERDE_SINRED"
+      echo "   ↳ esto NO es un verde ni un rojo: es un tramo sin red, y queda dicho."
+      emit assumption "$REPO: tests nuevos NO verificados contra la base (ningún runner declarado los colecta)"
+    fi
     if [ -z "$MUERDE_VACUOS" ]; then
-      if [ -z "$MUERDE_CIEGOS" ]; then
+      if [ -z "$MUERDE_CIEGOS" ] && [ -z "$MUERDE_SINRED" ]; then
         echo "   ✅ todo el alcance falla sobre la base: estos tests prueban conducta nueva"
       else
         echo "   ✅ lo que SÍ pude correr falla sobre la base; el resto queda declarado arriba"

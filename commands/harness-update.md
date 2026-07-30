@@ -7,6 +7,27 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
 
 0. `/harness-init` en un workspace ya instalado hace EXACTAMENTE esto
    (modo update) — son el mismo flujo; este comando es el atajo.
+0c. **Abrí la ventana de la Ley 0** antes de tocar un solo archivo:
+   ```
+   mkdir -p <workspace>/.harness && touch <workspace>/.harness/update-in-progress
+   ```
+   Por qué existe: `guard-canonical.sh` hace cumplir la **Ley 0** (ningún
+   agente edita el harness mientras hace una tarea) y bloquea toda escritura
+   sobre `scripts/*` que ya exista, `.claude/hooks/*`, `.claude/settings.json`
+   y `harness-policy.json`. Este playbook hace exactamente eso, a mano, en el
+   fallback del paso 2b: sin la ventana, el propio comando que actualiza el
+   harness queda bloqueado por el harness, y quien lo corre termina
+   desactivando el hook (que es el daño que la ley evita).
+   Es un archivo en DISCO y no una variable de entorno porque los hooks de
+   Edit/Write corren en otro proceso y no ven lo que exportaste en un Bash.
+   Tres cosas que van con la ventana:
+   - **caduca a la hora**: si el update se alarga, se vuelve a `touch`;
+   - **no es silenciosa**: cada escritura que pasa por ella emite una
+     `assumption` al bus, así que el humano ve en el panel qué se tocó;
+   - **es TUYA solo mientras dura este comando**: no la abras "por las dudas"
+     en una tarea normal. Ahí la respuesta correcta es
+     `scripts/harness-bug.sh report`, no abrir la ventana.
+   El cierre está en el paso 8 y es obligatorio.
 1. Lee `.harness-version` y `harness-answers.yaml` del workspace. Si la
    versión coincide con la del plugin, dilo y termina.
 1a. **ANTES de copiar nada, comprueba que el plugin EN DISCO es el último
@@ -318,6 +339,15 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
    gitleaks, doctor, push). El repo de la instancia tiene su propia puerta a
    main desde el issue #37: pushearlo a mano por fuera del harness era el
    único camino y eso era un bug, no una regla.
+8. **CERRÁ LA VENTANA DE LA LEY 0**, pase lo que pase con el resto (también si
+   parás en el paso 1a o si el update falla a la mitad):
+   ```
+   rm -f <workspace>/.harness/update-in-progress
+   ```
+   Dejarla abierta le da a la próxima tarea de producto permiso para editar el
+   harness durante una hora, que es exactamente el bucle que la Ley 0 corta: un
+   agente atascado en un gate arreglando `ship.sh` en vez de terminar su tarea.
+   Caduca sola a la hora, pero esa caducidad es la red, no el plan.
 
 Presta atención especial a: scripts/doctor.sh (es COPIA del plugin —
 casi siempre conviene actualizarla), hooks, y ship.sh (gates nuevos).

@@ -589,6 +589,25 @@ fi
 jq -e '.evidence | map(select(startswith("EV-TEST-"))) | length > 0' "$tmp" >/dev/null 2>&1 \
   || echo "⚠️  sin evidencia kind=test todavía: evidence.py verify --require-kind test fallará en ship si nadie la aporta"
 
+# ── Una condición DECLARADA no se pierde entre el precheck y el juicio ──
+# Si el precheck se selló con un slot rojo declarado como bug conocido del
+# harness (HARNESS_KNOWN_BUG), el veredicto tiene que heredarlo. Si no, el
+# reviewer juzga un verde que no es verde: hay un tramo del harness que no
+# verificó nada y nadie se lo dijo. Aditivo y fail-open: sin el campo, todo
+# queda exactamente como estaba.
+kb="$(jq -c '.known_bug // empty' "$WS/tasks/$TASK/precheck-$REPO.json" 2>/dev/null || true)"
+if [ -n "$kb" ]; then
+  if jq --argjson kb "$kb" '.known_bug = $kb' "$tmp" > "$tmp.kb" 2>/dev/null && [ -s "$tmp.kb" ]; then
+    mv "$tmp.kb" "$tmp"
+    echo "⚠️  este veredicto HEREDA una condición declarada: un slot quedó rojo por"
+    echo "   un bug conocido del harness ($(printf '%s' "$kb" | jq -r '.url // "?"'))."
+    echo "   El reviewer tiene que NOMBRARLA en su juicio: este verde carga un tramo"
+    echo "   que el harness no pudo verificar."
+  else
+    rm -f "$tmp.kb"
+  fi
+fi
+
 mv "$tmp" "$OUT"
 echo "✅ scaffold: tasks/$TASK/verdict-$REPO.json ($(jq '.evidence|length' "$OUT") evidencias, agents=$(jq -c '.implementation_agents' "$OUT"), commit ${HEAD:0:12})"
 

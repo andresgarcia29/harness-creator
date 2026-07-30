@@ -397,6 +397,48 @@ assert_eq "ninguno"     "$(clasifica '0')"   "el caso de siempre no se movió: '
 assert_eq "completo"    "$(clasifica '1')"   "ni el otro: '1' es completo"
 
 echo
+echo "── el sello declara el bug conocido del harness, y solo cuando lo hubo"
+# HARNESS_KNOWN_BUG no borra el rojo del gate: lo DECLARA. Si ese hecho no
+# queda en el sello, /review lee un ok:true indistinguible de uno limpio y la
+# declaracion se evapora justo donde alguien la auditaria. El campo es
+# ADITIVO (schema sigue en 1) porque los consumidores leen con jq y toleran
+# claves nuevas; agregar un codigo de salida, en cambio, habria roto la tabla
+# de exits que este mismo archivo verifica mas abajo.
+{ awk '/^known_bug_frag\(\) \{/,/^\}/' "$WS/scripts/ship.sh"
+  awk '/^precheck_verificado\(\) \{/,/^\}/' "$WS/scripts/ship.sh"
+  awk '/^stamp_precheck\(\) \{/,/^\}/' "$WS/scripts/ship.sh"; } > "$WS/kb.sh"
+grep -q '^known_bug_frag() {' "$WS/kb.sh" && grep -q '^stamp_precheck() {' "$WS/kb.sh" \
+  && pass "extraje known_bug_frag + stamp_precheck del script instanciado" \
+  || fail "no pude extraer el sellador: el chequeo no probaria nada"
+printf 'set -u\n. "$KB_FN"\nstamp_precheck true\n' > "$WS/kb-run.sh"
+sella_kb() {  # sella_kb <valor-de-KNOWN_BUG_USED> → ruta del sello escrito
+  # Las rutas se resuelven ANTES del prefijo de asignaciones (mismo motivo que
+  # `clasifica` de arriba: que una asignacion vea a la anterior no esta
+  # garantizado, y este test no se juega en una sutileza de expansion).
+  local probe="$WS/kbprobe" fn="$WS/kb.sh" runner="$WS/kb-run.sh"
+  rm -rf "$probe"; mkdir -p "$probe/tasks/TK"
+  WS="$probe" TASK=TK REPO=svc WT="$probe/sin-worktree" KNOWN_BUG_USED="$1" \
+    KB_FN="$fn" bash "$runner"
+  printf '%s' "$probe/tasks/TK/precheck-svc.json"
+}
+sello_kb="$(sella_kb "tests=https://github.com/anthropics/harness-creator/issues/77")"
+jq -e '.known_bug.url == "https://github.com/anthropics/harness-creator/issues/77"' "$sello_kb" >/dev/null \
+  && pass "con el knob usado, el sello trae .known_bug.url" \
+  || fail "el sello no declara el issue del bug conocido: $(cat "$sello_kb" 2>/dev/null)"
+jq -e '.known_bug.slot == "tests"' "$sello_kb" >/dev/null \
+  && pass "y .known_bug.slot dice CUAL gate se declaro (no un salto global)" \
+  || fail "el sello no dice que slot se declaro"
+jq -e '.schema == 1 and .ok == true and .verificado != null' "$sello_kb" >/dev/null \
+  && pass "sin romper el sello de siempre: schema 1, ok y verificado intactos" \
+  || fail "el campo nuevo rompio el sello que /review ya leia"
+# CONTRA-MITAD: sin knob la clave NO existe. Un `known_bug` siempre presente
+# (aunque fuera null) convertiria la declaracion en ruido de fondo.
+sello_kb="$(sella_kb "")"
+jq -e 'has("known_bug") | not' "$sello_kb" >/dev/null \
+  && pass "sin knob, el sello NO trae la clave known_bug" \
+  || fail "el sello declara un bug conocido que nadie declaro: $(cat "$sello_kb" 2>/dev/null)"
+
+echo
 echo "── un test nuevo que pasa SIN el cambio: el precheck lo caza, de punta a punta"
 # Caso de campo que costó una ronda entera: un implementer escribió un assert que
 # NO PODÍA FALLAR (evaluaba antes de que llegara el dato). La suite pasó, el

@@ -100,6 +100,42 @@ PUSH_RETRY_BUDGET="${HARNESS_PUSH_RETRIES:-20}"
 # reintentan en fase y se vuelven a pisar (manada). El jitter los desincroniza.
 PUSH_BACKOFF_MAX="${HARNESS_PUSH_BACKOFF_MAX:-30}"
 
+# ── EL ROJO QUE NO ES TUYO: HARNESS_KNOWN_BUG='<slot>=<url>' ──────────
+# Caso de campo: un agente en una tarea de PRODUCTO choca con un bug del
+# HARNESS (un gate que revienta, o que hace lo contrario de lo que su cabecera
+# documenta). Sus dos únicas salidas eran ilegítimas: arreglar el harness (que
+# no es su tarea, y descarrila la corrida en un bucle de "toco el gate, el gate
+# me muerde") o quedarse bloqueado. Este knob abre UNA tercera: declarar el bug
+# ya reportado y seguir, dejando rastro auditable.
+#
+# Los candados son el diseño, no un adorno:
+#   · EXIGE EL SLOT, no solo la url. Un salto-todo sería una puerta trasera.
+#     Los slots son los de collect_gate_slots, que es la granularidad que el
+#     propio mensaje de error ya imprime.
+#   · SLOTS VETADOS, jamás declarables: `security` y `veredicto`. Un secreto
+#     filtrado nunca es un bug del harness (y ese slot junta gitleaks con
+#     semgrep: no se puede abrir uno sin abrir el otro), y sin veredicto no
+#     hubo review. Esta es la defensa principal.
+#   · REPORTAR ES LA PRECONDICIÓN: la url tiene que estar YA en
+#     .harness/upstream-issues.jsonl, y ahí solo llega por harness-bug.sh
+#     report (que verifica propiedad del artefacto, drift, versión y repro) o
+#     record. Sin eso, el knob sería un "confía en mí".
+#   · ISSUE CERRADO = WORKAROUND VENCIDO: si gh dice CLOSED, se rechaza (el fix
+#     existe: /harness-update). Sin gh o sin red se acepta, pero declarándolo.
+#   · UN SOLO SLOT por invocación. Dos bugs del harness a la vez son dos issues
+#     y dos corridas: la fricción es deliberada.
+#   · NO PERSISTE (env var por invocación) y NO BORRA EL GATE: el rojo del slot
+#     ya salió al bus, encima se emite un `assumption`, el sello del precheck
+#     gana `known_bug` y la git note de procedencia también.
+#
+# LOS GATES SERIALES QUEDAN FUERA A PROPÓSITO. El trailer y el carril son sobre
+# TUS commits (un bug del harness no te pone un trailer mal), el de disco ya
+# tiene su escape con HARNESS_MIN_FREE_GB=0, y gate_test_muerde y el preflight
+# corren bajo `set -e` en serie: envolverlos en `if !` desactivaría errexit
+# adentro, que es el bug que este archivo ya pagó tres veces.
+KNOWN_BUG="${HARNESS_KNOWN_BUG:-}"
+KNOWN_BUG_USED=""
+
 LOCKDIR="$WS/locks/$REPO.lock.d"
 [ "$CI_MODE" -eq 1 ] || mkdir -p "$WS/locks" "$WS/tasks/$TASK"
 
@@ -373,12 +409,23 @@ precheck_verificado() {  # → completo | ninguno | desconocido
     *)              printf 'ninguno' ;;
   esac
 }
+# El rastro del bug conocido, en formato JSON y en UN solo lugar: lo comparten
+# el sello del precheck y ship.log. Es ADITIVO (vacío cuando no hubo knob) para
+# no tocar el schema 1 ni los consumidores, que leen con jq y toleran claves
+# nuevas. Tres copias de este printf serían tres formatos que tarde o temprano
+# dejan de coincidir, y el que audita compara literales.
+known_bug_frag() {  # → ,"known_bug":{...}  o vacío si no se usó el knob
+  [ -n "$KNOWN_BUG_USED" ] || return 0
+  printf ',"known_bug":{"slot":"%s","url":"%s"}' \
+    "${KNOWN_BUG_USED%%=*}" "${KNOWN_BUG_USED#*=}"
+}
 stamp_precheck() {  # stamp_precheck <ok:true|false>: sello que /review lee
   local ok="$1" head verificado
   head="$(git -C "$WT" rev-parse HEAD 2>/dev/null || echo unknown)"
   verificado="$(precheck_verificado)"
-  printf '{"schema":1,"task_id":"%s","repo":"%s","commit":"%s","ok":%s,"verificado":"%s","at":"%s"}\n' \
+  printf '{"schema":1,"task_id":"%s","repo":"%s","commit":"%s","ok":%s,"verificado":"%s","at":"%s"%s}\n' \
     "$TASK" "$REPO" "$head" "$ok" "$verificado" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$(known_bug_frag)" \
     > "$WS/tasks/$TASK/precheck-$REPO.json"
 }
 # ── LA EVIDENCIA DEL REPO, ¿MIRA AL COMMIT QUE ESTOY SELLANDO? ────────
@@ -439,7 +486,14 @@ aviso_evidencia_desalineada() {
 # pasó todos los gates. La solución de fondo es correr los gates en CI
 # (flow: prs), donde este problema deja de existir por construcción.
 stamp_provenance() {  # stamp_provenance <sha-completo>
-  local sha="$1" ver="?" man="?" who
+  local sha="$1" ver="?" man="?" who kbnote=""
+  # Si este commit pasó con un gate declarado como bug conocido, la nota tiene
+  # que decirlo: es el ÚNICO rastro que viaja con el commit al remoto, y sin él
+  # un cambio que se saltó un slot queda indistinguible de uno que no.
+  if [ -n "$KNOWN_BUG_USED" ]; then
+    kbnote="
+known_bug: ${KNOWN_BUG_USED#*=}"
+  fi
   # `if` y no `[ ... ] && VAR=...`: es la regla de la casa por el set -e, y ya
   # costó un exit 128 sin una línea de salida en este mismo archivo.
   if [ -f "$WS/harness-answers.yaml" ]; then
@@ -457,7 +511,7 @@ stamp_provenance() {  # stamp_provenance <sha-completo>
   git notes --ref=harness add -f -m "harness_version: $ver
 gates_manifest: $man
 workspace: $who
-task: $TASK" "$sha" >/dev/null 2>&1 || return 0
+task: $TASK$kbnote" "$sha" >/dev/null 2>&1 || return 0
   git push origin refs/notes/harness >/dev/null 2>&1 \
     || echo "   ℹ️  procedencia anotada localmente; no pude publicarla (git push origin refs/notes/harness)"
 }
@@ -542,6 +596,12 @@ on_exit() {
     echo "   → Los errores completos están arriba. Corrígelos TODOS en una"
     echo "     iteración (el error de cada gate trae su remediación) y re-corre"
     echo "     scripts/ship.sh --precheck $TASK $REPO."
+    echo "   → ¿El rojo es del HARNESS y no de tu cambio (el gate revienta, o hace"
+    echo "     lo contrario de lo que su cabecera documenta)? Entonces NO arregles"
+    echo "     el harness, NO lo pruebes, NO lo toques: no es tu tarea. El camino:"
+    echo "     1. scripts/harness-bug.sh report --title ... --file ... --repro ... --impact ..."
+    echo "     2. HARNESS_KNOWN_BUG='<slot>=<url-del-issue>' scripts/ship.sh --precheck $TASK $REPO"
+    echo "     3. seguí con TU tarea; el fix del harness es de sus mantenedores."
     echo "   → Esto NO consume presupuesto de loop: el reviewer todavía no vio nada."
     disco_avisa
     return 0
@@ -553,6 +613,12 @@ on_exit() {
   echo "⛔ gate '$CURRENT_GATE' falló (exit $rc)."
   echo "   → Lee el error de arriba. Corrige SOLO eso en el worktree $WT,"
   echo "     commitea con el trailer 'Task: $TASK' y re-corre ship.sh."
+  echo "   → ¿El rojo es del HARNESS y no de tu cambio (el gate revienta, o hace"
+  echo "     lo contrario de lo que su cabecera documenta)? Entonces NO arregles"
+  echo "     el harness, NO lo pruebes, NO lo toques: no es tu tarea. El camino:"
+  echo "     1. scripts/harness-bug.sh report --title ... --file ... --repro ... --impact ..."
+  echo "     2. HARNESS_KNOWN_BUG='<slot>=<url-del-issue>' scripts/ship.sh $TASK $REPO"
+  echo "     3. seguí con TU tarea; el fix del harness es de sus mantenedores."
   echo "   → Presupuesto de autofix: 2 rondas. Si esta es la tercera, PARA"
   echo "     y escala a humano con el error completo (Ley 6)."
   disco_avisa
@@ -2468,12 +2534,102 @@ close_serial_gate() {
   CURRENT_GATE=""; _G0=$SECONDS
 }
 
+# known_bug_cubre <slot> → 0 SOLO si el knob declara ESE slot y pasa los cuatro
+# candados. Es un predicado: se llama desde la condición de un `if`, así que
+# jamás debe salir != 0 por otra cosa que no sea "no cubre". Cada rechazo
+# imprime su motivo CON la remediación: un "no" mudo devolvería al agente al
+# bucle de tocar el harness, que es justo lo que este camino existe para evitar.
+known_bug_cubre() {  # known_bug_cubre <slot>
+  local slot="$1" decl_slot decl_url estado
+  [ -n "$KNOWN_BUG" ] || return 1
+  case "$KNOWN_BUG" in
+    *=*) ;;
+    *) echo "❌ HARNESS_KNOWN_BUG='$KNOWN_BUG' no tiene forma '<slot>=<url>'."
+       echo "   ↳ hay que NOMBRAR el slot: un salto-todo sería una puerta trasera."
+       return 1 ;;
+  esac
+  decl_slot="${KNOWN_BUG%%=*}"
+  decl_url="${KNOWN_BUG#*=}"
+  # Silencioso si el knob habla de OTRO slot: el motivo se imprime una vez, en
+  # el slot al que apunta, no una vez por slot de la fase.
+  [ "$decl_slot" = "$slot" ] || return 1
+
+  # CANDADO 1 (la defensa principal): hay slots que no se rodean nunca.
+  case "$decl_slot" in
+    security|veredicto)
+      echo "❌ los slots 'security' y 'veredicto' no se rodean JAMÁS, ni con issue abierto."
+      echo "   · security: un secreto filtrado jamás es un bug del harness, y ese"
+      echo "     slot junta gitleaks con semgrep (abrir uno sería abrir los dos)."
+      echo "   · veredicto: sin veredicto no hubo review, y entonces no hay nada"
+      echo "     que shippear todavía."
+      echo "   ↳ si el gate de ese slot está roto de verdad: reportalo con"
+      echo "     scripts/harness-bug.sh report y ESPERÁ el fix. Ese es el precio."
+      return 1 ;;
+  esac
+
+  # CANDADO 2: forma de issue del forge. Un '<slot>=porque-si' no es una
+  # declaración, es un salto sin rastro que nadie puede auditar después.
+  case "$decl_url" in
+    https://github.com/*/issues/*) ;;
+    *) echo "❌ HARNESS_KNOWN_BUG apunta a '$decl_url', que no es la url de un issue."
+       echo "   ↳ forma esperada: https://github.com/<org>/<repo>/issues/<n>"
+       return 1 ;;
+  esac
+
+  # CANDADO 3: el issue tiene que estar YA en el ledger local, y ahí solo lo
+  # pone harness-bug.sh (report verifica propiedad del artefacto, drift contra
+  # el template, versión y repro; record anota uno abierto a mano). O sea:
+  # REPORTAR ES LA PRECONDICIÓN DE DESBLOQUEARSE. Sin esto el knob sería un
+  # "confía en mí" y el canal de vuelta al plugin se quedaría vacío, que es el
+  # problema que este harness lleva rato intentando cerrar.
+  if ! grep -qF "\"url\":\"$decl_url\"" "$WS/.harness/upstream-issues.jsonl" 2>/dev/null; then
+    echo "❌ $decl_url no está en .harness/upstream-issues.jsonl: ese bug no fue reportado."
+    echo "   Reportar es la PRECONDICIÓN de desbloquearse, no un trámite posterior."
+    echo "   ↳ remediación:"
+    echo "     scripts/harness-bug.sh report --title '...' --file <artefacto-del-plugin> \\"
+    echo "       --repro <archivo-con-la-salida> --impact '<a quién más le pasa>'"
+    echo "     (si el issue ya existe y lo abriste a mano: harness-bug.sh record --url $decl_url ...)"
+    return 1
+  fi
+
+  # CANDADO 4: un issue CERRADO significa que el fix ya existe. Seguir
+  # declarándolo sería congelar el harness roto en esta máquina para siempre.
+  # Sin gh o sin red no se puede saber: se acepta, pero DICIÉNDOLO (un
+  # "verificado" que no verificó nada es peor que un desconocido declarado).
+  estado=""
+  if command -v gh >/dev/null 2>&1; then
+    estado="$(gh issue view "$decl_url" --json state --jq .state 2>/dev/null || echo "")"
+  fi
+  if [ "$estado" = "CLOSED" ]; then
+    echo "❌ el issue $decl_url está CERRADO: el workaround venció."
+    echo "   El fix del harness ya existe; declararlo otra vez lo dejaría fuera."
+    echo "   ↳ remediación: corré /harness-update y re-corré este ship."
+    return 1
+  fi
+  [ -n "$estado" ] || echo "   (estado del issue sin verificar: no hay gh o no hubo red)"
+  return 0
+}
+
 collect_gate_slots() {  # collect_gate_slots <etiqueta>: espera, imprime TODO, agrega
   local pid slot rc failed=""
   for pid in $PAR_PIDS; do wait "$pid" 2>/dev/null || true; done
   for slot in $PAR_SLOTS; do
     cat "$GDIR/$slot.out"
     rc="$(cat "$GDIR/$slot.rc" 2>/dev/null || echo 1)"
+    # El knob se consulta ACÁ y no dentro de cada gate: este es el único punto
+    # donde el harness ya conoce el slot por nombre, que es la granularidad que
+    # el mensaje de error imprime y por lo tanto la única que un agente puede
+    # citar sin adivinar. `if !` sobre un predicado es seguro; envolver un gate
+    # serial no lo sería (desactiva errexit adentro).
+    if [ "$rc" -ne 0 ] && known_bug_cubre "$slot"; then
+      KNOWN_BUG_USED="$KNOWN_BUG"
+      echo "⚠️  slot '$slot' rojo por BUG CONOCIDO del harness: ${KNOWN_BUG#*=}"
+      echo "   NO es un verde: es una condición DECLARADA. Queda en el bus, en el"
+      echo "   sello del precheck, en el veredicto y en ship.log. Quitá el"
+      echo "   workaround cuando el issue cierre."
+      emit assumption "$REPO: slot '$slot' rojo declarado como bug conocido del harness (${KNOWN_BUG#*=})" false
+      rc=0
+    fi
     [ "$rc" -eq 0 ] || failed="$failed $slot"
   done
   rm -rf "$GDIR"; PAR_PIDS=""; PAR_SLOTS=""
@@ -2793,8 +2949,9 @@ El sha que aterrice NO sera este si la cola de merge rebasea o hace squash." 2>/
       echo "   (el forge no tiene driver acá, o falta su CLI, o no hay acceso)."
       emit assumption "$REPO: rama $branch publicada, PR no confirmado"
     fi
-    printf '{"repo":"%s","sha":"%s","short":"%s","branch":"%s","pr":"%s","landed":false,"shipped_at":"%s"}\n' \
-      "$REPO" "$sha" "$short" "$branch" "${pr:-}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$WS/tasks/$TASK/ship.log"
+    printf '{"repo":"%s","sha":"%s","short":"%s","branch":"%s","pr":"%s","landed":false,"shipped_at":"%s"%s}\n' \
+      "$REPO" "$sha" "$short" "$branch" "${pr:-}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      "$(known_bug_frag)" >> "$WS/tasks/$TASK/ship.log"
     stamp_provenance "$sha"
     [ -n "${CURRENT_GATE:-}" ] && emit gate "$CURRENT_GATE" true "" "$((SECONDS - ${_G0:-$SECONDS}))" && CURRENT_GATE=""
     emit ship "$REPO: PR abierto desde $branch @ $short (falta el merge)" true
@@ -2820,7 +2977,7 @@ El sha que aterrice NO sera este si la cola de merge rebasea o hace squash." 2>/
     short="$(git rev-parse --short HEAD)" # contra el headSha de la API del forge,
                                           # que siempre viene completo. Con el sha
                                           # corto la comparación no matcheaba nunca.
-    echo "{\"repo\":\"$REPO\",\"sha\":\"$sha\",\"short\":\"$short\",\"shipped_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" >> "$WS/tasks/$TASK/ship.log"
+    echo "{\"repo\":\"$REPO\",\"sha\":\"$sha\",\"short\":\"$short\",\"shipped_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"$(known_bug_frag)}" >> "$WS/tasks/$TASK/ship.log"
     stamp_provenance "$sha"
     # Cierra el último gate ANTES de anunciar el ship: si lo dejara al trap,
     # el "veredicto ✅" saldría en el bus DESPUÉS del "shippeé" y la historia

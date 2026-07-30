@@ -503,6 +503,34 @@ assert_eq "0" "$(jq '.evidence | length' "$V6")" \
   "ni con --allow-empty entra el EV marcado al veredicto"
 
 echo
+echo "── el veredicto HEREDA la condición declarada del precheck (bug conocido)"
+# Caso de campo: un agente choca con un gate del harness que da falso rojo,
+# lo declara con HARNESS_KNOWN_BUG (que exige el issue ya reportado) y sigue.
+# Ese slot NO se verificó. Si el veredicto no lo hereda, el reviewer juzga un
+# verde que no es verde del todo y nadie se lo dijo.
+mk_ev6 EV-TEST-h3r3d4d0001 "$H6" false
+rm -f "$V6"
+cat > "$WS/tasks/T6/precheck-atlas.json" <<'PK'
+{"schema":1,"ok":true,"commit":"x","known_bug":{"slot":"tests","url":"https://github.com/o/r/issues/77"}}
+PK
+out="$(bash "$WS/scripts/verdict-scaffold.sh" T6 atlas revisor-6 2>&1)"; rc=$?
+assert_eq 0 "$rc" "el scaffold sale igual de verde"
+assert_eq "https://github.com/o/r/issues/77" "$(jq -r '.known_bug.url' "$V6")" \
+  "y el veredicto hereda el issue del bug conocido"
+assert_eq "tests" "$(jq -r '.known_bug.slot' "$V6")" "nombrando el slot que quedó sin verificar"
+assert_contains "$out" "HEREDA una condición declarada" "y se lo dice al reviewer en la cara"
+
+# Sin el campo en el sello, el veredicto queda EXACTAMENTE como antes: aditivo
+# y fail-open, o sea que esto no puede romper a quien no lo usa.
+rm -f "$V6"
+printf '{"schema":1,"ok":true,"commit":"x"}\n' > "$WS/tasks/T6/precheck-atlas.json"
+bash "$WS/scripts/verdict-scaffold.sh" T6 atlas revisor-6 >/dev/null 2>&1
+assert_eq "false" "$(jq 'has("known_bug")' "$V6")" \
+  "sin bug declarado, el veredicto no inventa el campo"
+rm -f "$WS/tasks/T6/precheck-atlas.json" "$V6" \
+      "$WS/tasks/T6/evidence/EV-TEST-h3r3d4d0001.json"
+
+echo
 echo "── --rebase --renew con el MISMO commit: re-liga la evidencia y CONSERVA el juicio"
 # Caso de campo (COR-360): el precheck selló bajo contención, ship rechazó el EV
 # suspect, se re-selló limpio en ventana tranquila... y no había camino de

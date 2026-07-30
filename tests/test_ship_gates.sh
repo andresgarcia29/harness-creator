@@ -740,6 +740,30 @@ assert_contains "$out" "no colectó ningún caso" "y lo dice como tramo sin red"
 assert_contains "$out" "EMIT assumption" "con el supuesto en el bus"
 assert_not_contains "$out" "o sea que MUERDE" "sin cobrarlo como verificación"
 
+# (m) el falso verde de Go en monorepo. El arreglo (muerde_go_base_compila)
+#     estaba puesto pero SIN un solo test que lo fijara, o sea que la próxima
+#     edición podía devolverlo sin que nadie se enterara. En un monorepo con
+#     `replace ... => ../../pkg`, el worktree temporal nace sin el go.work que
+#     hace resolver ese replace: la base ni compila. El gate leía ese fallo de
+#     COMPILACIÓN como "el test MUERDE" y salía verde con cualquier contenido.
+cat > "$WS/bin-muerde/go" <<'SH'
+#!/bin/sh
+# La base no resuelve su grafo de módulos: build y test fallan por lo MISMO,
+# que es justo la ambigüedad que el gate tiene que deshacer.
+echo "pkg@v0.0.0: replacement directory ../../pkg does not exist" >&2
+exit 1
+SH
+chmod +x "$WS/bin-muerde/go"
+mk_muerde_repo "$WS/mu11"
+printf 'package svc\n\nfunc TestNuevo(t *testing.T) {}\n' > svc_test.go
+git add -A && git commit -qm "test go en un monorepo cuya base no compila"
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "la base Go no compila: el gate no inventa un rojo"
+assert_contains "$out" "el ÁRBOL BASE no compila sin tu cambio" "y dice que quedó ciego"
+assert_contains "$out" "EMIT assumption" "con el supuesto en el bus"
+assert_not_contains "$out" "o sea que MUERDE" "sin cobrar el fallo de compilación como verificación"
+rm -f "$WS/bin-muerde/go"
+
 # ── DÓNDE corre: --precheck y --ci, jamás el camino de ship ──────────
 # El ship reintenta el push hasta 20 veces por contención: meterlo ahí pagaría un
 # checkout del árbol base por intento para reconfirmar una respuesta que no

@@ -391,7 +391,12 @@ git add . && git commit -qm spec-nuevo
 rm -f "$WS/tasks/T1/delta-spec.md"
 out="$(run_tests_gate 2>&1)"; rc=$?
 assert_eq 0 "$rc" "test AÑADIDO con .skip( de guard: NO bloquea"
-assert_contains "$out" "dashboard.spec.ts" "la línea informativa nombra el archivo añadido"
+# El texto DISTINTIVO de la línea nueva, no el basename: el mensaje de bloqueo
+# viejo también nombra el archivo, así que assertear solo 'dashboard.spec.ts'
+# pasaba igual contra el árbol base y no probaba nada. Esta línea es el único
+# rastro auditable que queda del skip que ya no se cuenta.
+assert_contains "$out" "test AÑADIDO con 1 skips/only: e2e/dashboard.spec.ts" \
+  "la línea informativa dice que es de ALTA y nombra el archivo"
 
 # 10. el MISMO .skip( pero sobre un archivo de test que YA existía → bloquea
 mk_test_repo "$WS/g7"
@@ -402,6 +407,19 @@ git add . && git commit -qm skip-en-existente
 out="$(run_tests_gate 2>&1)"; rc=$?
 assert_eq 3 "$rc" ".skip( añadido a un archivo de test EXISTENTE: bloquea"
 assert_contains "$out" "auth.test.js" "el mensaje nombra el archivo existente debilitado"
+
+# 11. test BORRADO sin declarar → bloquea nombrando el archivo. GATE-2 lo exige
+#     y la suite no lo probaba: el único `git rm` de tests que había es el de
+#     tests/__pycache__, que asegura lo CONTRARIO. Importa junto al cambio de
+#     archivos de alta, porque la lista `added` vive pegada a `deleted` y se
+#     reporta en el mismo bucle: un error de una podría tapar a la otra.
+mk_test_repo "$WS/g8"
+git rm -q tests/auth.test.js && git commit -qm borra-test
+rm -f "$WS/tasks/T1/delta-spec.md"
+out="$(run_tests_gate 2>&1)"; rc=$?
+assert_eq 3 "$rc" "test BORRADO sin declarar: bloquea"
+assert_contains "$out" "test BORRADO sin declarar: tests/auth.test.js" \
+  "el mensaje distingue el borrado y nombra el archivo"
 
 echo
 echo "── gate_test_muerde: un test que no puede fallar no prueba nada"

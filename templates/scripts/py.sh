@@ -117,7 +117,7 @@ in_harness_territory() {
 SHIMS=""      # "link -> target" por shim creado (para el reporte)
 VISITED=""    # bases ya procesadas (anti-loop)
 process_pp() {
-  local pp="$1" base="$2" srcs name rel resolved real linkdir tgt
+  local pp="$1" base="$2" srcs name rel resolved real linkdir tgt cur
   case "
 $VISITED" in *"
 $base"*) return 0 ;; esac
@@ -130,7 +130,34 @@ $base"
     [ -n "$name" ] || continue
     case "$rel" in /*) continue ;; esac          # sólo paths relativos
     resolved="$(rel2abs "$rel" "$base")"
-    if [ -f "$resolved/pyproject.toml" ]; then     # el destino YA existe → recurse, sin shim
+    if [ -f "$resolved/pyproject.toml" ]; then     # el destino resuelve → no hay que plantar
+      # …pero puede resolver porque un shim VIEJO sigue apuntando adonde lo dejó
+      # la corrida anterior (típico: el clon canónico de repos/) mientras el
+      # índice —que pone el worktree de la tarea PRIMERO— ya elige otro dir. Sin
+      # re-apuntar, ese ganador nunca se aplica al shim ya plantado.
+      # Caso de campo (COR-333): el path-dep escapaba del worktree a
+      # worktrees/packages/ (compartido entre tareas), el repo compiló y testeó
+      # contra repos/ en silencio y un símbolo agregado en el worktree "no
+      # existía". Misma regla declarada que al plantarlo: ÚLTIMO EN CORRER GANA.
+      if [ -L "$resolved" ]; then
+        # OJO: el territorio y el repo hijo se preguntan por el directorio que
+        # CONTIENE el link, no por $resolved: canonizar a través del symlink
+        # lleva al destino (que vive en repos/<repo> y sí tiene .git) y vetaría
+        # el re-apuntado siempre.
+        linkdir="$(dirname "$resolved")"
+        real="$(lookup_name "$name")"
+        if [ -n "$real" ] && in_harness_territory "$linkdir" && ! inside_child_repo "$linkdir"; then
+          cur="$(cd "$resolved" && pwd -P)"
+          if [ "$cur" != "$real" ]; then
+            tgt="$(abs2rel "$real" "$linkdir")"
+            ln -sfn "$tgt" "$resolved"
+            SHIMS="${SHIMS}${resolved} -> ${tgt} (re-apuntado)
+"
+            process_pp "$real/pyproject.toml" "$resolved"
+            continue
+          fi
+        fi
+      fi
       process_pp "$resolved/pyproject.toml" "$resolved"
       continue
     fi

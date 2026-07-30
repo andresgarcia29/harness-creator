@@ -25,13 +25,36 @@ Durante ship, `evidence.py verify` exige que cada ID:
   manifiesto sella `patch_id` (identidad de contenido, `change-id.sh`) y la
   evidencia CITADA sobrevive a un rebase igual que el veredicto que la cita.
   Manifiestos sin `patch_id` (versiones viejas) exigen SHA exacto;
-- no esté marcada `suspect` por contención: el manifiesto sella un bloque
-  `contention` (procesos de test ajenos y load durante la corrida, medidos
-  por el propio runner, que además toma un slot del semáforo de builds;
-  perilla `HARNESS_TEST_SLOTS`). Un resultado bajo saturación no prueba nada
-  y la remediación es re-correr con menos contención, no bajar el estándar;
 - conserve el output original y su hash;
 - cubra los tipos de evidencia requeridos por policy.
+
+## Contención: se DECLARA, no bloquea
+
+El manifiesto sella un bloque `contention` que mide la máquina compartida
+durante la corrida: procesos de test ajenos, cuántos de ellos estaban
+realmente quemando CPU (medido por delta de tiempo de CPU entre muestras, no
+por el promedio de vida del proceso) y el load. El runner además toma un slot
+del semáforo de builds (perilla `HARNESS_TEST_SLOTS`).
+
+Ese bloque VIAJA con la evidencia y `verify` lo DECLARA por stderr, pero **no
+la rechaza**. La razón es una asimetría: `verify` mata cualquier manifiesto que
+no tenga `exit_code: 0`, así que todo lo que llega al chequeo de contención ya
+salió VERDE, y la contención no fabrica verdes: fabrica TIMEOUTS, o sea rojos,
+que el chequeo de exit code ya rechaza. Un verde bajo carga es, si acaso, más
+confiable que uno en máquina libre. Rechazarlo mandaba a esperar una ventana
+tranquila que en un workspace multi-sesión puede no llegar nunca (caso de
+campo: una tarea de 5 minutos que tardó 3 horas hasta que hubo que matarla).
+
+Lo que la declaración sí deja abierto, y es lo que el reviewer tiene que
+mirar: **una suite cuyos guards de entorno SALTAN tests cuando un servicio está
+lento sale verde con menos tests corridos de los que cree**. Ningún otro gate
+lo cubre. Ante un sello con `suspect: true`, comparar el conteo de tests del
+log contra el esperado; si la suite tiene skips condicionales por timeout o
+healthcheck, re-correr en ventana tranquila (`HARNESS_TEST_SLOTS=N` baja el
+paralelismo PROPIO; si la carga es de otra sesión, no la toca).
+
+El aviso de `run` cuando el comando sale ROJO bajo contención sí sigue en pie:
+ahí la contención sí puede ser la causa del fallo.
 
 La evidencia FRESCA (la que prueba el árbol integrado que se pushea) sigue
 siendo SHA-estricta: la equivalencia por contenido jamás la satisface. Son

@@ -100,32 +100,68 @@ OUT="$WS/tasks/$TASK/verdict-$REPO.json"
 # tercer SHA. Un EV es elegible si es de este task/repo, salió en verde,
 # no movió HEAD, y es del commit pedido O del MISMO cambio (patch_id).
 #
-# Y NO está marcado por contención. Esa condición no es un capricho: es la
-# única forma de que la remediación del ship sea alcanzable. gate_preflight
-# rechaza el veredicto que cite un EV con contention.suspect, y manda a
-# re-sellar con menos carga; pero si el scaffold vuelve a elegir el
-# contaminado, el sello nuevo no sirve de nada: --rebase se niega porque el
-# commit no se movió, y --force re-incluye el sucio junto al limpio (y encima
-# tira el juicio que el reviewer ya había escrito). Caso de campo: una tarea
-# quedó trabada con el veredicto ya en pass, con EV-TEST-01066c3b5ea5 (suspect)
-# y EV-TEST-29565073a05f (mismo comando, mismo commit, limpio) conviviendo.
-# Un sello que el propio harness declara no probatorio no puede entrar al
-# veredicto: si el resultado es cero evidencia, eso es exactamente lo que
-# --allow-empty existe para decidir, y lo decide un humano.
+# LA CONTENCIÓN NO ELIGE: DECLARA. Hasta acá `eligible` exigía además que el
+# EV no estuviera marcado con contention.suspect, y esa exclusión salió carísima.
+# Caso de campo MEDIDO: una tarea de 5 minutos tardó 3 HORAS y hubo que matarla.
+# El agente sellaba evidencia, el scaffold salía exit 3 por contención, y él
+# volvía a sellar esperando a que la máquina se calmara. La carga no dependía de
+# él, así que el bucle no tenía condición de salida.
 #
-# El predicado va PARTIDO en dos a propósito. Caso de campo (COR-655): un EV
-# del commit CORRECTO pero excluido por contención caía en el mismo saco que
-# uno de otro SHA, y el mensaje decía "es de OTRO commit... el implementer
-# movió HEAD". Las dos frases eran falsas y mandaban a cazar una causa
-# inexistente: el commit era el bueno y nadie había movido nada. Un
-# diagnóstico equivocado cuesta más que ninguno, porque se le cree.
-ELIGIBLE_JQ='def eligible_salvo_contencion($t; $r; $c; $p):
+# Y el gate bloqueaba justo la única clase de resultado que la contención NO
+# puede haber falsificado: la elegibilidad exige exit_code 0 ANTES de mirar el
+# sello (acá y en evidence.py verify_one/fresh_evidence), o sea que todo EV que
+# llega al chequeo de contención YA SALIÓ VERDE. Y la contención produce
+# TIMEOUTS, o sea ROJOS, no verdes falsos: el rojo ya lo rechaza exit_code.
+#
+# Lo que sí queda es un residuo REAL, y por eso el EV entra DECLARADO en
+# evidence_under_contention en vez de entrar callado: una suite cuyos guards de
+# entorno SALTAN tests cuando un servicio está lento puede salir verde con MENOS
+# tests corridos de los que el verde aparenta. Eso es JUICIO del reviewer, y
+# para juzgarlo tiene que saberlo. Excluir el EV no lo protegía de ese residuo:
+# lo dejaba sin evidencia y sin tarea.
+#
+# UNA SOLA REGLA DE ELEGIBILIDAD, y los dos diagnósticos de COR-655 conservados
+# donde siguen sirviendo. Antes el predicado iba partido en dos (`eligible` y
+# `eligible_salvo_contencion`) solo para poder distinguir "suspect" de "otro
+# SHA" en el mensaje de error: decirle "es de OTRO commit... el implementer
+# movió HEAD" a un EV del commit bueno mandaba a cazar una causa inexistente, y
+# a un diagnóstico se le cree. Ese diagnóstico sobrevive, pero se MUEVE al único
+# caso en que la contención todavía explica por qué falta un verde: el EV ROJO
+# sellado bajo carga (`rojo_bajo_contencion`), donde re-sellar con la máquina
+# descargada SÍ puede cambiar el resultado. `bajo_contencion` queda como
+# predicado suelto: ya no decide nada, solo se declara.
+ELIGIBLE_JQ='def de_este_cambio($t; $r; $c; $p):
   type == "object" and .schema == 1 and .task_id == $t and .repo == $r
-  and .exit_code == 0 and .commit == .commit_after
+  and .commit == .commit_after
   and ((.commit == $c) or (($p != "") and ((.patch_id // "") == $p)));
 def eligible($t; $r; $c; $p):
-  eligible_salvo_contencion($t; $r; $c; $p)
-  and ((.contention.suspect // false) != true);'
+  de_este_cambio($t; $r; $c; $p) and .exit_code == 0;
+def bajo_contencion: (.contention.suspect // false) == true;
+def rojo_bajo_contencion($t; $r; $c; $p):
+  de_este_cambio($t; $r; $c; $p) and .exit_code != 0 and bajo_contencion;'
+
+# ── La contención se DICE, no se esconde en un campo ──────────────────
+# Un veredicto que gana un campo que nadie explica se lee como ruido y el
+# reviewer lo saltea. El razonamiento va a pantalla completo: por qué el EV
+# entra (ya es verde) y qué residuo queda igual (tests SALTADOS por guards de
+# entorno). Lo usan el scaffold y merge_qa, para que digan lo mismo.
+declara_contencion() {  # declara_contencion <verdict.json>
+  local n
+  n="$(jq '(.evidence_under_contention // []) | length' "$1" 2>/dev/null || echo 0)"
+  [ "${n:-0}" -gt 0 ] || return 0
+  echo "⚠️  $n evidencia(s) de este veredicto quedaron selladas bajo CONTENCIÓN:"
+  jq -r '(.evidence_under_contention // [])[] | "     - " + .' "$1"
+  echo "   NO se excluyen, y el motivo es mecánico: para entrar acá un EV ya pasó"
+  echo "   el chequeo de exit_code, o sea que SALIÓ VERDE, y la contención produce"
+  echo "   TIMEOUTS (rojos), que ese chequeo ya rechaza. Excluir los verdes dejaba"
+  echo "   al agente re-sellando a la espera de una máquina calma, sin condición de"
+  echo "   salida: caso de campo, 5 minutos de trabajo que tardaron 3 HORAS."
+  echo "   PERO queda un residuo REAL que es JUICIO del reviewer: una suite cuyos"
+  echo "   guards de entorno SALTAN tests cuando un servicio está lento sale verde"
+  echo "   con MENOS tests corridos de los que el verde aparenta."
+  echo "   ↳ el reviewer mira el conteo de tests SALTADOS en el log de esos EV y"
+  echo "     dice en su juicio si eso le cambia el veredicto."
+}
 
 merge_qa() {
   # Fusión MECANICA de qa-<repo>.json al veredicto. Caso de campo: el paso 3
@@ -157,22 +193,30 @@ merge_qa() {
   # Cada EV citado por QA pasa el MISMO predicado que la selección del
   # scaffold, contra el commit del veredicto (o su patch_id). Fail-closed:
   # un ID que no pasa NO se descarta en silencio: aborta con la causa.
-  local id ev ok_ids=""
+  local id ev ok_ids="" susp_ids=""
   for id in $(jq -r '.evidence[]? // empty' "$q"); do
     ev="$WS/tasks/$TASK/evidence/$id.json"
     [ -f "$ev" ] || { echo "❌ QA cita $id y no existe el manifiesto"; exit 3; }
     if jq -e --arg t "$TASK" --arg r "$REPO" --arg c "$vc" --arg p "$vpid" \
          "$ELIGIBLE_JQ"' eligible($t; $r; $c; $p)' "$ev" >/dev/null; then
       ok_ids="$ok_ids $id"
+      # El sello de contención ya no rechaza: se ARRASTRA al veredicto para que
+      # el reviewer lo vea. Rechazarlo mandaba a "re-sella con la máquina
+      # descargada", que es una espera sin condición de salida, y protegía de
+      # nada: este EV ya pasó exit_code 0, y la contención produce rojos.
+      jq -e "$ELIGIBLE_JQ"' bajo_contencion' "$ev" >/dev/null \
+        && susp_ids="$susp_ids $id"
     elif jq -e --arg t "$TASK" --arg r "$REPO" --arg c "$vc" --arg p "$vpid" \
-           "$ELIGIBLE_JQ"' eligible_salvo_contencion($t; $r; $c; $p)' "$ev" >/dev/null; then
-      # El commit es el CORRECTO: lo único que lo descalifica es el sello de
-      # contención. Decirle "es de OTRO cambio" mandaría a re-correr QA sobre
-      # un HEAD que ya es el bueno, y el sello nuevo saldría igual de sucio.
-      echo "❌ la evidencia de QA $id está sellada bajo CONTENCIÓN (contention.suspect)"
+           "$ELIGIBLE_JQ"' rojo_bajo_contencion($t; $r; $c; $p)' "$ev" >/dev/null; then
+      # Acá la contención SÍ explica el descarte, y es el único lugar donde lo
+      # hace: el EV es del commit correcto pero salió ROJO, y un rojo bajo carga
+      # puede ser de la máquina (timeouts) y no del cambio. Decirle "es de OTRO
+      # cambio" mandaría a re-correr QA sobre un HEAD que ya es el bueno.
+      echo "❌ la evidencia de QA $id salió en ROJO y está sellada bajo CONTENCIÓN"
       echo "   ↳ el commit es el correcto y nadie movió HEAD: la máquina estaba cargada"
-      echo "     al sellar. Re-sella con la máquina descargada (o HARNESS_TEST_SLOTS=1)"
-      echo "     y volvé a correr --merge-qa."
+      echo "     al sellar, y la contención produce TIMEOUTS. Ese rojo puede ser de la"
+      echo "     máquina y no de tu cambio: re-sella con la máquina descargada (o"
+      echo "     HARNESS_TEST_SLOTS=1) antes de salir a cazar un bug que quizá no existe."
       exit 3
     else
       echo "❌ la evidencia de QA $id es de OTRO cambio (ni commit ${vc:0:12} ni patch_id del veredicto)"
@@ -218,19 +262,27 @@ merge_qa() {
   # Los campos de JUICIO (verdict, blocking, compliance...) quedan byte a byte.
   local ids_json tmp notes
   ids_json="$(printf '%s\n' $ok_ids | jq -Rnc '[inputs | select(length > 0)]')"
-  local base_json
+  local base_json susp_json
   base_json="$(printf '%s\n' $base_ids | jq -Rnc '[inputs | select(length > 0)]')"
+  susp_json="$(printf '%s\n' $susp_ids | jq -Rnc '[inputs | select(length > 0)]')"
   notes="$(jq -r '.notes // ""' "$q")"
   tmp="$(mktemp "$WS/tasks/$TASK/.verdict-$REPO.XXXXXX")"
   jq -S --arg qa "$qa_state" --argjson ids "$ids_json" \
-        --argjson bids "$base_json" --arg notes "$notes" '
+        --argjson bids "$base_json" --argjson sids "$susp_json" --arg notes "$notes" '
     .qa = $qa
     | .qa_notes = (if $notes == "" then (.qa_notes // empty) else $notes end)
     | .evidence = ((.evidence + $ids) | unique)
     | (if ($bids | length) > 0
        then .evidence_baseline = (((.evidence_baseline // []) + $bids) | unique)
+       else . end)
+    # ADITIVO y con unique: la fusión sigue siendo idempotente a bytes, y el
+    # veredicto conserva lo que el scaffold ya había declarado.
+    | (if ($sids | length) > 0
+       then .evidence_under_contention =
+              (((.evidence_under_contention // []) + $sids) | unique)
        else . end)' "$v" > "$tmp" && mv "$tmp" "$v"
   echo "✅ merge-qa: qa=$qa_state fusionado al veredicto ($(printf '%s' "$ids_json" | jq 'length') EVs de QA)"
+  declara_contencion "$v"
 }
 
 if [ "$MERGE_QA" -eq 1 ]; then
@@ -335,8 +387,11 @@ for f in "$WS/tasks/$TASK/evidence"/EV-*.json; do
     "$ELIGIBLE_JQ"'
     select(type == "object" and .schema == 1 and .task_id == $t and .repo == $r)
     | if eligible($t; $r; $c; $p)
-      then [.id, (.runner // ""), (.kind // "")] | join("|")
-      elif eligible_salvo_contencion($t; $r; $c; $p) then "SUSPECT"
+      # El cuarto campo viaja para que el veredicto pueda DECLARAR cuáles de
+      # los EV que cita se sellaron bajo carga. Vacío cuando no lo estuvieron.
+      then [.id, (.runner // ""), (.kind // ""),
+            (if bajo_contencion then "suspect" else "" end)] | join("|")
+      elif rojo_bajo_contencion($t; $r; $c; $p) then "SUSPECT"
       else "STALE" end
   ' "$f" 2>/dev/null || true)"
   case "$line" in
@@ -355,12 +410,16 @@ rows="$(printf '%s' "$rows" | sort)"   # orden estable ⇒ scaffold idempotente 
 
 if [ -z "$rows" ] && [ "$ALLOW_EMPTY" -ne 1 ]; then
   if [ "$suspect" -gt 0 ]; then
-    # El commit es el CORRECTO: lo único que descalificó a estos EV es el sello
-    # de contención. Decir "de OTRO commit" mandaba a cazar un HEAD movido que
-    # nadie había movido, y el sello nuevo salía igual de sucio.
-    echo "❌ hay $suspect evidencia(s) de $REPO@${HEAD:0:12} selladas bajo CONTENCIÓN"
+    # El diagnóstico de COR-655, conservado en el ÚNICO caso donde la contención
+    # sigue explicando la falta de evidencia: estos EV son del commit CORRECTO
+    # pero salieron en ROJO bajo carga. Decir "de OTRO commit" mandaba a cazar un
+    # HEAD movido que nadie había movido. Y acá re-sellar SÍ puede cambiar el
+    # resultado, al revés que con un verde: la contención produce timeouts.
+    echo "❌ hay $suspect evidencia(s) de $REPO@${HEAD:0:12} en ROJO y selladas bajo CONTENCIÓN"
     echo "   ↳ el commit es el correcto y nadie movió HEAD: la máquina estaba cargada"
-    echo "     al sellar. Re-sella con la máquina descargada (o HARNESS_TEST_SLOTS=1):"
+    echo "     al sellar, y la contención produce TIMEOUTS. Ese rojo puede ser de la"
+    echo "     máquina y no de tu cambio: re-sella con la máquina descargada (o"
+    echo "     HARNESS_TEST_SLOTS=1) antes de salir a cazar un bug que quizá no existe:"
     [ "$stale" -gt 0 ] && echo "   (además hay $stale de otro commit)"
   elif [ "$stale" -gt 0 ]; then
     echo "❌ hay $stale evidencia(s) de $REPO pero de OTRO commit (HEAD actual: ${HEAD:0:12})"
@@ -387,13 +446,18 @@ printf '%s\n' "$rows" | jq -RnS --arg task "$TASK" --arg repo "$REPO" \
          | map(select(. != "" and . != $reviewer and . != "qa" and . != "ship"))
          | unique),
       evidence: ($rows | map(.[0])),
+      evidence_under_contention: ($rows | map(select(.[3] == "suspect") | .[0])),
       verdict: "PENDING_REVIEWER",
       qa: "pending",
       blocking: [], non_blocking: [],
       docs_updated: false,
       compliance: [],
       requirements_uncovered: -1,
-      snapshots_updated_justified: false }' > "$tmp"
+      snapshots_updated_justified: false }
+  # ADITIVO: sin EV bajo contención el campo NO existe, igual que known_bug. Un
+  # campo vacío en cada veredicto entrena a saltearlo justo cuando aparezca.
+  | (if (.evidence_under_contention | length) == 0
+     then del(.evidence_under_contention) else . end)' > "$tmp"
 
 # ── Arrastre del juicio (--rebase) ────────────────────────────────────
 # Se conserva compliance[], non_blocking[] y los flags del reviewer. NO se
@@ -416,7 +480,7 @@ if [ "$REBASE" -eq 1 ] && [ "$REBIND" -eq 1 ]; then
   # que cambia es QUÉ evidencia cita el veredicto. Se conserva TODO el juicio
   # (verdict, blocking, compliance, qa, requirements_uncovered, reviewed_at y
   # patch_id) y se reemplaza solo la lista de evidencia por la recién elegida,
-  # que por el predicado de arriba ya excluye lo marcado por contención.
+  # junto con la declaración de contención que le corresponde.
   # reviewed_at NO se refresca a propósito: la ventana de vigencia que mide
   # policy es la del JUICIO, y el juicio es el mismo de antes.
   # Sin delta POR DEFINICION: el commit no se movió. Se declara igual porque
@@ -431,7 +495,15 @@ if [ "$REBASE" -eq 1 ] && [ "$REBIND" -eq 1 ]; then
       implementation_agents:
         ((($prev[0].implementation_agents // []) + ($fresh[0].implementation_agents // []))
          | unique),
-      rebound_at: $fresh[0].reviewed_at }' > "$reb" 2>/dev/null && [ -s "$reb" ] || {
+      rebound_at: $fresh[0].reviewed_at }
+    # La declaración de contención se RECALCULA de la evidencia recién elegida,
+    # no se hereda: el rebind cambia justamente QUÉ se cita, así que heredarla
+    # dejaría el campo mintiendo en los dos sentidos (declarando un EV que ya no
+    # está, o callando uno nuevo). Sería la puerta de atrás por donde la
+    # contención vuelve a entrar sin decirlo.
+    | (if (($fresh[0].evidence_under_contention // []) | length) > 0
+       then .evidence_under_contention = $fresh[0].evidence_under_contention
+       else del(.evidence_under_contention) end)' > "$reb" 2>/dev/null && [ -s "$reb" ] || {
       rm -f "$reb" "$tmp"
       echo "❌ no pude re-ligar el veredicto previo (¿archivo corrupto?)"
       echo "   ↳ remediación: --force (el juicio se pierde: toca re-review)"; exit 3; }
@@ -610,6 +682,7 @@ fi
 
 mv "$tmp" "$OUT"
 echo "✅ scaffold: tasks/$TASK/verdict-$REPO.json ($(jq '.evidence|length' "$OUT") evidencias, agents=$(jq -c '.implementation_agents' "$OUT"), commit ${HEAD:0:12})"
+declara_contencion "$OUT"
 
 # El árbol clavado va DESPUÉS del sello: si el scaffold se negó (evidencia
 # stale, roles, juicio incorrupto), no queda un pin apuntando a un commit que

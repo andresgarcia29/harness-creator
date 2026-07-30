@@ -348,6 +348,13 @@ class EvidenceTest(unittest.TestCase):
         self.assertGreaterEqual(cont["cores"], 1)
         self.assertGreaterEqual(cont["foreign_test_procs_peak"], 0)
         self.assertIn(cont["suspect"], (True, False))
+        # COR-350: el conteo de ACTIVOS viaja JUNTO al viejo, no en su lugar.
+        # Agregar campos al sello es aditivo; sacarlos invalidaría de golpe la
+        # evidencia ya emitida, que es lo que el propio archivo advierte.
+        self.assertGreaterEqual(cont["foreign_active_test_procs_peak"], 0)
+        self.assertLessEqual(cont["foreign_active_test_procs_peak"],
+                             cont["foreign_test_procs_peak"])
+        self.assertIn(cont["active_measured"], (True, False))
 
     def test_no_slot_flag_skips_wrapper(self):
         result = subprocess.run(
@@ -434,10 +441,86 @@ class EvidenceTest(unittest.TestCase):
         self.assertTrue(module._looks_like_test_cmd("bash test_secrets.sh"))
         self.assertTrue(module._looks_like_test_cmd("bash -c go test ./..."))
 
-    def test_suspect_message_names_the_foreign_suites_and_both_remedies(self):
-        """HARNESS_TEST_SLOTS solo baja el paralelismo PROPIO: recomendarlo a
-        secas no ayuda cuando la carga es de otra sesión, que es el caso de
-        campo. El mensaje tiene que nombrar quién carga y las dos salidas."""
+    # ── COR-350: se contaban procesos de test ajenos que NO gastan CPU ────
+    # Un `vitest --watch` ocioso de otra sesión, o el árbol de Chromium del MCP
+    # de Playwright, CLASIFICAN como test y mantenían foreign_peak > 0 PARA
+    # SIEMPRE. Con la mitad izquierda de la conjunción vuelta constante, el
+    # detector degeneraba en `load > cores` a secas, que en una máquina de 6
+    # núcleos con varias sesiones es el estado NORMAL (medido: suspect=True con
+    # load_max 6.17 y 6 cores, o sea fallo por 0.17).
+
+    def test_active_cpu_classifier_ignores_idle_foreign_procs(self):
+        """Se cuenta solo lo que QUEMA CPU, medido por DELTA de tiempo de CPU
+        entre dos muestras. Muestras sintéticas a propósito: el criterio no
+        puede depender de lo que esté corriendo en la máquina del que testea."""
+        module = self._load_module()
+        ocioso = "node_modules/.bin/vitest --watch"
+        rows1 = [(10, 1, 0.0, ocioso), (20, 1, 0.0, "go test ./..."),
+                 (30, 1, 5.0, "vim notas.md")]
+        ajenos, activos, snap, medible = module._classify_active(
+            rows1, set(), {}, None, 100.0)
+        self.assertEqual(len(ajenos), 2)          # vim no es una suite
+        self.assertFalse(medible)                 # primera muestra: sin delta
+        self.assertEqual(len(activos), 2)         # no medible ⇒ cuentan (conservador)
+
+        # segunda muestra 10s después: el watcher gastó 0.05s (0.005 de un
+        # core) y la suite real gastó 10s (un core entero).
+        rows2 = [(10, 1, 0.05, ocioso), (20, 1, 10.0, "go test ./...")]
+        ajenos, activos, _, medible = module._classify_active(
+            rows2, set(), snap, 100.0, 110.0)
+        self.assertTrue(medible)
+        self.assertEqual(len(ajenos), 2)          # sigue estando: no desaparece
+        self.assertEqual(activos, ["go test ./..."])
+
+        # ventana demasiado corta para que el delta signifique algo: cuentan
+        # los dos. Aflojar por no poder medir sería justo el error del promedio.
+        _, activos_cortos, _, medible_corto = module._classify_active(
+            rows2, set(), snap, 100.0, 100.4)
+        self.assertFalse(medible_corto)
+        self.assertEqual(len(activos_cortos), 2)
+
+        # y el propio árbol nunca cuenta, gaste lo que gaste
+        _, activos_propios, _, _ = module._classify_active(
+            rows2, {10, 20}, snap, 100.0, 110.0)
+        self.assertEqual(activos_propios, [])
+
+    def test_cpu_time_parser_handles_the_two_ps_formats(self):
+        """`ps -o time` no tiene UN formato: macOS da `MM:SS.ss` y pasa a
+        `HH:MM:SS` con las horas; Linux agrega `DD-HH:MM:SS` para los procesos
+        de días, que es exactamente lo que son los watchers de otra sesión."""
+        module = self._load_module()
+        self.assertAlmostEqual(module._cpu_seconds("12:34.56"), 754.56, places=2)
+        self.assertAlmostEqual(module._cpu_seconds("1:02:03"), 3723.0, places=2)
+        self.assertAlmostEqual(module._cpu_seconds("2-03:00:00"), 183600.0, places=2)
+        self.assertAlmostEqual(module._cpu_seconds("  0:00.04 "), 0.04, places=2)
+        self.assertIsNone(module._cpu_seconds("?"))
+        self.assertIsNone(module._cpu_seconds(""))
+
+    def test_source_never_uses_the_average_cpu_column(self):
+        """ASERTO ESTRUCTURAL, y esto ya costó una ronda entera de review a
+        otro agente: la columna de %CPU de `ps` NO es CPU actual, es
+        cputime/etime, o sea el PROMEDIO sobre toda la vida del proceso.
+        Medido en vivo, un proceso al 100% de un core leía 7.4 y BAJANDO. La
+        ley que sale de ahí: un proceso vivo T segundos que corre una suite de
+        d segundos lee d/T*100, así que con T > 20d jamás cruza un umbral del
+        5% y el `vitest --watch` de otra sesión se escapa entero. Con esa
+        columna el gate queda MÁS FLOJO que antes, no más limpio.
+
+        Se ignoran las líneas de comentario a propósito: el fuente TIENE que
+        poder nombrar la trampa para que nadie la reintroduzca; lo que se
+        prohíbe es USARLA."""
+        codigo = "\n".join(line for line in SCRIPT.read_text().splitlines()
+                           if not line.lstrip().startswith("#"))
+        self.assertNotIn("pcpu", codigo)
+        self.assertIn("pid,ppid,time,command", codigo)   # el delta, no el promedio
+
+    def test_suspect_declaration_names_the_foreign_suites_and_the_residual(self):
+        """El mensaje tiene que nombrar QUIÉN carga la máquina (HARNESS_TEST_SLOTS
+        solo baja el paralelismo PROPIO, así que recomendarlo a secas no ayuda
+        cuando la carga es de otra sesión) y, sobre todo, cuál es el residuo que
+        de verdad queda abierto: una suite con guards de entorno que SALTAN tests
+        cuando un servicio está lento sale verde con menos tests de los que cree.
+        Eso no lo cubre ningún otro gate, así que se declara para el reviewer."""
         evidence_id = self.run_evidence()
         path = self.task / f"evidence/{evidence_id}.json"
         data = json.loads(path.read_text())
@@ -446,12 +529,28 @@ class EvidenceTest(unittest.TestCase):
                               "load_avg_max": 12.0, "cores": 6}
         path.write_text(json.dumps(data))
         result = self.verify(self.verdict(evidence_id))
-        self.assertEqual(result.returncode, 3)
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("go test ./internal/...", result.stderr)
         self.assertIn("OTRA sesión", result.stderr)
         self.assertIn("HARNESS_TEST_SLOTS", result.stderr)
+        self.assertIn("SALTAN", result.stderr)     # el residuo, nombrado
 
-    def test_verify_rejects_suspect_cited_evidence(self):
+    def test_verify_declares_suspect_cited_evidence_instead_of_blocking(self):
+        """ESTE TEST CAMBIÓ DE SENTIDO A PROPÓSITO (antes: ..._rejects_...).
+
+        Caso de campo medido: el sello de contención dejó a un agente esperando
+        a que la máquina se calmara y una tarea de 5 minutos tardó 3 HORAS y
+        hubo que matarla. La causa no era el umbral: era la ASIMETRÍA que el
+        gate ignoraba. `verify_one` construye `expected` con exit_code 0 y muere
+        ANTES de mirar la contención, así que TODA evidencia que llegaba al
+        chequeo de suspect ya había salido VERDE; y la contención produce
+        TIMEOUTS, o sea rojos, no aserciones que pasan de mentira. El gate
+        bloqueaba la única clase de resultado que la contención no puede
+        falsificar, y su remediación ('esperá a que terminen las otras
+        sesiones') puede no cumplirse nunca en un workspace multi-sesión.
+
+        Así que suspect deja de BLOQUEAR y pasa a DECLARAR: exit 0 y una
+        advertencia fuerte con los números y el residuo real."""
         evidence_id = self.run_evidence()
         manifest_path = self.task / f"evidence/{evidence_id}.json"
         data = json.loads(manifest_path.read_text())
@@ -459,15 +558,20 @@ class EvidenceTest(unittest.TestCase):
                               "load_avg_max": 29.4, "cores": 6}
         manifest_path.write_text(json.dumps(data))
         result = self.verify(self.verdict(evidence_id))
-        self.assertEqual(result.returncode, 3)
-        self.assertIn("contención", result.stderr)
-        self.assertIn("HARNESS_TEST_SLOTS", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("CONTENCIÓN", result.stderr)
+        self.assertIn("29.4", result.stderr)          # los números, no un adjetivo
+        self.assertIn("evidencias ligadas", result.stdout)
 
-    def test_fresh_gap_names_suspect_reason(self):
-        ev = self.mk_manifest("EV-TEST-susp00000001", "9" * 40,
-                              contention={"suspect": True,
-                                          "foreign_test_procs_peak": 11,
-                                          "load_avg_max": 29.4, "cores": 6})
+    def test_fresh_evidence_counts_a_green_sealed_under_contention(self):
+        """CONTRA-MITAD de la declaración: el descarte en `fresh_evidence` era
+        la otra mitad del cepo. Un manifiesto VERDE (exit_code 0, hash del log
+        OK) sellado bajo contención cuenta como evidencia fresca; la contención
+        viaja declarada, no borra la prueba."""
+        self.mk_manifest("EV-TEST-susp00000001", "9" * 40,
+                         contention={"suspect": True,
+                                     "foreign_test_procs_peak": 11,
+                                     "load_avg_max": 29.4, "cores": 6})
         path = self.task / "verdict-atlas.json"
         path.write_text(json.dumps({
             "schema": 1, "task_id": self.task.name, "repo": "atlas",
@@ -478,8 +582,24 @@ class EvidenceTest(unittest.TestCase):
              "--reviewed-commit", self.commit, "--verdict", str(path),
              "--require-kind", "test", "--require-fresh-kind", "test"],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("evidencia fresca", result.stdout)
+        self.assertIn("CONTENCIÓN", result.stderr)   # y se declara, no se calla
+
+    def test_red_evidence_under_contention_is_still_rejected(self):
+        """La declaración NO afloja el exit_code: un ROJO bajo contención sí
+        puede ser mentira (la contención fabrica timeouts), y ese lo sigue
+        rechazando el chequeo de exit_code, antes de mirar la contención."""
+        evidence_id = self.run_evidence()
+        path = self.task / f"evidence/{evidence_id}.json"
+        data = json.loads(path.read_text())
+        data["exit_code"] = 1
+        data["contention"] = {"suspect": True, "foreign_test_procs_peak": 11,
+                              "load_avg_max": 29.4, "cores": 6}
+        path.write_text(json.dumps(data))
+        result = self.verify(self.verdict(evidence_id))
         self.assertEqual(result.returncode, 3)
-        self.assertIn("suspect", result.stderr)
+        self.assertIn("exit_code", result.stderr)
 
     def test_old_manifest_without_contention_still_verifies(self):
         evidence_id = self.run_evidence()

@@ -32,6 +32,12 @@ skills: ## sincroniza la capa compartida de skills (skills.yaml)
 graph: ## construye/refresca el grafo de graphify (incremental por HEADs)
 	@bash scripts/graph-refresh.sh
 
+metrics: ## en qué se va el tiempo y qué gates dan falsos rojos (informe acotado)
+	@python3 scripts/harness-metrics.py report
+
+metrics-escalate: ## propone el reporte upstream de lo que supere umbral (dry-run)
+	@python3 scripts/harness-metrics.py escalate
+
 wt: ## crea worktrees: make wt TASK=<id> REPOS="a b"
 	@bash scripts/worktree-task.sh $(TASK) $(REPOS)
 

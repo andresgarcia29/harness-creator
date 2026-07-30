@@ -42,6 +42,14 @@ hallazgo archivado sin bead deja de existir (Ley 7).
    deploy verde: pídela primero (`transition ... deploy`). Sin esto la tarea
    queda archivada en disco pero viva en la máquina de estados, y un
    `/smart <id>` posterior la re-entra a revisar algo que ya está en producción.
+0b. **Recolecta las métricas de la tarea**:
+   `python3 scripts/harness-metrics.py collect --task <id>`.
+   Va ACÁ y no antes por una razón: la tarea ya murió, así que medirla no le
+   cuesta un segundo a nadie. El comando solo LEE artefactos que ya estaban
+   escritos (los sellos de evidencia, el bus, state.json): no instrumenta nada
+   y es fail-open, así que si falla no toca el archivado. Lo que habilita es
+   `make metrics`, que dice en qué se va el tiempo y qué gates dan falsos rojos.
+
 1. **Recolecta write-backs**: lee tasks/<id>/delta-spec.md Y las notas
    de desviación que los implementers dejaron durante la ejecución
    (spec bidireccional: lo descubierto en el worktree — "existía un

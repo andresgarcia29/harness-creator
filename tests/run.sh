@@ -54,6 +54,7 @@ pyrun "server.py (lógica)" test_server.py
 pyrun "server.py (HTTP end-to-end)" test_op_http.py
 pyrun "evidence v1" test_evidence.py
 pyrun "policy engine v1" test_policy.py
+pyrun "metricas del harness" test_metrics.py
 
 echo
 if [ "$failed" -eq 0 ]; then echo "════ SUITE COMPLETA EN VERDE ════"; else echo "════ HAY FALLAS ════"; exit 1; fi

@@ -300,6 +300,15 @@ def non_blocking_without_bead(task_dir: Path) -> list:
     return out
 
 
+def blocking_count(task_dir: Path, repo: str):
+    """Cuantos bloqueantes dejo el ultimo veredicto del repo, o None si no se sabe."""
+    try:
+        items = json.loads((task_dir / f"verdict-{repo}.json").read_text(encoding="utf-8")).get("blocking")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return None
+    return len(items) if isinstance(items, list) else None
+
+
 def stale_delta_spec(task_dir: Path) -> "str | None":
     """delta-spec.md más nuevo que TODOS los veredictos: nadie revisó ese texto.
 
@@ -482,6 +491,67 @@ def repo_kinds(ws: Path) -> dict:
     return kinds
 
 
+def vet_repos_for_lane(lane: str, repos: list, ws: Path) -> None:
+    """Chequea carril vs repos ANTES de gastar un implementer.
+
+    Vivía adentro de cmd_init, y por eso solo se cobraba al abrir la tarea:
+    sumar un repo despues (`repos --add`) se saltaba el freno entero. Es la
+    misma verificación en los dos momentos, así que es UNA función: dos copias
+    divergen en silencio justo donde el carril promete algo que gate_lane va a
+    cobrar al final.
+
+    Los mensajes NO cambian a propósito: hay tests que comparan texto literal,
+    y quien los lee en la terminal ya aprendió a reconocerlos."""
+    if not repos:
+        return
+    # quick es de UN repo, y eso se puede comprobar ACÁ: es la única
+    # promesa del carril que no necesita ver el diff. quick no genera DAG,
+    # así que nada ordena el ship entre repos, y descubrirlo al final
+    # costaría el trabajo del implementer más una escalada.
+    distinct = list(dict.fromkeys(repos))
+    if lane == "quick" and len(distinct) > 1:
+        fail("POLICY-LANE-005",
+             f"quick es de UN repo; para multi-repo usa express o superior. "
+             f"Esta tarea declara {len(distinct)}: {', '.join(distinct)}. "
+             "quick no genera DAG, o sea que no hay nada que ordene el ship "
+             "entre repos. Remediación: iniciá con --lane express (o "
+             "superior), o partí la tarea en una por repo")
+    # El aviso temprano que faltaba: gate_lane frena un carril corto que
+    # toca infra, pero recién en el precheck, DESPUÉS de que el implementer
+    # trabajó. Caso de campo: un carril se clasificó por el tamaño del
+    # cambio en vez de por lo que toca, y el error se pagó al final.
+    kinds = repo_kinds(ws)
+    if not kinds:
+        # Degradar sin decir fue el bug (caso de campo): con repo_kinds
+        # vacio se salteaban EN SILENCIO el freno de infra Y el aviso de
+        # repos desconocidos, y quien probaba leia ese silencio como
+        # "chequeo pasado". Fail-open se queda (el backstop es gate_lane
+        # en ship.sh); lo que no se queda es el silencio.
+        manifest = ws / "manifest.yaml"
+        if manifest.exists():
+            estado = "presente pero sin repos con kind legibles"
+        else:
+            estado = f"ausente en {manifest.parent}"
+        print(f"⚠️  manifest.yaml {estado}: el chequeo carril/kind NO "
+              "corrio (ni el freno de infra ni el aviso de repos "
+              "desconocidos); el backstop es gate_lane en ship.sh",
+              file=sys.stderr)
+    if lane in ("quick", "express"):
+        infra = [r for r in repos if kinds.get(r) in ("infra-live", "infra-module")]
+        if infra:
+            fail("POLICY-LANE-004",
+                 f"carril {lane} con repos de infra: {', '.join(infra)} "
+                 f"(kind infra-module/infra-live en manifest.yaml). El carril "
+                 f"{lane} promete cero infra y gate_lane lo va a bloquear "
+                 "DESPUÉS de que el implementer trabaje. Remediación: iniciá "
+                 "con --lane standard (o full), o quitá ese repo de la tarea")
+    unknown = [r for r in repos if kinds and r not in kinds]
+    if unknown:
+        print(f"⚠️  repos fuera de manifest.yaml (sin kind conocido): "
+              f"{', '.join(unknown)}; el chequeo carril/kind no los cubre",
+              file=sys.stderr)
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     path = state_path(task_dir)
@@ -503,53 +573,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     if args.lane not in known_lanes:
         fail("POLICY-LANE-001", f"carril desconocido: {args.lane} (permitidos: {sorted(known_lanes)})")
     repos = [r.strip() for r in (getattr(args, "repos", "") or "").split(",") if r.strip()]
-    if repos:
-        # quick es de UN repo, y eso se puede comprobar ACÁ: es la única
-        # promesa del carril que no necesita ver el diff. quick no genera DAG,
-        # así que nada ordena el ship entre repos, y descubrirlo al final
-        # costaría el trabajo del implementer más una escalada.
-        distinct = list(dict.fromkeys(repos))
-        if args.lane == "quick" and len(distinct) > 1:
-            fail("POLICY-LANE-005",
-                 f"quick es de UN repo; para multi-repo usa express o superior. "
-                 f"Esta tarea declara {len(distinct)}: {', '.join(distinct)}. "
-                 "quick no genera DAG, o sea que no hay nada que ordene el ship "
-                 "entre repos. Remediación: iniciá con --lane express (o "
-                 "superior), o partí la tarea en una por repo")
-        # El aviso temprano que faltaba: gate_lane frena un carril corto que
-        # toca infra, pero recién en el precheck, DESPUÉS de que el implementer
-        # trabajó. Caso de campo: un carril se clasificó por el tamaño del
-        # cambio en vez de por lo que toca, y el error se pagó al final.
-        kinds = repo_kinds(task_dir.parent.parent)   # tasks/<id> vive bajo el WS
-        if not kinds:
-            # Degradar sin decir fue el bug (caso de campo): con repo_kinds
-            # vacio se salteaban EN SILENCIO el freno de infra Y el aviso de
-            # repos desconocidos, y quien probaba leia ese silencio como
-            # "chequeo pasado". Fail-open se queda (el backstop es gate_lane
-            # en ship.sh); lo que no se queda es el silencio.
-            manifest = task_dir.parent.parent / "manifest.yaml"
-            if manifest.exists():
-                estado = "presente pero sin repos con kind legibles"
-            else:
-                estado = f"ausente en {manifest.parent}"
-            print(f"⚠️  manifest.yaml {estado}: el chequeo carril/kind NO "
-                  "corrio (ni el freno de infra ni el aviso de repos "
-                  "desconocidos); el backstop es gate_lane en ship.sh",
-                  file=sys.stderr)
-        if args.lane in ("quick", "express"):
-            infra = [r for r in repos if kinds.get(r) in ("infra-live", "infra-module")]
-            if infra:
-                fail("POLICY-LANE-004",
-                     f"carril {args.lane} con repos de infra: {', '.join(infra)} "
-                     f"(kind infra-module/infra-live en manifest.yaml). El carril "
-                     f"{args.lane} promete cero infra y gate_lane lo va a bloquear "
-                     "DESPUÉS de que el implementer trabaje. Remediación: iniciá "
-                     "con --lane standard (o full), o quitá ese repo de la tarea")
-        unknown = [r for r in repos if kinds and r not in kinds]
-        if unknown:
-            print(f"⚠️  repos fuera de manifest.yaml (sin kind conocido): "
-                  f"{', '.join(unknown)}; el chequeo carril/kind no los cubre",
-                  file=sys.stderr)
+    vet_repos_for_lane(args.lane, repos, task_dir.parent.parent)   # tasks/<id> vive bajo el WS
     state = {
         "schema": 1,
         "task_id": task_dir.name,
@@ -1044,12 +1068,62 @@ def cmd_transition(args: argparse.Namespace) -> int:
         if args.repo:
             rounds_by_repo[args.repo] = rounds_by_repo.get(args.repo, 0) + 1
             this_repo = rounds_by_repo[args.repo]
+            # ── EL TECHO MIRA CONVERGENCIA, NO SOLO EL CONTEO ─────────────
+            # CASO DE CAMPO: una tarea bajó 4 → 2 → 1 → 0 bloqueantes y el
+            # techo de 3 rondas la paró con el trabajo terminado; hubo que
+            # despertar a un humano de madrugada para desbloquear algo que
+            # estaba convergiendo a la vista de cualquiera.
+            #
+            # POR QUÉ: rondas de más NO siempre son "no converge". También
+            # son un reviewer que hace bien su trabajo y encuentra menos
+            # cada vez. Cortar por conteo puro confunde las dos cosas y
+            # cobra la escalada más cara justo en el caso bueno.
+            #
+            # La señal es el conteo de `blocking` del ÚLTIMO veredicto del
+            # repo, acumulado ronda a ronda en review_blocking_by_repo. Si
+            # baja estrictamente, la ronda extra pasa con aviso; si no baja,
+            # el corte es el de siempre. El techo DURO 2*maximum existe
+            # porque bajar de a uno desde cincuenta también "converge" y
+            # nadie va a pagar cincuenta rondas para comprobarlo.
+            #
+            # Sin veredictos legibles no hay serie: `seen` queda vacío,
+            # `converging` es falso y el corte es IDÉNTICO al de antes.
+            blocking_by_repo = state.get("review_blocking_by_repo")
+            if not isinstance(blocking_by_repo, dict):
+                blocking_by_repo = {}
+            seen = blocking_by_repo.get(args.repo)
+            seen = [n for n in seen if isinstance(n, int)] if isinstance(seen, list) else []
+            previous = blocking_count(task_dir, args.repo)
+            if previous is not None:
+                seen.append(previous)
+            blocking_by_repo[args.repo] = seen
+            state["review_blocking_by_repo"] = blocking_by_repo
+            converging = len(seen) >= 2 and seen[-1] < seen[-2]
+            hard = 2 * maximum
             if this_repo > maximum:
-                fail("POLICY-LIMIT-001",
-                     f"review round {this_repo} del repo {args.repo} excede el máximo "
-                     f"{maximum}. Ese repo no converge: escala a humano con el "
-                     "historial de veredictos (los otros repos de la tarea no se "
-                     "ven afectados)")
+                if this_repo > hard:
+                    fail("POLICY-LIMIT-001",
+                         f"review round {this_repo} del repo {args.repo} excede el "
+                         f"techo duro {hard} (2× el máximo {maximum}). Aunque los "
+                         "bloqueantes vengan bajando, esta cantidad de rondas ya no "
+                         "es convergencia sino goteo: escala a humano con el "
+                         "historial de veredictos (los otros repos de la tarea no "
+                         "se ven afectados)")
+                if not converging:
+                    traza = (f"{seen[-2]} → {seen[-1]}" if len(seen) >= 2
+                             else "sin serie legible de bloqueantes en los veredictos")
+                    fail("POLICY-LIMIT-001",
+                         f"review round {this_repo} del repo {args.repo} excede el "
+                         f"máximo {maximum} y NO bajó bloqueantes ({traza}). Ese repo "
+                         "no converge: escala a humano con el historial de veredictos "
+                         "(los otros repos de la tarea no se ven afectados)")
+                # Sobrevivir a los dos fail() de arriba ES la decisión: la
+                # ronda extra se CONCEDE, y se cuenta como tal en el bus.
+                aviso = (f"ronda extra {this_repo}/{maximum} de {args.repo} "
+                         f"permitida por convergencia: los bloqueantes bajan "
+                         f"({' → '.join(str(n) for n in seen)}), techo duro {hard}")
+                print(f"⚠️  {aviso}")
+                emit_bus(task_dir, "decision", aviso)
             budget_warning(this_repo, maximum, f" de {args.repo}")
             rounds = max([rounds] + list(rounds_by_repo.values()))
         else:
@@ -1122,6 +1196,64 @@ def cmd_rollback(args: argparse.Namespace) -> int:
     print(f"↩️  {task_dir.name}: rollback {current} → {destination} ({args.reason})")
     print(f"   review_rounds sin cambios ({state.get('review_rounds', 0)}): "
           "el rollback deshace, no cobra una ronda")
+    return 0
+
+
+def cmd_repos(args: argparse.Namespace) -> int:
+    """Suma repos a una tarea YA iniciada, registrando quién y por qué.
+
+    POR QUÉ EXISTE: `init` era el único comando que aceptaba `--repos` y se
+    niega a re-correrse (POLICY-STATE-001), así que ampliar el alcance de una
+    tarea en curso no tenía ninguna vía registrada.
+
+    CASO DE CAMPO: el enrichment descubrió CON EVIDENCIA que el bug vivía
+    también en otros dos repos. worktree-task.sh los aceptó sin chistar, pero
+    `state.repos` se quedó con tres de cinco, y en los carriles sin dag.json
+    `repos_missing_verdict` lee justamente `state.repos`: el repo nuevo
+    desaparecía del conteo y la fase avanzaba a ship SIN su veredicto. Editar
+    state.json a mano está prohibido (AGENTS.md), así que la única salida
+    honesta era esta: un comando que valide igual que init y deje historia.
+
+    El mismo `vet_repos_for_lane` que cobra init cobra acá, sobre la lista
+    COMBINADA: un repo de infra agregado después no puede colarse por la
+    puerta de atrás en un carril que prometió cero infra."""
+    task_dir = Path(args.task_dir).resolve()
+    path = state_path(task_dir)
+    lock_state(task_dir)
+    state = load(path, "estado")
+    if not args.reason.strip():
+        fail("POLICY-REPOS-001",
+             "ampliar el alcance sin motivo es una edición a mano con otro "
+             "nombre: pasá --reason con la evidencia que descubrió el repo")
+    phase = state.get("phase")
+    if phase in ("ship", "deploy", "archive"):
+        fail("POLICY-REPOS-002",
+             f"la tarea ya está en fase {phase}: un repo agregado acá nace sin "
+             "review posible (desde ship no se vuelve a review por el grafo). "
+             "Remediación: rollback a review con motivo y recién entonces "
+             "sumá el repo, o abrí una tarea nueva para ese repo")
+    current = state.get("repos")
+    current = [r for r in current if isinstance(r, str) and r] if isinstance(current, list) else []
+    added = [r.strip() for r in args.add.split(",") if r.strip()]
+    added = [r for r in dict.fromkeys(added) if r not in current]
+    if not added:
+        print(f"ℹ️  {task_dir.name}: sin cambios, esos repos ya estaban "
+              f"declarados ({', '.join(current) or 'ninguno'})")
+        return 0
+    combined = current + added
+    lane = state.get("lane", "full")
+    vet_repos_for_lane(lane, combined, task_dir.parent.parent)
+    state["repos"] = combined
+    state.setdefault("history", []).append({
+        "kind": "repos", "added": added,
+        "actor": args.actor, "reason": args.reason,
+    })
+    atomic(path, state)
+    emit_bus(task_dir, "decision",
+             f"alcance ampliado: +{', '.join(added)} ({args.reason})")
+    print(f"✅ {task_dir.name}: repos {', '.join(combined)} (+{', '.join(added)})")
+    print("   esos repos ahora exigen veredicto antes de review → ship "
+          "(POLICY-SHIP-004)")
     return 0
 
 
@@ -1333,6 +1465,17 @@ def build_parser() -> argparse.ArgumentParser:
     rollback.add_argument("--actor", required=True)
     rollback.add_argument("--reason", required=True)
     rollback.set_defaults(func=cmd_rollback)
+    repos_cmd = sub.add_parser("repos",
+                               help="suma repos a una tarea ya iniciada: init "
+                                    "no se re-corre y editar state.json a mano "
+                                    "está prohibido")
+    repos_cmd.add_argument("task_dir")
+    repos_cmd.add_argument("--add", required=True,
+                           help="repos a sumar, separados por coma")
+    repos_cmd.add_argument("--actor", required=True)
+    repos_cmd.add_argument("--reason", required=True,
+                           help="la evidencia que descubrió el repo")
+    repos_cmd.set_defaults(func=cmd_repos)
     deliv = sub.add_parser("delivery",
                            help="promueve la entrega declarada de la tarea "
                                 "(review → prs → trunk): el 'go' auditable")

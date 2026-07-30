@@ -54,6 +54,7 @@ FORCE=0
 ALLOW_EMPTY=0
 REBASE=0
 RENEW=0
+REBIND=0
 MERGE_QA=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -111,11 +112,20 @@ OUT="$WS/tasks/$TASK/verdict-$REPO.json"
 # Un sello que el propio harness declara no probatorio no puede entrar al
 # veredicto: si el resultado es cero evidencia, eso es exactamente lo que
 # --allow-empty existe para decidir, y lo decide un humano.
-ELIGIBLE_JQ='def eligible($t; $r; $c; $p):
+#
+# El predicado va PARTIDO en dos a propósito. Caso de campo (COR-655): un EV
+# del commit CORRECTO pero excluido por contención caía en el mismo saco que
+# uno de otro SHA, y el mensaje decía "es de OTRO commit... el implementer
+# movió HEAD". Las dos frases eran falsas y mandaban a cazar una causa
+# inexistente: el commit era el bueno y nadie había movido nada. Un
+# diagnóstico equivocado cuesta más que ninguno, porque se le cree.
+ELIGIBLE_JQ='def eligible_salvo_contencion($t; $r; $c; $p):
   type == "object" and .schema == 1 and .task_id == $t and .repo == $r
   and .exit_code == 0 and .commit == .commit_after
-  and ((.contention.suspect // false) != true)
-  and ((.commit == $c) or (($p != "") and ((.patch_id // "") == $p)));'
+  and ((.commit == $c) or (($p != "") and ((.patch_id // "") == $p)));
+def eligible($t; $r; $c; $p):
+  eligible_salvo_contencion($t; $r; $c; $p)
+  and ((.contention.suspect // false) != true);'
 
 merge_qa() {
   # Fusión MECANICA de qa-<repo>.json al veredicto. Caso de campo: el paso 3
@@ -154,12 +164,49 @@ merge_qa() {
     if jq -e --arg t "$TASK" --arg r "$REPO" --arg c "$vc" --arg p "$vpid" \
          "$ELIGIBLE_JQ"' eligible($t; $r; $c; $p)' "$ev" >/dev/null; then
       ok_ids="$ok_ids $id"
+    elif jq -e --arg t "$TASK" --arg r "$REPO" --arg c "$vc" --arg p "$vpid" \
+           "$ELIGIBLE_JQ"' eligible_salvo_contencion($t; $r; $c; $p)' "$ev" >/dev/null; then
+      # El commit es el CORRECTO: lo único que lo descalifica es el sello de
+      # contención. Decirle "es de OTRO cambio" mandaría a re-correr QA sobre
+      # un HEAD que ya es el bueno, y el sello nuevo saldría igual de sucio.
+      echo "❌ la evidencia de QA $id está sellada bajo CONTENCIÓN (contention.suspect)"
+      echo "   ↳ el commit es el correcto y nadie movió HEAD: la máquina estaba cargada"
+      echo "     al sellar. Re-sella con la máquina descargada (o HARNESS_TEST_SLOTS=1)"
+      echo "     y volvé a correr --merge-qa."
+      exit 3
     else
       echo "❌ la evidencia de QA $id es de OTRO cambio (ni commit ${vc:0:12} ni patch_id del veredicto)"
       echo "   ↳ re-corre QA sobre el HEAD actual (evidence.py run --runner qa ...),"
       echo "     o, si el veredicto es el viejo: scripts/verdict-scaffold.sh --rebase $TASK $REPO"
+      echo "   ↳ si es la corrida del ROJO sobre el árbol base (rojo primero), citala en"
+      echo "     evidence_baseline[] de qa-$REPO.json: ahí NO se exige igualdad de commit"
       exit 3
     fi
+  done
+
+  # ── Evidencia BASELINE: la prueba del rojo primero vive en OTRO commit ──
+  # Caso de campo (COR-650): el requirement del rojo primero se demuestra
+  # corriendo el test sobre el árbol BASE, y esa corrida se sella por
+  # definición en otro SHA y casi siempre en rojo (el rojo ES el punto).
+  # Exigirle igualdad de commit y exit 0 la volvía inaceptable siempre, así
+  # que el agente QA terminaba inventando campos ad hoc que ningún gate leía.
+  # Se acepta si su commit es ANCESTRO del commit revisado: probar el pasado
+  # de este cambio es exactamente su trabajo; un commit ajeno no prueba nada.
+  local bid bev bcommit base_ids=""
+  for bid in $(jq -r '.evidence_baseline[]? // empty' "$q"); do
+    bev="$WS/tasks/$TASK/evidence/$bid.json"
+    [ -f "$bev" ] || { echo "❌ QA cita $bid como baseline y no existe el manifiesto"; exit 3; }
+    jq -e --arg t "$TASK" --arg r "$REPO" --arg id "$bid" '
+      type == "object" and .schema == 1 and .task_id == $t and .repo == $r
+      and .id == $id and .commit == .commit_after' "$bev" >/dev/null \
+      || { echo "❌ el baseline $bid no es un EV sano de esta tarea/repo"; exit 3; }
+    bcommit="$(jq -r '.commit // ""' "$bev")"
+    git -C "$WT" merge-base --is-ancestor "$bcommit" "$vc" 2>/dev/null || {
+      echo "❌ el baseline $bid está sellado sobre ${bcommit:0:12}, que NO es ancestro"
+      echo "   del commit revisado (${vc:0:12})"
+      echo "   ↳ un baseline prueba el PASADO de este cambio; un commit ajeno no prueba nada"
+      exit 3; }
+    base_ids="$base_ids $bid"
   done
   if [ "$qc" != "$vc" ] && [ -z "$ok_ids" ]; then
     echo "❌ el QA es del commit ${qc:-?} y el veredicto de ${vc:0:12}: no hay"
@@ -171,12 +218,18 @@ merge_qa() {
   # Los campos de JUICIO (verdict, blocking, compliance...) quedan byte a byte.
   local ids_json tmp notes
   ids_json="$(printf '%s\n' $ok_ids | jq -Rnc '[inputs | select(length > 0)]')"
+  local base_json
+  base_json="$(printf '%s\n' $base_ids | jq -Rnc '[inputs | select(length > 0)]')"
   notes="$(jq -r '.notes // ""' "$q")"
   tmp="$(mktemp "$WS/tasks/$TASK/.verdict-$REPO.XXXXXX")"
-  jq -S --arg qa "$qa_state" --argjson ids "$ids_json" --arg notes "$notes" '
+  jq -S --arg qa "$qa_state" --argjson ids "$ids_json" \
+        --argjson bids "$base_json" --arg notes "$notes" '
     .qa = $qa
     | .qa_notes = (if $notes == "" then (.qa_notes // empty) else $notes end)
-    | .evidence = ((.evidence + $ids) | unique)' "$v" > "$tmp" && mv "$tmp" "$v"
+    | .evidence = ((.evidence + $ids) | unique)
+    | (if ($bids | length) > 0
+       then .evidence_baseline = (((.evidence_baseline // []) + $bids) | unique)
+       else . end)' "$v" > "$tmp" && mv "$tmp" "$v"
   echo "✅ merge-qa: qa=$qa_state fusionado al veredicto ($(printf '%s' "$ids_json" | jq 'length') EVs de QA)"
 }
 
@@ -219,9 +272,23 @@ if [ -f "$OUT" ]; then
       echo "   ↳ se recreó el worktree o se reescribió la historia: sin ese commit no hay"
       echo "     delta que calcular, y arrastrar juicio a ciegas sería un falso verde."
       echo "     Remediación: --force"; exit 3; }
-    [ "$PREV_COMMIT" != "$HEAD" ] || {
-      echo "❌ el veredicto previo ya es de este commit (${HEAD:0:12}): no hay delta que rebasear"
-      echo "   ↳ si el implementer aún no commiteó el fix, no hay nada que re-revisar todavía"; exit 3; }
+    if [ "$PREV_COMMIT" = "$HEAD" ]; then
+      if [ "$RENEW" -ne 1 ]; then
+        echo "❌ el veredicto previo ya es de este commit (${HEAD:0:12}): no hay delta que rebasear"
+        echo "   ↳ si el implementer aún no commiteó el fix, no hay nada que re-revisar todavía"
+        echo "   ↳ si re-sellaste evidencia LIMPIA del mismo commit (la citada quedó suspect),"
+        echo "     usa --rebase --renew: re-liga la evidencia y CONSERVA el juicio"
+        exit 3
+      fi
+      # REBIND, no rebase: mismo commit, código byte a byte el que el reviewer
+      # ya juzgó. Caso de campo (COR-360): el precheck selló bajo contención,
+      # ship rechazó el EV suspect, se re-selló limpio en ventana tranquila...
+      # y no había camino de vuelta: --rebase se negaba (sin delta) y --force
+      # borraba el juicio. La única salida era pagar un re-review completo de
+      # un diff idéntico al ya aprobado. La evidencia caduca por contención
+      # igual que caduca por cambio de base; el juicio no.
+      REBIND=1
+    fi
     # rebase PURO: mismo cambio sobre otra base. El juicio no caduca por esto
     # (validate-ship lo reusa por patch_id); regenerar el scaffold reseteaba
     # verdict a PENDING_REVIEWER y cobraba un reviewer por un movimiento que
@@ -261,6 +328,7 @@ fi
 # re-sellar la suite cuando el EV del implementer sigue probando este diff.
 rows=""
 stale=0
+suspect=0
 for f in "$WS/tasks/$TASK/evidence"/EV-*.json; do
   [ -e "$f" ] || continue
   line="$(jq -r --arg t "$TASK" --arg r "$REPO" --arg c "$HEAD" --arg p "$PATCH_ID" \
@@ -268,10 +336,12 @@ for f in "$WS/tasks/$TASK/evidence"/EV-*.json; do
     select(type == "object" and .schema == 1 and .task_id == $t and .repo == $r)
     | if eligible($t; $r; $c; $p)
       then [.id, (.runner // ""), (.kind // "")] | join("|")
+      elif eligible_salvo_contencion($t; $r; $c; $p) then "SUSPECT"
       else "STALE" end
   ' "$f" 2>/dev/null || true)"
   case "$line" in
     "") ;;
+    SUSPECT) suspect=$((suspect+1)) ;;
     STALE) stale=$((stale+1)) ;;
     *)
       id="${line%%|*}"
@@ -284,7 +354,15 @@ done
 rows="$(printf '%s' "$rows" | sort)"   # orden estable ⇒ scaffold idempotente a bytes
 
 if [ -z "$rows" ] && [ "$ALLOW_EMPTY" -ne 1 ]; then
-  if [ "$stale" -gt 0 ]; then
+  if [ "$suspect" -gt 0 ]; then
+    # El commit es el CORRECTO: lo único que descalificó a estos EV es el sello
+    # de contención. Decir "de OTRO commit" mandaba a cazar un HEAD movido que
+    # nadie había movido, y el sello nuevo salía igual de sucio.
+    echo "❌ hay $suspect evidencia(s) de $REPO@${HEAD:0:12} selladas bajo CONTENCIÓN"
+    echo "   ↳ el commit es el correcto y nadie movió HEAD: la máquina estaba cargada"
+    echo "     al sellar. Re-sella con la máquina descargada (o HARNESS_TEST_SLOTS=1):"
+    [ "$stale" -gt 0 ] && echo "   (además hay $stale de otro commit)"
+  elif [ "$stale" -gt 0 ]; then
     echo "❌ hay $stale evidencia(s) de $REPO pero de OTRO commit (HEAD actual: ${HEAD:0:12})"
     echo "   ↳ el implementer movió HEAD después de generarlas: re-corre la evidencia sobre el HEAD actual:"
   else
@@ -333,7 +411,34 @@ printf '%s\n' "$rows" | jq -RnS --arg task "$TASK" --arg repo "$REPO" \
 # traer `surface: ["ruta", ...]` con lo que ejercita. Si el delta no toca nada
 # de esa superficie, el pass se arrastra marcado. Sin `surface` no se arrastra
 # nada: fail-closed, igual que antes.
-if [ "$REBASE" -eq 1 ]; then
+if [ "$REBASE" -eq 1 ] && [ "$REBIND" -eq 1 ]; then
+  # REBIND: el commit no se movió, así que no hay delta que juzgar. Lo único
+  # que cambia es QUÉ evidencia cita el veredicto. Se conserva TODO el juicio
+  # (verdict, blocking, compliance, qa, requirements_uncovered, reviewed_at y
+  # patch_id) y se reemplaza solo la lista de evidencia por la recién elegida,
+  # que por el predicado de arriba ya excluye lo marcado por contención.
+  # reviewed_at NO se refresca a propósito: la ventana de vigencia que mide
+  # policy es la del JUICIO, y el juicio es el mismo de antes.
+  # Sin delta POR DEFINICION: el commit no se movió. Se declara igual porque
+  # los dos bloques de abajo (el delta que viaja al reviewer y su persistencia)
+  # cuelgan de $REBASE, y bajo set -u una variable sin declarar mata el script
+  # justo después de haber re-ligado bien el veredicto.
+  changed='[]'
+  reb="$(mktemp "$WS/tasks/$TASK/.rebind-$REPO.XXXXXX")"
+  jq -nS --slurpfile fresh "$tmp" --slurpfile prev "$OUT" '
+    $prev[0] + {
+      evidence: $fresh[0].evidence,
+      implementation_agents:
+        ((($prev[0].implementation_agents // []) + ($fresh[0].implementation_agents // []))
+         | unique),
+      rebound_at: $fresh[0].reviewed_at }' > "$reb" 2>/dev/null && [ -s "$reb" ] || {
+      rm -f "$reb" "$tmp"
+      echo "❌ no pude re-ligar el veredicto previo (¿archivo corrupto?)"
+      echo "   ↳ remediación: --force (el juicio se pierde: toca re-review)"; exit 3; }
+  mv "$reb" "$tmp"
+  echo "↻ rebind sobre ${HEAD:0:12}: $(jq '.evidence | length' "$tmp") EV re-ligados,"
+  echo "  juicio CONSERVADO (verdict=$(jq -r '.verdict' "$tmp"))"
+elif [ "$REBASE" -eq 1 ]; then
   changed="$(git -C "$WT" diff --name-only "$PREV_COMMIT" "$HEAD" 2>/dev/null \
     | jq -Rsc 'split("\n") | map(select(length > 0))')"
   [ -n "$changed" ] || changed='[]'
@@ -524,7 +629,8 @@ if [ "$REBASE" -eq 1 ]; then
     echo "→ delta para el reviewer: git -C $REVIEW_DIR diff $PREV_COMMIT..$HEAD  ($nfiles archivos; lista completa en delta_files)"
   fi
 fi
-[ "$REBASE" -eq 1 ] && echo "→ re-review INCREMENTAL: juzga solo las entradas con .rejudge; el resto trae carried_from."
+[ "$REBASE" -eq 1 ] && [ "$REBIND" -ne 1 ] \
+  && echo "→ re-review INCREMENTAL: juzga solo las entradas con .rejudge; el resto trae carried_from."
 echo "→ el reviewer reemplaza SOLO el juicio: verdict, blocking, non_blocking,"
 echo "  compliance, requirements_uncovered, docs_updated, snapshots_updated_justified."
 echo "  El campo qa lo fusiona /review desde qa-$REPO.json."

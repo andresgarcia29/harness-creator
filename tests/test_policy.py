@@ -530,6 +530,112 @@ class PolicyTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn("el chequeo carril/kind NO corrio", r.stderr)
 
+    # ── REPOS --add: ampliar el alcance de una tarea YA iniciada ──────────
+    # Caso de campo: el enrichment descubrió con evidencia que el bug vivía
+    # también en otros dos repos. worktree-task.sh los aceptó sin chistar pero
+    # state.repos quedó con tres de cinco, y en los carriles sin dag.json
+    # repos_missing_verdict solo lee state.repos: el repo nuevo desaparecía del
+    # conteo y la fase avanzaba a ship sin su veredicto. init no se re-corre
+    # (POLICY-STATE-001) y editar state.json a mano está prohibido.
+
+    def add_repos(self, task, add, reason="el enrichment lo encontró en proto"):
+        return self.run_policy("repos", task, "--add", add,
+                               "--actor", "orchestrator", "--reason", reason)
+
+    def move(self, task, phase):
+        return self.run_policy("transition", task, phase, "--actor", "orchestrator")
+
+    def test_repos_add_widens_a_started_task_and_leaves_history(self):
+        task = self.ws_task()
+        self.assertEqual(self.run_policy("init", task, "--lane", "express",
+                                         "--repos", "atlas").returncode, 0)
+        added = self.add_repos(task, "proto")
+        self.assertEqual(added.returncode, 0, added.stderr)
+        state = self.state_of(task)
+        self.assertEqual(state["repos"], ["atlas", "proto"])
+        self.assertEqual(state["history"][-1]["kind"], "repos")
+        self.assertEqual(state["history"][-1]["added"], ["proto"])
+        self.assertIn("enrichment", state["history"][-1]["reason"])
+
+    def test_repos_add_of_something_already_declared_changes_nothing(self):
+        task = self.ws_task()
+        self.assertEqual(self.run_policy("init", task, "--lane", "express",
+                                         "--repos", "atlas").returncode, 0)
+        again = self.add_repos(task, "atlas")
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertEqual(self.state_of(task)["repos"], ["atlas"])
+        self.assertEqual(self.state_of(task)["history"], [])
+
+    def test_repos_add_cannot_smuggle_a_second_repo_into_quick(self):
+        # la misma promesa que init cobra, cobrada también por la puerta nueva
+        task = self.ws_task()
+        self.assertEqual(self.run_policy("init", task, "--lane", "quick",
+                                         "--repos", "atlas").returncode, 0)
+        refused = self.add_repos(task, "proto")
+        self.assertEqual(refused.returncode, 3)
+        self.assertIn("POLICY-LANE-005", refused.stderr)
+        self.assertEqual(self.state_of(task)["repos"], ["atlas"])   # sin cambios
+
+    def test_repos_add_cannot_smuggle_infra_into_express(self):
+        task = self.ws_task()
+        self.assertEqual(self.run_policy("init", task, "--lane", "express",
+                                         "--repos", "atlas").returncode, 0)
+        refused = self.add_repos(task, "terraform-core")
+        self.assertEqual(refused.returncode, 3)
+        self.assertIn("POLICY-LANE-004", refused.stderr)
+        self.assertIn("terraform-core", refused.stderr)
+        self.assertEqual(self.state_of(task)["repos"], ["atlas"])
+
+    def test_repos_add_without_a_reason_is_an_edit_by_hand(self):
+        task = self.ws_task()
+        self.assertEqual(self.run_policy("init", task, "--lane", "express",
+                                         "--repos", "atlas").returncode, 0)
+        empty = self.add_repos(task, "proto", reason="  ")
+        self.assertEqual(empty.returncode, 3)
+        self.assertIn("POLICY-REPOS-001", empty.stderr)
+
+    def test_repos_add_is_refused_once_the_task_reached_ship(self):
+        # un repo agregado en ship nace sin review posible: desde ship el grafo
+        # solo va a deploy, así que su veredicto no tendría dónde ocurrir
+        task = self.ws_task()
+        self.assertEqual(self.run_policy("init", task, "--lane", "express",
+                                         "--repos", "atlas").returncode, 0)
+        for phase in ("implement", "review"):
+            self.assertEqual(self.move(task, phase).returncode, 0)
+        (task / "verdict-atlas.json").write_text(json.dumps({
+            "schema": 1, "verdict": "pass", "qa": "pass", "reviewer": "rev",
+            "implementation_agents": ["impl"],
+        }))
+        with (task / "ship.log").open("a") as log:
+            log.write(json.dumps({"repo": "atlas", "sha": "abc1234"}) + "\n")
+        self.assertEqual(self.move(task, "ship").returncode, 0)
+        late = self.add_repos(task, "proto")
+        self.assertEqual(late.returncode, 3)
+        self.assertIn("POLICY-REPOS-002", late.stderr)
+        self.assertEqual(self.state_of(task)["repos"], ["atlas"])
+
+    def test_repos_add_closes_the_fail_open_toward_ship(self):
+        """El cierre del agujero: sin dag.json, repos_missing_verdict lee
+        state.repos. Si el repo nuevo no está ahí, la fase avanza a ship sin su
+        veredicto (eso era el bug). Registrado con --add, SHIP-004 lo nombra."""
+        task = self.ws_task()
+        self.assertEqual(self.run_policy("init", task, "--lane", "express",
+                                         "--repos", "atlas").returncode, 0)
+        self.assertEqual(self.add_repos(task, "proto").returncode, 0)
+        for phase in ("implement", "review"):
+            self.assertEqual(self.move(task, phase).returncode, 0)
+        (task / "verdict-atlas.json").write_text(json.dumps({
+            "schema": 1, "verdict": "pass", "qa": "pass", "reviewer": "rev",
+            "implementation_agents": ["impl"],
+        }))
+        with (task / "ship.log").open("a") as log:
+            log.write(json.dumps({"repo": "atlas", "sha": "abc1234"}) + "\n")
+        blocked = self.move(task, "ship")
+        self.assertEqual(blocked.returncode, 3)
+        self.assertIn("POLICY-SHIP-004", blocked.stderr)
+        self.assertIn("proto", blocked.stderr)
+        self.assertEqual(self.state_of(task)["phase"], "review")   # no se movió
+
     # ── el presupuesto de rondas POR REPO (primer test que pasa --repo) ──
 
     def test_review_rounds_counted_per_repo(self):
@@ -578,6 +684,74 @@ class PolicyTest(unittest.TestCase):
         techo = self.transition_repo("review", "atlas")
         self.assertEqual(techo.returncode, 3)
         self.assertIn("POLICY-LIMIT-001", techo.stderr)
+
+    # ── LIMIT-001: el techo mira CONVERGENCIA, no solo el conteo ──────────
+    # Caso de campo: una tarea bajó 4 → 2 → 1 → 0 bloqueantes y el techo de 3
+    # rondas la paró con el trabajo terminado; hubo que despertar a un humano
+    # de madrugada. Rondas de más no siempre son "no converge": también son un
+    # reviewer que hace bien su trabajo.
+
+    def mk_blocking(self, repo, count):
+        """Deja el veredicto del repo con `count` bloqueantes: es la SEÑAL que
+        el techo lee para decidir si la ronda extra se concede."""
+        (self.task / f"verdict-{repo}.json").write_text(json.dumps({
+            "schema": 1, "verdict": "changes_requested", "qa": "pass",
+            "reviewer": "rev", "implementation_agents": ["impl"],
+            "blocking": [f"b{i}" for i in range(count)],
+        }))
+
+    def review_round(self, repo, blocking_now):
+        """Una ronda: se declara el veredicto que dejó la ronda ANTERIOR y se
+        pide la entrada a review. El motor lee ese archivo, no la conversación."""
+        self.mk_blocking(repo, blocking_now)
+        return self.transition_repo("review", repo)
+
+    def test_extra_round_is_granted_while_blocking_keeps_dropping(self):
+        self.reach("rfc", "implement")
+        self.assertEqual(self.transition_repo("review", "atlas").returncode, 0)
+        for count in (4, 2):
+            self.assertEqual(self.review_round("atlas", count).returncode, 0)
+        cuarta = self.review_round("atlas", 1)      # ronda 4, sobre el techo de 3
+        self.assertEqual(cuarta.returncode, 0, cuarta.stderr)
+        self.assertIn("convergencia", cuarta.stdout)
+        self.assertEqual(self.state()["review_rounds_by_repo"]["atlas"], 4)
+
+    def test_extra_round_is_refused_when_blocking_does_not_drop(self):
+        self.reach("rfc", "implement")
+        self.assertEqual(self.transition_repo("review", "atlas").returncode, 0)
+        for count in (2, 2):
+            self.assertEqual(self.review_round("atlas", count).returncode, 0)
+        cuarta = self.review_round("atlas", 2)
+        self.assertEqual(cuarta.returncode, 3)
+        self.assertIn("POLICY-LIMIT-001", cuarta.stderr)
+        self.assertIn("NO bajó bloqueantes", cuarta.stderr)
+        self.assertIn("2 → 2", cuarta.stderr)       # la serie que lo justifica, a la vista
+        # la ronda rechazada NO se cobra: el estado quedó en la tercera
+        self.assertEqual(self.state()["review_rounds_by_repo"]["atlas"], 3)
+
+    def test_hard_ceiling_stops_a_converging_repo_at_twice_the_maximum(self):
+        # Bajar de a uno desde cincuenta también "converge": el techo duro
+        # (2× el máximo) existe para que la convergencia no sea barra libre.
+        self.reach("rfc", "implement")
+        self.assertEqual(self.transition_repo("review", "atlas").returncode, 0)
+        for count in (6, 5, 4, 3, 2):               # rondas 2..6, bajada estricta
+            paso = self.review_round("atlas", count)
+            self.assertEqual(paso.returncode, 0, paso.stderr)
+        septima = self.review_round("atlas", 1)     # ronda 7 > 2*3
+        self.assertEqual(septima.returncode, 3)
+        self.assertIn("POLICY-LIMIT-001", septima.stderr)
+        self.assertIn("techo duro", septima.stderr)
+
+    def test_ceiling_is_identical_to_before_without_readable_verdicts(self):
+        # La contra-mitad del arreglo: sin serie de bloqueantes legible no hay
+        # convergencia que invocar y el corte tiene que ser el de siempre.
+        self.reach("rfc", "implement")
+        for _ in range(3):
+            self.assertEqual(self.transition_repo("review", "atlas").returncode, 0)
+        cuarta = self.transition_repo("review", "atlas")
+        self.assertEqual(cuarta.returncode, 3)
+        self.assertIn("POLICY-LIMIT-001", cuarta.stderr)
+        self.assertNotIn("convergencia", cuarta.stdout)
 
     def test_last_round_warns_with_repo_and_only_then(self):
         self.reach("rfc", "implement")

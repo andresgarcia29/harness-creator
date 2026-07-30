@@ -44,6 +44,10 @@ run_hook 'ls -la' "$WS/worktrees/T1/repo"
 assert_eq 0 $? "un comando sin scripts/: pasa"
 run_hook 'bash scripts/ship.sh' "$WS/repos/otro"
 assert_eq 0 $? "cwd fuera de worktrees/: no es asunto de este hook"
+run_hook "cd $WS && bash scripts/ship.sh T1 repo" "$WS/worktrees/T1/repo"
+assert_eq 0 $? "cd a la raíz del workspace + script relativo: el cd manda, pasa"
+run_hook "$(printf 'bd create --description "repro:\nbash scripts/ship.sh T1 repo\nfin"')" "$WS/worktrees/T1/repo"
+assert_eq 0 $? "mención multilínea entre comillas es dato, no comando: pasa"
 
 echo "── fail-open"
 

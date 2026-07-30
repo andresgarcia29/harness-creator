@@ -872,6 +872,24 @@ run_lang_gates() {
       echo "   verificó tipos y nada más."
     fi
   fi
+  # Repo Python cuyo pyproject.toml NO esta en la raiz (monorepo, services/,
+  # src/): el bloque de abajo no entraba, ni ruff ni pytest corrian y el
+  # precheck salia verde. Es la MISMA clase de silencio que la guarda de TS
+  # de arriba cerro, todavia abierta del lado Python (caso de campo COR-101:
+  # se vio porque la guarda de TS SI existia y la asimetria quedo a la
+  # vista). Un gate que no encuentra que verificar lo dice, no se ausenta.
+  if [ ! -f pyproject.toml ] && git ls-files '*/pyproject.toml' 2>/dev/null | grep -q .; then
+    gate python
+    echo "⛔ el gate python NO PUEDE CORRER: $REPO no tiene pyproject.toml en la raíz,"
+    echo "   pero sí en subdirectorios:"
+    git ls-files '*/pyproject.toml' 2>/dev/null | head -5 | sed 's/^/     · /'
+    echo "   Hasta ahora esto se saltaba en silencio: ni ruff ni pytest, y el"
+    echo "   precheck salía verde igual."
+    echo "   ↳ remediación: declara un pyproject.toml en la raíz que federe los"
+    echo "     paquetes (por ejemplo [tool.uv.workspace] con sus members), o mueve"
+    echo "     el proyecto a la raíz."
+    exit 3
+  fi
   if [ -f pyproject.toml ]; then
     LANG_SEEN=1
     gate python
@@ -1035,13 +1053,51 @@ run_lang_gates() {
   # que auto-aplican producción al mergear. Para un repo infra este es el
   # único gate entre un typo de HCL y el apply. Detección espejo de
   # discover.sh: *.tf en la raíz o subdirs hasta profundidad 4.
-  local tf_files tf_dir
+  local tf_files tf_dir tf_tests
   tf_files="$(git ls-files '*.tf' 2>/dev/null \
     | grep -v -E '(^|/)\.terraform/' | awk -F/ 'NF<=4' || true)"
   if [ -n "$tf_files" ]; then
     LANG_SEEN=1
     if need terraform Terraform; then
       gate terraform
+      # ── EL GATE NO PUEDE ENSUCIAR LO QUE JUZGA (COR-416/347) ──────────
+      # Caso de campo visto en DOS repos independientes: `terraform init`
+      # escribe .terraform/ y .terraform.lock.hcl en el directorio del módulo,
+      # así que la PRIMERA corrida del precheck sellaba con el árbol limpio y
+      # la SEGUNDA encontraba el árbol sucio... por artefactos del PROPIO gate.
+      # El ship se frenaba por basura que nadie escribió a mano, y la
+      # remediación que se le pedía al humano era borrar lo que el verificador
+      # había dejado. Un verificador que ensucia lo que juzga se descalifica
+      # solo: su veredicto deja de hablar del cambio y habla de sí mismo.
+      #
+      # Por eso los plugins van a un TF_DATA_DIR de scratch (fuera del
+      # worktree) y el lockfile vuelve EXACTAMENTE como estaba: repuesto si
+      # existía commiteado, borrado si no existía.
+      tf_limpio() {  # tf_limpio <dir> <subcomando...>: init + subcomando sin dejar rastro
+        local d="$1"; shift
+        local scratch lock_prev="" rc=0
+        scratch="$(mktemp -d)"
+        # Un lock COMMITEADO es parte del artefacto juzgado, e init lo reescribe
+        # (agrega hashes de plataforma): se guarda antes y se repone después.
+        if [ -f "$d/.terraform.lock.hcl" ]; then
+          lock_prev="$scratch/lock.previo"
+          cp "$d/.terraform.lock.hcl" "$lock_prev"
+        fi
+        if ! ( cd "$d"
+               TF_DATA_DIR="$scratch/data" terraform init -backend=false -input=false >/dev/null ); then
+          rm -rf "$scratch"
+          return 1
+        fi
+        # La restauración del lock va ANTES del subcomando, no después: si el
+        # subcomando sale rojo, el `set -e` de ship.sh mata todo en esa misma
+        # línea y una limpieza posterior NO correría, dejando el árbol sucio
+        # justo en el caso en que el humano va a mirarlo.
+        if [ -n "$lock_prev" ]; then cp "$lock_prev" "$d/.terraform.lock.hcl"
+        else rm -f "$d/.terraform.lock.hcl"; fi
+        if ( cd "$d"; TF_DATA_DIR="$scratch/data" terraform "$@" ); then rc=0; else rc=$?; fi
+        rm -rf "$scratch"
+        return "$rc"
+      }
       # fmt es recursivo desde la raíz: una pasada cubre todos los subdirs.
       terraform fmt -check -recursive
       # init/validate van POR directorio con .tf (cada uno es un root/módulo).
@@ -1049,13 +1105,28 @@ run_lang_gates() {
           | awk -F/ '{ if (NF == 1) print "."; else { sub("/[^/]*$", ""); print } }' \
           | sort -u); do
         echo "  → terraform validate: $tf_dir"
-        ( cd "$tf_dir"
-          terraform init -backend=false -input=false >/dev/null
-          terraform validate )
+        tf_limpio "$tf_dir" validate
       done
-      # validate NO es una suite: TESTS_RAN queda como esté, igual que squawk
-      # y buf. El sello de evidencia no puede afirmar "corrí tests" porque un
-      # HCL parseó.
+      # ── terraform test: validate PARSEA, test EJECUTA (COR-625) ───────
+      # Caso de campo: un repo de infra con tests/kargo_retry.tftest.hcl pasaba
+      # el precheck entero sin correr UN SOLO test suyo, porque el bloque de
+      # arriba solo mira sintaxis. `validate` dice "esto parsea"; `terraform
+      # test` dice "esto se comporta". Por eso SOLO terraform test enciende
+      # TESTS_RAN: el sello de evidencia no puede afirmar "corrí tests" porque
+      # un HCL parseó, igual que no lo afirman squawk ni buf.
+      tf_tests="$(git ls-files '*.tftest.hcl' 2>/dev/null \
+        | grep -v -E '(^|/)\.terraform/' | awk -F/ 'NF<=5' || true)"
+      if [ -n "$tf_tests" ]; then
+        # terraform test corre desde la RAÍZ del módulo, no desde tests/: ahí
+        # viven los archivos de test, pero el root de configuración es el padre.
+        for tf_dir in $(printf '%s\n' "$tf_tests" \
+            | awk -F/ '{ if (NF == 1) print "."; else { sub("/[^/]*$", ""); print } }' \
+            | sed 's|/tests$||; s|^tests$|.|' | sort -u); do
+          echo "  → terraform test: $tf_dir"
+          tf_limpio "$tf_dir" test
+        done
+        TESTS_RAN=1
+      fi
     fi
   fi
   # Gates de arquitectura y SQL: la CONFIG del repo es el opt-in (sin config,
@@ -1645,6 +1716,32 @@ muerde_go() {  # → 0 si hay toolchain Go
   MUERDE_MOTIVO="'go' no está en el PATH"
   return 1
 }
+muerde_tf() {  # → 0 si hay CLI de terraform
+  if command -v terraform >/dev/null; then return 0; fi
+  MUERDE_MOTIVO="'terraform' no está en el PATH"
+  return 1
+}
+# La raiz del modulo, no el directorio del archivo: terraform test corre desde
+# el root de configuracion y sus tests viven en tests/ o al lado. Caso de
+# campo (COR-625): tests/kargo_retry.tftest.hcl jamas entro al alcance y el
+# precheck salio verde sin correrlo.
+muerde_tf_root() {  # muerde_tf_root <archivo> → raíz del módulo
+  local d
+  d="$(dirname "$1")"
+  case "$d" in
+    */tests) d="${d%/tests}" ;;
+    tests)   d="." ;;
+  esac
+  printf '%s' "$d"
+}
+# Misma asimetria que muerde_go_base_compila: un init que no resuelve en la
+# BASE es ambiental y su rojo no prueba que el test muerda. El arbol base es
+# un worktree temporal que el trap borra entero, asi que aca no hay que
+# cuidar lockfiles: la higiene de COR-416 protege al worktree REAL.
+muerde_tf_base_init() {  # muerde_tf_base_init <archivo>
+  ( cd "$MUERDE_BASE/$(muerde_tf_root "$1")"
+    terraform init -backend=false -input=false )
+}
 # ── ¿el ÁRBOL BASE resuelve su grafo de módulos? ──────────────────────
 # Caso de campo: en un monorepo con `replace ... => ../../pkg`, el worktree
 # temporal del gate nace SIN el go.work que hace resolver ese replace, así que
@@ -1751,6 +1848,14 @@ muerde_corre() {  # muerde_corre <clase> <unidad> → el exit REAL sobre el árb
           "$MUERDE_PY" -q "$2" ) ;;
     go)
       ( cd "$MUERDE_BASE"; go test "$2" ) ;;
+    tf)
+      # -filter corre SOLO este archivo, unidad por unidad como el resto.
+      # La ruta del filtro es relativa a la raiz del modulo, no al repo.
+      ( d="$(muerde_tf_root "$2")"
+        rel="$2"
+        if [ "$d" != "." ]; then rel="${2#"$d"/}"; fi
+        cd "$MUERDE_BASE/$d"
+        terraform test -filter="$rel" ) ;;
     node)
       case "$MUERDE_NODE_RUNNER" in
         vitest)     ( cd "$MUERDE_BASE"; "$WT/node_modules/.bin/vitest" run "$2" ) ;;
@@ -1770,6 +1875,15 @@ muerde_corre_grupo() {  # muerde_corre_grupo <clase> <lista>: unidad por unidad
     # cobrarlo como MUERDE es el falso verde que este bloque existe para matar.
     if [ "$clase" = "go" ] && ! muerde_go_base_compila "$u" > "$MUERDE_SALIDA" 2>&1; then
       echo "   ⚠️  $u: el ÁRBOL BASE no compila sin tu cambio: NO puedo verificar este test"
+      MUERDE_CIEGOS="$MUERDE_CIEGOS   · $u
+"
+      tail -3 "$MUERDE_SALIDA" | sed 's/^/       /'
+      continue
+    fi
+    # Terraform: si el init de la BASE no resuelve, el exit != 0 del test es
+    # ambiental (modulos o providers sin resolver), no un test que muerde.
+    if [ "$clase" = "tf" ] && ! muerde_tf_base_init "$u" > "$MUERDE_SALIDA" 2>&1; then
+      echo "   ⚠️  $u: el ÁRBOL BASE no inicializa terraform: NO puedo verificar este test"
       MUERDE_CIEGOS="$MUERDE_CIEGOS   · $u
 "
       tail -3 "$MUERDE_SALIDA" | sed 's/^/       /'
@@ -1817,12 +1931,12 @@ muerde_salto() {  # muerde_salto <qué> <lista>: saltar se DICE, no se calla
   emit assumption "$REPO ($1): tests nuevos NO verificados contra la base ($MUERDE_MOTIVO)"
 }
 gate_test_muerde() {
-  local pat="${TEST_FILE_PATTERN:-(_test\.|\.test\.|_spec\.|\.spec\.|(^|/)test_)}"
+  local pat="${TEST_FILE_PATTERN:-(_test\.|\.test\.|_spec\.|\.spec\.|(^|/)test_|\.tftest\.hcl$)}"
   local artifacts="${TEST_ARTIFACT_PATTERN:-(__pycache__/|\.pyc$|\.pyo$|\.class$|\.pytest_cache/|/node_modules/)}"
   local nuevos tocados delta added="" escape="" f dir
   local scope="" escapados=""
-  local py_files="" go_dirs="" node_files="" otros=""
-  local corre_py=0 corre_go=0 corre_node=0
+  local py_files="" go_dirs="" node_files="" tf_units="" otros=""
+  local corre_py=0 corre_go=0 corre_node=0 corre_tf=0
   local MUERDE_PY="" MUERDE_NODE_RUNNERS="" MUERDE_NODE_RUNNER="" MUERDE_MOTIVO=""
   local mb head tmp
   # Tres puntos, el mismo ancla que gate_quick_size y por el mismo motivo: el
@@ -1875,6 +1989,8 @@ TOCEOF
 " ;;
       *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs) node_files="$node_files$f
 " ;;
+      *.tftest.hcl) tf_units="$tf_units$f
+" ;;
       *) otros="$otros$f
 " ;;
     esac
@@ -1893,11 +2009,15 @@ SCOPEOF
   if [ -n "$node_files" ]; then
     if muerde_node; then corre_node=1; else muerde_salto Node "$node_files"; fi
   fi
+  if [ -n "$tf_units" ]; then
+    if muerde_tf; then corre_tf=1; else muerde_salto Terraform "$tf_units"; fi
+  fi
   if [ -n "$otros" ]; then
-    MUERDE_MOTIVO="corro pytest (.py), go test (.go) y vitest/jest/playwright (.ts/.js); para el resto NO invento un comando, porque un runner adivinado diría 'el test muerde' cuando lo que falló fue la invocación"
+    MUERDE_MOTIVO="corro pytest (.py), go test (.go), vitest/jest/playwright (.ts/.js) y terraform test (.tftest.hcl); para el resto NO invento un comando, porque un runner adivinado diría 'el test muerde' cuando lo que falló fue la invocación"
     muerde_salto "sin runner dirigido" "$otros"
   fi
-  if [ "$corre_py" -eq 0 ] && [ "$corre_go" -eq 0 ] && [ "$corre_node" -eq 0 ]; then
+  if [ "$corre_py" -eq 0 ] && [ "$corre_go" -eq 0 ] && [ "$corre_node" -eq 0 ] \
+     && [ "$corre_tf" -eq 0 ]; then
     echo "   (nada que correr: este gate NO dice verde ni rojo sobre estos tests)"
     return 0
   fi
@@ -1947,6 +2067,7 @@ CKEOF
     if [ "$corre_py" -eq 1 ];   then muerde_corre_grupo py   "$py_files";   fi
     if [ "$corre_go" -eq 1 ];   then muerde_corre_grupo go   "$go_dirs";    fi
     if [ "$corre_node" -eq 1 ]; then muerde_corre_grupo node "$node_files"; fi
+    if [ "$corre_tf" -eq 1 ];   then muerde_corre_grupo tf   "$tf_units";   fi
     # Los CIEGOS no son verdes ni rojos: se dicen, y viajan como supuesto para
     # que el veredicto no herede un "todo verificado" que nadie verificó.
     if [ -n "$MUERDE_CIEGOS" ]; then

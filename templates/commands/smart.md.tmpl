@@ -160,6 +160,13 @@ con ellos `init`
 rechaza en el acto un express que incluya un repo de infra
 (`POLICY-LANE-004`, kind `infra-module`/`infra-live` en manifest.yaml),
 ANTES de gastar un implementer en trabajo que `gate_lane` va a devolver.
+Si el enrichment descubre CON EVIDENCIA que la tarea toca un repo que el init
+no declaró, se registra con `scripts/harness-policy.py repos tasks/<id> --add
+<repo> --actor orchestrator --reason "<evidencia>"`: jamás re-corras `init` (se
+niega con `POLICY-STATE-001`) ni edites `state.json` a mano. Sin ese registro el
+repo nuevo no entra en `state.repos`, y en los carriles sin `dag.json` la fase
+avanza a ship SIN su veredicto.
+
 Al retomar, lee `state.json` (incluido su `lane` y su `delivery`) y continúa
 desde su fase; no infieras la fase por conversación. Cada
 avance se solicita con `scripts/harness-policy.py transition tasks/<id> <fase>

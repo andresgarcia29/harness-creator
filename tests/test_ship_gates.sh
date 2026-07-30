@@ -487,7 +487,8 @@ extract muerde_limpia > "$WS/gate_muerde.sh"
 # gate: son sus tres lecturas (el delta-spec, el diff y el grafo de modulos de
 # la base). Sin ellas el gate extraido muere con 127 en vez de decidir.
 for fn in delta_seccion declara_tests_nuevos muerde_pytest muerde_go \
-          muerde_go_base_compila muerde_node muerde_node_colecta muerde_corre \
+          muerde_go_base_compila muerde_tf muerde_tf_root muerde_tf_base_init \
+          muerde_node muerde_node_colecta muerde_corre \
           muerde_corre_grupo muerde_salto gate_test_muerde; do
   extract "$fn" >> "$WS/gate_muerde.sh"
 done
@@ -514,7 +515,8 @@ else
   pass "la implementación que vive bajo tests/ NO es un archivo de test para muerde"
 fi
 subset_ok=1
-for f in src/pagos.test.ts tests/test_calc.py e2e/checkout.spec.ts pkg/x_test.go spec/carro_spec.rb; do
+for f in src/pagos.test.ts tests/test_calc.py e2e/checkout.spec.ts pkg/x_test.go spec/carro_spec.rb \
+         infra/tests/kargo.tftest.hcl; do
   echo "$f" | grep -qE "$pat_muerde"    || { fail "muerde perdió de vista $f"; subset_ok=0; }
   echo "$f" | grep -qE "$pat_untouched" || { fail "subset roto: muerde corre $f pero untouched no lo protege"; subset_ok=0; }
 done
@@ -764,6 +766,39 @@ assert_contains "$out" "EMIT assumption" "con el supuesto en el bus"
 assert_not_contains "$out" "o sea que MUERDE" "sin cobrar el fallo de compilación como verificación"
 rm -f "$WS/bin-muerde/go"
 
+# (n) COR-625: un .tftest.hcl NI SIQUIERA entraba al alcance del gate (el
+#     patron no lo miraba) y no habia runner para el. Un repo de infra sumaba
+#     tests nuevos y este gate salia verde sin haber corrido ninguno.
+#     El stub modela la unica distincion que importa: el test "vacuo" pasa
+#     sobre la base (no muerde), el otro falla porque el modulo nuevo no
+#     existe ahi todavia.
+cat > "$WS/bin-muerde/terraform" <<'SH'
+#!/bin/sh
+case "$1" in
+  init) exit 0 ;;
+  test) for a in "$@"; do case "$a" in -filter=*vacuo*) echo "pasa en la base"; exit 0 ;; esac; done
+        echo "fallo: el modulo nuevo no existe en la base"; exit 1 ;;
+esac
+exit 0
+SH
+chmod +x "$WS/bin-muerde/terraform"
+
+mk_muerde_repo "$WS/mu-tf1"
+mkdir -p tests && printf 'run "x" {}\n' > tests/muerde.tftest.hcl
+git add -A && git commit -qm tftest
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "tftest que falla sobre la base: verde (muerde)"
+assert_contains "$out" "tests/muerde.tftest.hcl" "el gate lo miro (antes ni entraba al alcance)"
+assert_contains "$out" "MUERDE" "y lo dice"
+
+mk_muerde_repo "$WS/mu-tf2"
+mkdir -p tests && printf 'run "x" {}\n' > tests/vacuo.tftest.hcl
+git add -A && git commit -qm vacuo
+out="$(run_muerde)"; rc=$?
+assert_eq 3 "$rc" "tftest que pasa TAMBIEN sobre la base: bloquea (exit 3)"
+assert_contains "$out" "tests/vacuo.tftest.hcl" "nombrando el archivo exacto"
+rm -f "$WS/bin-muerde/terraform"
+
 # ── DÓNDE corre: --precheck y --ci, jamás el camino de ship ──────────
 # El ship reintenta el push hasta 20 veces por contención: meterlo ahí pagaría un
 # checkout del árbol base por intento para reconfirmar una respuesta que no
@@ -996,6 +1031,20 @@ out="$( ( cd "$WS/st-go"; WT="$WS/st-go"; REPO=r; TASK=T1; BASE_REF=main
           gate() { :; }; emit() { :; }; go() { :; }
           . "$WS/lang.sh"; run_lang_gates ) 2>&1 )"
 assert_not_contains "$out" "no reconozco el stack" "stack reconocido: sin aviso"
+
+# COR-101: pyproject.toml SOLO en subdirectorio (monorepo, services/, src/).
+# La rama Python es `if [ -f pyproject.toml ]` a secas: no entraba, ni ruff ni
+# pytest corrian, y el precheck salia verde. La guarda espejo del lado TS ya
+# existia, y esa asimetria fue justo lo que delato el agujero.
+mk_stack "$WS/st-py-sub" README.md
+( cd "$WS/st-py-sub"; mkdir -p services/api
+  printf '[project]\nname="api"\nversion="0.1"\n' > services/api/pyproject.toml
+  git add -A && git commit -qm sub )
+out="$(run_lang_bare "$WS/st-py-sub")"; rc=$?
+assert_eq 3 "$rc" "pyproject solo en subdir: bloquea en vez de saltarse en silencio"
+assert_contains "$out" "el gate python NO PUEDE CORRER" "y dice que el gate no pudo correr"
+assert_contains "$out" "ni ruff ni pytest" "nombrando exactamente lo que no se verifico"
+assert_contains "$out" "services/api/pyproject.toml" "y el subdirectorio donde si vive"
 
 cd "$WS"
 
@@ -1265,6 +1314,57 @@ assert_contains "$out" "TF validate pwd=prod" "tf subdir: validate corre EN el s
   . "$WS/lang.sh"; run_lang_gates ) >/dev/null 2>&1
 rc=$?
 [ "$rc" -ne 0 ] && pass "validate rojo: el gate bloquea" || fail "validate rojo salio verde"
+
+# 5. COR-416/347: el gate NO puede ensuciar el arbol que juzga. `terraform
+# init` escribe .terraform/ y .terraform.lock.hcl en el modulo: la primera
+# corrida del precheck sellaba con arbol limpio y la segunda lo encontraba
+# sucio POR ARTEFACTOS DEL PROPIO GATE. Visto en dos repos independientes.
+mk_stack "$WS/st-tf-sucio" main.tf
+out="$( ( cd "$WS/st-tf-sucio"; WT="$WS/st-tf-sucio"; REPO=r; TASK=T1; BASE_REF=main
+          gate() { :; }; emit() { :; }
+          terraform() {
+            if [ "$1" = "init" ]; then
+              printf 'hashes que init inventa\n' > .terraform.lock.hcl
+              mkdir -p "${TF_DATA_DIR:-.terraform}/plugin"
+            fi
+            echo "TF $* pwd=${PWD##*/}"
+          }
+          . "$WS/lang.sh"; run_lang_gates
+          echo "PORCELAIN:[$(git status --porcelain)]"
+          if [ -d .terraform ]; then echo "QUEDO .terraform"; fi ) 2>&1 )"
+assert_contains "$out" "PORCELAIN:[]" "el gate terraform NO deja el worktree sucio (COR-416/347)"
+assert_not_contains "$out" "QUEDO .terraform" "y los plugins no aterrizan en el modulo"
+
+# 6. Un lock COMMITEADO es parte del artefacto juzgado: init lo reescribe con
+# hashes de plataforma, y el gate tiene que devolverlo intacto.
+mk_stack "$WS/st-tf-lock" main.tf
+( cd "$WS/st-tf-lock"; printf 'LOCK-ORIGINAL\n' > .terraform.lock.hcl
+  git add -A && git commit -qm lock )
+out="$( ( cd "$WS/st-tf-lock"; WT="$WS/st-tf-lock"; REPO=r; TASK=T1; BASE_REF=main
+          gate() { :; }; emit() { :; }
+          terraform() {
+            if [ "$1" = "init" ]; then printf 'REESCRITO-POR-INIT\n' > .terraform.lock.hcl; fi
+            echo "TF $* pwd=${PWD##*/}"
+          }
+          . "$WS/lang.sh"; run_lang_gates
+          echo "LOCK:[$(cat .terraform.lock.hcl)]"
+          echo "PORCELAIN:[$(git status --porcelain)]" ) 2>&1 )"
+assert_contains "$out" "LOCK:[LOCK-ORIGINAL]" "el lock commiteado vuelve intacto aunque init lo reescriba"
+assert_contains "$out" "PORCELAIN:[]" "y el arbol versionado queda igual que antes del gate"
+
+# 7. COR-625: validate PARSEA, test EJECUTA. Un repo de infra con
+# tests/*.tftest.hcl pasaba el precheck sin correr un solo test suyo.
+mk_stack "$WS/st-tf-test" README.md
+( cd "$WS/st-tf-test"; mkdir -p infra/tests; : > infra/main.tf
+  printf 'run "x" {}\n' > infra/tests/kargo.tftest.hcl
+  git add -A && git commit -qm tftest )
+out="$( ( cd "$WS/st-tf-test"; WT="$WS/st-tf-test"; REPO=r; TASK=T1; BASE_REF=main
+          gate() { :; }; emit() { :; }
+          terraform() { echo "TF $* pwd=${PWD##*/}"; }
+          . "$WS/lang.sh"; run_lang_gates; echo "TESTS_RAN=$TESTS_RAN" ) 2>&1 )"
+assert_contains "$out" "TF test pwd=infra" "terraform test corre EN la raiz del modulo (el sufijo tests/ se recorta)"
+assert_contains "$out" "TESTS_RAN=1" "y ESO si es una suite: TESTS_RAN=1"
+cd "$WS"
 
 echo
 echo "── go en subdir con package.json en la raiz (bug de campo del controller/)"

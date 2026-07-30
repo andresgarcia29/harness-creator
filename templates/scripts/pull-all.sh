@@ -33,6 +33,20 @@ pull_one() {  # pull_one <dir> <slot>
   [ "${untracked:-0}" -gt 0 ] && note=" [$untracked untracked: no estorban al rebase]"
   branch="$(git -C "$d" symbolic-ref --short HEAD 2>/dev/null || echo desconocida)"
   case "$branch" in main|master) ;; *) note="$note [rama: $branch]" ;; esac
+  # Sin upstream, git pull --rebase no sabe contra que rebasar: el clon queda
+  # atras con un "✗" criptico que diagnostica "red o conflicto". Caso de campo
+  # (COR-642): videocore quedo 40 commits atras y un doc canonico se escribio
+  # contra codigo que ya no existia. Si origin tiene la rama homonima, el
+  # arreglo es determinista: se configura y se sigue; si no la tiene, el pull
+  # fallara abajo y se reporta como siempre (fallo visible, no silencio).
+  if [ "$branch" != "desconocida" ] && \
+     ! git -C "$d" rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then
+    git -C "$d" show-ref --verify --quiet "refs/remotes/origin/$branch" \
+      || git -C "$d" fetch origin "$branch" >/dev/null 2>&1 || true
+    if git -C "$d" branch --set-upstream-to="origin/$branch" "$branch" >/dev/null 2>&1; then
+      note="$note [upstream reconfigurado a origin/$branch]"
+    fi
+  fi
   before="$(git -C "$d" rev-parse --short HEAD 2>/dev/null)"
   if out="$(git -C "$d" pull --rebase 2>&1)"; then
     # Aprovechando que la red ya se pagó: sanar origin/HEAD local, que un

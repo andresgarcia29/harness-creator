@@ -89,6 +89,19 @@ distinto de cero con la razón exacta cuando NO procede: propiedad (3), repro
 ausente (4), cuota (5), instancia atrasada (6), drift local (7), canal apagado
 (8), claim huérfano (9), claim imposible de tomar (10).
 
+Si la cuota (5) te frena y abres el issue **a mano**, anótalo en el ledger o el
+dedupe local quedará ciego justo para el bug que más se repite:
+
+```bash
+scripts/harness-bug.sh record \
+  --url https://github.com/andresgarcia29/harness-creator/issues/45 \
+  --file scripts/ship.sh \
+  --title "ship.sh --precheck se lee como task-id"   # el MISMO título del issue
+```
+
+El título tiene que ser el del issue: la huella sale de él, y una huella distinta
+no dedupea nada. La fila queda con status `manual`, que no consume cuota.
+
 Los dos últimos vienen del candado local contra duplicados (`.harness/claims/`)
 y no se destraban solos. Son problemas distintos con remedios distintos:
 

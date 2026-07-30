@@ -129,12 +129,53 @@ for i in 1 2 3; do
 done
 out="$(cd "$WS" && $BUG report --title "bug nuevo del dia" --file scripts/emit.sh --repro repro.log --impact z --dry-run 2>&1)"; rc=$?
 assert_eq 5 "$rc" "cuota de 24h agotada: exit 5"
+assert_contains "$out" "harness-bug.sh record" "cuota agotada: enseña el camino de vuelta al ledger"
 # fuera de la ventana de 24h la cuota se libera
 sed_tmp="$WS/.harness/l2.jsonl"
 awk -v old="$(( now - 200000 ))" '{sub(/"epoch":[0-9]+/, "\"epoch\":" old); print}' \
   "$WS/.harness/upstream-issues.jsonl" > "$sed_tmp" && mv "$sed_tmp" "$WS/.harness/upstream-issues.jsonl"
 out="$(cd "$WS" && $BUG report --title "bug nuevo del dia" --file scripts/emit.sh --repro repro.log --impact z --dry-run 2>&1)"; rc=$?
 assert_eq 0 "$rc" "reportes de hace >24h no consumen cuota"
+
+echo "── record: el issue abierto a mano entra al ledger y el dedupe lo ve"
+
+# El agujero de COR-629: cuando la cuota frena el report, el humano abre el issue
+# a mano y el ledger nunca se entera, así que el MISMO defecto vuelve a pasar el
+# dedupe como nuevo al día siguiente. `record` es la puerta de vuelta.
+rm -f "$WS/.harness/upstream-issues.jsonl"
+out="$(cd "$WS" && $BUG record --title "bug reportado a mano" --file scripts/emit.sh --url "https://github.com/x/y/issues/45" 2>&1)"; rc=$?
+assert_eq 0 "$rc" "record anota sin tocar la red"
+grep -q '"status":"manual"' "$WS/.harness/upstream-issues.jsonl" && pass "la fila queda como manual" || fail "sin fila manual en el ledger"
+out="$(cd "$WS" && $BUG report --title "bug reportado a mano" --file scripts/emit.sh --repro repro.log --impact z --dry-run 2>&1)"; rc=$?
+assert_eq 0 "$rc" "el mismo defecto tras record: el dedupe lo caza"
+assert_contains "$out" "issues/45" "y apunta al issue manual"
+
+# Y anotar a mano NO puede cerrar el canal automático: la cuota cuenta issues que
+# abrió ESTE script (`creado`), no filas del ledger. Si `manual` consumiera cuota,
+# el que hace lo correcto se quedaría sin poder reportar nada.
+rm -f "$WS/.harness/upstream-issues.jsonl"
+now_m="$(date +%s)"
+for i in 1 2 3; do
+  printf '{"ts":"x","epoch":%s,"fp":"cafe000%s","file":"scripts/x.sh","url":"https://github.com/x/y/issues/9%s","status":"manual"}\n' \
+    "$now_m" "$i" "$i" >> "$WS/.harness/upstream-issues.jsonl"
+done
+out="$(cd "$WS" && $BUG report --title "bug nuevo con tres manuales frescos" --file scripts/emit.sh --repro repro.log --impact z --dry-run 2>&1)"; rc=$?
+assert_eq 0 "$rc" "tres filas manuales frescas no consumen cuota (solo 'creado' cuenta)"
+
+out="$(cd "$WS" && $BUG record --title "bug reportado a mano" --file scripts/emit.sh --url "https://github.com/x/y/issues/45" 2>&1)"; rc=$?
+assert_eq 0 "$rc" "record dos veces no es un error"
+out2="$(cd "$WS" && $BUG record --title "bug reportado a mano" --file scripts/emit.sh --url "https://github.com/x/y/issues/45" 2>&1)"
+assert_contains "$out2" "ya está en el ledger" "la segunda anotación no duplica la fila"
+assert_eq 4 "$(wc -l < "$WS/.harness/upstream-issues.jsonl" | tr -d ' ')" "y el ledger sigue con una sola fila por huella"
+
+out="$(cd "$WS" && $BUG record --title "sin url" --file scripts/emit.sh 2>&1)"; rc=$?
+assert_eq 1 "$rc" "record sin --url: exit 1, no se anota un issue que nadie puede abrir"
+out="$(cd "$WS" && $BUG record --title "url que no es issue" --file scripts/emit.sh --url "https://example.com/nada" 2>&1)"; rc=$?
+assert_eq 1 "$rc" "record con una url que no es un issue: exit 1"
+out="$(cd "$WS" && $BUG record --file scripts/emit.sh --url "https://github.com/x/y/issues/45" 2>&1)"; rc=$?
+assert_eq 1 "$rc" "record sin --title: exit 1 (sin título no hay huella)"
+
+rm -f "$WS/.harness/upstream-issues.jsonl"
 
 echo "── el canal se puede apagar"
 

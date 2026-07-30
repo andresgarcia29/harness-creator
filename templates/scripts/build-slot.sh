@@ -55,7 +55,14 @@ fi
 # --- dir de locks (por máquina y por uid; cross-sesión, cross-checkout) ---------
 # En /tmp: se limpia solo en reboot y los flocks no sobreviven al proceso, así que
 # no hay locks stale jamás.
-dir="/tmp/harness-build-slots-$(id -u)"
+#
+# HARNESS_SLOT_DIR: dir de semáforo propio, pensado para la suite del harness.
+# Caso de campo (COR-630): los tests contaban concurrencia sobre el semáforo
+# cross-sesión (que es cross-sesión POR DISEÑO, Ley 8) y los slots de OTRAS
+# sesiones se contaban como suyos: suite roja con la máquina ocupada sin que
+# nada del código cambiara. No abre un bypass nuevo: HARNESS_BUILD_SLOTS ya es
+# un override explícito del mismo presupuesto.
+dir="${HARNESS_SLOT_DIR:-/tmp/harness-build-slots-$(id -u)}"
 mkdir -p "$dir"
 chmod 700 "$dir"
 

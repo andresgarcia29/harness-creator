@@ -15,6 +15,7 @@
 #   harness-bug.sh check <ruta>            ¿es artefacto del plugin y está sin tocar?
 #   harness-bug.sh report --title "..." --file <ruta> --repro <archivo> \
 #                         --impact "<a quién más le pasa>" [--dry-run] [--force]
+#   harness-bug.sh record --url <issue> --file <ruta> --title "..."   anota un issue abierto a mano
 #   harness-bug.sh list                    el ledger local de lo ya reportado
 #
 # LEYES:
@@ -59,6 +60,21 @@ redact() {
       && { _emit_redact; return 0; }
   fi
   cat
+}
+
+# LC_ALL=C en los dos tr a propósito: GNU tr trabaja byte a byte y BSD tr
+# respeta el locale, así que un título con acentos normalizaba distinto en
+# macOS que en Linux y la MISMA falla daba dos huellas. La reconciliación
+# entre máquinas compara huellas literales: sin esto, jamás matcheaba.
+# Efecto único de la corrección: un título acentuado ya reportado cambia de
+# huella una sola vez, y el dedupe local lo verá como nuevo esa vez.
+# Vive acá y no dentro de cmd_report porque `record` tiene que llegar a la
+# MISMA huella que `report`: dos copias de esta fórmula son dos dedupes que
+# tarde o temprano dejan de coincidir, que es justo el agujero que `record` cierra.
+fp_of() {  # fp_of <file> <title> → huella estable del defecto
+  local norm
+  norm="$(printf '%s' "$2" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -cs '[:alnum:]' ' ' | awk '{$1=$1};1')"
+  printf '%s|%s' "$1" "$norm" | sha | cut -c1-12
 }
 
 ver_lt() {  # ver_lt <a> <b> → 0 si a < b (semver simple, sin pre-releases)
@@ -338,15 +354,7 @@ cmd_report() {
   [ -s "$repro_path" ] || die "el repro está vacío: $repro" 4
 
   # 3 · fingerprint y dedupe local
-  # LC_ALL=C en los dos tr a propósito: GNU tr trabaja byte a byte y BSD tr
-  # respeta el locale, así que un título con acentos normalizaba distinto en
-  # macOS que en Linux y la MISMA falla daba dos huellas. La reconciliación
-  # entre máquinas compara huellas literales: sin esto, jamás matcheaba.
-  # Efecto único de la corrección: un título acentuado ya reportado cambia de
-  # huella una sola vez, y el dedupe local lo verá como nuevo esa vez.
-  local norm fp
-  norm="$(printf '%s' "$title" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -cs '[:alnum:]' ' ' | awk '{$1=$1};1')"
-  fp="$(printf '%s|%s' "$file" "$norm" | sha | cut -c1-12)"
+  local fp; fp="$(fp_of "$file" "$title")"
   if [ -f "$LEDGER" ] && grep -q "\"fp\":\"$fp\"" "$LEDGER" 2>/dev/null; then
     local prev; prev="$(grep "\"fp\":\"$fp\"" "$LEDGER" | tail -1 | jq -r '.url // "(sin url)"' 2>/dev/null)"
     echo "⏭  ya reportado (fp $fp): $prev"
@@ -363,7 +371,7 @@ cmd_report() {
     local recent now; now="$(date +%s)"
     recent="$(jq -r --argjson now "$now" 'select((.epoch // 0) > ($now - 86400)) | select((.status // "") == "creado") | .fp' "$LEDGER" 2>/dev/null | wc -l | tr -d ' ')"
     if [ "${recent:-0}" -ge "$QUOTA" ]; then
-      die "cuota de reportes automáticos agotada ($recent en 24h, tope $QUOTA): junta los hallazgos en UN issue o repórtalo a mano" 5
+      die "cuota de reportes automáticos agotada ($recent en 24h, tope $QUOTA): junta los hallazgos en UN issue o repórtalo a mano Y anótalo con: harness-bug.sh record --url <issue> --file $file --title '<el mismo título>'" 5
     fi
   fi
 
@@ -499,6 +507,43 @@ EOF
   return 0
 }
 
+# ── record ─────────────────────────────────────────────────────────────────
+# record: el issue abierto A MANO entra al ledger. Caso de campo (COR-629): la
+# cuota frenó el report, el humano abrió el issue #45 a mano, y al día
+# siguiente el MISMO defecto pasó el dedupe local como nuevo; lo frenó la
+# cuota de pura suerte. Un reporte manual sin huella deja ciego al dedupe
+# justo para los bugs que más se repiten.
+# El status es `manual` y NO consume cuota: el filtro de la cuota cuenta solo
+# `status == "creado"`, o sea issues que abrió ESTE script. Anotar a mano no es
+# una tormenta automática, y cobrarle cuota castigaría justo al que cerró el agujero.
+cmd_record() {
+  local title="" file="" url=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --title) title="${2:-}"; shift 2 ;;
+      --file)  file="${2:-}";  shift 2 ;;
+      --url)   url="${2:-}";   shift 2 ;;
+      *) die "flag desconocido: $1" 1 ;;
+    esac
+  done
+  [ -n "$title" ] || die "falta --title (el MISMO título del issue: la huella sale de él)" 1
+  [ -n "$file" ]  || die "falta --file (el artefacto del harness que falla)" 1
+  case "$url" in https://github.com/*/issues/*) : ;;
+    *) die "falta --url o no es un issue (https://github.com/<owner>/<repo>/issues/<n>)" 1 ;; esac
+  command -v jq >/dev/null 2>&1 || die "sin jq no puedo escribir el ledger" 1
+  file="${file#./}"; file="${file#"$WS"/}"
+  local fp; fp="$(fp_of "$file" "$title")"
+  if [ -f "$LEDGER" ] && grep -q "\"fp\":\"$fp\"" "$LEDGER" 2>/dev/null; then
+    echo "⏭  esa huella ya está en el ledger (fp $fp): nada que anotar"
+    return 0
+  fi
+  ledger_add "$fp" "$file" "$url" "manual"
+  # ledger_add se traga los fallos por diseño (es best-effort en report); acá
+  # anotar ES el trabajo, así que se verifica que la fila haya quedado
+  grep -q "\"fp\":\"$fp\"" "$LEDGER" 2>/dev/null || die "no pude escribir $LEDGER" 1
+  echo "✅ anotado (fp $fp, status manual): el dedupe local ya ve este issue"
+}
+
 ledger_add() {  # fp file url estado [issue-propio-que-cedió]
   mkdir -p "$(dirname "$LEDGER")" 2>/dev/null || return 0
   command -v jq >/dev/null 2>&1 || return 0
@@ -519,6 +564,7 @@ cmd_list() {
 case "${1:-}" in
   check)  shift; cmd_check "$@" ;;
   report) shift; cmd_report "$@" ;;
+  record) shift; cmd_record "$@" ;;
   list)   shift; cmd_list "$@" ;;
-  *) echo "uso: harness-bug.sh <check|report|list> …" >&2; exit 1 ;;
+  *) echo "uso: harness-bug.sh <check|report|record|list> …" >&2; exit 1 ;;
 esac

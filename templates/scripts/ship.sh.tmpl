@@ -1354,6 +1354,24 @@ semgrep_test_globs() {
 # el delta-spec debe nombrar CADA archivo debilitado DENTRO de una sección
 # MODIFIED/REMOVED (escribir la palabra en la prosa ya no abre nada).
 #
+# v3: los skips de un archivo de test AÑADIDO no cuentan. En un archivo de
+# alta TODAS las líneas son "+", así que un solo guard de entorno (el
+# test.skip(!reachable, ...) que Playwright pide para no correr contra un
+# servicio caído, el t.Skip de Go) daba neto 1 y salía exit 3. Un archivo que
+# no existía no puede debilitar nada, y el gate no le dejaba salida legítima:
+# su único escape es nombrarlo bajo MODIFIED/REMOVED del delta-spec, que en un
+# archivo nuevo sería una declaración FALSA (el requirement es ADDED), o sea
+# que la única forma de shippear un spec nuevo era mentirle al gate. El
+# archivo igual se NOMBRA en la salida, para que el hecho quede auditable.
+# Nada más se afloja: aserciones netas eliminadas, borrados sin declarar y
+# skips sobre archivos EXISTENTES siguen bloqueando con exit 3, y el conteo de
+# aserciones netas (por archivo y global) no cambia.
+#
+# Por qué no abre un agujero: el residual (un archivo nuevo íntegramente
+# skipeado, que pasaría por test sin serlo) lo caza gate_test_muerde, que corre
+# cada test NUEVO contra el árbol base y exige que falle ahí. Un test que nunca
+# corre no falla, así que no pasa ese gate.
+#
 # Residuales conscientes (rúbrica del reviewer, no de este gate): borrar
 # filas de una tabla Go table-driven, y reemplazos tautológicos
 # (expect(true).toBe(true)). -M explícito en TODOS los git diff: sin él, un
@@ -1377,6 +1395,13 @@ gate_tests_untouched() {
   local deleted
   deleted="$(git diff -M origin/$BASE_REF..HEAD --diff-filter=D --name-only \
     | grep -E "$pat" | grep -vE "$artifacts" || true)"
+
+  # Archivos de test de ALTA: sus skips no cuentan (ver v3 en la cabecera).
+  # Mismo filtrado por $pat y $artifacts que `deleted`.
+  local added
+  added="$(git diff -M origin/$BASE_REF..HEAD --diff-filter=A --name-only \
+    | grep -E "$pat" | grep -vE "$artifacts" || true)"
+  is_added() { printf '%s\n' "$added" | grep -qxF "$1"; }
 
   # UN pase del diff completo en awk (BSD-safe: sin \b ni \s; gsub cuenta
   # OCURRENCIAS, no líneas). Salida: "<aserciones_netas>\t<skips_netos>\t<archivo>".
@@ -1447,6 +1472,10 @@ DELEOF
     while IFS="$(printf '\t')" read -r na ns f; do
       [ -n "$f" ] || continue
       global_na=$((global_na+na))
+      if [ "$ns" -gt 0 ] && is_added "$f"; then
+        echo "   ⚠️  test AÑADIDO con $ns skips/only: $f (no cuentan: el archivo no existía, no hay nada que debilitar)"
+        ns=0
+      fi
       [ "$na" -gt 0 ] || [ "$ns" -gt 0 ] || continue
       if declares "$f"; then
         echo "   ⚠️  tests tocados y DECLARADOS en el delta-spec: $f"

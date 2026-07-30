@@ -8,8 +8,16 @@ versionada. La memoria que no se promueve, expira — git es la única
 verdad duradera.
 
 1. **Cosecha**: `mem_search` de la última semana (decisiones, errores
-   repetidos, sorpresas). Complementa con tasks/*/verdict-*.json
-   (¿qué blocking se repite?) y docs/changelog/ de la semana.
+   repetidos, sorpresas). Complementa con `make metrics` y con
+   docs/changelog/ de la semana.
+   `make metrics` contesta con datos lo que antes se contaba a ojo
+   abriendo veredictos: en qué se va el tiempo, qué gates bloquean más,
+   cuántas rondas de review no bajaron bloqueantes, y sobre todo los
+   FALSOS ROJOS (gates que salieron rojo y después verde sin que el
+   código cambiara). Es determinista, sale de artefactos ya escritos y
+   está acotado por construcción, así que leerlo cuesta lo mismo con
+   diez tareas que con mil. No leas `.harness/metrics/tasks.jsonl`
+   crudo: para eso está el informe.
 2. **Clasifica cada hallazgo**:
    - **Decisión madura** (sobrevivió 2+ tareas sin cambiar) → borrador
      de ADR en docs/adr/ (usa la plantilla ADR-0000).
@@ -19,6 +27,14 @@ verdad duradera.
      repite; el que vive en un gate, no.
    - **Convención emergente** → línea en el CLAUDE.md del repo que
      corresponda (no el global).
+   - **Fricción del HARNESS, no del código** (un gate que da falsos
+     rojos, rondas que no convergen) → no es un ADR ni una regla de este
+     workspace: el arreglo vive en el harness y sirve a TODAS las
+     instancias. Corre `make metrics-escalate`, que imprime el comando de
+     `harness-bug.sh report` ya armado, con título estable para que la
+     huella dedupee entre máquinas. Revísalo y ejecútalo si el hallazgo
+     es real. Un falso rojo que solo se arregla acá vuelve la semana que
+     viene en la máquina de otro.
    - **Ruido / superado** → márcalo para expirar. No acumules.
 3. **Presenta el lote al humano** como propuestas de diff (ADRs, reglas,
    hooks) — NADA se aplica sin su ok. La ley la ratifican humanos.

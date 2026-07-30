@@ -86,6 +86,36 @@ assert_no_file "$WS/tasks/../../../etc" "id malicioso no crea rutas fuera de tas
 payload Bash "{\"command\":\"cd worktrees/COR-9/atlas && go test ./...\"}" "$WS" | "$HOOK"
 assert_contains "$(cat "$WS/tasks/COR-9/evidence.log")" "go test" "un test que corrió queda como evidencia 'ran'"
 
+# 5b. El MCP de Playwright NO es una corrida de tests. El filtro era por
+# SUBSTRING desnudo, así que `@playwright/mcp@latest` casaba por el `test` de
+# `latest` y cada Chromium por `mcp-chrome-for-testing-*`. Una corrida inventada
+# en evidence.log es peor que ninguna: gate_evidence la intersecta con la matriz
+# de compliance y da por probado lo que nadie corrió. evidence.py ya cerró estos
+# dos exactos mirando la posición de comando; este hook se declaraba su espejo y
+# se había quedado atrás (COR-661).
+antes="$(cat "$WS/tasks/COR-9/evidence.log")"
+payload Bash "{\"command\":\"cd worktrees/COR-9/atlas && npm exec @playwright/mcp@latest --browser chromium\"}" "$WS" | "$HOOK"
+payload Bash "{\"command\":\"/tmp/ms-playwright/chromium/chrome --user-data-dir=/tmp/ms-playwright-mcp/mcp-chrome-for-testing-abc\"}" "$WS/worktrees/COR-9/atlas" | "$HOOK"
+assert_not_contains "$(cat "$WS/tasks/COR-9/evidence.log")" "playwright/mcp" \
+  "el MCP de Playwright NO se registra como corrida de tests"
+assert_not_contains "$(cat "$WS/tasks/COR-9/evidence.log")" "mcp-chrome-for-testing" \
+  "ni el Chromium que levanta, aunque su ruta diga 'testing'"
+
+# 5c. Y la contra-mitad, que es la que impide arreglar esto apagando el filtro:
+# las invocaciones reales de suite se siguen registrando, cada una por su forma.
+payload Bash "{\"command\":\"cd worktrees/COR-9/atlas && uv run pytest tests/\"}" "$WS" | "$HOOK"
+payload Bash "{\"command\":\"cd worktrees/COR-9/atlas && npm run test\"}" "$WS" | "$HOOK"
+payload Bash "{\"command\":\"cd worktrees/COR-9/atlas && npx vitest run src/a.test.ts\"}" "$WS" | "$HOOK"
+log="$(cat "$WS/tasks/COR-9/evidence.log")"
+assert_contains "$log" "uv run pytest" "el envoltorio no esconde la suite: uv run pytest sí cuenta"
+assert_contains "$log" "npm run test" "npm run test también"
+assert_contains "$log" "vitest run" "y vitest por su nombre de runner"
+
+# 5d. Un comando que apenas NOMBRA un test no lo corre.
+payload Bash "{\"command\":\"cd worktrees/COR-9/atlas && go build ./...\"}" "$WS" | "$HOOK"
+assert_not_contains "$(cat "$WS/tasks/COR-9/evidence.log")" "go build" \
+  "go build no es go test: el subcomando manda"
+
 # 6. fail-open: payload roto sale 0
 echo "esto no es json" | "$HOOK"
 assert_eq "0" "$?" "payload roto: exit 0 (observa, jamás bloquea)"

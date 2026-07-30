@@ -82,6 +82,88 @@ remember_task() { ok_id "$sid" || return 0
 recall_task() { ok_id "$sid" || return 0
   head -1 "$STATE_DIR/$sid" 2>/dev/null; }
 
+# ── ¿este comando CORRE una suite? ───────────────────────────────────
+# Antes se decidía por SUBSTRING desnudo (*test*|*spec*|...), y eso marcaba
+# como corrida de tests al MCP de Playwright que trae el propio harness:
+# `npm exec @playwright/mcp@latest` casa por el `test` de `latest`, y cada
+# Chromium con `--user-data-dir=.../mcp-chrome-for-testing-*` también. Una
+# corrida inventada en evidence.log es peor que ninguna: gate_evidence la
+# intersecta con la matriz de compliance y da por probado lo que nadie corrió.
+#
+# evidence.py cerró esos dos falsos positivos mirando la POSICIÓN DE COMANDO y
+# exigiendo token DELIMITADO; su _TEST_TOKENS se declaraba "espejo de
+# track-read.sh" y el espejo se había quedado atrás (COR-661). Misma regla acá.
+nombra_suite() {  # nombra_suite <palabra>: `test:unit` sí, `latest` no
+  case " $(printf '%s' "$1" | tr ':.@/_-' '      ') " in
+    *" test "*|*" tests "*|*" spec "*|*" specs "*) return 0 ;;
+  esac
+  return 1
+}
+palabra_cmd() {  # el nombre con el que se INVOCA: basename sin extensión
+  local w="${1##*/}"
+  case "$w" in *.exe|*.sh|*.bash|*.py|*.js|*.mjs|*.cjs) w="${w%.*}" ;; esac
+  printf '%s' "$w"
+}
+segmento_suite() {  # segmento_suite <un solo comando, sin separadores>
+  local head w
+  # Sin globbing: el comando trae `./...` y `tests/*.py`, y expandirlos acá
+  # cambiaría lo que se juzga por lo que haya en disco.
+  set -f
+  # shellcheck disable=SC2086
+  set -- $1
+  set +f
+  # 1. saltar envoltorios, sus flags y las asignaciones de entorno
+  while [ $# -gt 0 ]; do
+    case "$1" in -*) shift; continue ;; esac
+    case "${1%%/*}" in *=*) shift; continue ;; esac
+    case "$(palabra_cmd "$1")" in
+      sh|bash|zsh|dash|ksh|env|setsid|nohup|time|nice|ionice|stdbuf|sudo|doas|timeout|python|python2|python3|node|uv|uvx|npx|poetry|pdm|pipenv|hatch|rye)
+        shift; continue ;;
+    esac
+    break
+  done
+  [ $# -gt 0 ] || return 1
+  head="$(palabra_cmd "$1")"
+  # `uv run pytest`: el subcomando del envoltorio tampoco dice nada del
+  # trabajo. Solo si es la PALABRA suelta: `bash tests/run.sh` trae una ruta,
+  # y ahí `run` es el nombre del script, no un subcomando que saltar.
+  case "$1" in
+    */*) : ;;
+    *) case "$head" in
+         run|exec) shift; [ $# -gt 0 ] || return 1; head="$(palabra_cmd "$1")" ;;
+       esac ;;
+  esac
+  case "$head" in pytest|py.test|jest|vitest|rspec|phpunit|tox|nose2) return 0 ;; esac
+  # 2. con estos manda el SUBCOMANDO: `go test` sí, `go build` no
+  case "$head" in
+    go|cargo|mvn|gradle|gradlew|dotnet|swift|make|npm|pnpm|yarn|bun|deno) ;;
+    *) nombra_suite "$head"; return $? ;;
+  esac
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in -*) shift; continue ;; esac
+    w="$(palabra_cmd "$1")"
+    case "$w" in run|exec) shift; continue ;; esac   # `npm run <script>`
+    case "$w" in pytest|py.test|jest|vitest|rspec|phpunit|tox|nose2) return 0 ;; esac
+    nombra_suite "$w"; return $?
+  done
+  return 1
+}
+corre_suite() {  # corre_suite <la línea entera del agente>
+  local seg segs
+  # Segmento por segmento: el comando típico es `cd <worktree> && go test ./...`
+  # y el head de la cadena entera sería `cd`, o sea que ninguna corrida real se
+  # reconocería. Cada tramo se juzga solo.
+  segs="$(printf '%s' "$1" | tr ';|&' '\n\n\n')"
+  while IFS= read -r seg; do
+    [ -n "$seg" ] || continue
+    if segmento_suite "$seg"; then return 0; fi
+  done <<SEGEOF
+$segs
+SEGEOF
+  return 1
+}
+
 # emit <kind> <ruta-o-cmd> <ruta-para-derivar-tarea>
 emit() {
   local task kind="$1"; task="$(task_of "$3")"
@@ -122,8 +204,7 @@ case "$tool" in
     # pero el cwd reportado es la raíz. La tarea viene del TEXTO del comando.
     hint="$cwd"
     case "$cmd" in *worktrees/*) hint="worktrees/${cmd#*worktrees/}" ;; esac
-    case "$cmd" in
-      *test*|*spec*|*pytest*|*jest*|*vitest*|*rspec*|*"go test"*|*gradle*|*mvn*|*cargo*)
+    if corre_suite "$cmd"; then
         emit ran "$(printf '%s' "$cmd" | cut -c1-160)" "$hint"
         for tok in $cmd; do
           case "$tok" in
@@ -138,8 +219,7 @@ case "$tool" in
               emit ran-file "${tok#"$WS"/}" "$t" ;;
           esac
         done
-        ;;
-    esac
+    fi
     # ── LEER POR BASH TAMBIÉN ES LEER ──
     # Caso de campo: el reviewer inspecciona con git show, rg, cat o sed -n
     # (exactamente lo que la economía de tokens le pide: la ventana, no el

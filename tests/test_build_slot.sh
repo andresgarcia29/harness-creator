@@ -17,6 +17,12 @@ t_ws
 # sesiones de la máquina: con el equipo ocupado el "máximo ≤ 2" salía rojo sin
 # que una sola línea del código hubiera cambiado. Cada corrida usa su propio dir
 # de locks, dentro del workspace temporal que t_ws borra al salir.
+# Un test del semaforo no puede correr DENTRO del semaforo: build-slot exporta
+# HARNESS_BUILD_SLOT_HELD=1 a su hijo, y con esa variable heredada cada
+# invocacion de aca se vuelve un exec directo, o sea que se mediria un
+# semaforo apagado (COR-707: concurrencia 4 con tope 2, waiter sin bloquear).
+# tests/run.sh ya la limpia para toda la suite; esto cubre la corrida suelta.
+unset HARNESS_BUILD_SLOT_HELD
 export HARNESS_SLOT_DIR="$WS/slots"
 
 SLOT="$ROOT/templates/scripts/build-slot.sh"

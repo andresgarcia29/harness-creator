@@ -2062,6 +2062,14 @@ muerde_corre_grupo() {  # muerde_corre_grupo <clase> <lista>: unidad por unidad
   # el rojo no podría nombrar cuál es cuál. Son archivos NUEVOS: son pocos.
   while IFS= read -r u; do
     [ -n "$u" ] || continue
+    # Se ANUNCIA antes de correr, no después. Caso de campo (COR-683): un
+    # precheck estuvo 41 minutos colgado en este gate sin una sola línea de
+    # salida, y el reporte no pudo decir en qué archivo. La corrida real no
+    # lleva límite de tiempo a propósito (una suite grande tarda minutos
+    # legítimamente, y un timeout ahí fabricaría falsos rojos), así que lo que
+    # se compra con esta línea es lo otro que el reporte pedía: que un cuelgue
+    # deje de ser silencioso y se pueda nombrar el culpable de un vistazo.
+    echo "   → corriendo sobre la base: $u"
     # Go: si la BASE no compila sin el cambio, su exit != 0 es ambiental y
     # cobrarlo como MUERDE es el falso verde que este bloque existe para matar.
     if [ "$clase" = "go" ] && ! muerde_go_base_compila "$u" > "$MUERDE_SALIDA" 2>&1; then

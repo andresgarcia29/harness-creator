@@ -18,6 +18,23 @@ set -u
 export GIT_AUTHOR_NAME="harness tests" GIT_AUTHOR_EMAIL="t@t"
 export GIT_COMMITTER_NAME="harness tests" GIT_COMMITTER_EMAIL="t@t"
 
+# ── Un test del semáforo NO puede correr DENTRO del semáforo ──────────
+# build-slot.sh exporta HARNESS_BUILD_SLOT_HELD=1 a su hijo (re-entrancia, para
+# que un docker build interior no se auto-deadlockee), y evidence.py salta el
+# wrapper cuando la ve. Las dos conductas son correctas. Lo que rompe es
+# heredarlas: si alguien sella esta suite como evidencia
+# (`evidence.py run ... -- bash tests/run.sh`), TODA invocación de build-slot
+# dentro de los tests se vuelve un exec directo, y entonces los tests que MIDEN
+# el semáforo miden un semáforo apagado. Caso de campo (COR-707): concurrencia
+# contada 4 con tope 2, el waiter sin bloquearse, y `slot_wrapped: false` en el
+# sello. Sueltos pasaban; bajo el wrapper, tres aserciones en rojo.
+# Efecto: la suite completa del harness no se podía sellar como evidencia, o sea
+# que "corrí la suite entera" no se podía probar con el mecanismo que el propio
+# harness exige para probar cualquier cosa.
+# Se limpia acá, para TODA la suite, y además en los tests que lo miden, para
+# que también sean correctos corriéndolos sueltos bajo un slot tomado.
+unset HARNESS_BUILD_SLOT_HELD HARNESS_SLOT_DIR HARNESS_SLOT_N
+
 cd "$(dirname "$0")"
 
 command -v jq >/dev/null || { echo "falta jq (los hooks y el bus lo usan)"; exit 1; }

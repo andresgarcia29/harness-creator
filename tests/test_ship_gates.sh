@@ -671,7 +671,7 @@ extract muerde_limpia > "$WS/gate_muerde.sh"
 # la base). Sin ellas el gate extraido muere con 127 en vez de decidir.
 for fn in delta_seccion declara_tests_nuevos muerde_pytest muerde_go \
           muerde_go_base_compila muerde_tf muerde_tf_root muerde_tf_base_init \
-          muerde_node muerde_node_colecta muerde_corre \
+          muerde_node con_limite muerde_node_colecta muerde_corre \
           muerde_corre_grupo muerde_salto gate_test_muerde; do
   extract "$fn" >> "$WS/gate_muerde.sh"
 done
@@ -871,11 +871,13 @@ PKG_VITEST='{"devDependencies":{"vitest":"^2"}}'
 # vitest de palo: `list` colecta lo que le pasen; `run` pasa solo si el helper
 # está en el cwd (o sea, solo si el gate lo copió al árbol base, que es el bug).
 STUB_VITEST='#!/bin/sh
-case "$1" in
-  list) shift; echo "$1"; exit 0 ;;
-  run)  shift ;;
-esac
-for a; do t="$a"; done
+# La sonda pasa `list --watch=false <archivo>` (sin --watch=false, vitest 1.6
+# arranca en watch y cuelga el gate para siempre, #57). El stub tiene que
+# saltar el subcomando Y los flags, o "colecta" el flag en vez del archivo.
+sub=""
+case "$1" in list|run) sub="$1"; shift ;; esac
+for a; do case "$a" in --*) ;; *) t="$a" ;; esac; done
+if [ "$sub" = list ]; then echo "$t"; exit 0; fi
 case "$t" in *helpers*) echo "No test files found"; exit 1 ;; esac
 if [ -f tests/helpers/flujo.ts ]; then echo "1 passed"; exit 0; fi
 echo "Cannot resolve ./helpers/flujo"; exit 1'
@@ -903,15 +905,50 @@ assert_eq 0 "$rc" "el test importa un helper NUEVO de tests/: muerde (la base no
 assert_contains "$out" "MUERDE" "porque el helper ya no viaja al árbol base con él"
 assert_not_contains "$out" "PASA sobre el árbol base" "sin el falso rojo que no tenía salida"
 
+# (j0) #57: la sonda NO puede colgarse. `vitest list` en vitest 1.6 no es un
+# subcomando: es un filtro de nombre, y fuera de CI el runner arranca en modo
+# WATCH. Si algun test falla imprime "Watching for file changes..." y se queda
+# ahi: el command-substitution no cierra NUNCA. Medido en campo: 25 minutos a
+# 1% de CPU sin una linea de salida, y le pasa a TODA tarea de frontend que
+# cumpla el rojo primero, porque ahi el test nuevo es rojo sobre la base por
+# definicion. El stub reproduce ese runner: se cuelga salvo que le llegue CI.
+STUB_VITEST_WATCH='#!/bin/sh
+if [ -z "$CI" ]; then
+  echo "FAIL  Tests failed. Watching for file changes..."
+  while :; do sleep 1; done
+fi
+case "$1" in list) shift ;; run) shift ;; esac
+for a; do case "$a" in --*) ;; *) t="$a" ;; esac; done
+echo "$t"
+[ -f feature.ts ] && exit 0
+exit 1'
+mk_node_muerde "$WS/mu13" "$PKG_VITEST" vitest "$STUB_VITEST_WATCH"
+printf "test('x', () => {})\n" > tests/pago.test.ts
+git add -A && git commit -qm "test nuevo, rojo sobre la base"
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "el gate TERMINA aunque el runner se colgaria sin CI (#57)"
+assert_contains "$out" "MUERDE" "y llega a su veredicto en vez de quedarse esperando"
+
+# La tercera capa, probada aparte para no pagar el timeout en la suite: un
+# comando que ignora todo y se cuelga igual tiene un limite duro de tiempo.
+extract con_limite > "$WS/limite.sh"
+t0=$(date +%s)
+( . "$WS/limite.sh"; con_limite 1 sleep 30 ) >/dev/null 2>&1 || true
+t1=$(date +%s)
+[ $((t1 - t0)) -le 5 ] \
+  && pass "con_limite corta un comando colgado (una sonda no puede ser eterna)" \
+  || fail "con_limite no corto: la sonda puede colgar el gate entero"
+
 # (j) COR-656: vitest declarado pero con un include que no alcanza a e2e/. La
 #     invocación salía 1 ("No test files found") y el gate, que por decisión
 #     escrita no juzga el MOTIVO del fallo, lo cobraba como MUERDE.
 STUB_VITEST_SRC='#!/bin/sh
-case "$1" in
-  list) shift; case "$1" in src/*) echo "$1"; exit 0 ;; esac
-        echo "No test files found"; exit 1 ;;
-  run)  shift ;;
-esac
+sub=""
+case "$1" in list|run) sub="$1"; shift ;; esac
+for a; do case "$a" in --*) ;; *) t="$a" ;; esac; done
+if [ "$sub" = list ]; then
+  case "$t" in src/*) echo "$t"; exit 0 ;; esac
+fi
 echo "No test files found"; exit 1'
 mk_node_muerde "$WS/mu8" "$PKG_VITEST" vitest "$STUB_VITEST_SRC"
 mkdir -p e2e && printf "test('checkout', () => {})\n" > e2e/checkout.spec.ts
@@ -1144,10 +1181,23 @@ rm -f package.json tsconfig.json
 mkdir -p apps/web && echo '{"name":"web"}' > apps/web/package.json
 git add -A && git commit -qm monorepo; cd "$WS"
 out="$(run_lang "$WS/fe4")"; rc=$?
-assert_eq 3 "$rc" "package.json solo en subdirs: el gate se niega"
 assert_contains "$out" "no tiene package.json en la raíz" "monorepo: nombra la causa"
 assert_contains "$out" "apps/web/package.json" "monorepo: muestra dónde sí lo encontró"
-assert_contains "$out" "en silencio" "monorepo: dice que antes se saltaba callado"
+assert_contains "$out" "tramo SIN MIRAR" "monorepo: dice que no es un verde"
+# NO bloquea, misma correccion que del lado Python (#60): un exit 3 aca inventa
+# un veredicto sobre el CODIGO cuando la verdad es "no encontre que mirar". El
+# silencio era el bug, y sigue cerrado porque esto se dice y viaja al bus.
+assert_eq 0 "$rc" "declara el tramo sin mirar, pero NO bloquea"
+
+# Y un package.json bajo un directorio GENERADO no dice que el repo sea TS.
+mk_fe "$WS/fe4b"; cd "$WS/fe4b"
+rm -f package.json tsconfig.json
+mkdir -p gen/ts && echo '{"name":"protos"}' > gen/ts/package.json
+git add -A && git commit -qm generado; cd "$WS"
+out="$(run_lang "$WS/fe4b")"; rc=$?
+assert_eq 0 "$rc" "package.json solo bajo gen/: el repo no es TS"
+assert_not_contains "$out" "no tiene package.json en la raíz" \
+  "y no molesta con un aviso sobre codigo generado"
 
 # 6. TS sin tsconfig y sin script de typecheck → se niega
 mk_fe "$WS/fe5"; cd "$WS/fe5"; rm -f tsconfig.json
@@ -1252,10 +1302,31 @@ mk_stack "$WS/st-py-sub" README.md
   printf '[project]\nname="api"\nversion="0.1"\n' > services/api/pyproject.toml
   git add -A && git commit -qm sub )
 out="$(run_lang_bare "$WS/st-py-sub")"; rc=$?
-assert_eq 3 "$rc" "pyproject solo en subdir: bloquea en vez de saltarse en silencio"
 assert_contains "$out" "el gate python NO PUEDE CORRER" "y dice que el gate no pudo correr"
 assert_contains "$out" "ni ruff ni pytest" "nombrando exactamente lo que no se verifico"
 assert_contains "$out" "services/api/pyproject.toml" "y el subdirectorio donde si vive"
+# run_lang_bare silencia emit, asi que el supuesto se comprueba aparte: que se
+# DIGA en consola no alcanza, el humano mira el panel y el veredicto hereda el bus.
+out_emit="$( ( set -u; cd "$WS/st-py-sub"; WT="$WS/st-py-sub"; REPO=r; TASK=T1; BASE_REF=main
+               gate() { :; }; emit() { echo "EMIT $*"; }
+               . "$WS/lang.sh"; run_lang_gates ) 2>&1 )"
+assert_contains "$out_emit" "EMIT assumption" "el supuesto viaja al bus, no solo a la consola"
+# Y NO bloquea: el silencio era el bug, no la ausencia. Un exit 3 aca inventa un
+# veredicto sobre el CODIGO cuando la verdad es "no encontre que mirar", que es
+# lo que el resto del archivo tiene prohibido. Costo caro (#60): un repo de
+# contratos puros quedo imposible de entregar, y era la RAIZ del DAG.
+assert_eq 0 "$rc" "declara el tramo sin mirar, pero NO bloquea (#60)"
+
+# Un artefacto GENERADO no es señal de que el repo sea de ese lenguaje: el unico
+# pyproject de un repo de contratos es el wheel que produce su generador.
+mk_stack "$WS/st-py-gen" README.md
+( cd "$WS/st-py-gen"; mkdir -p gen/python
+  printf '[project]\nname="protos"\nversion="0.1"\n' > gen/python/pyproject.toml
+  git add -A && git commit -qm generado )
+out="$(run_lang_bare "$WS/st-py-gen")"; rc=$?
+assert_eq 0 "$rc" "pyproject solo bajo gen/: el repo no es Python, no hay nada que decir"
+assert_not_contains "$out" "el gate python NO PUEDE CORRER" \
+  "y no molesta con un aviso sobre codigo generado"
 
 cd "$WS"
 
@@ -1562,6 +1633,40 @@ out="$( ( cd "$WS/st-tf-lock"; WT="$WS/st-tf-lock"; REPO=r; TASK=T1; BASE_REF=ma
           echo "PORCELAIN:[$(git status --porcelain)]" ) 2>&1 )"
 assert_contains "$out" "LOCK:[LOCK-ORIGINAL]" "el lock commiteado vuelve intacto aunque init lo reescriba"
 assert_contains "$out" "PORCELAIN:[]" "y el arbol versionado queda igual que antes del gate"
+
+# 6b. #57 del reves, y es el que faltaba: en un repo SIN lock commiteado, la
+# limpieza corria ANTES del subcomando y borraba el lock que init acababa de
+# escribir. Sin lock, validate ya no resuelve los providers que init instalo:
+# "Missing required provider" para todos, con el diff VACIO. El gate salia rojo
+# SIEMPRE y sin camino legitimo a verde. Solo se veia en repos sin lock
+# commiteado, por eso paso desapercibido.
+mk_stack "$WS/st-tf-sinlock" main.tf
+out="$( ( cd "$WS/st-tf-sinlock"; WT="$WS/st-tf-sinlock"; REPO=r; TASK=T1; BASE_REF=main
+          gate() { :; }; emit() { :; }
+          terraform() {
+            if [ "$1" = "init" ]; then printf 'CREADO-POR-INIT\n' > .terraform.lock.hcl; return 0; fi
+            # Solo validate y test resuelven providers: fmt no toca el lock, y
+            # exigirselo seria modelar mal y romper el gate por otro lado.
+            # Con `if` y no `case`: un `)` de patron dentro de $( ) le corta el
+            # command-substitution al parser y el subshell entero se lee como
+            # un nombre de archivo. Ya nos costo una vuelta aca mismo.
+            if [ "$1" = validate ] || [ "$1" = test ]; then
+              if [ ! -f .terraform.lock.hcl ]; then
+                echo "Error: Missing required provider"; return 1
+              fi
+              echo "TF $* con lock:[$(cat .terraform.lock.hcl)]"
+            else
+              echo "TF $*"
+            fi
+          }
+          . "$WS/lang.sh"; run_lang_gates
+          echo "PORCELAIN:[$(git status --porcelain)]" ) 2>&1 )"
+assert_contains "$out" "con lock:[CREADO-POR-INIT]" \
+  "sin lock commiteado, el subcomando corre CON el lock que init creo (#56)"
+assert_not_contains "$out" "Missing required provider" \
+  "y no se lo borra debajo: el gate ya no se ensucia a si mismo hasta el rojo"
+assert_contains "$out" "PORCELAIN:[]" \
+  "y el lock que no estaba commiteado igual se limpia DESPUES, no antes"
 
 # 7. COR-625: validate PARSEA, test EJECUTA. Un repo de infra con
 # tests/*.tftest.hcl pasaba el precheck sin correr un solo test suyo.

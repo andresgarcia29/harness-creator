@@ -870,16 +870,25 @@ run_lang_gates() {
   # el bloque entero se saltaba EN SILENCIO, el precheck salía verde y el
   # commit roto viajaba hasta el gate de ship. Un gate que no encuentra qué
   # verificar tiene que decirlo, no ausentarse.
-  if [ ! -f package.json ] && git ls-files '*/package.json' 2>/dev/null | grep -q .; then
+  # Misma forma y mismo razonamiento que la guarda de Python de más abajo: el
+  # silencio era el bug, no la ausencia. Se DICE y viaja como supuesto, pero no
+  # bloquea: un exit 3 acá inventa un veredicto sobre el código cuando la verdad
+  # es "no encontré qué mirar" (#60, medido del lado Python en un repo de
+  # contratos). Y un package.json bajo un directorio generado o vendoreado no
+  # es señal de que el repo sea TypeScript.
+  local ts_sub
+  ts_sub="$(git ls-files '*/package.json' 2>/dev/null \
+            | grep -vE '(^|/)(gen|generated|vendor|node_modules|dist|build|target|third_party)/' || true)"
+  if [ ! -f package.json ] && [ -n "$ts_sub" ]; then
     gate ts
-    echo "⛔ el gate ts NO PUEDE CORRER: $REPO no tiene package.json en la raíz,"
-    echo "   pero sí en subdirectorios:"
-    git ls-files '*/package.json' 2>/dev/null | head -5 | sed 's/^/     · /'
-    echo "   Hasta ahora esto se saltaba en silencio: ni typecheck ni tests, y el"
-    echo "   precheck salía verde igual."
-    echo "   ↳ remediación: declara un package.json en la raíz con scripts typecheck"
-    echo "     y test que deleguen a los paquetes (npm -w, pnpm -r, turbo, lo que use)."
-    exit 3
+    echo "⚠️  el gate ts NO PUEDE CORRER: $REPO no tiene package.json en la raíz,"
+    echo "   pero sí en subdirectorios que no son generados:"
+    printf '%s\n' "$ts_sub" | head -5 | sed 's/^/     · /'
+    echo "   Esto NO es un verde: es un tramo SIN MIRAR, ni typecheck ni tests."
+    echo "   ↳ para que se verifique: declara un package.json en la raíz con"
+    echo "     scripts typecheck y test que deleguen a los paquetes (npm -w,"
+    echo "     pnpm -r, turbo, lo que use)."
+    emit assumption "$REPO: gate ts NO corrió (package.json solo en subdirectorios)"
   fi
   if [ -f package.json ]; then
     LANG_SEEN=1
@@ -978,23 +987,36 @@ run_lang_gates() {
       echo "   verificó tipos y nada más."
     fi
   fi
-  # Repo Python cuyo pyproject.toml NO esta en la raiz (monorepo, services/,
-  # src/): el bloque de abajo no entraba, ni ruff ni pytest corrian y el
-  # precheck salia verde. Es la MISMA clase de silencio que la guarda de TS
-  # de arriba cerro, todavia abierta del lado Python (caso de campo COR-101:
-  # se vio porque la guarda de TS SI existia y la asimetria quedo a la
-  # vista). Un gate que no encuentra que verificar lo dice, no se ausenta.
-  if [ ! -f pyproject.toml ] && git ls-files '*/pyproject.toml' 2>/dev/null | grep -q .; then
+  # Repo Python cuyo pyproject.toml NO está en la raíz (monorepo, services/,
+  # src/): el bloque de abajo no entraba, ni ruff ni pytest corrían y el
+  # precheck salía verde EN SILENCIO (COR-101). El silencio era el bug, y sigue
+  # cerrado: esto se DICE, viaja como supuesto al bus y deja `verificado` en un
+  # valor distinto de "completo", que el reviewer tiene orden de declarar.
+  #
+  # Lo que NO puede hacer es bloquear, y ese fue mi error al cerrarlo (#60): un
+  # `exit 3` acá inventa un veredicto sobre el CÓDIGO cuando la verdad es "no
+  # encontré qué mirar", que es exactamente lo que el resto de este archivo
+  # tiene prohibido (muerde_go_base_compila, los CIEGOS de muerde, disco_avisa).
+  # Costó caro: `proto` es un repo de contratos puros que no puede tener
+  # pyproject en la raíz, es la RAÍZ del DAG de shipping, y quedó imposible de
+  # entregar en verde, bloqueando toda tarea que tocara el contrato.
+  #
+  # Y los artefactos GENERADOS no son señal de que el repo sea de ese lenguaje:
+  # el único pyproject de `proto` es el wheel que produce su generate.sh. Un
+  # directorio generado o vendoreado no cuenta.
+  local nogen='(^|/)(gen|generated|vendor|node_modules|dist|build|target|\.venv|third_party)/'
+  local py_sub
+  py_sub="$(git ls-files '*/pyproject.toml' 2>/dev/null | grep -vE "$nogen" || true)"
+  if [ ! -f pyproject.toml ] && [ -n "$py_sub" ]; then
     gate python
-    echo "⛔ el gate python NO PUEDE CORRER: $REPO no tiene pyproject.toml en la raíz,"
-    echo "   pero sí en subdirectorios:"
-    git ls-files '*/pyproject.toml' 2>/dev/null | head -5 | sed 's/^/     · /'
-    echo "   Hasta ahora esto se saltaba en silencio: ni ruff ni pytest, y el"
-    echo "   precheck salía verde igual."
-    echo "   ↳ remediación: declara un pyproject.toml en la raíz que federe los"
-    echo "     paquetes (por ejemplo [tool.uv.workspace] con sus members), o mueve"
-    echo "     el proyecto a la raíz."
-    exit 3
+    echo "⚠️  el gate python NO PUEDE CORRER: $REPO no tiene pyproject.toml en la raíz,"
+    echo "   pero sí en subdirectorios que no son generados:"
+    printf '%s\n' "$py_sub" | head -5 | sed 's/^/     · /'
+    echo "   Esto NO es un verde: es un tramo SIN MIRAR, ni ruff ni pytest."
+    echo "   ↳ para que se verifique: declara un pyproject.toml en la raíz que"
+    echo "     federe los paquetes (por ejemplo [tool.uv.workspace] con sus"
+    echo "     members), o mueve el proyecto a la raíz."
+    emit assumption "$REPO: gate python NO corrió (pyproject solo en subdirectorios)"
   fi
   if [ -f pyproject.toml ]; then
     LANG_SEEN=1
@@ -1194,13 +1216,20 @@ run_lang_gates() {
           rm -rf "$scratch"
           return 1
         fi
-        # La restauración del lock va ANTES del subcomando, no después: si el
-        # subcomando sale rojo, el `set -e` de ship.sh mata todo en esa misma
-        # línea y una limpieza posterior NO correría, dejando el árbol sucio
-        # justo en el caso en que el humano va a mirarlo.
+        # El subcomando corre CON el lock que init acaba de escribir, y la
+        # limpieza va DESPUÉS. La versión anterior lo hacía al revés, razonando
+        # que un `set -e` mataría la limpieza posterior si el subcomando salía
+        # rojo. Ese razonamiento era falso: el subcomando va envuelto en un
+        # `if`, que desactiva errexit para él, así que la línea de abajo SIEMPRE
+        # corre. Y el precio del orden invertido era grave (#56): en un repo sin
+        # lock commiteado, ese `rm -f` borraba el lock recién creado y entonces
+        # `terraform validate` ya no resolvía los providers que init había
+        # instalado. "Missing required provider" para todos, con el diff vacío:
+        # el gate salía rojo SIEMPRE, sin camino legítimo a verde, y solo se
+        # veía en repos sin lock commiteado (por eso pasó desapercibido).
+        if ( cd "$d"; TF_DATA_DIR="$scratch/data" terraform "$@" ); then rc=0; else rc=$?; fi
         if [ -n "$lock_prev" ]; then cp "$lock_prev" "$d/.terraform.lock.hcl"
         else rm -f "$d/.terraform.lock.hcl"; fi
-        if ( cd "$d"; TF_DATA_DIR="$scratch/data" terraform "$@" ); then rc=0; else rc=$?; fi
         rm -rf "$scratch"
         return "$rc"
       }
@@ -1913,6 +1942,33 @@ muerde_node() {  # → MUERDE_NODE_RUNNERS con los runners declarados E instalad
 #
 # La pregunta se hace con el cwd en el ÁRBOL BASE a propósito: la config que va
 # a gobernar la invocación real es la de ese árbol, no la del worktree.
+# ── NINGUNA sonda de un gate puede colgarse para siempre ──────────────
+# Caso de campo (#57), y es el peor modo de falla que este archivo puede tener.
+# `vitest list` en vitest 1.6 NO es un subcomando: lo toma como filtro de nombre
+# de archivo y, fuera de CI, arranca en modo WATCH. Si algún test falla imprime
+# "Watching for file changes..." y se queda ahí; el command-substitution nunca
+# cierra. Medido: 25 minutos colgado a 1% de CPU, sin una sola línea de salida.
+# Y le pasa a TODA tarea de frontend que cumpla el rojo primero, porque ahí el
+# test nuevo es rojo sobre la base POR DEFINICIÓN, que es justo lo que este gate
+# exige. El síntoma no se parece a un bug, se parece a "el precheck tarda".
+#
+# Tres capas, porque una sola vuelve a fallar con el próximo runner:
+#   1. CI=true en toda invocación de un runner de node. Es la señal universal
+#      de "no interactivo" que vitest, jest y playwright respetan.
+#   2. --watch=false explícito en vitest (medido: 6.89s contra colgarse; y
+#      `--run` NO alcanza en 1.6.1, sigue colgado).
+#   3. un límite DURO de tiempo sobre la sonda: algo que tarda más de dos
+#      minutos en contestar "¿colectás este archivo?" ya no está sondeando.
+# La 3 existe porque las dos primeras dependen de que el runner se porte bien,
+# y la lección de este bug es justamente que no hay que confiar en eso.
+con_limite() {  # con_limite <segundos> <comando...>
+  # perl y no `timeout`: timeout no viene en macOS, y perl ya es dependencia
+  # del harness (build-slot.sh lo usa para el flock del semáforo).
+  # `die` y no un exit numérico a propósito: el contrato de códigos de salida
+  # del header es de ship.sh, y un número acá lo ensuciaría con uno que no es
+  # suyo (lo caza tests/test_precheck.sh, que cruza cada exit con la tabla).
+  perl -e 'alarm shift @ARGV; exec @ARGV; die "no pude ejecutar: $!"' "$@"
+}
 muerde_node_colecta() {  # muerde_node_colecta <archivo> → MUERDE_NODE_RUNNER
   local r out
   # shellcheck disable=SC2086
@@ -1920,7 +1976,12 @@ muerde_node_colecta() {  # muerde_node_colecta <archivo> → MUERDE_NODE_RUNNER
     out=""
     case "$r" in
       vitest)
-        out="$( cd "$MUERDE_BASE" && "$WT/node_modules/.bin/vitest" list "$1" 2>&1 )" || true
+        # En vitest >= 2.1 `list` es un subcomando y contesta al instante. En
+        # 1.6 es un filtro, así que corre ese archivo y tarda unos segundos:
+        # las dos ramas contestan lo mismo (la salida nombra el archivo si lo
+        # colecta), y la vieja solo paga tiempo.
+        out="$( cd "$MUERDE_BASE" && CI=true con_limite 120 \
+                 "$WT/node_modules/.bin/vitest" list --watch=false "$1" 2>&1 )" || true
         # vitest < 2.1 no conoce `list`. "No pude preguntar" no es "no colecta":
         # se cae a la invocación directa, que es el statu quo exacto de antes.
         case "$out" in
@@ -1928,9 +1989,11 @@ muerde_node_colecta() {  # muerde_node_colecta <archivo> → MUERDE_NODE_RUNNER
             MUERDE_NODE_RUNNER="vitest"; return 0 ;;
         esac ;;
       jest)
-        out="$( cd "$MUERDE_BASE" && "$WT/node_modules/.bin/jest" --listTests "$1" 2>&1 )" || true ;;
+        out="$( cd "$MUERDE_BASE" && CI=true con_limite 120 \
+                 "$WT/node_modules/.bin/jest" --listTests "$1" 2>&1 )" || true ;;
       playwright)
-        out="$( cd "$MUERDE_BASE" && "$WT/node_modules/.bin/playwright" test --list "$1" 2>&1 )" || true ;;
+        out="$( cd "$MUERDE_BASE" && CI=true con_limite 120 \
+                 "$WT/node_modules/.bin/playwright" test --list "$1" 2>&1 )" || true ;;
     esac
     if printf '%s' "$out" | grep -qF -- "$(basename "$1")"; then
       MUERDE_NODE_RUNNER="$r"
@@ -1963,10 +2026,15 @@ muerde_corre() {  # muerde_corre <clase> <unidad> → el exit REAL sobre el árb
         cd "$MUERDE_BASE/$d"
         terraform test -filter="$rel" ) ;;
     node)
+      # CI=true también acá: `vitest run` ya es no interactivo, pero jest y
+      # playwright tienen sus propios modos que esperan una tecla, y el bug de
+      # #57 enseñó que un runner que se queda esperando cuelga el gate ENTERO.
+      # Sin límite de tiempo a propósito: esto es la corrida de verdad, y una
+      # suite grande tarda minutos legítimamente. Lo que se acota es la sonda.
       case "$MUERDE_NODE_RUNNER" in
-        vitest)     ( cd "$MUERDE_BASE"; "$WT/node_modules/.bin/vitest" run "$2" ) ;;
-        jest)       ( cd "$MUERDE_BASE"; "$WT/node_modules/.bin/jest" "$2" ) ;;
-        playwright) ( cd "$MUERDE_BASE"; "$WT/node_modules/.bin/playwright" test "$2" ) ;;
+        vitest)     ( cd "$MUERDE_BASE"; CI=true "$WT/node_modules/.bin/vitest" run "$2" ) ;;
+        jest)       ( cd "$MUERDE_BASE"; CI=true "$WT/node_modules/.bin/jest" "$2" ) ;;
+        playwright) ( cd "$MUERDE_BASE"; CI=true "$WT/node_modules/.bin/playwright" test "$2" ) ;;
       esac ;;
   esac
 }

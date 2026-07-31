@@ -93,7 +93,74 @@ out="$(run_is)"; rc=$?
 assert_eq 3 "$rc" "doctor rojo: exit 3"
 assert_contains "$out" "no se publica a sí misma" "con el porqué"
 assert_contains "$out" "scripts/doctor.sh" "y manda al detalle con remediaciones"
-rm -f "$IWS/.doctor-red"
+
+# ── EL ROJO QUE NO ES TUYO en la puerta de la instancia (issue #59) ────
+# Caso de campo: doctor.sh contaba una lista ajena de AGENTS.md como leyes
+# duplicadas. Con el doctor en rojo por un bug DEL HARNESS, esta puerta (la
+# única legítima a main del repo de la instancia: specs maestras, ADRs,
+# constitución) quedaba cerrada para TODA tarea, y la única salida era editar
+# AGENTS.md o doctor.sh en medio de una tarea, que es justo lo que la Ley 12
+# prohíbe. Bloqueaba un archive más 7 commits ya commiteados de otras tareas.
+# Los candados son los MISMOS que en ship.sh: se testean acá porque una copia
+# que diverge silenciosamente es el modo de falla conocido de tener dos.
+LEDGER="$IWS/.harness/upstream-issues.jsonl"   # untracked: -uno no lo ve sucio
+KB_URL="https://github.com/andresgarcia29/harness-creator/issues/59"
+run_kb() {  # run_kb <valor-de-HARNESS_KNOWN_BUG>
+  ( cd "$IWS" && PATH="$WS/bin:$(t_path_without gitleaks)" \
+      HARNESS_KNOWN_BUG="$1" bash scripts/instance-ship.sh 2>&1 )
+}
+# gh stub: sin él el estado del issue depende de la red y de que la máquina
+# tenga gh logueado, que es exactamente el flake que un test no puede tener.
+gh_stub() { printf '#!/bin/sh\necho %s\n' "$1" > "$WS/bin/gh"; chmod +x "$WS/bin/gh"; }
+gh_stub OPEN
+
+# el knob SIN forma '<slot>=<url>': hay que NOMBRAR el slot, un salta-todo sería
+# una puerta trasera
+out="$(run_kb "$KB_URL")"; rc=$?
+assert_eq 3 "$rc" "knob sin slot: sigue bloqueando"
+assert_contains "$out" "no tiene forma" "y dice que hay que nombrar el slot"
+
+# el knob nombra OTRO slot: el rojo del doctor no está declarado
+out="$(run_kb "gitleaks=$KB_URL")"; rc=$?
+assert_eq 3 "$rc" "knob de otro slot: el rojo del doctor sigue bloqueando"
+
+# CANDADO: reportar es la PRECONDICIÓN. Sin fila en el ledger no hay rastro
+# auditable, y el knob sería un "confía en mí".
+rm -f "$LEDGER"
+out="$(run_kb "doctor=$KB_URL")"; rc=$?
+assert_eq 3 "$rc" "issue NO reportado (sin fila en el ledger): sigue bloqueando"
+assert_contains "$out" "upstream-issues.jsonl" "y nombra el ledger que falta"
+assert_contains "$out" "harness-bug.sh report" "con la remediación: reportarlo"
+
+mkdir -p "$IWS/.harness"
+printf '{"ts":"2026-07-30","status":"creado","file":"scripts/doctor.sh","url":"%s"}\n' \
+  "$KB_URL" > "$LEDGER"
+
+# CANDADO: un issue CERRADO significa que el fix ya existe; seguir declarándolo
+# congelaría el harness roto en esta máquina para siempre
+gh_stub CLOSED
+out="$(run_kb "doctor=$KB_URL")"; rc=$?
+assert_eq 3 "$rc" "issue CLOSED upstream: el workaround venció, sigue bloqueando"
+assert_contains "$out" "CERRADO" "y lo dice"
+assert_contains "$out" "harness-update" "mandando a traer el fix"
+
+# el camino legítimo: issue abierto y reportado. Publica, y NO se calla el rojo.
+gh_stub OPEN
+out="$(run_kb "doctor=$KB_URL")"; rc=$?
+assert_eq 0 "$rc" "doctor rojo + knob válido con el issue en el ledger: publica"
+assert_contains "$out" "BUG CONOCIDO del harness" "y lo DECLARA en la salida"
+assert_contains "$out" "$KB_URL" "nombrando el issue"
+assert_contains "$out" "NO es un verde" "sin venderlo como verde"
+assert_contains "$out" "instancia publicada" "y la puerta se abre"
+assert_not_contains "$out" "doctor sin fallos" "el gate NO se borra: no dice que el doctor está limpio"
+
+rm -f "$WS/bin/gh" "$LEDGER" "$IWS/.doctor-red"
+rmdir "$IWS/.harness" 2>/dev/null || true
+# el knob no persiste: es env var por invocación. Dejo un commit pendiente para
+# los gates que siguen (el de arriba se publicó).
+echo w > "$IWS/scripts/pendiente2.sh"
+git -C "$IWS" add scripts/pendiente2.sh
+git -C "$IWS" commit -qm "commit pendiente 2"
 
 # gitleaks rojo: el gate que más importa en ESTE repo
 printf '#!/bin/sh\necho "leak encontrado" >&2\nexit 1\n' > "$WS/bin/gitleaks"

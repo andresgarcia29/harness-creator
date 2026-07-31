@@ -307,12 +307,29 @@ FLOW="{{FLOW}}"
 # placeholder crudo es un problema de generación que le toca al doctor, no un
 # motivo para frenar un ship.
 flow_norm="$(printf '%s' "$FLOW" | tr 'A-Z' 'a-z' | tr -d ' +_-')"
+# ── trunk con MERGE COMMIT: para poder deshacer de un tirón ───────────
+# Caso de campo (#58): un humano autoriza un cambio grande que toca dos repos y
+# se propaga por tokens a ocho frontends, y pide poder revertirlo si no le
+# gusta. Con fast-forward, revertir exige conocer el rango exacto
+# (`git revert --no-commit <pre>..<post>`), que el humano no tiene a mano y el
+# harness no le entregaba en ningún lado. Con un merge commit es UN comando:
+# `git revert -m 1 <sha>`.
+#
+# Antes no había camino legítimo: hacer el merge a mano viola la Ley 1 (a main
+# solo por ship.sh) y el hook lo bloquea, y cambiar la entrega a `prs` para
+# mergear con --merge contradice la entrega que la invocación registró. O sea
+# el hueco exacto que describe la Ley 15: si no existe un camino legítimo, al
+# harness le falta uno.
+LAND_MERGE=0
 case "$flow_norm" in
   trunk|trunkdirecttoprod|""|'{{flow}}') FLOW_MODE=trunk ;;
+  trunkmergecommit|trunkmerge) FLOW_MODE=trunk; LAND_MERGE=1 ;;
   prs|pr) FLOW_MODE=prs ;;
   *)
-    echo "❌ harness-answers.yaml declara flow: $FLOW, y ship.sh implementa dos:"
-    echo "   'trunk' (push directo tras los gates) y 'prs' (rama + PR)."
+    echo "❌ harness-answers.yaml declara flow: $FLOW, y ship.sh implementa tres:"
+    echo "   'trunk' (push directo tras los gates), 'trunk-merge-commit' (igual,"
+    echo "   pero aterriza con un merge commit para poder revertir de un tirón)"
+    echo "   y 'prs' (rama + PR)."
     echo "   NO voy a pushear a espaldas de una política que dice otra cosa."
     echo "   ↳ opciones: cambiá flow a 'trunk' o a 'prs', o abrí el PR a mano"
     echo "     desde la rama task/<id> tras un --precheck verde."
@@ -3063,9 +3080,34 @@ El sha que aterrice NO sera este si la cola de merge rebasea o hace squash." 2>/
     exit 0
   fi
 
-  if git push origin HEAD:$BASE_REF; then
-    sha="$(git rev-parse HEAD)"          # COMPLETO: deploy-watch lo compara
-    short="$(git rev-parse --short HEAD)" # contra el headSha de la API del forge,
+  # ── El objeto que se publica ─────────────────────────────────────────
+  # Con LAND_MERGE se arma un merge commit SIN tocar el árbol de trabajo: nada
+  # de checkout ni de ramas temporales. HEAD ya viene rebaseado sobre el trunk,
+  # así que su ÁRBOL es exactamente el resultado que se quiere publicar, y
+  # `commit-tree` lo sella con dos padres. El orden de los padres no es
+  # decorativo: primero el trunk, para que `git revert -m 1` deshaga el trabajo
+  # de la tarea y no al revés. Va DENTRO del loop de reintentos porque cada
+  # rebase por contención cambia HEAD y el trunk, y el merge hay que rehacerlo.
+  push_ref="HEAD"
+  if [ "$LAND_MERGE" -eq 1 ]; then
+    if ! merge_sha="$(git commit-tree "$(git rev-parse 'HEAD^{tree}')" \
+                        -p "$(git rev-parse "origin/$BASE_REF")" \
+                        -p "$(git rev-parse HEAD)" \
+                        -m "merge: $TASK en $REPO
+
+Task: $TASK")"; then
+      echo "❌ no pude armar el merge commit para aterrizar $TASK en $BASE_REF."
+      echo "   ↳ el ship NO publicó nada. Con flow 'trunk' (sin merge commit) el"
+      echo "     camino sigue abierto; este modo existe para poder revertir de un"
+      echo "     tirón, y publicar un fast-forward en su lugar sería entregar algo"
+      echo "     distinto de lo que la política declara."
+      exit 2
+    fi
+    push_ref="$merge_sha"
+  fi
+  if git push origin "$push_ref:$BASE_REF"; then
+    sha="$(git rev-parse "$push_ref")"    # COMPLETO: deploy-watch lo compara
+    short="$(git rev-parse --short "$push_ref")" # contra el headSha del forge,
                                           # que siempre viene completo. Con el sha
                                           # corto la comparación no matcheaba nunca.
     echo "{\"repo\":\"$REPO\",\"sha\":\"$sha\",\"short\":\"$short\",\"shipped_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"$(known_bug_frag)}" >> "$WS/tasks/$TASK/ship.log"
@@ -3076,6 +3118,14 @@ El sha que aterrice NO sera este si la cola de merge rebasea o hace squash." 2>/
     [ -n "${CURRENT_GATE:-}" ] && emit gate "$CURRENT_GATE" true "" "$((SECONDS - ${_G0:-$SECONDS}))" && CURRENT_GATE=""
     emit ship "$REPO @ $short — pasó los gates y está en main" true
     echo "✅ shipped $REPO @ $short"
+    # El comando de revert es la RAZÓN de este modo, así que se entrega acá y
+    # no se deja para que el humano lo derive. Con fast-forward habría que
+    # conocer el rango exacto; con el merge commit es una línea, y esa línea
+    # tiene que estar donde se lee el resultado del ship, no en un ticket.
+    if [ "$LAND_MERGE" -eq 1 ]; then
+      echo "   ↩︎  para deshacerlo entero: git -C repos/$REPO revert -m 1 $short"
+      echo "      (aterrizó con merge commit; el primer padre es $BASE_REF)"
+    fi
     request_ship_phase
     echo "→ siguiente: scripts/deploy-watch.sh $TASK $REPO (o /ship se encarga)"
     exit 0

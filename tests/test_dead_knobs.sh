@@ -17,7 +17,8 @@ echo "── flow: quien elige PRs ya no recibe un push a main en silencio"
 # UN solo consumidor en todo el repo.
 ship="$(cat "$root/templates/scripts/ship.sh.tmpl")"
 assert_contains "$ship" 'FLOW="{{FLOW}}"' "ship.sh ahora lee el flujo configurado"
-assert_contains "$ship" "ship.sh implementa dos" "y dice qué implementa de verdad"
+assert_contains "$ship" "ship.sh implementa tres" "y dice qué implementa de verdad"
+assert_contains "$ship" "trunk-merge-commit" "incluido el modo que aterriza con merge commit (#58)"
 assert_contains "$ship" "a espaldas de una política" "y por qué se niega en vez de seguir"
 
 # El guard tiene que dejar pasar trunk y frenar el resto. Se extrae el case.

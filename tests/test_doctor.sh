@@ -250,6 +250,75 @@ assert_contains "$out" "re-corre /harness-init . en modo update" "y el comando e
 assert_not_contains "$out" "leyes coherentes en los dos mapas" "un duplicado no puede salir verde"
 assert_not_contains "$out" "titulo distinto en cada mapa" "el duplicado se reporta por lo que es, no como divergencia de título"
 
+# (3b) LISTA NUMERADA AJENA fuera de la seccion de leyes (issues #41 y #59).
+# Caso de campo: `bd setup codex` (beads, la herramienta de tracking que el
+# propio CLAUDE.md manda usar) inyecta en AGENTS.md un "Session Close Protocol"
+# que es una lista 1..5 en negrita. El chequeo escaneaba el archivo ENTERO, asi
+# que contaba esos items como leyes y dejaba el doctor en rojo PERMANENTE por un
+# AGENTS.md correcto, con una remediacion ("re-corre /harness-init . en modo
+# update") que ademas invita a REGENERAR AGENTS.md, que es la accion que
+# /harness-update documenta como la que borro 70 lineas de una instancia real.
+# El bloque va con su encabezado real y despues de las leyes, tal cual lo instala bd.
+cat > "$WS/AGENTS.md" <<'EOF'
+# mapa para agentes
+
+## Las leyes
+
+1. **Push a main SOLO vía ship.sh**: es la única puerta.
+2. **Contratos expand/contract**: un cambio de proto nunca rompe al consumidor.
+6. **Presupuestos**: máx 3 iteraciones por loop; RFC máx 2 rondas.
+6b. **Piensa hondo en el plan, no en el loop**: ultrathink, sin decisiones abiertas.
+7. **Decisiones fuera del repo NO EXISTEN.** Lo de chat se propone como ADR.
+12. **Un bug del HARNESS se verifica y se reporta upstream, siempre.**
+13. **Un repo ARCHIVADO en el forge se ignora SIEMPRE.** No entra al grafo.
+
+## Session Close Protocol
+
+When ending a session:
+
+1. **File issues for remaining work** - Create beads for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Update issue status** - Close finished work, update in-progress items
+4. **Handle git/sync by active profile**:
+5. **Hand off** - Summarize changes, validation, issue status
+EOF
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_not_contains "$out" "numera DOS veces" "una lista numerada AJENA a la seccion de leyes no son leyes duplicadas"
+assert_not_contains "$out" "❌ Ley 3" "ni inventa una 'Ley 3' con el item 3 del protocolo de beads"
+assert_contains "$out" "leyes coherentes en los dos mapas" "con las leyes intactas, el check sale verde igual"
+
+# (3b bis) LA CONTRA-MITAD: acotar la ventana no puede APAGAR el chequeo. El
+# mismo AGENTS.md, con el bloque ajeno intacto, pero con un 6 duplicado DENTRO
+# de la seccion de leyes: eso si es el merge fallido y se sigue reportando.
+cat > "$WS/AGENTS.md" <<'EOF'
+# mapa para agentes
+
+## Las leyes
+
+1. **Push a main SOLO vía ship.sh**: es la única puerta.
+2. **Contratos expand/contract**: un cambio de proto nunca rompe al consumidor.
+6. **Presupuestos**: máx 3 iteraciones por loop; RFC máx 2 rondas.
+6b. **Piensa hondo en el plan, no en el loop**: ultrathink, sin decisiones abiertas.
+7. **Decisiones fuera del repo NO EXISTEN.** Lo de chat se propone como ADR.
+12. **Un bug del HARNESS se verifica y se reporta upstream, siempre.**
+13. **Un repo ARCHIVADO en el forge se ignora SIEMPRE.** No entra al grafo.
+6. **Presupuestos**: sobreviviente del bloque viejo que el merge no borró.
+
+## Session Close Protocol
+
+When ending a session:
+
+1. **File issues for remaining work** - Create beads for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Update issue status** - Close finished work, update in-progress items
+4. **Handle git/sync by active profile**:
+5. **Hand off** - Summarize changes, validation, issue status
+EOF
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_contains "$out" "❌ AGENTS.md numera DOS veces la(s) ley(es): 6" "un duplicado DENTRO de la seccion de leyes se sigue reportando"
+assert_not_contains "$out" "veces la(s) ley(es): 1" "y nombra SOLO el numero duplicado de verdad, no los del bloque ajeno"
+assert_not_contains "$out" "leyes coherentes en los dos mapas" "un duplicado real no puede salir verde"
+
 # (4) Titulo divergente con la MISMA numeracion: edicion local a un solo mapa.
 # Dos causas distintas no comparten remediacion: aca NO va la del merge.
 cat > "$WS/AGENTS.md" <<'EOF'

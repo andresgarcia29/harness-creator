@@ -105,11 +105,18 @@ harness; cada agente es contexto y mantenimiento.
 ### 2b. Resto de preguntas obligatorias
 
 1. **Nombre del proyecto** y prefijo de tickets.
-2. **Flujo a main**: `trunk-direct-to-prod` | `trunk-staging` | `prs`.
-   Usa EXACTAMENTE esas tres cadenas en el answers: `ship.sh` las lee y solo
-   implementa la primera; con las otras dos se niega a pushear en vez de
-   contradecir la política elegida (antes las registraba y pusheaba a main
-   igual). Direct-to-prod → gates estrictos + gitleaks obligatorio.
+2. **Flujo a main**: `trunk-direct-to-prod` | `trunk-merge-commit` |
+   `trunk-staging` | `prs`. Usa EXACTAMENTE esas cadenas en el answers:
+   `ship.sh` las lee, implementa la primera, la segunda y `prs`, y con
+   `trunk-staging` se niega a pushear en vez de contradecir la política
+   elegida (antes la registraba y pusheaba a main igual).
+   Direct-to-prod → gates estrictos + gitleaks obligatorio.
+   **Preguntá si quieren poder deshacer un cambio grande de un tirón**: si la
+   respuesta es sí, es `trunk-merge-commit`. Aterriza igual y con los mismos
+   gates, pero deja un merge commit, y entonces revertir es
+   `git revert -m 1 <sha>` en vez de averiguar el rango exacto de un
+   fast-forward, que el humano no tiene a mano en el momento en que lo
+   necesita. El costo es una historia con merges en la trunk.
 3. **DAG**: propón el orden inferido (contracts → shared → services →
    frontends) y pide corrección.
 4. **Ownership por abogado**: qué posee / no posee / invariantes.

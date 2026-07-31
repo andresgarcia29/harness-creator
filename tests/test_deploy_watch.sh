@@ -263,6 +263,15 @@ assert_eq "acme-landing"  "$(app_of acme- acme-landing)" "prefijo con guion y re
 assert_eq "acme-landing"  "$(app_of acme landing)"       "prefijo sin guion: lo agrega"
 assert_eq "acme-landing"  "$(app_of acme- landing)"      "prefijo con guion: no lo duplica"
 assert_eq "landing"       "$(app_of '' landing)"         "sin prefijo: el nombre del repo tal cual"
+# El caso LITERAL de COR-242, clavado con nombre y apellido: prefijo "corvux"
+# + repo "corvux-landing" daba "corvuxcorvux-landing", una app que no existe en
+# ningun cluster. El watcher se comio 900s esperandola y propuso revertir un
+# deploy que SI habia funcionado. Se fija el literal y no solo el patron
+# generico: una regresion que solo rompa este par tiene que morder igual.
+assert_eq "corvux-landing" "$(app_of corvux corvux-landing)" \
+  "COR-242 literal: corvux + corvux-landing NO da corvuxcorvux-landing"
+assert_not_contains "$(app_of corvux corvux-landing)" "corvuxcorvux" \
+  "y la concatenacion ciega no vuelve a entrar por ninguna puerta"
 
 echo
 echo "── sin credenciales de ArgoCD no se espera 900s ni se propone revertir"
@@ -603,5 +612,143 @@ echo "── el catalogo declara la DIRECCION, no solo el token"
 cat_yaml="$(cat "$ROOT/catalog/capabilities.yaml")"
 assert_contains "$cat_yaml" "ARGOCD_URL" "el entry de argocd declara su direccion"
 assert_contains "$cat_yaml" "KARGO_API_ADDRESS" "y el de kargo la suya"
+
+echo
+echo "── COR-676: Actions verde NO es un deploy verificado; el cluster es quien lo dice"
+# Caso de campo (repo apollo). `deploy-watch.sh <task> apollo` cerraba con
+#   🟢 deploy de apollo verificado por driver=gitops: actions
+# y emitia un `deploy ok=true` al bus, con los DOS tramos de cluster ciegos:
+# kargo sin login y argocd sin direccion. Lo unico comprobado era que el CI
+# construyo. El cambio que lo destapo era una variable de entorno del chart, o
+# sea exactamente lo que solo se ve corriendo en el pod. Un falso verde asi es
+# peor que un rojo: nadie vuelve a mirar.
+mkdir -p "$WS/bin" "$WS/tasks/T9"
+SHA40="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+sed -e "s|{{KARGO_PROJECT}}|p|g" -e "s|{{GITHUB_ORG}}|org|g" \
+    -e "s|{{ARGO_APP_PREFIX}}|corvux|g" -e "s|{{ROLLBACK_MODE}}|auto|g" \
+    "$ROOT/templates/scripts/deploy-watch.sh.tmpl" > "$WS/scripts/dw676.sh"
+printf 'repos:\n  - name: apollo\n    kind: service\n' > "$WS/manifest.yaml"
+rm -f "$WS/harness-answers.yaml"; rm -rf "$WS/scripts/smoke"
+printf '{"repo":"apollo","sha":"%s"}\n' "$SHA40" > "$WS/tasks/T9/ship.log"
+
+# gh que responde por NUESTRO commit y da el workflow en verde: la etapa de CI
+# se verifica de verdad, que es justo lo que hacia falta para reproducir.
+cat > "$WS/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"run list"*)  echo 30568698782 ;;
+  *"run watch"*) exit 0 ;;
+  *) exit 1 ;;
+esac
+STUB
+kargo_ciego() { cat > "$WS/bin/kargo" <<'STUB'
+#!/usr/bin/env bash
+echo "Error: get client from config: seems like you are not logged in" >&2
+exit 1
+STUB
+chmod +x "$WS/bin/kargo"; }
+kargo_ok() { printf '#!/usr/bin/env bash\necho "promotion-1  Succeeded"\n' > "$WS/bin/kargo"
+  chmod +x "$WS/bin/kargo"; }
+# argocd instalado pero sin servidor: falla en milisegundos, como en campo
+printf '#!/usr/bin/env bash\necho "Argo CD server address unspecified" >&2\nexit 1\n' > "$WS/bin/argocd"
+chmod +x "$WS/bin/gh" "$WS/bin/argocd"
+SIN_KUBECTL="$(t_path_without kubectl)"
+
+run676() {  # run676 [env...]: corre el watcher de apollo con el PATH de $WS/bin
+  ( cd "$WS" && CLAUDE_PROJECT_DIR="$WS" PATH="$WS/bin:$SIN_KUBECTL" \
+      DEPLOY_TIMEOUT="${DW_TIMEOUT:-3}" DEPLOY_POLL_SECS=1 \
+      env -u ARGOCD_AUTH_TOKEN -u ARGOCD_URL -u ARGOCD_SERVER \
+      bash scripts/dw676.sh T9 apollo ) 2>&1
+}
+
+kargo_ciego
+rm -f "$WS/bin/kubectl"
+: > "$WS/.harness/events.jsonl"
+out="$(run676)"; rc=$?
+assert_contains "$out" "✅ actions verde" "el tramo de CI SI se verifico (la reproduccion es fiel)"
+assert_not_contains "$out" "verificado por driver=gitops: actions" \
+  "COR-676: Actions sola NO cierra verde un deploy gitops"
+assert_not_contains "$out" "🟢" "y no hay circulo verde de ningun tipo"
+assert_not_contains "$(bus)" '"ok":true' \
+  "ni un deploy ok=true en el bus (es lo que el humano ve en el panel)"
+assert_contains "$out" "SIN VERIFICAR EN EL CLUSTER" "se declara AUSENTE, con todas las letras"
+assert_contains "$out" "pipeline CORRIÓ" "y explica que CI y cluster son preguntas distintas"
+assert_contains "$out" "CEGUERA, no un deploy rojo" "es ceguera, no un deploy roto"
+assert_contains "$out" "· kargo:" "nombra el tramo de kargo que quedo sin mirar"
+assert_contains "$out" "· argocd:" "y el de argocd"
+assert_contains "$(bus)" "NO verificado en el cluster" "queda como supuesto en el ledger"
+assert_not_contains "$out" "🔴" "no inventa un rojo con lo que no observo"
+assert_not_contains "$out" "git revert" "y no manda a revertir (la remediacion son credenciales)"
+assert_eq 0 "$rc" "ceguera no es fallo del deploy: exit 0"
+
+echo
+echo "── la contra-mitad: un deploy REALMENTE verde sigue verde"
+# Si el arreglo convierte todo en "no pude verificar", el gate deja de servir y
+# es peor que el bug. Con el cluster respondiendo Healthy+Synced, el cierre
+# tiene que ser verde de verdad y con su evento en el bus.
+kargo_ok
+cat > "$WS/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"get applications"*) exit 1 ;;
+  *"get application "*) printf 'Synced Healthy ' ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "$WS/bin/kubectl"
+: > "$WS/.harness/events.jsonl"
+out="$(run676)"; rc=$?
+assert_contains "$out" "🟢 deploy de apollo verificado" "cluster sano: el cierre es verde"
+assert_contains "$out" "actions + health de argocd" "y nombra los dos tramos observados"
+assert_contains "$(bus)" '"ok":true' "con su deploy ok=true en el bus"
+assert_not_contains "$out" "SIN VERIFICAR" "no degrada a ceguera lo que si pudo mirar"
+assert_eq 0 "$rc" "y sale 0"
+
+# El smoke tambien es señal de cluster: interroga al artefacto desplegado.
+mkdir -p "$WS/scripts/smoke"
+printf '#!/bin/sh\nexit 0\n' > "$WS/scripts/smoke/apollo.sh"
+chmod +x "$WS/scripts/smoke/apollo.sh"
+rm -f "$WS/bin/kubectl"
+: > "$WS/.harness/events.jsonl"
+out="$(run676)"
+assert_contains "$out" "🟢 deploy de apollo verificado" \
+  "con argocd ciego pero smoke verde: sigue habiendo prueba de que el artefacto vive"
+rm -rf "$WS/scripts/smoke"
+
+echo
+echo "── la otra contra-mitad: un deploy REALMENTE roto sigue en rojo"
+cat > "$WS/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"get applications"*) exit 1 ;;
+  *"get application "*) printf 'OutOfSync Degraded ' ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "$WS/bin/kubectl"
+: > "$WS/.harness/events.jsonl"
+out="$(run676)"; rc=$?
+assert_contains "$out" "🔴" "app observada y enferma: rojo legitimo"
+assert_contains "$out" "NO está Healthy+Synced" "con la causa observada"
+[ "$rc" -ne 0 ] && pass "y sale != 0 (el rojo sigue mordiendo)" \
+  || fail "un deploy enfermo salio 0: el gate dejo de morder"
+assert_contains "$(bus)" '"ok":false' "y el bus lo cuenta como deploy fallado"
+assert_not_contains "$out" "SIN VERIFICAR EN EL CLUSTER" \
+  "un rojo observado NO se disfraza de ceguera"
+rm -f "$WS/bin/kubectl"
+
+echo
+echo "── y driver=actions conserva su verde: ahi Actions SI es toda la señal declarada"
+# El contrato del driver `actions` es explicito: la conclusion del workflow es
+# todo lo que hay, y fingir mas seria inventar. Si el arreglo de COR-676 se
+# derramara hasta aca, cada deploy sin Kubernetes quedaria "sin verificar" para
+# siempre: eso rompe el gate en vez de arreglarlo.
+printf 'project: demo\ndeploy:\n  apollo:\n    driver: actions\n' > "$WS/harness-answers.yaml"
+: > "$WS/.harness/events.jsonl"
+out="$(run676)"
+assert_contains "$out" "🟢 deploy de apollo verificado por driver=actions: actions" \
+  "driver=actions con el workflow verde: cierra verde, como siempre"
+assert_contains "$(bus)" '"ok":true' "y emite su deploy al bus"
+rm -f "$WS/harness-answers.yaml"
 
 t_done

@@ -259,7 +259,35 @@ say "── driver de deploy: $DRIVER${KIND:+ (kind=$KIND)} ──"
 # verificado. Es el mismo error que este script vino a arreglar, y lo cometí
 # yo mismo en la primera versión del arreglo.
 VERIFIED_PARTS=""
-verified() { VERIFIED_PARTS="${VERIFIED_PARTS:+$VERIFIED_PARTS + }$1"; }
+# ── UNA SEÑAL DE CI NO PRUEBA QUE EL ARTEFACTO ESTE VIVO ──────────────
+# Caso de campo (COR-676, repo apollo): Actions verde y los DOS tramos de
+# cluster ciegos (kargo sin login, argocd sin direccion). El cierre decia
+# "🟢 deploy de apollo verificado por driver=gitops: actions" y ademas emitia
+# un `deploy ok=true` al bus, o sea que el panel del humano lo daba por sano.
+# Lo unico que se habia comprobado era que el CI construyo. El cambio que lo
+# destapo era una variable de entorno del chart (MP_OAUTH_REDIRECT_URI):
+# exactamente lo que solo se puede ver EN EL CLUSTER.
+#
+# Actions dice que el pipeline CORRIO. Que el artefacto ATERRIZO lo dicen el
+# health de ArgoCD, el smoke del canary o el verify declarado. Son preguntas
+# distintas, asi que los tramos se cuentan en DOS columnas y no en una lista
+# sola: con driver gitops, la columna de cluster vacia no puede cerrar verde.
+VERIFIED_CLUSTER=""
+verified() {  # verified <tramo> [cluster]
+  VERIFIED_PARTS="${VERIFIED_PARTS:+$VERIFIED_PARTS + }$1"
+  [ "${2:-}" = "cluster" ] \
+    && VERIFIED_CLUSTER="${VERIFIED_CLUSTER:+$VERIFIED_CLUSTER + }$1"
+  return 0
+}
+
+# ── LO QUE NO SE PUDO MIRAR SE ACUMULA IGUAL QUE LO VERIFICADO ────────
+# Mismo patron que MUERDE_CIEGOS en ship.sh: los ciegos no son verdes ni
+# rojos, se DICEN, y viajan al cierre para que el veredicto no herede un
+# "todo verificado" que nadie verifico. Sin esta lista, el humano leia tres
+# avisos sueltos arriba y un verde abajo, y el verde es lo que se recuerda.
+CEGUERAS=""
+ciego() { CEGUERAS="${CEGUERAS:+$CEGUERAS
+}   · $1"; }
 
 # driver none SIN verify ni smoke: no hay nada que este watcher pueda mirar.
 # Con verify_cmd o smoke declarados, none salta las etapas de CI/gitops pero
@@ -437,6 +465,7 @@ if [ "$DRIVER" != "none" ] && ! command -v gh >/dev/null; then
   say "   Esto no es un deploy verde: es un tramo del que no sé nada."
   say "   ↳ instala gh (catálogo: gh) o verifica el workflow a mano."
   emit assumption "Actions de $REPO NO verificado: gh no está instalado"
+  ciego "actions: gh no está instalado"
 fi
 if [ "$DRIVER" != "none" ] && command -v gh >/dev/null; then
   say "── actions: $ORG/$REPO@main ──"
@@ -467,12 +496,14 @@ if [ "$DRIVER" != "none" ] && command -v gh >/dev/null; then
     say "   La etapa de Actions NO corrió. Esto no es un deploy verde: es un"
     say "   deploy del que no sé nada."
     emit assumption "Actions de $REPO NO verificado: sin sha en ship.log"
+    ciego "actions: no hay sha de $REPO en tasks/$TASK/ship.log"
   fi
   if [ -z "$run_id" ] && [ -n "$head_sha" ]; then
     say "⚠️ ningún run de Actions para el commit ${head_sha:0:12} tras 100 s."
     say "   NO vigilo el run anterior: su resultado no dice nada de este cambio."
     say "   Puede que el workflow no dispare en push a $BASE_REF, o que aún no exista."
     emit assumption "Actions de $REPO NO verificado: sin run para el commit ${head_sha:0:12}"
+    ciego "actions: ningún run para el commit ${head_sha:0:12}"
   fi
   if [ -n "$run_id" ]; then
     gh run watch --repo "$ORG/$REPO" "$run_id" --exit-status >>"$LOG" 2>&1 \
@@ -534,6 +565,7 @@ if command -v kargo >/dev/null; then
     say "⚠️ kargo no respondió: ${reason:-sin salida}"
     say "   la promoción del freight NO se verificó; el deploy sigue por health de ArgoCD"
     emit assumption "promoción de Kargo NO verificada en $REPO: ${reason:-kargo no respondió}"
+    ciego "kargo: ${reason:-no respondió}"
   fi
 else
   # El CLI ausente se dice en una línea, sin supuesto: un pipeline sin Kargo
@@ -541,6 +573,7 @@ else
   # callarse y que ambos casos se lean igual.
   say "ℹ️  kargo CLI no está: la promoción del freight no se verifica por aquí"
   say "   (si tu pipeline no usa Kargo, esto no es un hueco; si lo usa, instálalo)"
+  ciego "kargo: el CLI no está instalado"
 fi
 
 # ── SALUD DE ARGOCD: TRES ESTADOS, NO DOS ────────────────────────────
@@ -637,7 +670,7 @@ check_argocd_health() {  # → 0 sano · 1 no sano · 2 no concluyente
 say "── argocd: verificando $APP (timeout ${TIMEOUT}s) ──"
 check_argocd_health; health_rc=$?
 case "$health_rc" in
-  0) say "✅ $APP Healthy + Synced"; verified "health de argocd" ;;
+  0) say "✅ $APP Healthy + Synced"; verified "health de argocd" cluster ;;
   1) red "$APP existe y NO está Healthy+Synced" ;;
   2) say "⚠️  no pude verificar el health de '$APP'."
      say "   Puede faltar kubectl, faltar credenciales de ArgoCD, o que la app"
@@ -651,7 +684,8 @@ case "$health_rc" in
      say "       dump_kv ARGOCD_AUTH_TOKEN <ruta-del-vault>/argocd token"
      say "     en scripts/secrets.sh. La dirección va como host o como URL: el"
      say "     watcher le saca el esquema, que es lo que el CLI no tolera."
-     emit assumption "health de $REPO NO verificado: no pude observar la app $APP" ;;
+     emit assumption "health de $REPO NO verificado: no pude observar la app $APP"
+     ciego "argocd: no pude observar la app '$APP'" ;;
 esac
 
 fi   # ← fin de las etapas exclusivas de gitops
@@ -662,9 +696,10 @@ fi   # ← fin de las etapas exclusivas de gitops
 if [ -x "$WS/scripts/smoke/$REPO.sh" ]; then
   say "── smoke: $REPO ──"
   "$WS/scripts/smoke/$REPO.sh" >>"$LOG" 2>&1 || red "smoke del canary falló"
-  say "✅ smoke verde"; verified "smoke del canary"
+  say "✅ smoke verde"; verified "smoke del canary" cluster
 else
   say "⚠️ sin smoke para $REPO (scripts/smoke/$REPO.sh) — agrégalo; el canary es la última defensa"
+  ciego "smoke: no existe scripts/smoke/$REPO.sh"
 fi
 
 # 5 · verify declarado por el usuario (TODOS los drivers, incluido none).
@@ -688,12 +723,12 @@ if [ -n "$VERIFY_CMD" ]; then
   elif [ -n "$VERIFY_EXPECT" ]; then
     case "$vout" in
       *"$VERIFY_EXPECT"*)
-        say "✅ verify verde (contiene '$VERIFY_EXPECT')"; verified "verify declarado" ;;
+        say "✅ verify verde (contiene '$VERIFY_EXPECT')"; verified "verify declarado" cluster ;;
       *)
         red "verify de $REPO: la salida NO contiene '$VERIFY_EXPECT' (salida en $LOG)" ;;
     esac
   else
-    say "✅ verify verde (exit 0; sin verify_expect)"; verified "verify declarado"
+    say "✅ verify verde (exit 0; sin verify_expect)"; verified "verify declarado" cluster
   fi
 fi
 
@@ -706,8 +741,32 @@ if [ -z "$VERIFIED_PARTS" ]; then
   say "⚠️  deploy de $REPO SIN VERIFICAR: ningún tramo se pudo observar."
   say "   No hay evidencia de que esté sano NI de que esté roto. Mirá los"
   say "   avisos de arriba: cada uno dice qué le faltó."
+  [ -n "$CEGUERAS" ] && say "$CEGUERAS"
   emit assumption "deploy de $REPO sin verificar: ningún tramo observable (driver=$DRIVER)"
   say "→ siguiente: resolvé lo que falta y volvé a correr, o verificá a mano"
+elif [ "$DRIVER" = "gitops" ] && [ -z "$VERIFIED_CLUSTER" ]; then
+  # ── CI VERDE Y CLUSTER CIEGO: NI VERDE NI ROJO ──────────────────────
+  # Este es el falso verde de COR-676 y la razon por la que existe la columna
+  # de cluster. El watcher NO puede mirar donde importa, asi que se declara
+  # AUSENTE con todas las letras en vez de comprar el veredicto con la unica
+  # señal barata que tenia. Tampoco es rojo: no observo nada enfermo, y
+  # proponer un revert aca mandaria al agente a perseguir un bug que no
+  # existe (la remediacion real son credenciales, no codigo).
+  #
+  # NO emite `deploy ... true`: ese evento es lo que el humano ve en el panel,
+  # y darlo por sano es la mentira mas cara que puede contar este script.
+  say "⚠️  deploy de $REPO SIN VERIFICAR EN EL CLUSTER."
+  say "   Lo único que pude observar fue: $VERIFIED_PARTS, y eso es CI."
+  say "   Actions prueba que el pipeline CORRIÓ, no que el artefacto esté VIVO:"
+  say "   eso lo dicen el health de ArgoCD, el smoke del canary o el verify"
+  say "   declarado, y ninguno de los tres se pudo observar:"
+  [ -n "$CEGUERAS" ] && say "$CEGUERAS"
+  say "   Es CEGUERA, no un deploy rojo: no propongo revertir nada, y tampoco"
+  say "   declaro sano un deploy que no miré."
+  emit assumption "deploy de $REPO NO verificado en el cluster: solo hubo señal de CI ($VERIFIED_PARTS) con driver=gitops"
+  say "→ siguiente: resolvé la ceguera de arriba (credenciales de Kargo/ArgoCD,"
+  say "   kubectl, o un scripts/smoke/$REPO.sh) y volvé a correr; hasta entonces"
+  say "   nadie sabe si el pod corre la config nueva"
 else
   emit deploy "$REPO verificado ($DRIVER): $VERIFIED_PARTS" true
   say "🟢 deploy de $REPO verificado por driver=$DRIVER: $VERIFIED_PARTS"

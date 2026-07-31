@@ -1791,6 +1791,55 @@ out="$(puerta trunk prs)"; rc=$?
 assert_eq 0 "$rc" "delivery prs sobre flow trunk: se resuelve"
 assert_contains "$out" "FLOW_MODE=prs" "delivery prs OVERRIDEA el flow trunk (la simétrica)"
 
+# (c2) #58: flow trunk-merge-commit. Es trunk (misma puerta, mismos gates) pero
+# aterriza con merge commit para que revertir sea UN comando.
+out="$(puerta trunk-merge-commit trunk)"; rc=$?
+assert_eq 0 "$rc" "flow trunk-merge-commit: es una puerta implementada, no un rojo"
+assert_contains "$out" "FLOW_MODE=trunk" "usa la puerta trunk (mismos gates, mismo push directo)"
+out="$(puerta trunk-merge-commit trunk 0 0; echo)"
+( set -euo pipefail; WS="$WS"; TASK=T1; REPO=svc; PRECHECK=0; LANG_ONLY=0; CI_MODE=0
+  DMOUT="trunk"; DMRC=0; python3() { printf '%b' "$DMOUT"; }
+  sed "s/{{FLOW}}/trunk-merge-commit/" "$WS/puerta-raw.sh" > "$WS/puerta-mc.sh"
+  . "$WS/puerta-mc.sh"; echo "LAND_MERGE=$LAND_MERGE" ) 2>&1 | grep -q "LAND_MERGE=1" \
+  && pass "y enciende el modo merge commit" || fail "flow trunk-merge-commit no encendió LAND_MERGE"
+
+# Un flow que NO se implementa sigue siendo rojo, y el mensaje nombra los TRES.
+out="$(puerta gitflow trunk 2>&1)" || true
+assert_contains "$out" "trunk-merge-commit" "el rechazo de un flow ajeno nombra los tres implementados"
+
+echo
+echo "── #58: el merge commit se arma sin tocar el árbol, y es revertible de un tirón"
+# Caso de campo: un humano autoriza un cambio grande y pide poder deshacerlo. Con
+# fast-forward hay que conocer el rango exacto; con merge commit es un comando.
+# Lo que se prueba acá es la PROPIEDAD que el humano compró: `git revert -m 1`
+# deshace el trabajo de la tarea y deja el trunk como estaba.
+MC="$WS/mergecommit"; mkdir -p "$MC"; ( cd "$MC"
+  git init -q .; git config user.email t@t; git config user.name t
+  echo base > app.txt; git add -A; git commit -qm base
+  git update-ref refs/remotes/origin/main HEAD
+  BASE_TREE="$(git rev-parse 'HEAD^{tree}')"
+  echo tarea >> app.txt; echo nuevo > feature.txt; git add -A; git commit -qm "trabajo de la tarea"
+  # el mismo plumbing que usa ship.sh: árbol de HEAD, primer padre el trunk
+  m="$(git commit-tree "$(git rev-parse 'HEAD^{tree}')" \
+        -p "$(git rev-parse origin/main)" -p "$(git rev-parse HEAD)" -m "merge: T1 en svc")"
+  # reset --hard y no checkout: HEAD ya está en esa rama, así que un checkout
+  # no re-sincroniza índice ni árbol y el revert operaría sobre otro estado.
+  git update-ref "refs/heads/$(git rev-parse --abbrev-ref HEAD)" "$m"
+  git reset -q --hard "$m"
+  echo "PADRES:[$(git rev-list --parents -n 1 HEAD | wc -w | tr -d ' ')]"
+  echo "CONTENIDO:[$(cat app.txt | tr '\n' ' ')]"
+  git revert -m 1 --no-edit HEAD >/dev/null   # git revert NO acepta -q
+  echo "TRAS_REVERT:[$(git rev-parse 'HEAD^{tree}')]"
+  echo "ESPERADO:[$BASE_TREE]"
+  echo "FEATURE_TRAS_REVERT:[$([ -f feature.txt ] && echo si || echo no)]" ) > "$WS/mc.out" 2>&1
+mcout="$(cat "$WS/mc.out")"
+assert_contains "$mcout" "PADRES:[3]" "el commit que aterriza tiene DOS padres (es un merge, no un fast-forward)"
+assert_contains "$mcout" "CONTENIDO:[base tarea ]" "y su árbol es el resultado de la tarea, no una fusión inventada"
+tras="$(printf '%s' "$mcout" | sed -n 's/^TRAS_REVERT:\[\(.*\)\]$/\1/p')"
+esp="$(printf '%s' "$mcout" | sed -n 's/^ESPERADO:\[\(.*\)\]$/\1/p')"
+assert_eq "$esp" "$tras" "git revert -m 1 devuelve el árbol EXACTO de antes de la tarea"
+assert_contains "$mcout" "FEATURE_TRAS_REVERT:[no]" "incluidos los archivos que la tarea agregó"
+
 # (d) sin campo delivery (el subcomando contesta 'flow') → conducta de HOY
 out="$(puerta prs flow)"
 assert_contains "$out" "FLOW_MODE=prs" "sin delivery declarado: manda el flow prs del workspace"
@@ -1869,7 +1918,7 @@ assert_contains "$out" "harness-policy.py delivery tasks/T1 --to prs --actor hum
 assert_contains "$out" "scripts/ship.sh T1 svc" "y el comando para re-correr después"
 assert_no_file "$DWS/locks/svc.lock.d" "se niega SIN tomar el lock del repo"
 assert_not_contains "$out" "══ ship svc" "jamás entra al loop de ship (ni fetch, ni rebase, ni push)"
-assert_not_contains "$out" "ship.sh implementa dos" "y NO se confunde con el rechazo de flow no implementado (exit 7)"
+assert_not_contains "$out" "ship.sh implementa tres" "y NO se confunde con el rechazo de flow no implementado (exit 7)"
 
 # Y el ORDEN es estructural, no una casualidad de este fixture: la consulta de
 # la entrega precede al lock y al loop de ship en el archivo. Mismo método que

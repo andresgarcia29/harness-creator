@@ -20,8 +20,15 @@ project:
 instance:
   repo: {{INSTANCE_REPO}}
 
-# trunk | prs  (trunk-staging NO está implementado y ship.sh falla cerrado)
-#   trunk → push directo a la trunk tras los gates
+# trunk | trunk-merge-commit | prs
+# (trunk-staging NO está implementado y ship.sh falla cerrado)
+#   trunk → push directo a la trunk tras los gates (fast-forward: los commits
+#           de la tarea quedan sueltos en la historia)
+#   trunk-merge-commit → lo MISMO (mismos gates, misma puerta), pero aterriza
+#           con un merge commit. Es para cuando el humano quiere poder deshacer
+#           un cambio grande de un tirón: con merge commit revertir es
+#           `git revert -m 1 <sha>`, y con fast-forward hay que conocer el
+#           rango exacto, que nadie tiene a mano. El primer padre es la trunk.
 #   prs   → misma verificación, pero publica la rama y abre el PR: el cambio NO
 #           está en la trunk cuando ship.sh termina, y deploy-watch espera al
 #           merge para resolver el commit que de verdad aterrizó

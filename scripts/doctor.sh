@@ -481,11 +481,49 @@ fi
 # canon, porque 8 caracteres identifican "Presupues" y en un titulo de 50 no
 # identifican nada.
 LEY_MIN_PCT=60
+# LA VENTANA: SOLO la seccion de leyes, jamas el archivo entero (issues #41,#59).
+# Caso de campo: `bd setup codex` (beads, la herramienta de tracking que este
+# mismo mapa manda usar) inyecta en AGENTS.md un "Session Close Protocol" que es
+# una lista 1..5 en negrita. Escaneando el archivo entero, esos items entraban
+# como leyes y el doctor gritaba "numera DOS veces la(s) ley(es): 1 2 3 4 5"
+# sobre un AGENTS.md correcto: rojo PERMANENTE (y un rojo cronico deja de
+# leerse), con una remediacion que ademas invita a REGENERAR AGENTS.md, que es
+# la accion que /harness-update documenta como la que borro 70 lineas de una
+# instancia real. Un gate que empuja al incidente que el comando de al lado
+# documenta es peor que no tener gate.
+#
+# EL DELIMITADOR, y por que este:
+#  · ABRE en el primer encabezado que menciona "ley" (cualquier nivel, sin
+#    importar mayusculas). Tiene que servir para los DOS mapas, y no dicen lo
+#    mismo: CLAUDE.md abre con "## Leyes globales (no negociables...)" y
+#    AGENTS.md con "## Las leyes (validas para TODA herramienta)". Casar la
+#    palabra, no el titulo literal, es lo unico que cubre a los dos y sobrevive
+#    a que alguien le cambie el parentesis.
+#  · CIERRA en el encabezado SIGUIENTE, sea cual sea. Anclarlo a "## El
+#    pipeline" (como hace el repro del issue) ata el chequeo al nombre de una
+#    seccion que no es la suya: el dia que alguien la renombra, la ventana se
+#    come el resto del archivo y el bug vuelve, callado.
+#  · SIN encabezado de leyes se cae al archivo ENTERO, que es el comportamiento
+#    de siempre. Un mapa con las leyes bajo otro nombre no puede quedar mudo:
+#    devolver vacio ahi convertiria este arreglo en "no miro nada".
+_ley_seccion() {  # _ley_seccion <archivo> → SOLO el bloque de leyes
+  # el awk sale != 0 cuando NUNCA encontro el encabezado de leyes; ahi, y solo
+  # ahi, el fallback imprime el archivo entero (comportamiento historico)
+  awk '
+    /^#+[ \t]/ {
+      if (dentro) exit
+      if (tolower($0) ~ /ley/) dentro = 1
+      next
+    }
+    dentro { print }
+    END { if (!dentro) exit 9 }
+  ' "$1" 2>/dev/null || cat "$1" 2>/dev/null
+}
 _ley_nums() {   # _ley_nums <archivo> → numeros de ley, en orden de aparicion
-  sed -n 's/^\([0-9][0-9]*[a-z]*\)\. \*\*.*/\1/p' "$1" 2>/dev/null
+  _ley_seccion "$1" | sed -n 's/^\([0-9][0-9]*[a-z]*\)\. \*\*.*/\1/p'
 }
 _ley_title() {  # _ley_title <archivo> <num> → titulo, marcador de roto, o vacio
-  awk -v num="$2" '
+  _ley_seccion "$1" | awk -v num="$2" '
     $0 ~ ("^" num "\\. \\*\\*") {
       resto = substr($0, index($0, "**") + 2)
       cierre = 0
@@ -498,7 +536,7 @@ _ley_title() {  # _ley_title <archivo> <num> → titulo, marcador de roto, o vac
       print t
       exit
     }
-  ' "$1" 2>/dev/null
+  ' 2>/dev/null
 }
 _ley_rota() { case "$1" in "<SIN-CIERRE>"|"<ANIDADO>") return 0 ;; *) return 1 ;; esac; }
 

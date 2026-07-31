@@ -19,7 +19,8 @@
 #   2. rebase sobre origin (la misma disciplina que ship.sh)
 #   3. gitleaks sobre el rango a pushear (el riesgo número UNO acá: un
 #      token o un .secrets colado a main en el repo que versiona la config)
-#   4. doctor en verde (una instancia rota no se publica a sí misma)
+#   4. doctor en verde (una instancia rota no se publica a sí misma), con el
+#      escape declarado de HARNESS_KNOWN_BUG para el rojo que NO es tuyo
 #
 # Uso: instance-ship.sh
 # Portabilidad: bash 3.2, BSD userland.
@@ -42,6 +43,117 @@ fi
 
 BB="${HARNESS_BASE_BRANCH:-$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')}"
 [ -n "$BB" ] || BB=main
+
+# ── EL ROJO QUE NO ES TUYO: HARNESS_KNOWN_BUG='doctor=<url>' ──────────
+# Caso de campo (issue #59): doctor.sh contaba como leyes duplicadas una lista
+# numerada AJENA que `bd setup codex` inyecta en AGENTS.md. Con el doctor en
+# rojo por un bug DEL HARNESS, esta puerta (la ÚNICA legítima a main del repo de
+# la instancia: specs maestras, ADRs, constitución) quedaba cerrada para TODA
+# tarea, y la única salida era editar AGENTS.md o doctor.sh en medio de una
+# tarea, que es exactamente lo que la Ley 12 prohíbe. Bloqueó el archive de una
+# tarea más 7 commits ya commiteados de otras. ship.sh ya tenía este escape;
+# que la otra puerta no lo tuviera era el bug.
+#
+# COPIA DELIBERADA de known_bug_cubre() de ship.sh.tmpl, con los MISMOS candados
+# y los MISMOS mensajes. No se extrajo a una librería porque ship.sh es un
+# template con sustituciones y este script se instala tal cual: hoy no hay un
+# lugar compartido donde vivan los dos. DOS COPIAS QUE DIVERGEN EN LA PRIMERA
+# EDICIÓN SON UN PROBLEMA CONOCIDO DE ESTE REPO: si tocás los candados acá,
+# tocá también templates/scripts/ship.sh.tmpl (y al revés). Los tests de los dos
+# lados prueban los mismos cuatro candados justo para que la divergencia grite.
+#
+# Los candados son el diseño, no un adorno:
+#   · EXIGE EL SLOT, no solo la url. Un salto-todo sería una puerta trasera.
+#     Acá el único slot declarable es `doctor`.
+#   · SLOTS VETADOS, jamás declarables: `security` y `veredicto`. En esta puerta
+#     `security` es gitleaks, y un secreto colado a main en el repo que versiona
+#     la config del harness es el peor accidente posible acá.
+#   · REPORTAR ES LA PRECONDICIÓN: la url tiene que estar YA en
+#     .harness/upstream-issues.jsonl, y ahí solo llega por harness-bug.sh.
+#   · ISSUE CERRADO = WORKAROUND VENCIDO: si gh dice CLOSED, se rechaza (el fix
+#     existe: /harness-update). Sin gh o sin red se acepta, pero declarándolo.
+#   · NO PERSISTE (env var por invocación) y NO BORRA EL GATE: se declara, sale
+#     un `assumption` al bus y queda dicho en la salida.
+KNOWN_BUG="${HARNESS_KNOWN_BUG:-}"
+
+# known_bug_cubre <slot> → 0 SOLO si el knob declara ESE slot y pasa los cuatro
+# candados. Es un predicado: se llama desde la condición de un `if`, así que
+# jamás debe salir != 0 por otra cosa que no sea "no cubre". Cada rechazo
+# imprime su motivo CON la remediación: un "no" mudo devolvería al agente al
+# bucle de tocar el harness, que es justo lo que este camino existe para evitar.
+known_bug_cubre() {  # known_bug_cubre <slot>
+  local slot="$1" decl_slot decl_url estado
+  [ -n "$KNOWN_BUG" ] || return 1
+  case "$KNOWN_BUG" in
+    *=*) ;;
+    *) echo "❌ HARNESS_KNOWN_BUG='$KNOWN_BUG' no tiene forma '<slot>=<url>'."
+       echo "   ↳ hay que NOMBRAR el slot: un salto-todo sería una puerta trasera."
+       echo "     El único slot declarable en esta puerta es 'doctor'."
+       return 1 ;;
+  esac
+  decl_slot="${KNOWN_BUG%%=*}"
+  decl_url="${KNOWN_BUG#*=}"
+
+  # CANDADO 1 (la defensa principal): hay slots que no se rodean nunca. Acá se
+  # chequea ANTES de comparar el slot (en ship.sh va después) porque esta puerta
+  # tiene UN solo slot: si no, el intento de declarar 'security' saldría por la
+  # rama muda de abajo y el motivo no se imprimiría nunca.
+  case "$decl_slot" in
+    security|veredicto)
+      echo "❌ los slots 'security' y 'veredicto' no se rodean JAMÁS, ni con issue abierto."
+      echo "   · security: un secreto filtrado jamás es un bug del harness, y este"
+      echo "     es el repo donde un token colado a main duele más."
+      echo "   · veredicto: sin veredicto no hubo review, y entonces no hay nada"
+      echo "     que shippear todavía."
+      echo "   ↳ si el gate de ese slot está roto de verdad: reportalo con"
+      echo "     scripts/harness-bug.sh report y ESPERÁ el fix. Ese es el precio."
+      return 1 ;;
+  esac
+  # Silencioso si el knob habla de OTRO slot: el rojo que bloquea ya se imprime
+  # con su propio mensaje, y repetirlo acá sería el mismo hallazgo con dos caras.
+  [ "$decl_slot" = "$slot" ] || return 1
+
+  # CANDADO 2: forma de issue del forge. Un '<slot>=porque-si' no es una
+  # declaración, es un salto sin rastro que nadie puede auditar después.
+  case "$decl_url" in
+    https://github.com/*/issues/*) ;;
+    *) echo "❌ HARNESS_KNOWN_BUG apunta a '$decl_url', que no es la url de un issue."
+       echo "   ↳ forma esperada: https://github.com/<org>/<repo>/issues/<n>"
+       return 1 ;;
+  esac
+
+  # CANDADO 3: el issue tiene que estar YA en el ledger local, y ahí solo lo
+  # pone harness-bug.sh (report verifica propiedad del artefacto, drift contra
+  # el template, versión y repro; record anota uno abierto a mano). O sea:
+  # REPORTAR ES LA PRECONDICIÓN DE DESBLOQUEARSE. Sin esto el knob sería un
+  # "confía en mí" y el canal de vuelta al plugin se quedaría vacío.
+  if ! grep -qF "\"url\":\"$decl_url\"" "$WS/.harness/upstream-issues.jsonl" 2>/dev/null; then
+    echo "❌ $decl_url no está en .harness/upstream-issues.jsonl: ese bug no fue reportado."
+    echo "   Reportar es la PRECONDICIÓN de desbloquearse, no un trámite posterior."
+    echo "   ↳ remediación:"
+    echo "     scripts/harness-bug.sh report --title '...' --file <artefacto-del-plugin> \\"
+    echo "       --repro <archivo-con-la-salida> --impact '<a quién más le pasa>'"
+    echo "     (si el issue ya existe y lo abriste a mano: harness-bug.sh record --url $decl_url ...)"
+    return 1
+  fi
+
+  # CANDADO 4: un issue CERRADO significa que el fix ya existe. Seguir
+  # declarándolo sería congelar el harness roto en esta máquina para siempre.
+  # Sin gh o sin red no se puede saber: se acepta, pero DICIÉNDOLO (un
+  # "verificado" que no verificó nada es peor que un desconocido declarado).
+  estado=""
+  if command -v gh >/dev/null 2>&1; then
+    estado="$(gh issue view "$decl_url" --json state --jq .state 2>/dev/null || echo "")"
+  fi
+  if [ "$estado" = "CLOSED" ]; then
+    echo "❌ el issue $decl_url está CERRADO: el workaround venció."
+    echo "   El fix del harness ya existe; declararlo otra vez lo dejaría fuera."
+    echo "   ↳ remediación: corré /harness-update y re-corré este instance-ship."
+    return 1
+  fi
+  [ -n "$estado" ] || echo "   (estado del issue sin verificar: no hay gh o no hubo red)"
+  return 0
+}
 
 # ── 1. Árbol limpio POR SOLAPAMIENTO: no se publica un archivo a medias ─
 # El árbol de la instancia es COMPARTIDO entre tareas concurrentes: la Ley 7
@@ -141,11 +253,25 @@ fi
 # ── 4. doctor en verde: una instancia rota no se publica ──────────────
 if [ -x "$WS/scripts/doctor.sh" ]; then
   echo "── doctor (los FAIL bloquean; los warn no) ──"
-  bash "$WS/scripts/doctor.sh" . >/dev/null 2>&1 || {
+  if bash "$WS/scripts/doctor.sh" . >/dev/null 2>&1; then
+    echo "✅ doctor sin fallos"
+  elif known_bug_cubre doctor; then
+    # NO se borra el gate: el rojo sigue siendo rojo, solo que DECLARADO y con
+    # su issue upstream. `if !` sobre un predicado es seguro; envolver así el
+    # gate mismo no lo sería (desactivaría errexit adentro).
+    echo "⚠️  slot 'doctor' rojo por BUG CONOCIDO del harness: ${KNOWN_BUG#*=}"
+    echo "   NO es un verde: es una condición DECLARADA. Queda en el bus y en"
+    echo "   esta salida. Quitá el workaround cuando el issue cierre."
+    [ -f "$WS/scripts/emit.sh" ] && bash "$WS/scripts/emit.sh" assumption \
+      "instancia: slot 'doctor' rojo declarado como bug conocido del harness (${KNOWN_BUG#*=})" \
+      "" "" >/dev/null 2>&1 || true
+  else
     echo "❌ el doctor reporta FALLOS: una instancia rota no se publica a sí misma."
     echo "   ↳ remediación: bash scripts/doctor.sh .  (el detalle con remediaciones)"
-    exit 3; }
-  echo "✅ doctor sin fallos"
+    echo "   ↳ si el rojo NO es tuyo (un bug del harness ya reportado upstream):"
+    echo "     HARNESS_KNOWN_BUG='doctor=<url-del-issue>' scripts/instance-ship.sh"
+    exit 3
+  fi
 fi
 
 # ── push (vive DENTRO del script sancionado: el hook no aplica acá) ───

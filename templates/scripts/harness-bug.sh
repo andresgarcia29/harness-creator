@@ -92,9 +92,28 @@ ver_lt() {  # ver_lt <a> <b> → 0 si a < b (semver simple, sin pre-releases)
 # instancia (docs, specs, agentes, pasos custom, answers) es tuyo: si falla,
 # el bug es local aunque duela igual. Esta tabla es la misma clasificación de
 # propiedad que usa /harness-update para decidir quién gana un diff.
+# ── Artefactos del plugin que NUNCA viven en el workspace ─────────────
+# Los comandos del propio plugin (/harness-init, /harness-update), sus skills y
+# sus fuentes no se copian a la instancia POR DISEÑO. Y el chequeo de existencia
+# de abajo exigía que el archivo estuviera en el workspace, así que un bug de
+# `/harness-update` no se podía reportar por el canal que la Ley 12 manda usar:
+# moría con "no existe en el workspace: commands/harness-update.md". Una ley que
+# obliga a usar un canal cerrado para toda una clase de bug la termina violando
+# el que quiere cumplirla (caso de campo: issue #42, abierto a mano por esto).
+#
+# Su drift no se puede medir (no hay copia local contra la cual comparar), así
+# que quedan en `no-verificable`, que es el estado que este script ya tiene para
+# eso. No es un permiso: es decir la verdad sobre lo que se pudo comprobar.
+plugin_only() {  # plugin_only <ruta> → 0 si vive SOLO en el plugin
+  case "$1" in
+    commands/*.md|skills/*|catalog/*|templates/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 owner_of() {
   case "$1" in
     scripts/smoke/*|scripts/cronjobs/jobs/local-*) echo instance ;;
+    commands/*.md|skills/*|catalog/*|templates/*) echo plugin ;;
     # Los cronjobs se extrajeron a su propio repo (harness-cronjobs). Siguen
     # siendo codigo de plugin, pero de OTRO plugin: reportarlos aca abriria el
     # issue en el repo equivocado, contra una ruta que ya no existe.
@@ -289,7 +308,8 @@ reconcile_after_create() {  # reconcile_after_create <fp> <file> <url-propio>
 cmd_check() {
   local p="${1:?uso: harness-bug.sh check <ruta-relativa-al-workspace>}"
   p="${p#./}"; p="${p#"$WS"/}"
-  [ -e "$WS/$p" ] || die "no existe en el workspace: $p" 1
+  plugin_only "$p" || [ -e "$WS/$p" ] \
+    || die "no existe en el workspace: $p" 1
   local own drift; own="$(owner_of "$p")"; drift="$(drift_of "$p")"
   echo "artefacto: $p"
   echo "propiedad: $own"
@@ -336,7 +356,8 @@ cmd_report() {
   enabled || die "reportes upstream deshabilitados en esta instancia (upstream_issues: off)" 8
 
   file="${file#./}"; file="${file#"$WS"/}"
-  [ -e "$WS/$file" ] || die "no existe en el workspace: $file" 1
+  plugin_only "$file" || [ -e "$WS/$file" ] \
+    || die "no existe en el workspace: $file (si es un artefacto que vive SOLO en el plugin, como commands/ o skills/, usá su ruta tal cual)" 1
 
   # 1 · propiedad y drift (fail-closed)
   local own drift; own="$(owner_of "$file")"; drift="$(drift_of "$file")"

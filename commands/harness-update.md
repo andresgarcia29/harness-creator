@@ -104,6 +104,20 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
    elige el valor que convenga ni se sigue porque el generate haya corrido.
    Si el binario rechaza el answers, eso también es un
    tercer estado: decilo y pasá al fallback declarándolo, no lo edites a ojo.
+   **Y hay una forma concreta de "editarlo a ojo" que está PROHIBIDA: borrar la
+   clave que el binario no reconoce.** El binario valida contra un esquema fijo
+   que trae embebido, y ese esquema puede ser más viejo que tu instancia o no
+   conocer las claves LOCALES que el workspace agregó para sus propios scripts.
+   Caso de campo (issue #42): un binario 0.60.0 rechazó `gcp:` (que lee un
+   script local para descubrir el endpoint de GKE) y después `upstream_issues:`,
+   que está en el template desde v0.48.0. Quitarlas para que `generate` corra
+   habría dejado el answers "válido" para el binario y roto para la instancia,
+   en silencio y sin que nada lo detecte después. Una clave rechazada es SIEMPRE
+   el tercer estado: se declara y se va al fallback 2b. Nunca se borra.
+   Antes de confiar en el binario, comprobá que sus templates no sean más viejos
+   que los del plugin en disco: si `harness --version` no dice qué vintage de
+   templates trae, no podés saberlo, y entonces el fallback 2b es el camino
+   honesto aunque el binario exista.
    El porqué: este paso es el último lugar donde un LLM improvisa con permisos
    de escritura sobre una instancia, y de acá salieron los tres incidentes más
    caros de campo (la versión `0.60.0` que no existía en ningún origen, el
@@ -129,7 +143,7 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
      deploy-watch,emit,forge,gowork,graph-refresh,minion-probe,pull-all,
      ticket-close,ticket-pull,harness-bug,harness-version,skills-sync,
      pipeline-steps,py,fe,archived-repos,mark-read,verdict-beads,ship-wave,
-     port-forwards,instance-ship}.sh,
+     port-forwards,instance-ship,adr-new}.sh,
      scripts/{harness-policy,evidence,harness-metrics}.py, `harness-policy.json`,
      **los hooks Y el archivo que los cablea**, que van JUNTOS o el update
      entrega un hook que nunca corre:

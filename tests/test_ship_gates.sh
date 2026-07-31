@@ -805,6 +805,34 @@ assert_eq 0 "$rc" "declarado bajo MODIFIED: sale del alcance (la remediación im
 assert_contains "$out" "fuera del alcance" "y queda dicho, no borrado en silencio"
 rm -f "$WS/tasks/TM/delta-spec.md"
 
+# (d2) El escape excusa un REFACTOR, jamás un caso NUEVO del mismo archivo.
+# Caso de campo (COR-667): cualquier fix que cambie una firma obliga a declarar
+# MODIFIED su archivo de test, y con eso el archivo se autoexcluía ENTERO. En
+# video-forge, cost_test.go se declaró MODIFIED (cambiaban las llamadas) y
+# además agregaba el único test que probaba el fix; el precheck imprimió "sin
+# tests nuevos que verificar" y salió verde sin mirarlo. El patrón es común, no
+# excepcional, y un gate que da la señal de seguridad sin la seguridad es peor
+# que no tenerlo.
+mk_muerde_repo "$WS/mu12"
+printf 'def test_firma_vieja():\n    assert True\n' > tests/test_firma.py
+git add -A && git commit -qm "el test que ya existia"
+git update-ref refs/remotes/origin/main HEAD
+# el fix cambia la firma del test viejo Y agrega el caso que prueba el cambio
+printf 'def test_firma_vieja(ctx):\n    assert True\n\ndef test_caso_nuevo():\n    import feature\n' > tests/test_firma.py
+git add -A && git commit -qm "cambia la firma y agrega el caso nuevo"
+cat > "$WS/tasks/TM/delta-spec.md" <<'FIX'
+## MODIFIED Requirements
+- R1: cambia la firma de las llamadas en tests/test_firma.py
+FIX
+out="$(run_muerde)"; rc=$?
+assert_contains "$out" "AGREGA tests nuevos: sigue en el alcance" \
+  "declarar MODIFIED no licencia saltarse un caso NUEVO del mismo archivo"
+assert_contains "$out" "MUERDE" "el caso nuevo SÍ se corre contra la base"
+assert_not_contains "$out" "sin tests nuevos que verificar" \
+  "y el gate ya no miente diciendo que no había nada que mirar"
+assert_eq 0 "$rc" "y con el caso nuevo mordiendo, el gate sale verde"
+rm -f "$WS/tasks/TM/delta-spec.md"
+
 # (e) stack sin runner dirigido: ni verde mudo ni rojo inventado
 mk_muerde_repo "$WS/mu4"
 printf 'assert true\n' > tests/algo_spec.rb

@@ -34,8 +34,8 @@ MISMA ley, entres por donde entres. Cuerpos abreviados: el largo, allá.
    `scripts/ship.sh --precheck <task-id> <repo>`: los gates mecánicos
    cuestan segundos, una ronda de review cuesta minutos.
 7. **Decisiones fuera de `docs/` NO EXISTEN.** Lo decidido en chat se
-   propone como ADR `PROPOSED` en `docs/adr/` y espera ratificación
-   humana, o se perdió.
+   propone como ADR `PROPOSED` con `scripts/adr-new.sh <slug>` (reserva el
+   número sin chocar con otra tarea) y espera ratificación humana, o se perdió.
 8. **Builds pesados serializados**: el `docker build/run` de toolchain va
    SOLO por `scripts/build-slot.sh` (semáforo cross-sesión, espera
    bloqueante de kernel). La CPU de la máquina es de todos.

@@ -34,6 +34,24 @@ assert_eq 3 "$rc" "un paso custom es tuyo, no del plugin (exit 3)"
 out="$(cd "$WS" && $BUG check .claude/hooks/block-direct-push.sh 2>&1)"; rc=$?
 assert_eq 0 "$rc" "un hook del plugin es reportable"
 
+# Los comandos del PROPIO plugin (/harness-init, /harness-update), sus skills y
+# sus fuentes no se copian a la instancia POR DISEÑO, y el chequeo de existencia
+# los rechazaba: "no existe en el workspace". O sea que un bug de /harness-update
+# no podia viajar por el canal que la Ley 12 manda usar, y quien queria cumplir
+# la ley terminaba violandola. Caso de campo: el issue #42 se abrio a mano por
+# esto, y el propio reporte lo dice.
+out="$(cd "$WS" && $BUG check commands/harness-update.md 2>&1)"; rc=$?
+assert_eq 0 "$rc" "un comando del propio plugin es reportable aunque no viva en el workspace"
+assert_contains "$out" "propiedad: plugin" "y se clasifica como del plugin"
+assert_contains "$out" "no-verificable" "con el drift declarado como no medible, que es la verdad"
+out="$(cd "$WS" && $BUG check skills/harness-init/SKILL.md 2>&1)"; rc=$?
+assert_eq 0 "$rc" "y las skills del plugin tambien"
+# La contra-mitad: que esto no abra la puerta a reportar cualquier cosa que no
+# exista. Una ruta de la INSTANCIA que no esta sigue siendo un error.
+out="$(cd "$WS" && $BUG check docs/no-existe.md 2>&1)"; rc=$?
+assert_eq 1 "$rc" "una ruta de la instancia que no existe sigue siendo error"
+assert_contains "$out" "no existe en el workspace" "y lo dice"
+
 out="$(cd "$WS" && eval "$BUG $RPT --file docs/quality.md --dry-run" 2>&1)"; rc=$?
 assert_eq 3 "$rc" "report sobre artefacto de la instancia: exit 3"
 

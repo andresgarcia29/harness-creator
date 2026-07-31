@@ -41,7 +41,7 @@ Dirección de dependencias (ley, referencia del DAG de shipping):
    y ADRs van en **ultrathink** y sin decisiones abiertas
    (`scripts/plan-lint.sh`); antes de review, `ship.sh --precheck` verde.
 7. **Decisiones fuera de `docs/` NO EXISTEN.** Lo decidido en chat se
-   propone como ADR o se perdió.
+   propone como ADR (creálo con `scripts/adr-new.sh <slug>`) o se perdió.
 8. **Builds pesados serializados** (economía de CPU): el `docker build/run`
    de toolchain va SOLO vía `scripts/build-slot.sh` (semáforo cross-sesión,
    `max(1, núcleos/4)` slots, override `HARNESS_BUILD_SLOTS`, espera

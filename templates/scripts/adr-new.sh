@@ -182,12 +182,20 @@ if ! ( set -C; : > "$FILE" ) 2>/dev/null; then
   exit 6
 fi
 
-# El cuerpo sale de la plantilla REAL, tal cual, con tres sustituciones. Se usa
-# awk con index/substr y no sed: el título es texto libre del usuario y en el
-# reemplazo de sed (y en el de sub() de awk) los caracteres `&`, `/` y `\` son
-# metacaracteres. Un ADR titulado "A/B testing" rompía el script.
+# El cuerpo sale de la plantilla REAL, tal cual, con sustituciones puntuales:
+# número, título, fecha y (si el entorno lo trae) la tarea. El separador y el
+# resto del formato salen de la plantilla, así que si ella cambia, los ADR
+# nuevos la siguen sin tocar este script.
+#
+# Se usa awk con index/substr y no sed: el título es texto LIBRE del usuario, y
+# en el reemplazo de sed (y en el de sub() de awk) `&`, `/` y `\` son
+# metacaracteres. Un ADR titulado "A/B testing & co" rompía la sustitución.
+# Y el texto del usuario viaja por ENVIRON, no por `-v`: awk interpreta las
+# secuencias de escape de un `-v`, o sea que un título con `\n` se partiría.
 TODAY="$(date +%Y-%m-%d)"
-if ! awk -v num="$NUM" -v title="$TITLE" -v hoy="$TODAY" -v task="${HARNESS_TASK:-}" '
+if ! ADR_TITLE="$TITLE" ADR_TASK="${HARNESS_TASK:-}" \
+   awk -v num="$NUM" -v hoy="$TODAY" '
+  BEGIN { title = ENVIRON["ADR_TITLE"]; task = ENVIRON["ADR_TASK"] }
   NR == 1 {
     i = index($0, "ADR-NNNN")
     if (i > 0) $0 = substr($0, 1, i - 1) "ADR-" num substr($0, i + 8)

@@ -24,10 +24,41 @@
 
 set -u
 
+# ── ¿DÓNDE vive el bus? ───────────────────────────────────────────────
+# Este comentario prometía una búsqueda hacia arriba que el código NO hacía:
+# devolvía el valor tal cual, así que sin CLAUDE_PROJECT_DIR ni WS caía en $PWD
+# y el bus nacía en CUALQUIER directorio. Caso de campo (COR-675): un agente con
+# el cwd dentro de worktrees/<task>/<repo> dejaba `?? .harness/` en el árbol del
+# CLIENTE — el precheck toleraba ese untracked y evidence.py no, o sea dos gates
+# discrepando sobre qué es un árbol limpio, y un `git add -A` habría commiteado
+# telemetría del harness en el repo ajeno. Peor todavía ahora que las métricas
+# leen ESTE bus: los eventos se repartían entre varios events.jsonl, el panel
+# leía uno solo y la telemetría se corrompía en silencio.
+#
+# Prioridades, en orden: CLAUDE_PROJECT_DIR y WS son la señal EXPLÍCITA (del
+# cliente y del propio harness) y ganan siempre. Sin ellas, se sube directorio
+# por directorio hasta el primero que tenga .harness/ o CLAUDE.md: ese ES el
+# workspace. Si no aparece ninguno hasta la raíz se cae al punto de partida, que
+# es la conducta de antes: el bus es fail-open por ley y NO puede tumbar a nadie
+# por no encontrar su casa.
+#
+# Sin `dirname` a propósito: expansión de parámetros, cero forks por nivel, y el
+# `prev` corta el bucle en "/" (donde ${p%/*} se queda quieto) pase lo que pase.
 _emit_ws() {
-  # El workspace es el que tiene .harness/ o CLAUDE.md, subiendo desde aquí.
-  local d="${CLAUDE_PROJECT_DIR:-${WS:-$PWD}}"
-  printf '%s' "$d"
+  local d="${CLAUDE_PROJECT_DIR:-${WS:-}}"
+  if [ -n "$d" ]; then printf '%s' "$d"; return 0; fi
+  local start p prev
+  start="${PWD:-$(pwd)}"
+  p="$start"; prev=""
+  while [ -n "$p" ] && [ "$p" != "$prev" ]; do
+    if [ -d "$p/.harness" ] || [ -f "$p/CLAUDE.md" ]; then printf '%s' "$p"; return 0; fi
+    prev="$p"
+    case "$p" in
+      */*) p="${p%/*}"; [ -n "$p" ] || p="/" ;;
+      *)   p="" ;;
+    esac
+  done
+  printf '%s' "$start"
 }
 
 _emit_redact() {

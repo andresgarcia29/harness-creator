@@ -2064,10 +2064,33 @@ gate_test_muerde() {
     elif declara_tests_nuevos "$f"; then :
     else continue
     fi
+    # ── El escape excusa un REFACTOR, jamás un caso NUEVO ────────────
+    # Declarar un archivo bajo MODIFIED dice "toqué tests que ya existían", y
+    # para eso el escape es correcto: un retoque cosmético pasa sobre la base
+    # legítimamente y ponerlo rojo fabricaría un falso rojo. Lo que NO dice es
+    # "no verifiques los casos que este archivo AGREGA".
+    #
+    # Caso de campo (COR-667), y el patrón es común, no excepcional: cualquier
+    # fix que cambie una firma obliga a declarar MODIFIED su archivo de test.
+    # En video-forge, cost_test.go se declaró MODIFIED (cambiaban las llamadas)
+    # y ADEMÁS agregaba el único test que probaba el fix. El gate lo sacó del
+    # alcance ENTERO e imprimió "sin tests nuevos que verificar": el precheck
+    # salió verde sin mirar la única prueba del cambio. Un gate que da la señal
+    # de seguridad sin la seguridad es peor que no tenerlo.
+    #
+    # Por eso el escape solo se concede si el archivo NO trae declaraciones de
+    # test nuevas. Un refactor puro no las trae (declara_tests_nuevos mira las
+    # líneas AÑADIDAS que declaran un test), así que la remediación que este
+    # gate imprime sigue funcionando para el caso que la motivó.
     if printf '%s\n' "$escape" | grep -qiF -- "$(basename "$f")"; then
-      escapados="$escapados   ⚠️  $f: declarado bajo MODIFIED/REMOVED, fuera del alcance
+      if declara_tests_nuevos "$f"; then
+        escapados="$escapados   ⚠️  $f: declarado bajo MODIFIED/REMOVED, pero AGREGA tests nuevos: sigue en el alcance
 "
-      continue
+      else
+        escapados="$escapados   ⚠️  $f: declarado bajo MODIFIED/REMOVED, fuera del alcance
+"
+        continue
+      fi
     fi
     scope="$scope$f
 "

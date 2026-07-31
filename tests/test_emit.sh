@@ -112,4 +112,40 @@ before="$(wc -l < "$WS/.harness/events.jsonl")"
 assert_eq "0" "$?" "sin argumentos: exit 0"
 assert_eq "$before" "$(wc -l < "$WS/.harness/events.jsonl")" "sin argumentos: no escribe basura"
 
+echo
+echo "── DÓNDE nace el bus: el workspace se BUSCA, no se asume el cwd"
+# El comentario de _emit_ws prometía una búsqueda hacia arriba que el código no
+# hacía: devolvía el valor tal cual, así que sin CLAUDE_PROJECT_DIR ni WS caía
+# en $PWD y el bus nacía en CUALQUIER directorio. Caso de campo (COR-675): con
+# el cwd dentro de worktrees/<task>/<repo>, el harness dejaba un `.harness/`
+# untracked en el árbol del CLIENTE (dos gates discrepando sobre qué es un árbol
+# limpio, y un `git add -A` habría commiteado telemetría en el repo ajeno). Y
+# ahora pesa más: las métricas leen ESTE bus, así que los eventos repartidos
+# entre varios events.jsonl corrompen la medición en silencio.
+BWS="$WS/buscado"
+mkdir -p "$BWS/.harness" "$BWS/worktrees/T9/repo/src/deep" "$WS/sin-ancestro/a/b"
+
+# desde un subdirectorio PROFUNDO, sin señal explícita: sube hasta la raíz real
+( cd "$BWS/worktrees/T9/repo/src/deep" \
+  && env -u CLAUDE_PROJECT_DIR -u WS bash "$EMIT" phase "desde el fondo" "" T9 )
+[ -f "$BWS/.harness/events.jsonl" ] \
+  && pass "el evento aterriza en el .harness/ de la RAÍZ del workspace" \
+  || fail "el evento no llegó a la raíz: el bus volvió a nacer donde estaba el cwd"
+assert_no_file "$BWS/worktrees/T9/repo/src/deep/.harness/events.jsonl" \
+  "y NO deja un .harness/ suelto en el árbol del cliente"
+
+# la señal EXPLÍCITA gana: es lo que dicen el cliente y el propio harness
+mkdir -p "$WS/explicito"
+( cd "$BWS/worktrees/T9/repo" \
+  && env -u WS CLAUDE_PROJECT_DIR="$WS/explicito" bash "$EMIT" phase "explícito" "" T9 )
+[ -f "$WS/explicito/.harness/events.jsonl" ] \
+  && pass "CLAUDE_PROJECT_DIR le gana a la búsqueda (es la señal del cliente)" \
+  || fail "se ignoró CLAUDE_PROJECT_DIR"
+
+# sin NINGÚN ancestro con .harness/ ni CLAUDE.md: no cuelga y no inventa.
+# Fail-open por ley: el bus jamás puede tumbar a quien lo invoca.
+( cd "$WS/sin-ancestro/a/b" \
+  && env -u CLAUDE_PROJECT_DIR -u WS bash "$EMIT" phase "huérfano" "" T9 )
+assert_eq "0" "$?" "sin workspace que encontrar: sigue saliendo 0"
+
 t_done

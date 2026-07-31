@@ -368,6 +368,7 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `docs/harness/pipeline-steps.md` | docs/pipeline-steps.md.tmpl | siempre (el contrato de los pasos custom) |
 | `docs/harness/minions-decomposition.md` | docs/minions-decomposition.md | siempre (capacidad MinionS, PROPUESTA/opt-in) |
 | `scripts/verdict-scaffold.sh` | scripts/ | siempre (esqueleto determinista del veredicto: el reviewer solo pone juicio; campos mecánicos de fuentes verificables) |
+| `scripts/adr-new.sh` | scripts/ | siempre. Reserva el número del ADR de forma ATÓMICA (lock por mkdir más noclobber) y cuenta los que están SIN COMMITEAR, que son los que colisionan. El repo de la instancia NO se aísla por tarea a propósito (guarda la ley compartida), así que dos tareas concurrentes veían el mismo máximo y elegían el mismo número: dos decisiones de arquitectura con el mismo identificador. La Ley 7 de los dos mapas manda usarlo |
 | `scripts/pull-all.sh` | scripts/ | siempre (make pull: clones canónicos al último main en paralelo, sucios se saltan con aviso, dispara graph-refresh) |
 | `scripts/repo-brief.sh` | scripts/ | siempre — brief determinista por repo (`.cache/briefs/`); arranque en caliente de implementers/reviewers, $0 tokens |
 | `scripts/graph-refresh.sh` | scripts/ | si graphify elegido — el ciclo de vida del grafo: build inicial, `--update` incremental, stamp por HEADs. Sin esto, "usa graphify query" es un consejo vacío. Lo llama el BOOTSTRAP (build inicial en el onboarding, antes de la primera tarea), el prefetch de /smart y /rfc, harness-janitor y `make graph` |

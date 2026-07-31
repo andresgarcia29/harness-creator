@@ -31,6 +31,13 @@ class EvidenceTest(unittest.TestCase):
         # suite puede quedarse BLOQUEADO esperando un slot que tiene otra
         # sesion de la maquina. Cada test usa su propio dir de locks, dentro
         # del temporal que tearDown borra.
+        # Un test del semaforo no puede correr DENTRO del semaforo. Si esta
+        # suite se sella como evidencia, build-slot exporta
+        # HARNESS_BUILD_SLOT_HELD=1 y evidence.py deja de envolver: el sello
+        # sale con slot_wrapped false y el test mide un semaforo apagado
+        # (COR-707). run.sh la limpia para toda la suite; esto cubre la
+        # corrida suelta bajo un slot ya tomado.
+        self._held_prev = os.environ.pop("HARNESS_BUILD_SLOT_HELD", None)
         self._slot_dir_prev = os.environ.get("HARNESS_SLOT_DIR")
         os.environ["HARNESS_SLOT_DIR"] = str(self.root / "slots")
 
@@ -39,6 +46,8 @@ class EvidenceTest(unittest.TestCase):
             os.environ.pop("HARNESS_SLOT_DIR", None)
         else:
             os.environ["HARNESS_SLOT_DIR"] = self._slot_dir_prev
+        if self._held_prev is not None:
+            os.environ["HARNESS_BUILD_SLOT_HELD"] = self._held_prev
         self.tmp.cleanup()
 
     def _neutraliza_contencion(self, evidence_id):

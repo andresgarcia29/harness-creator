@@ -748,6 +748,24 @@ git add -A && git commit -qm feat
 out="$(run_muerde)"; rc=$?
 assert_eq 0 "$rc" "test nuevo que falla sobre la base: verde (muerde)"
 assert_contains "$out" "MUERDE" "y lo dice, en vez de pasar callado"
+# COR-683: un precheck estuvo 41 minutos colgado en este gate sin UNA linea de
+# salida, asi que el reporte no pudo decir en que archivo. La corrida real no
+# lleva timeout a proposito (una suite grande tarda minutos y un timeout ahi
+# fabricaria falsos rojos), pero el cuelgue deja de ser silencioso.
+assert_contains "$out" "corriendo sobre la base: tests/test_feature.py" \
+  "anuncia la unidad ANTES de correrla: un cuelgue se puede nombrar"
+
+# Y el arbol base ve el node_modules del worktree por enlace: sin eso, vitest no
+# puede cargar su config (que importa de vitest/config) y el gate no ejecuta una
+# sola asercion. El enlace tiene que existir ANTES de invocar al runner.
+sh_src="$(cat "$TMPL")"
+assert_contains "$sh_src" 'ln -s "$WT/node_modules" "$MUERDE_BASE/node_modules"' \
+  "el arbol base recibe node_modules prestado del worktree"
+enlace_ln="$(grep -n 'ln -s "\$WT/node_modules"' "$TMPL" | cut -d: -f1)"
+corre_ln="$(grep -n 'muerde_corre_grupo node' "$TMPL" | tail -1 | cut -d: -f1)"
+[ -n "$enlace_ln" ] && [ -n "$corre_ln" ] && [ "$enlace_ln" -lt "$corre_ln" ] \
+  && pass "y el enlace se crea ANTES de invocar al runner de node (COR-683)" \
+  || fail "el runner de node corre antes del enlace: vitest no cargaria su config"
 assert_contains "$out" "ImportError" "mostrando el motivo real del fallo sobre la base"
 
 # (b) test NUEVO que pasa en los DOS árboles → rojo con nombre y remediación

@@ -381,6 +381,24 @@ out="$(bash "$WS/scripts/verdict-scaffold.sh" --merge-qa T1 atlas 2>&1)"; rc=$?
 assert_eq 3 "$rc" "EV de QA en ROJO bajo contención: exit 3"
 assert_contains "$out" "ROJO" "nombrando el rojo, que es lo que descalifica"
 assert_not_contains "$out" "OTRO cambio" "y no un commit ajeno que no lo es (COR-655)"
+rm -f "$WS/tasks/T1/evidence/EV-TEST-qarojo00001.json"
+
+# El mismo hueco que la selección: EV de QA de ESTE cambio, en rojo y SIN carga
+# que lo explique. Caía en el else y se lo acusaba de "otro cambio", así que la
+# remediación mandaba a re-correr QA sobre el HEAD que ya era el bueno.
+jq -n --arg id EV-TEST-qarojolimp1 --arg c "$HEADQ" \
+  '{schema:1, id:$id, task_id:"T1", repo:"atlas", kind:"test", runner:"qa",
+    commit:$c, commit_after:$c, exit_code:1, contention:{suspect:false},
+    output:("evidence/"+$id+".log"), output_sha256:"deadbeef"}' \
+  > "$WS/tasks/T1/evidence/EV-TEST-qarojolimp1.json"
+jq -n --arg c "$HEADQ" '{schema:1, task_id:"T1", repo:"atlas", qa:"pass",
+  commit:$c, evidence:["EV-TEST-qarojolimp1"]}' > "$WS/tasks/T1/qa-atlas.json"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --merge-qa T1 atlas 2>&1)"; rc=$?
+assert_eq 3 "$rc" "EV de QA en ROJO limpio: exit 3"
+assert_contains "$out" "en ROJO" "nombrando el rojo, que es la causa real"
+assert_not_contains "$out" "OTRO cambio" "y no un commit ajeno que no lo es"
+assert_not_contains "$out" "CONTENCIÓN" "ni una carga que el sello dice que no hubo"
+rm -f "$WS/tasks/T1/evidence/EV-TEST-qarojolimp1.json" "$WS/tasks/T1/qa-atlas.json"
 
 echo
 echo "── el ÁRBOL CLAVADO: el reviewer juzga el commit sellado, no el árbol vivo"
@@ -441,6 +459,31 @@ assert_eq "$H5B" "$(git -C "$PIN5" rev-parse HEAD)" "rebase: el pin se RE-CLAVA 
 assert_contains "$(cat "$PIN5/app.txt")" "v2" "y su contenido es el del commit nuevo"
 assert_contains "$out" "worktrees/T5/.review-beta diff" \
   "el comando de delta corre en el árbol clavado, no en el vivo"
+
+# (b bis) el pin se lleva SU PROPIO go.work. El de la tarea PODA los .review-*
+# (mismo module-path que el árbol vivo, y go.work prohíbe el módulo repetido),
+# así que dentro del pin `go` moría con "directory prefix does not contain
+# modules" y la remediación natural (`go work use .`) reescribía el archivo que
+# el QA usaba sobre el árbol vivo. Reviewer y QA corren en PARALELO por diseño.
+cp "$ROOT/templates/scripts/gowork.sh" "$WS/scripts/"
+printf 'v2b\n' > "$WT5/app.txt"; g5 add -A; g5 commit -q -m "sin go"
+H5E="$(g5 rev-parse HEAD)"
+mk_ev5 EV-TEST-pin00000000e "$H5E"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --rebase T5 beta revisor-5 2>&1)"
+assert_not_contains "$out" "PROPIO go.work" "repo sin Go: ni una línea de ruido sobre go.work"
+assert_no_file "$PIN5/go.work" "y ningún archivo inventado en un repo que no es Go"
+
+printf 'module example.com/beta\n\ngo 1.22\n' > "$WT5/go.mod"
+g5 add -A; g5 commit -q -m "ahora es un repo Go"
+H5G="$(g5 rev-parse HEAD)"
+mk_ev5 EV-TEST-pin00000000g "$H5G"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --rebase T5 beta revisor-5 2>&1)"
+assert_file "$PIN5/go.work" "repo Go: el scaffold le genera al pin su PROPIO go.work"
+assert_contains "$out" "PROPIO go.work" "y lo dice, con el motivo (no aparece un archivo de la nada)"
+assert_not_contains "$(cat "$PIN5/go.work")" "../beta" \
+  "el go.work del pin NO apunta al worktree vivo: adentro manda el commit sellado"
+assert_no_file "$WS/worktrees/T5/go.work" \
+  "y generarlo no crea ni toca el go.work de la tarea, que es el que usa el QA"
 
 # (c) si el pin falla, el scaffold NO muere: lo declara y deja el supuesto al bus.
 # Fallo inyectado con un shim de git que rechaza SOLO el subcomando worktree
@@ -600,6 +643,24 @@ assert_contains "$out" "ROJO" "el diagnóstico dice que el problema es el rojo"
 assert_contains "$out" "CONTENCIÓN" "y que la carga puede ser su causa"
 assert_not_contains "$out" "OTRO commit" "sin culpar a un HEAD que nadie movió (COR-655)"
 rm -f "$WS/tasks/T6/evidence/EV-TEST-r0j0b4j0c4r.json"
+
+# (e) El tercer descarte, el que quedaba mudo: EV del commit CORRECTO, SIN sello
+# de contención, y en rojo. Caía en la rama STALE y se lo acusaba de "otro
+# commit", así que el agente salía a cazar un HEAD movido en vez de leer el log
+# del test que falló. A un diagnóstico se le cree: tiene que ser el correcto.
+rm -f "$V6"
+jq -n --arg id EV-TEST-r0j0l1mp10r --arg c "$H6" \
+  '{schema:1, id:$id, task_id:"T6", repo:"atlas", kind:"test", runner:"impl-atlas",
+    commit:$c, commit_after:$c, exit_code:1, contention:{suspect:false},
+    output:("evidence/"+$id+".log"), output_sha256:"deadbeef"}' \
+  > "$WS/tasks/T6/evidence/EV-TEST-r0j0l1mp10r.json"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" T6 atlas revisor-6 2>&1)"; rc=$?
+assert_eq 3 "$rc" "EV en ROJO limpio: exit 3 (el veredicto no cita rojos)"
+assert_contains "$out" "en ROJO" "y el diagnóstico nombra la causa REAL: los tests fallaron"
+assert_not_contains "$out" "OTRO commit" "sin mandar a perseguir un HEAD que nadie movió"
+assert_not_contains "$out" "CONTENCIÓN" "y sin culpar a una carga que el sello dice que no hubo"
+assert_contains "$out" "lee el log" "con la remediación que sí sirve"
+rm -f "$WS/tasks/T6/evidence/EV-TEST-r0j0l1mp10r.json"
 
 echo
 echo "── el veredicto HEREDA la condición declarada del precheck (bug conocido)"

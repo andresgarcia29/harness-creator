@@ -102,6 +102,19 @@ contra una instalación real).
   funcionando mientras el puntero esté.
 
 ### Fixed
+- **`pytest` sin tests que colectar deja de ser un ship imposible.** `pytest`
+  sale 5 cuando no colectó NINGÚN caso, y eso no es un fallo: bajo `set -e` el
+  gate de Python lo trataba como error fatal, así que un repo de contratos
+  puros (cero tests Python) con un `pyproject.toml` en la raíz no podía
+  shippear JAMÁS. Es la misma familia que el disco lleno y la ceguera de
+  `deploy-watch`: una causa ambiental disfrazada de defecto de código. Ahora el
+  5 no bloquea y tampoco pasa en silencio, que sería el falso verde de siempre:
+  se dice por pantalla con su remediación (`pytest --collect-only`), el
+  marcador de verificación queda en 0 (así que el sello del precheck declara
+  "ninguno", no "completo") y el supuesto viaja al bus. Mismo trato que "no
+  encuentro pytest", porque es el mismo hecho verificable, y la misma lectura
+  del 5 que ya hacía `gate_test_muerde`. Cualquier otro código sigue matando el
+  ship: un rojo de verdad es un rojo.
 - **Un candidato que el plan descarta ya no traba la tarea para siempre**
   (`harness-policy.py repos --remove`). `init` recibe los repos CANDIDATOS del
   intake, y el patrón que este harness recomienda, verificar-antes-de-planear,

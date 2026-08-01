@@ -1116,8 +1116,33 @@ run_lang_gates() {
       emit assumption "$REPO (Python): lint NO ejecutado, falta ruff/uv"
     fi
     if [ -n "$PYTEST" ]; then
-      $PYTEST -q
-      TESTS_RAN=1
+      # ── exit 5 de pytest NO es un fallo: es "no colecté ningún test" ──
+      # Bajo `set -e` este tramo trataba el 5 como error fatal, y un repo sin
+      # tests Python quedaba sin poder shippear JAMÁS. Caso de campo: un repo de
+      # contratos puros (cero tests Python) con un pyproject en la raíz; el día
+      # que `py_tool` resuelve pytest ahí, el ship muere para siempre por un
+      # código que significa "no había nada que correr". Es la misma familia que
+      # el disco lleno y la ceguera de deploy-watch: una causa ambiental
+      # disfrazada de defecto de código.
+      #
+      # No bloquea, y TAMPOCO pasa en silencio, que sería el falso verde de
+      # siempre: se dice, TESTS_RAN se queda en 0 (nada corrió, y el sello del
+      # precheck lo declara "ninguno") y el supuesto viaja al bus. Mismo trato
+      # que "no encuentro pytest", porque es el mismo hecho verificable: los
+      # tests no se ejecutaron. Y es la misma lectura del 5 que ya hace
+      # gate_test_muerde, que no puede leerlo distinto sin contradecirse.
+      if $PYTEST -q; then
+        TESTS_RAN=1
+      else
+        py_rc=$?
+        if [ "$py_rc" -ne 5 ]; then exit "$py_rc"; fi
+        echo "⚠️  $REPO: pytest no colectó NINGÚN test (exit 5). Eso no es un fallo:"
+        echo "   o el repo no tiene tests Python, o un conftest/filtro no los encuentra."
+        echo "   NO bloquea el ship, pero este tramo quedó SIN VERIFICAR y el sello lo dice."
+        echo "   ↳ si el repo DEBERÍA tener tests, corré 'pytest --collect-only' para ver"
+        echo "     por qué no los colecta (rootdir, testpaths, conftest roto)."
+        emit assumption "$REPO (Python): pytest no colectó ningún test (exit 5), tramo sin verificar"
+      fi
     else
       echo "⚠️  $REPO es Python pero no encuentro pytest (ni uv que sepa invocarlo): los tests NO CORRIERON."
       echo "   ↳ instalá uv y corré 'uv sync --extra dev' (pytest tiene que quedar EN el venv),"

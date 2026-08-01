@@ -1515,6 +1515,33 @@ assert_contains "$out" "no encuentro pytest" "lo mismo para pytest (misma trampa
 assert_contains "$out" "TESTS_RAN=0" "y no afirma haber testeado"
 
 echo
+echo "── COR-698: pytest exit 5 ('no colecté ningún test') no es un fallo"
+# Un repo de contratos puros (cero tests Python) con pyproject en la raíz: el
+# gate SI corre pytest, pytest sale 5, y bajo `set -e` eso mataba el ship para
+# siempre. Es una causa ambiental disfrazada de defecto de codigo, la misma
+# familia que el disco lleno. La contra-mitad importa igual: un 1 (tests que
+# FALLARON) tiene que seguir matando el ship, o el arreglo seria un falso verde.
+mkdir -p "$WS/stub5"
+printf '#!/bin/sh\nexit 2\n' > "$WS/stub5/uv"                      # fuerza binario pelado
+printf '#!/bin/sh\necho "no tests ran"\nexit 5\n' > "$WS/stub5/pytest"
+printf '#!/bin/sh\n[ "$1" = "check" ] && { echo "[]"; exit 0; }\nexit 0\n' > "$WS/stub5/ruff"
+chmod +x "$WS/stub5/uv" "$WS/stub5/pytest" "$WS/stub5/ruff"
+mk_py "$WS/py698"
+out="$(run_py "$WS/py698" "$WS/stub5:/usr/bin:/bin")"; rc=$?
+assert_eq 0 "$rc" "pytest exit 5: el gate NO muere (antes: ship imposible para siempre)"
+assert_contains "$out" "no colectó NINGÚN test" "y lo DICE, no pasa en silencio"
+assert_contains "$out" "SIN VERIFICAR" "nombrando lo que quedó sin mirar"
+assert_contains "$out" "collect-only" "con la remediación ejecutable"
+assert_contains "$out" "TESTS_RAN=0" "y NO afirma haber testeado: el sello dirá 'ninguno'"
+
+# la contra-mitad: un rojo de verdad sigue siendo un rojo
+printf '#!/bin/sh\necho "1 failed"\nexit 1\n' > "$WS/stub5/pytest"; chmod +x "$WS/stub5/pytest"
+mk_py "$WS/py698b"
+out="$(run_py "$WS/py698b" "$WS/stub5:/usr/bin:/bin")"; rc=$?
+assert_eq 1 "$rc" "pytest exit 1 (tests ROJOS): sigue matando el ship"
+assert_not_contains "$out" "TESTS_RAN=0" "y ni siquiera llega a imprimir el marcador"
+
+echo
 echo "── issue #31: ruff ratchetea igual que buf, la deuda de main no bloquea"
 # Medido en un repo real: 144 violaciones heredadas en main dejaban a TODA
 # tarea de ese repo sin poder llegar a review, sin haber tocado una sola.

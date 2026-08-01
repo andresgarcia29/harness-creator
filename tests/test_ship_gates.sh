@@ -477,8 +477,8 @@ out="$( ( set -eu; WS="$WS"; REPO=test; GDIR="$WS/gd"; PAR_PIDS=""; PAR_SLOTS=""
 assert_num "$(dur_de "$out" en-paralelo)" "par/group_exit: el gate de un slot paralelo cierra con dur numérico"
 
 # y ningún cierre de gate se quedó sin instrumentar en el template
-sin_dur="$(grep -c 'emit gate "$CURRENT_GATE"' "$TMPL" 2>/dev/null || echo 0)"
-con_dur="$(grep 'emit gate "$CURRENT_GATE"' "$TMPL" 2>/dev/null | grep -c 'SECONDS' || echo 0)"
+sin_dur="$(grep -c 'emit gate "$CURRENT_GATE"' "$TMPL" 2>/dev/null || true)"
+con_dur="$(grep 'emit gate "$CURRENT_GATE"' "$TMPL" 2>/dev/null | grep -c 'SECONDS' || true)"
 assert_eq "$sin_dur" "$con_dur" "TODOS los cierres de gate del template pasan dur ($sin_dur sitios)"
 
 

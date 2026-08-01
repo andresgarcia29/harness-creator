@@ -158,6 +158,40 @@ assert_contains "$out" "T1/atlas tomado por la sesión abc12345" "dice qué work
 assert_contains "$out" "parada(s) registradas" "avisa si alguien te está esperando"
 assert_contains "$out" "2 supuesto(s) sin confirmar" "y cuenta los supuestos, que son lo primero a auditar"
 
+# Caso de campo: un assumptions.md que EXISTE y no tiene ni un supuesto (o sea
+# el caso BUENO) rompía el script entero. `grep -c` imprime 0 y ADEMÁS sale 1
+# cuando no encuentra nada, así que el `|| echo 0` que había agregaba un
+# segundo 0: k quedaba "0\n0" y el $(()) moría con "syntax error in
+# expression". Se veía al final de la salida, después de imprimir todo, así
+# que parecía un fallo del bloque de worktrees y no del conteo de supuestos.
+printf 'notas sueltas, ningun supuesto\n' > "$WS/tasks/T2/assumptions.md"
+out="$(run 2>&1)"; rc=$?
+assert_eq 0 "$rc" "un assumptions.md SIN supuestos no rompe el script"
+assert_not_contains "$out" "harness-version.sh: line" "y no escupe un error de bash en la cara"
+assert_contains "$out" "2 supuesto(s) sin confirmar" "el conteo sigue siendo el de los supuestos reales"
+
+# y el borde de al lado: TODOS los assumptions.md vacíos de supuestos
+printf 'nada\n' > "$WS/tasks/T1/assumptions.md"
+out="$(run 2>&1)"; rc=$?
+assert_eq 0 "$rc" "todos sin supuestos: sale 0 igual"
+assert_not_contains "$out" "supuesto(s) sin confirmar" "y no anuncia una sección vacía"
+printf -- '- SUPUESTO: el endpoint acepta null\n- SUPUESTO: el umbral es 300ms\n' > "$WS/tasks/T1/assumptions.md"
+rm -f "$WS/tasks/T2/assumptions.md"
+
+# Y la defensa de al lado, con diente: si `grep` devuelve algo que NO es un
+# número (otro vendor, un locale raro, un alias del usuario), la aritmética
+# tampoco puede tumbar el script. Esto OBSERVA: no tiene permiso para romper.
+cat > "$WS/bin/grep" <<'SH'
+#!/bin/sh
+case "$*" in *SUPUESTO*) echo "no soy un numero"; exit 0 ;; esac
+exec /usr/bin/grep "$@"
+SH
+chmod +x "$WS/bin/grep"
+out="$(run 2>&1)"; rc=$?
+assert_eq 0 "$rc" "un grep que devuelve basura no tumba el chequeo"
+assert_not_contains "$out" "harness-version.sh: line" "y tampoco escupe un error de bash"
+rm -f "$WS/bin/grep"
+
 echo
 echo "── observa, no frena"
 # Un chequeo de versión que puede tumbar tu trabajo es un bug: en modo normal

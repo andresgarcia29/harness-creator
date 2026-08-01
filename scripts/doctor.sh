@@ -73,7 +73,13 @@ fi
 if [ -d "$WS/repos" ]; then
   _arch="$WS/.cache/archived-repos.txt"
   if [ -f "$_arch" ]; then
-    _n="$(grep -c . "$_arch" 2>/dev/null || echo 0)"
+    # Misma trampa que mató a harness-version.sh: `grep -c` imprime 0 y sale 1
+    # cuando no encuentra nada, así que `|| echo 0` deja "0\n0". Acá no revienta
+    # (el valor solo se interpola en un mensaje) pero el doctor diría "0\n0
+    # archivados conocidos", y un observador que imprime basura deja de ser
+    # creíble justo cuando hace falta creerle.
+    _n="$(grep -c . "$_arch" 2>/dev/null || true)"
+    case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
     if [ -f "$WS/.cache/archived-repos.stamp" ] && [ -n "$(find "$WS/.cache/archived-repos.stamp" -mtime +7 2>/dev/null)" ]; then
       warn "la lista de repos archivados tiene más de 7 días ($_n archivados conocidos)"
       echo "   ↳ scripts/archived-repos.sh refresh — si un repo se archivó después, sigue entrando al grafo"

@@ -3,7 +3,7 @@
 # Un generador DEBE escribir el digest de abajo en .harness-templates de
 # la instancia: sin eso, nadie puede saber con qué set se generó.
 plugin_version: 0.57.10
-c216e3e7fe4c86e0e0c1768d9728ae1a8ea41bbb4102e795b85794c6e4453155  scripts/doctor.sh
+2e1c0e68a608709a99a1b3d8571cfbf592dfc8b30481d657d1054e02a44414a8  scripts/doctor.sh
 b1348ebaff9f0f47c231a188bf577de7337cfe2b900604b0a2192a3b07c650f6  templates/AGENTS.md.tmpl
 0abfddba94a72009e55fabdc2010856f471680e51eaaa33b29628eae7077f48b  templates/CLAUDE.md.tmpl
 18229eff75b95bf1e0ff957ab96e43c53878b388581ab1cbc5761506807aa3d1  templates/Makefile.tmpl
@@ -70,7 +70,7 @@ be7f69e52a9c8caddf233d22d679664b22db3f9a9e0b3a53d6edbd438e4965ea  templates/scri
 31e18724e8b87b601684bd6d4f23cebec0c44268cda331b3c8c93506ba46ed4b  templates/scripts/harness-bug.sh
 969e6931ac774da852214b221add298c0b68b56eee0579b46e02ba451996aefd  templates/scripts/harness-metrics.py
 616ca9ec32c9e9cf56966262b9581d07afa548efed15002d37c660e5d222f95e  templates/scripts/harness-policy.py
-f1540fa410ddbed044f0bd3aab55c1e1743fc2561e47e43425eeb8590c8d9b27  templates/scripts/harness-version.sh
+892bfdbd43a9f4cd31560bef453c7f4aa44b132d487e59b76791a28d2fcc02ba  templates/scripts/harness-version.sh
 e1037110376b1d57f75ebd583d29e3ef88d65db0361758230e9746ab0919055b  templates/scripts/instance-ship.sh
 e7be1a5693bcd45f88033dd6ffb4ea88550d5e7148c233756a4caf9f443f19ea  templates/scripts/mark-read.sh
 ffa92b2c4026fee10565f82f21ed3b7b6014f062889dd04fa3a83a27756f07d2  templates/scripts/minion-probe.sh
@@ -105,4 +105,4 @@ badf4f148140f44612c0ddebf08fe8d7e4b2f39f9af45d61544a585290d05fa6  templates/skil
 1b8a61fae86b92b3b8e6e9c2476bb22b53f1675ec52cba55552a15408bf637d1  templates/ui/panel.sh
 af164c1f918036c0ba25f21a4a45f9d5bce9221fa28fe19647955d099ec7b3c7  templates/ui/pricing.json
 c1788266c91e18d16646ad8c345a4d7a91255ec138db609437276b812f9b0e16  templates/ui/server.py
-digest: fc2692e106274dc63bd20cf5c3d019aaf8ee2cb5a3f0ccc9d0c5396afb4d08eb
+digest: 606a08e4f8866ef32c914367f0171b5d9d0ac028fef25661f8cb0db981f7c423

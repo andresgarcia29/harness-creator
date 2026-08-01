@@ -130,6 +130,13 @@ OUT="$WS/tasks/$TASK/verdict-$REPO.json"
 # sellado bajo carga (`rojo_bajo_contencion`), donde re-sellar con la máquina
 # descargada SÍ puede cambiar el resultado. `bajo_contencion` queda como
 # predicado suelto: ya no decide nada, solo se declara.
+#
+# Y el descarte se CLASIFICA, que era el resto del mismo defecto: un EV podía
+# quedar afuera por tres motivos distintos (rojo bajo carga, rojo limpio, otro
+# commit) y los tres imprimían "es de OTRO commit... el implementer movió HEAD".
+# Al rojo LIMPIO ese mensaje lo mandaba a perseguir un HEAD que nadie movió en
+# vez de a leer el log del test que falló. Cada motivo tiene su predicado
+# (`rojo_bajo_contencion`, `rojo`, y el resto) y su remediación.
 ELIGIBLE_JQ='def de_este_cambio($t; $r; $c; $p):
   type == "object" and .schema == 1 and .task_id == $t and .repo == $r
   and .commit == .commit_after
@@ -137,8 +144,10 @@ ELIGIBLE_JQ='def de_este_cambio($t; $r; $c; $p):
 def eligible($t; $r; $c; $p):
   de_este_cambio($t; $r; $c; $p) and .exit_code == 0;
 def bajo_contencion: (.contention.suspect // false) == true;
+def rojo($t; $r; $c; $p):
+  de_este_cambio($t; $r; $c; $p) and .exit_code != 0;
 def rojo_bajo_contencion($t; $r; $c; $p):
-  de_este_cambio($t; $r; $c; $p) and .exit_code != 0 and bajo_contencion;'
+  rojo($t; $r; $c; $p) and bajo_contencion;'
 
 # ── La contención se DICE, no se esconde en un campo ──────────────────
 # Un veredicto que gana un campo que nadie explica se lee como ruido y el
@@ -217,6 +226,15 @@ merge_qa() {
       echo "     al sellar, y la contención produce TIMEOUTS. Ese rojo puede ser de la"
       echo "     máquina y no de tu cambio: re-sella con la máquina descargada (o"
       echo "     HARNESS_TEST_SLOTS=1) antes de salir a cazar un bug que quizá no existe."
+      exit 3
+    elif jq -e --arg t "$TASK" --arg r "$REPO" --arg c "$vc" --arg p "$vpid" \
+           "$ELIGIBLE_JQ"' rojo($t; $r; $c; $p)' "$ev" >/dev/null; then
+      # Mismo descarte mudo que en la selección: el EV es de ESTE cambio y salió
+      # rojo sin carga que lo explique. Decirle "es de OTRO cambio" mandaba a
+      # re-correr QA sobre el HEAD que ya era el bueno.
+      echo "❌ la evidencia de QA $id es de este cambio pero salió en ROJO (exit_code != 0)"
+      echo "   ↳ QA no puede fusionar un rojo al veredicto: lee su log, arregla y"
+      echo "     re-corre QA (evidence.py run --runner qa ...)"
       exit 3
     else
       echo "❌ la evidencia de QA $id es de OTRO cambio (ni commit ${vc:0:12} ni patch_id del veredicto)"
@@ -381,6 +399,7 @@ fi
 rows=""
 stale=0
 suspect=0
+rojo=0
 for f in "$WS/tasks/$TASK/evidence"/EV-*.json; do
   [ -e "$f" ] || continue
   line="$(jq -r --arg t "$TASK" --arg r "$REPO" --arg c "$HEAD" --arg p "$PATCH_ID" \
@@ -392,11 +411,13 @@ for f in "$WS/tasks/$TASK/evidence"/EV-*.json; do
       then [.id, (.runner // ""), (.kind // ""),
             (if bajo_contencion then "suspect" else "" end)] | join("|")
       elif rojo_bajo_contencion($t; $r; $c; $p) then "SUSPECT"
+      elif rojo($t; $r; $c; $p) then "ROJO"
       else "STALE" end
   ' "$f" 2>/dev/null || true)"
   case "$line" in
     "") ;;
     SUSPECT) suspect=$((suspect+1)) ;;
+    ROJO) rojo=$((rojo+1)) ;;
     STALE) stale=$((stale+1)) ;;
     *)
       id="${line%%|*}"
@@ -420,6 +441,18 @@ if [ -z "$rows" ] && [ "$ALLOW_EMPTY" -ne 1 ]; then
     echo "     al sellar, y la contención produce TIMEOUTS. Ese rojo puede ser de la"
     echo "     máquina y no de tu cambio: re-sella con la máquina descargada (o"
     echo "     HARNESS_TEST_SLOTS=1) antes de salir a cazar un bug que quizá no existe:"
+    [ "$stale" -gt 0 ] && echo "   (además hay $stale de otro commit)"
+  elif [ "$rojo" -gt 0 ]; then
+    # El tercer descarte, y el que quedaba mudo: EV del commit CORRECTO, sin
+    # sello de contención, y en ROJO. Caía en la rama STALE y se lo acusaba de
+    # "otro commit", así que el agente salía a cazar un HEAD movido que nadie
+    # había movido, en vez de leer el log del test que falló. Acá no hay nada
+    # que re-sellar: el veredicto no puede citar un rojo, y el rojo es del
+    # cambio. A un diagnóstico se le cree, así que tiene que ser el correcto.
+    echo "❌ hay $rojo evidencia(s) de $REPO@${HEAD:0:12} en ROJO (exit_code != 0)"
+    echo "   ↳ el commit es el correcto y la máquina no estaba cargada: los tests"
+    echo "     FALLARON. No hay HEAD que perseguir ni sello que renovar: lee el log"
+    echo "     del EV (tasks/$TASK/evidence/), arregla el cambio y re-sella:"
     [ "$stale" -gt 0 ] && echo "   (además hay $stale de otro commit)"
   elif [ "$stale" -gt 0 ]; then
     echo "❌ hay $stale evidencia(s) de $REPO pero de OTRO commit (HEAD actual: ${HEAD:0:12})"
@@ -648,6 +681,37 @@ pin_review_tree() {  # pin_review_tree <commit> → 0 clavado; 1 no, con el moti
   return 1
 }
 
+# ── El loop nativo del reviewer no le pisa el del QA ──────────────────
+# El go.work de la tarea es UNO SOLO y no puede nombrar el pin: el árbol clavado
+# tiene los MISMOS module-paths que el worktree vivo y go.work prohíbe el módulo
+# repetido, así que gowork.sh poda los .review-*. Consecuencia medida en campo:
+# cualquier `go` corrido dentro del pin muere con "directory prefix does not
+# contain modules", y la remediación natural (`go work use .`, o regenerar el
+# go.work parado ahí) REESCRIBE el archivo que el QA está usando sobre el árbol
+# vivo. El resultado fue un rojo por una razón que no era el código, o sea el
+# peor modo de fallo del pipeline: un falso negativo que dispara una ronda de
+# review inexistente, o peor, evidencia sellada sobre un árbol que no es el del
+# veredicto. Y no es un caso raro: reviewer y QA se lanzan en PARALELO por
+# diseño, así que la carrera es la norma en cualquier tarea de un repo Go.
+# El pin se lleva su PROPIO go.work: `go` lo encuentra subiendo desde el cwd
+# antes que el de la tarea, y los dos árboles dejan de compartir archivo.
+# NO ES UN GATE, igual que el pin: sin gowork.sh o sin módulos Go, silencio.
+pin_gowork() {
+  local out=""
+  [ -f "$WS/scripts/gowork.sh" ] || return 0
+  if ! out="$(bash "$WS/scripts/gowork.sh" "$TASK" "$REPO" 2>&1)"; then
+    echo "⚠️  no pude generar el go.work del árbol clavado: $(one_line "$out")"
+    echo "   ↳ si el reviewer corre Go ahí adentro, que lo regenere él:"
+    echo "     bash scripts/gowork.sh $TASK $REPO"
+    return 0
+  fi
+  case "$out" in *"sin módulos Go"*) return 0 ;; esac   # repo sin Go: nada que aislar
+  echo "📐 el pin tiene su PROPIO go.work: el loop nativo del reviewer y el del QA"
+  echo "   dejan de compartir archivo (antes, el segundo en correr le pisaba el"
+  echo "   'use' al primero y el build salía rojo por una razón que no era el código)."
+  echo "   Queda sin trackear dentro del pin, y el pin es desechable por diseño."
+}
+
 # Detección temprana de violación de roles: si TODA la evidencia la corrió
 # qa o el propio reviewer, ship morirá en POLICY-ROLE-002/003. Mejor aquí.
 if [ "$(jq '.implementation_agents | length' "$tmp")" -eq 0 ] && [ "$ALLOW_EMPTY" -ne 1 ]; then
@@ -693,6 +757,7 @@ if pin_review_tree "$HEAD"; then
   echo "📌 árbol clavado al commit sellado: $REVIEW_DIR (${HEAD:0:12}, detached)"
   echo "   el reviewer LEE y difea AHÍ, no en el worktree vivo: el vivo es del"
   echo "   implementer y puede seguir moviéndose mientras se emite el juicio."
+  pin_gowork
 else
   echo "⚠️  no pude clavar el árbol de review en worktrees/$TASK/.review-$REPO: $PIN_WHY"
   echo "   el veredicto SALE IGUAL (el pin es protección extra, no un gate:"

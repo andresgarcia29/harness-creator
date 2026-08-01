@@ -11,6 +11,22 @@
 #                                       el worktree si el module-path está en ambos. Así una
 #                                       tarea que sólo tocó un servicio compila contra el
 #                                       shared canónico.
+#   bash scripts/gowork.sh <task-id> <repo>
+#                                      genera worktrees/<task-id>/.review-<repo>/go.work: el
+#                                       go.work PROPIO del árbol clavado del reviewer.
+#
+# ── Por qué el árbol clavado necesita SU archivo (caso de campo) ──
+# El pin `.review-<repo>` que clava verdict-scaffold tiene los MISMOS module-paths que el
+# worktree vivo, y un go.work no admite el mismo módulo dos veces, así que el go.work de la
+# tarea PODA los .review-* (ver discover). Consecuencia: cualquier `go` corrido dentro del pin
+# muere con "directory prefix does not contain modules", y la remediación natural (`go work
+# use .`, o regenerar el go.work parado ahí) REESCRIBE el archivo que el QA está usando sobre
+# el árbol vivo. Medido: el go.work quedó apuntando al pin mientras QA medía sobre el vivo y
+# el build salió rojo por una razón que no era el código. No es raro: el pipeline lanza
+# reviewer y QA en PARALELO por diseño, así que la carrera es la norma.
+# Con un go.work DENTRO del pin, `go` lo encuentra subiendo desde el cwd antes que el de la
+# tarea y los dos árboles dejan de compartir archivo. En el pin gana el commit SELLADO; los
+# demás repos vivos de la tarea siguen entrando, porque son parte del mismo cambio.
 #
 # ── Resultado del experimento de replaces (repos reales de un harness) ──
 # Los go.mod de los servicios suelen traer `replace <mod> => ../../pkg` (y proto) pensados
@@ -39,6 +55,7 @@ REPOS_DIR="$WS/repos"
 WT_DIR="$WS/worktrees"
 
 task="${1:-}"
+repo="${2:-}"
 
 # ── descubrimiento: go.mod bajo un root, podando ruido y (opcional) una ruta extra ──
 discover() { # $1=root  [$2=ruta absoluta a podar]
@@ -56,6 +73,15 @@ discover() { # $1=root  [$2=ruta absoluta a podar]
     find "$root" \( -name .git -o -name vendor -o -name node_modules \
                     -o -name .cache -o -name '.review-*' \) -prune -o -name go.mod -print
   fi
+}
+
+# ── el árbol clavado: su RAÍZ se llama .review-*, así que la poda de discover lo
+#    borraría entero. Acá se poda todo lo demás y el pin sí entra. ──
+discover_pin() { # $1=raíz del pin
+  local root="$1"
+  [ -d "$root" ] || return 0
+  find "$root" \( -name .git -o -name vendor -o -name node_modules \
+                  -o -name .cache \) -prune -o -name go.mod -print
 }
 
 # ── path de $1 relativo a $2, con prefijo ./ (perl/File::Spec: portable, no exige existencia) ──
@@ -105,6 +131,7 @@ collect() { # lee paths de go.mod por stdin y agrega registros
   done
 }
 
+donde=""
 if [ -z "$task" ]; then
   workfile="$WS/go.work"; workdir="$WS"
   collect < <(discover "$WS" "$WT_DIR")               # raíz: poda worktrees
@@ -116,9 +143,25 @@ else
   esac
   wtroot="$WT_DIR/$task"
   [ -d "$wtroot" ] || { echo "❌ worktree de la tarea '$task' no existe ($wtroot)"; exit 1; }
-  workfile="$wtroot/go.work"; workdir="$wtroot"
-  collect < <(discover "$REPOS_DIR")                  # canónico primero
-  collect < <(discover "$wtroot")                     # worktree gana por module-path
+  if [ -z "$repo" ]; then
+    workfile="$wtroot/go.work"; workdir="$wtroot"
+    collect < <(discover "$REPOS_DIR")                # canónico primero
+    collect < <(discover "$wtroot")                   # worktree gana por module-path
+  else
+    case "$repo" in
+      [A-Za-z0-9][A-Za-z0-9._-]*) ;;
+      *) echo "❌ repo inválido '$repo'"; exit 1 ;;
+    esac
+    pin="$wtroot/.review-$repo"
+    [ -d "$pin" ] || {
+      echo "❌ no existe el árbol clavado del reviewer ($pin)"
+      echo "   ↳ lo clava el sello del veredicto: scripts/verdict-scaffold.sh $task $repo"
+      exit 1; }
+    workfile="$pin/go.work"; workdir="$pin"; donde=" [árbol clavado del reviewer]"
+    collect < <(discover "$REPOS_DIR")                # canónico primero
+    collect < <(discover "$wtroot" "$wtroot/$repo")   # los OTROS repos vivos de la tarea
+    collect < <(discover_pin "$pin")                  # el commit SELLADO gana
+  fi
 fi
 
 # ── ganadores: último registro por module-path, ordenado por module-path ──
@@ -192,4 +235,4 @@ fi
 tmp="$(mktemp)"; printf '%s' "$content" > "$tmp"
 if [ -f "$workfile" ] && cmp -s "$tmp" "$workfile"; then rm -f "$tmp"; else mv "$tmp" "$workfile"; fi
 
-echo "✓ go.work (${nmods} módulos, ${nrepl} replaces) → $workfile"
+echo "✓ go.work (${nmods} módulos, ${nrepl} replaces) → ${workfile}${donde}"

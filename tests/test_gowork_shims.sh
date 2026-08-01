@@ -143,4 +143,49 @@ EOF
 ( cd "$PY" && PATH="$PY/fakebin:$PATH" bash "$PY/scripts/py.sh" '--version' app3 ) >/dev/null 2>&1 || true
 assert_no_file "$PY/repos/pkg/pinned"               "py.sh: un paquete que solo vive en el pin del reviewer no gana shim"
 
+# ══ D. …y por eso el pin se lleva su PROPIO go.work ═════════════════════════════
+# La poda de C es correcta y deja un hueco: dentro del pin, `go` no encuentra
+# ningún módulo del go.work de la tarea y muere con "directory prefix does not
+# contain modules". La remediación natural (`go work use .`) reescribe el archivo
+# que el QA usa sobre el árbol VIVO, y el segundo en correr le pisa el `use` al
+# primero. Reviewer y QA corren en PARALELO por diseño, así que la carrera es la
+# norma: medido en campo como un build rojo por una razón que no era el código.
+echo
+echo "── el árbol clavado del reviewer y el worktree vivo no comparten go.work"
+GD="$WS/goworkpin"
+mkdir -p "$GD/scripts" "$GD/repos/shared" \
+         "$GD/worktrees/T1/svc" "$GD/worktrees/T1/otro" "$GD/worktrees/T1/.review-svc"
+cp "$ROOT/templates/scripts/gowork.sh" "$GD/scripts/gowork.sh"
+printf 'module example.com/shared\n\ngo 1.21\n' > "$GD/repos/shared/go.mod"
+printf 'module example.com/svc\n\ngo 1.22\n'    > "$GD/worktrees/T1/svc/go.mod"
+printf 'module example.com/otro\n\ngo 1.22\n'   > "$GD/worktrees/T1/otro/go.mod"
+# el pin: MISMO module-path que el vivo (es el mismo repo, clavado a un commit)
+printf 'module example.com/svc\n\ngo 1.22\n'    > "$GD/worktrees/T1/.review-svc/go.mod"
+
+bash "$GD/scripts/gowork.sh" T1 >/dev/null 2>&1 || true
+GWT="$GD/worktrees/T1/go.work"
+assert_file "$GWT" "gowork <task>: genera el go.work de la tarea"
+vivo_antes="$(cat "$GWT")"
+assert_contains "$vivo_antes" "./svc"              "el go.work de la tarea apunta al worktree VIVO"
+assert_not_contains "$vivo_antes" ".review-svc"    "y nunca al pin (module-path duplicado: go.work lo prohíbe)"
+
+out_pin="$(bash "$GD/scripts/gowork.sh" T1 svc 2>&1)" || true
+GWP="$GD/worktrees/T1/.review-svc/go.work"
+assert_file "$GWP" "gowork <task> <repo>: el pin gana SU PROPIO go.work"
+assert_contains "$out_pin" "árbol clavado"         "y la salida dice de cuál de los dos habla"
+pin_content="$(cat "$GWP")"
+assert_contains "$pin_content" "	."                "el pin se incluye a sí mismo (use .)"
+assert_not_contains "$pin_content" "../svc"        "y NO al árbol vivo: adentro manda el commit sellado"
+assert_contains "$pin_content" "../otro"           "los otros repos vivos de la tarea sí entran (son el mismo cambio)"
+assert_contains "$pin_content" "repos/shared"      "con el fallback al canónico de siempre"
+
+# LA regresión de COR-720: generar uno NO toca al otro, en ningún orden.
+assert_eq "$vivo_antes" "$(cat "$GWT")" "generar el del pin no le pisa el 'use' al del QA"
+bash "$GD/scripts/gowork.sh" T1 >/dev/null 2>&1 || true
+assert_eq "$pin_content" "$(cat "$GWP")" "y regenerar el de la tarea no le pisa el 'use' al del reviewer"
+
+out_np="$(bash "$GD/scripts/gowork.sh" T1 nopin 2>&1)"; rc_np=$?
+assert_eq 1 "$rc_np" "pin inexistente: exit 1, no un go.work en un dir inventado"
+assert_contains "$out_np" "verdict-scaffold.sh" "con la remediación exacta (quién clava el pin)"
+
 t_done

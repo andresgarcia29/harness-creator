@@ -102,6 +102,30 @@ contra una instalación real).
   funcionando mientras el puntero esté.
 
 ### Fixed
+- **El reviewer y el QA dejan de pelearse por un `go.work`.** El árbol clavado
+  del reviewer (`.review-<repo>`) tiene los mismos module-paths que el worktree
+  vivo, y un `go.work` no admite el módulo repetido: por eso `gowork.sh` lo
+  poda. La consecuencia era que dentro del pin cualquier `go` moría con
+  "directory prefix does not contain modules", y la remediación natural
+  (`go work use .`, o regenerar el archivo parado ahí) REESCRIBÍA el `go.work`
+  que el QA estaba usando sobre el árbol vivo. Medido en campo: el `use` quedó
+  apuntando al pin mientras el QA medía sobre el vivo, y el build salió rojo por
+  una razón que no era el código. No es un caso raro: reviewer y QA se lanzan en
+  PARALELO por diseño, así que la carrera es la norma en cualquier tarea Go.
+  Ahora `gowork.sh <task> <repo>` genera el `go.work` PROPIO del pin (el commit
+  sellado gana; los otros repos vivos de la tarea siguen entrando, porque son el
+  mismo cambio) y `verdict-scaffold.sh` lo emite al clavar el árbol. `go` lo
+  encuentra subiendo desde el cwd antes que el de la tarea, así que los dos
+  árboles dejan de compartir archivo. Fail-open como el pin: sin Go o sin
+  `gowork.sh`, silencio.
+- **El veredicto ya no acusa de "otro commit" a un rojo del commit correcto.**
+  `verdict-scaffold` descartaba evidencia por tres motivos distintos (rojo bajo
+  carga, rojo limpio, commit ajeno) y dos de ellos imprimían el mismo mensaje:
+  "hay N evidencia(s) pero de OTRO commit, el implementer movió HEAD". A un EV
+  que simplemente salió ROJO eso lo mandaba a perseguir un HEAD que nadie había
+  movido en vez de a leer el log del test que falló, y a un diagnóstico se le
+  cree. Cada descarte tiene ahora su predicado y su remediación, en la selección
+  y en `--merge-qa`, que compartían el hueco.
 - **Un disco lleno deja de disfrazarse de defecto de código.** Medido: 3 de 8
   corridas de la MISMA suite en rojo con el disco al 100 por ciento (56K libres
   de 193G); dos ni llegaron a colectar el archivo de test porque los workers

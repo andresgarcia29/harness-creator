@@ -135,17 +135,27 @@ def phase_is_declared(state: dict, policy: dict) -> bool:
     edición a mano de state.json rompe el invariante y por eso se detecta:
     el `history` dejó de ser prosa y pasó a ser un control.
 
-    Las entradas kind=delivery NO son movimientos de fase: promover la entrega
-    no mueve la tarea de fase. Se saltean para buscar el último movimiento real,
-    porque si contaran, un `delivery --to prs` en fase review dejaría un
-    history[-1].to inexistente y validate-ship acusaría de edición a mano a
-    quien usó el CLI. El resto de la regla queda igual: una entrada que no es
-    un objeto sigue delatando la edición manual."""
+    No todo lo que se registra en `history` es un movimiento de fase: promover
+    la entrega (`kind=delivery`) o cambiar el ALCANCE (`kind=repos`) dejan
+    historia sin mover la tarea de fase. Si contaran como movimiento, el último
+    quedaría sin `to` y validate-ship acusaría de editar state.json a mano a
+    quien usó el CLI: exactamente lo que esos comandos existen para evitar.
+
+    El filtro es ESTRUCTURAL, no una lista de kinds. Antes se salteaba
+    `kind=delivery` por nombre, y el kind siguiente que apareció (`repos`) cayó
+    en la misma trampa sin que nadie lo notara: un `repos --add` legítimo dejaba
+    la tarea acusada de edición manual, y con `--remove` es peor, porque ESE es
+    el camino de salida de una tarea trabada (destrabarla la volvía a trabar un
+    paso después). Un movimiento de fase es, por definición, una entrada que
+    DECLARA `to`; lo que no lo declara no movió nada. Así el próximo kind nace
+    correcto sin tocar esta función.
+
+    El resto de la regla queda igual: una entrada que no es un objeto sigue
+    delatando la edición manual, y por eso se conserva en la lista."""
     history = state.get("history")
     if not isinstance(history, list):
         history = []
-    moves = [e for e in history
-             if not (isinstance(e, dict) and e.get("kind") == "delivery")]
+    moves = [e for e in history if not isinstance(e, dict) or "to" in e]
     if not moves:
         return state.get("phase") == policy.get("workflow", {}).get("initial_phase")
     last = moves[-1]

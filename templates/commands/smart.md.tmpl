@@ -167,6 +167,16 @@ niega con `POLICY-STATE-001`) ni edites `state.json` a mano. Sin ese registro el
 repo nuevo no entra en `state.repos`, y en los carriles sin `dag.json` la fase
 avanza a ship SIN su veredicto.
 
+Y al revés, que es el caso del patrón verificar-antes-de-planear: los repos del
+paso 0 son CANDIDATOS, y el plan descarta los que no participan. Un candidato
+descartado que se queda en `state.repos` traba la tarea para siempre, porque
+`review → ship` exige que TODOS shippeen y ese nunca va a tener commits. En
+cuanto el plan lo descarte, sacalo con `scripts/harness-policy.py repos
+tasks/<id> --remove <repo> --actor orchestrator --reason "<por qué no
+participa>"`. Solo se deja quitar lo que no produjo nada: con veredicto
+sellado, con ship, o nombrado en el `dag.json`, el comando se niega y te dice
+por dónde (`POLICY-REPOS-005/006`).
+
 Al retomar, lee `state.json` (incluido su `lane` y su `delivery`) y continúa
 desde su fase; no infieras la fase por conversación. Cada
 avance se solicita con `scripts/harness-policy.py transition tasks/<id> <fase>

@@ -325,7 +325,16 @@ done
 asum=0
 for a in "$WS"/tasks/*/assumptions.md; do
   [ -f "$a" ] || continue
-  k="$(grep -c '^- SUPUESTO:' "$a" 2>/dev/null || echo 0)"
+  # `grep -c` IMPRIME 0 y ADEMÁS sale 1 cuando no encontró nada, así que un
+  # `|| echo 0` agrega un SEGUNDO 0 y k queda "0\n0": el $(()) de abajo muere
+  # con "syntax error in expression". Solo se disparaba con un assumptions.md
+  # que existe y no tiene ni un supuesto, o sea en el caso BUENO, y el error
+  # salía al final de todo, así que parecía un fallo del bloque anterior.
+  # El `|| true` protege el pipeline; el case protege la aritmética de
+  # cualquier salida que no sea un número (un grep de otro vendor, un locale
+  # raro): esta función observa, y un observador no puede tumbar nada.
+  k="$(grep -c '^- SUPUESTO:' "$a" 2>/dev/null || true)"
+  case "$k" in ''|*[!0-9]*) k=0 ;; esac
   asum=$((asum + k))
 done
 if [ "$asum" -gt 0 ]; then

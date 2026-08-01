@@ -102,6 +102,18 @@ contra una instalación real).
   funcionando mientras el puntero esté.
 
 ### Fixed
+- **`harness-version.sh` reventaba al final cuando NO había supuestos que
+  auditar.** `grep -c` imprime `0` y ADEMÁS sale 1 cuando no encuentra nada, así
+  que el `|| echo 0` que protegía la línea agregaba un segundo `0`: la variable
+  quedaba en `"0\n0"` y el `$(( ))` de la línea siguiente moría con
+  `syntax error in expression`. Solo se disparaba con un `assumptions.md` que
+  existe y no tiene ni un supuesto, o sea en el caso BUENO, y el error salía
+  DESPUÉS de imprimir todo el reporte, así que parecía un fallo del bloque de
+  worktrees y no del conteo de supuestos. Reportado desde una instancia real.
+  El mismo patrón estaba en `doctor.sh`, donde no reventaba pero hacía decir
+  "0\n0 archivados conocidos": un observador que imprime basura deja de ser
+  creíble justo cuando hace falta creerle. Los dos normalizan ahora cualquier
+  salida que no sea un número, con test que lo fija con un `grep` stub.
 - **Cambiar el alcance dejó de leerse como una edición a mano de `state.json`.**
   `phase_is_declared` (el control que detecta ediciones manuales comparando
   `history[-1].to` contra `phase`) salteaba las entradas `kind=delivery` por

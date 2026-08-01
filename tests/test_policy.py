@@ -636,6 +636,163 @@ class PolicyTest(unittest.TestCase):
         self.assertIn("proto", blocked.stderr)
         self.assertEqual(self.state_of(task)["phase"], "review")   # no se movió
 
+    # ── REPOS --remove: el candidato que el plan descartó (issue #61) ─────
+    # Caso de campo: init recibe los repos CANDIDATOS del intake y el patrón
+    # verificar-antes-de-planear descarta la mayoría (48 de 51 medidos). Los
+    # descartados no tienen nada que implementar ni shippear, así que nunca
+    # tienen commits, y review → ship exige que TODOS shippeen: la tarea quedaba
+    # trabada en review con el código ya en main y desplegado verde. La única
+    # salida era editar state.json a mano, prohibido por AGENTS.md. O sea que el
+    # harness recomendaba un patrón y castigaba a quien lo seguía.
+
+    def rm_repos(self, task, remove, reason="el plan verificó y lo descartó"):
+        return self.run_policy("repos", task, "--remove", remove,
+                               "--actor", "orchestrator", "--reason", reason)
+
+    def test_repos_remove_frees_a_task_stuck_by_a_discarded_candidate(self):
+        """El issue completo, de punta a punta: dos candidatos, el plan usa uno,
+        y la tarea llega a ship sin editar state.json a mano."""
+        task = self.ws_task()
+        self.assertEqual(self.run_policy("init", task, "--lane", "express",
+                                         "--repos", "atlas,proto").returncode, 0)
+        for phase in ("implement", "review"):
+            self.assertEqual(self.move(task, phase).returncode, 0)
+        (task / "verdict-atlas.json").write_text(json.dumps({
+            "schema": 1, "verdict": "pass", "qa": "pass", "reviewer": "rev",
+            "implementation_agents": ["impl"],
+        }))
+        with (task / "ship.log").open("a") as log:
+            log.write(json.dumps({"repo": "atlas", "sha": "abc1234"}) + "\n")
+        # ANTES del remove: trabada, y el gate nombra al candidato descartado
+        stuck = self.move(task, "ship")
+        self.assertEqual(stuck.returncode, 3)
+        self.assertIn("POLICY-SHIP-004", stuck.stderr)
+        self.assertIn("proto", stuck.stderr)
+        # el remove registrado la destraba
+        gone = self.rm_repos(task, "proto")
+        self.assertEqual(gone.returncode, 0, gone.stderr)
+        state = self.state_of(task)
+        self.assertEqual(state["repos"], ["atlas"])
+        self.assertEqual(state["history"][-1]["removed"], ["proto"])
+        self.assertNotIn("added", state["history"][-1])
+        self.assertIn("descartó", state["history"][-1]["reason"])
+        self.assertEqual(self.move(task, "ship").returncode, 0)
+
+    def test_repos_remove_refuses_a_repo_with_a_sealed_verdict(self):
+        # ese repo se revisó: sacarlo del alcance borraría la prueba
+        task = self.ws_task()
+        self.assertEqual(self.run_policy("init", task, "--lane", "express",
+                                         "--repos", "atlas,proto").returncode, 0)
+        (task / "verdict-proto.json").write_text(json.dumps({
+            "schema": 1, "verdict": "pass", "qa": "pass", "reviewer": "rev",
+            "implementation_agents": ["impl"],
+        }))
+        refused = self.rm_repos(task, "proto")
+        self.assertEqual(refused.returncode, 3)
+        self.assertIn("POLICY-REPOS-005", refused.stderr)
+        self.assertIn("verdict-proto.json", refused.stderr)
+        self.assertEqual(self.state_of(task)["repos"], ["atlas", "proto"])
+
+    def test_repos_remove_refuses_a_repo_that_already_shipped(self):
+        task = self.ws_task()
+        self.assertEqual(self.run_policy("init", task, "--lane", "express",
+                                         "--repos", "atlas,proto").returncode, 0)
+        with (task / "ship.log").open("a") as log:
+            log.write(json.dumps({"repo": "proto", "sha": "abc1234"}) + "\n")
+        refused = self.rm_repos(task, "proto")
+        self.assertEqual(refused.returncode, 3)
+        self.assertIn("POLICY-REPOS-005", refused.stderr)
+        self.assertIn("ship.log", refused.stderr)
+        self.assertEqual(self.state_of(task)["repos"], ["atlas", "proto"])
+
+    def test_repos_remove_refuses_what_the_dag_still_declares(self):
+        """Sacarlo solo de state.repos no destraba nada: repos_missing_verdict
+        lee las dos fuentes en unión. Fallar acá evita el falso alivio."""
+        task = self.ws_task()
+        self.assertEqual(self.run_policy("init", task, "--lane", "full",
+                                         "--repos", "atlas,proto").returncode, 0)
+        (task / "dag.json").write_text(json.dumps({
+            "schema": 1,
+            "tasks": [{"id": "T1", "repo": "atlas", "deps": []},
+                      {"id": "T2", "repo": "proto", "deps": []}],
+        }))
+        refused = self.rm_repos(task, "proto")
+        self.assertEqual(refused.returncode, 3)
+        self.assertIn("POLICY-REPOS-006", refused.stderr)
+        self.assertIn("dag.json", refused.stderr)
+        self.assertIn("validate-dag", refused.stderr)   # remediación ejecutable
+        self.assertEqual(self.state_of(task)["repos"], ["atlas", "proto"])
+
+    def test_repos_remove_cannot_empty_the_task(self):
+        task = self.ws_task()
+        self.assertEqual(self.run_policy("init", task, "--lane", "express",
+                                         "--repos", "atlas").returncode, 0)
+        refused = self.rm_repos(task, "atlas")
+        self.assertEqual(refused.returncode, 3)
+        self.assertIn("POLICY-REPOS-007", refused.stderr)
+        self.assertEqual(self.state_of(task)["repos"], ["atlas"])
+
+    def test_repos_remove_without_a_reason_is_an_edit_by_hand(self):
+        task = self.ws_task()
+        self.assertEqual(self.run_policy("init", task, "--lane", "express",
+                                         "--repos", "atlas,proto").returncode, 0)
+        empty = self.rm_repos(task, "proto", reason="   ")
+        self.assertEqual(empty.returncode, 3)
+        self.assertIn("POLICY-REPOS-001", empty.stderr)
+        self.assertEqual(self.state_of(task)["repos"], ["atlas", "proto"])
+
+    def test_repos_remove_of_something_never_declared_changes_nothing(self):
+        task = self.ws_task()
+        self.assertEqual(self.run_policy("init", task, "--lane", "express",
+                                         "--repos", "atlas").returncode, 0)
+        noop = self.rm_repos(task, "muse")
+        self.assertEqual(noop.returncode, 0, noop.stderr)
+        self.assertEqual(self.state_of(task)["repos"], ["atlas"])
+        self.assertEqual(self.state_of(task)["history"], [])
+
+    def test_repos_without_add_or_remove_is_refused(self):
+        task = self.ws_task()
+        self.assertEqual(self.run_policy("init", task, "--lane", "express",
+                                         "--repos", "atlas").returncode, 0)
+        naked = self.run_policy("repos", task, "--actor", "orchestrator",
+                                "--reason", "porque si")
+        self.assertEqual(naked.returncode, 3)
+        self.assertIn("POLICY-REPOS-004", naked.stderr)
+
+    def test_repos_add_and_remove_in_one_call_swap_the_scope(self):
+        # el plan cambió un candidato por otro: es UNA decisión, un registro
+        task = self.ws_task()
+        self.assertEqual(self.run_policy("init", task, "--lane", "full",
+                                         "--repos", "atlas,proto").returncode, 0)
+        swap = self.run_policy("repos", task, "--add", "muse",
+                               "--remove", "proto", "--actor", "orchestrator",
+                               "--reason", "el plan cambió proto por muse")
+        self.assertEqual(swap.returncode, 0, swap.stderr)
+        state = self.state_of(task)
+        self.assertEqual(state["repos"], ["atlas", "muse"])
+        self.assertEqual(state["history"][-1]["added"], ["muse"])
+        self.assertEqual(state["history"][-1]["removed"], ["proto"])
+
+    def test_repos_remove_is_refused_once_the_task_reached_ship(self):
+        # ahí review → ship ya pasó: quitar no destraba nada y borra historia
+        task = self.ws_task()
+        self.assertEqual(self.run_policy("init", task, "--lane", "express",
+                                         "--repos", "atlas,proto").returncode, 0)
+        for phase in ("implement", "review"):
+            self.assertEqual(self.move(task, phase).returncode, 0)
+        for repo in ("atlas", "proto"):
+            (task / f"verdict-{repo}.json").write_text(json.dumps({
+                "schema": 1, "verdict": "pass", "qa": "pass", "reviewer": "rev",
+                "implementation_agents": ["impl"],
+            }))
+            with (task / "ship.log").open("a") as log:
+                log.write(json.dumps({"repo": repo, "sha": "abc1234"}) + "\n")
+        self.assertEqual(self.move(task, "ship").returncode, 0)
+        late = self.rm_repos(task, "proto")
+        self.assertEqual(late.returncode, 3)
+        self.assertIn("POLICY-REPOS-002", late.stderr)
+        self.assertEqual(self.state_of(task)["repos"], ["atlas", "proto"])
+
     # ── el presupuesto de rondas POR REPO (primer test que pasa --repo) ──
 
     def test_review_rounds_counted_per_repo(self):

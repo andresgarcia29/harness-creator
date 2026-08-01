@@ -102,6 +102,24 @@ contra una instalación real).
   funcionando mientras el puntero esté.
 
 ### Fixed
+- **Un candidato que el plan descarta ya no traba la tarea para siempre**
+  (`harness-policy.py repos --remove`). `init` recibe los repos CANDIDATOS del
+  intake, y el patrón que este harness recomienda, verificar-antes-de-planear,
+  existe justamente para descartar candidatos: en el caso de campo el
+  arquitecto descartó 48 de 51 y el plan quedó en dos repos. Los otros tres no
+  tenían nada que implementar, revisar ni shippear, así que nunca iban a tener
+  veredicto, y `review → ship` los exige a todos: la tarea quedaba trabada en
+  review con el código ya en main y desplegado verde. La única salida era
+  editar `state.json` a mano, que `AGENTS.md` prohíbe, o sea que el harness
+  recomendaba un patrón y castigaba a quien lo seguía. Quitar es más peligroso
+  que sumar, así que va fail-closed y solo alcanza al repo que no produjo nada:
+  con veredicto sellado, con entrada en `ship.log`, nombrado en `dag.json` (el
+  DAG ES el plan, y sacarlo solo de `state.repos` no destrabaría nada porque el
+  gate lee las dos fuentes en unión) o siendo el último repo, el comando se
+  niega con su remediación. `--add` y `--remove` componen en una sola llamada,
+  porque cambiar un candidato por otro es UNA decisión y merece UN registro. Y
+  los dos mensajes de `POLICY-SHIP-004` que producían el bloqueo ahora nombran
+  la salida: el gate que atrapa es el que enseña a salir.
 - **El reviewer y el QA dejan de pelearse por un `go.work`.** El árbol clavado
   del reviewer (`.review-<repo>`) tiene los mismos module-paths que el worktree
   vivo, y un `go.work` no admite el módulo repetido: por eso `gowork.sh` lo

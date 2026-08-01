@@ -981,15 +981,22 @@ def cmd_transition(args: argparse.Namespace) -> int:
                  "(desde ship solo se va a deploy). Corré /review de cada uno "
                  "(produce verdict-<repo>.json), shippealo con scripts/ship.sh "
                  "y recién entonces pedí review → ship. Si el plan cambió y un "
-                 "repo ya no participa, regenerá tasks/<id>/dag.json y "
-                 "re-corré validate-dag")
+                 "repo ya no participa, sacalo del alcance con "
+                 f"'harness-policy.py repos tasks/{task_dir.name} --remove "
+                 "<repo> --actor <vos> --reason \"<por qué no participa>\"' (y "
+                 "si además está en dag.json, regenerá el DAG y re-corré "
+                 "validate-dag): un candidato que el plan descartó nunca va a "
+                 "tener veredicto, y sin sacarlo la tarea no cierra jamás")
         pending = repos_pending_ship(task_dir)
         if pending:
             fail("POLICY-SHIP-004",
                  f"faltan repos por shippear: {', '.join(pending)}. ship.sh se corre "
                  "una vez por repo y exige phase=review: si avanzas ahora, esos repos "
                  "quedan sin camino (desde ship solo se va a deploy). Shippea cada uno "
-                 "con scripts/ship.sh y recién entonces pide review → ship")
+                 "con scripts/ship.sh y recién entonces pide review → ship. Si "
+                 "alguno ya no participa porque el plan lo descartó, sacalo con "
+                 f"'harness-policy.py repos tasks/{task_dir.name} --remove <repo> "
+                 "--actor <vos> --reason \"<por qué no participa>\"'")
     # ── LAS RONDAS SE CUENTAN POR REPO ────────────────────────────────
     # El presupuesto existe para cortar un loop implementer↔reviewer que no
     # converge. Contarlo por TAREA hacía que una tarea de tres repos, donde
@@ -1200,7 +1207,7 @@ def cmd_rollback(args: argparse.Namespace) -> int:
 
 
 def cmd_repos(args: argparse.Namespace) -> int:
-    """Suma repos a una tarea YA iniciada, registrando quién y por qué.
+    """Suma o quita repos de una tarea YA iniciada, registrando quién y por qué.
 
     POR QUÉ EXISTE: `init` era el único comando que aceptaba `--repos` y se
     niega a re-correrse (POLICY-STATE-001), así que ampliar el alcance de una
@@ -1216,44 +1223,128 @@ def cmd_repos(args: argparse.Namespace) -> int:
 
     El mismo `vet_repos_for_lane` que cobra init cobra acá, sobre la lista
     COMBINADA: un repo de infra agregado después no puede colarse por la
-    puerta de atrás en un carril que prometió cero infra."""
+    puerta de atrás en un carril que prometió cero infra.
+
+    POR QUÉ TAMBIÉN QUITA (issue #61): el alcance se declara ANTES de saber
+    cuál sobrevive. `init` recibe los repos CANDIDATOS del intake, y el patrón
+    que este harness recomienda, verificar-antes-de-planear, existe justamente
+    para descartar candidatos: en el caso de campo el arquitecto descartó 48 de
+    51 y el plan quedó en dos repos. Los otros tres no tenían nada que
+    implementar, revisar ni shippear, así que nunca iban a tener veredicto ni
+    entrada en ship.log, y `review → ship` (que los exige a todos) no podía
+    prosperar NUNCA. La tarea quedaba trabada en review con el código ya en
+    main y desplegado verde: contabilidad trabada, no trabajo pendiente. La
+    única salida era editar state.json a mano, prohibido por AGENTS.md. O sea:
+    el harness recomendaba un patrón y castigaba al que lo seguía.
+
+    Quitar es MÁS peligroso que sumar (borra una obligación en vez de crearla),
+    así que va fail-closed y solo alcanza al repo que no produjo NADA:
+      · con veredicto sellado → no se quita: ese repo se revisó, y borrarlo del
+        alcance borraría la prueba de que fue parte de la tarea.
+      · con entrada en ship.log → no se quita: ya shippeó.
+      · nombrado en dag.json → no se quita: el DAG ES el plan, y sacarlo solo
+        de state.repos no destraba nada (`repos_missing_verdict` lee las dos
+        fuentes en unión). Si el plan lo descartó, el DAG no debería nombrarlo.
+      · último repo de la tarea → no se quita: una tarea sin repos no es tarea.
+    Lo que queda removible es exactamente el caso del issue: un candidato que
+    el plan descartó antes de que nadie tocara una línea."""
     task_dir = Path(args.task_dir).resolve()
     path = state_path(task_dir)
     lock_state(task_dir)
     state = load(path, "estado")
     if not args.reason.strip():
         fail("POLICY-REPOS-001",
-             "ampliar el alcance sin motivo es una edición a mano con otro "
-             "nombre: pasá --reason con la evidencia que descubrió el repo")
+             "cambiar el alcance sin motivo es una edición a mano con otro "
+             "nombre: pasá --reason con la evidencia que descubrió (o descartó) "
+             "el repo")
+    if not (args.add or args.remove):
+        fail("POLICY-REPOS-004",
+             "nada que hacer: pasá --add, --remove, o los dos")
     phase = state.get("phase")
     if phase in ("ship", "deploy", "archive"):
         fail("POLICY-REPOS-002",
              f"la tarea ya está en fase {phase}: un repo agregado acá nace sin "
-             "review posible (desde ship no se vuelve a review por el grafo). "
+             "review posible (desde ship no se vuelve a review por el grafo), y "
+             "uno quitado acá ya no destraba nada porque review → ship ya pasó. "
              "Remediación: rollback a review con motivo y recién entonces "
-             "sumá el repo, o abrí una tarea nueva para ese repo")
+             "cambiá el alcance, o abrí una tarea nueva para ese repo")
     current = state.get("repos")
     current = [r for r in current if isinstance(r, str) and r] if isinstance(current, list) else []
-    added = [r.strip() for r in args.add.split(",") if r.strip()]
+    added = [r.strip() for r in (args.add or "").split(",") if r.strip()]
     added = [r for r in dict.fromkeys(added) if r not in current]
-    if not added:
-        print(f"ℹ️  {task_dir.name}: sin cambios, esos repos ya estaban "
-              f"declarados ({', '.join(current) or 'ninguno'})")
+    asked_out = [r.strip() for r in (args.remove or "").split(",") if r.strip()]
+    asked_out = list(dict.fromkeys(asked_out))
+    removed = [r for r in asked_out if r in current or r in added]
+    if not added and not removed:
+        print(f"ℹ️  {task_dir.name}: sin cambios, el alcance ya es el pedido "
+              f"({', '.join(current) or 'ninguno'})")
         return 0
-    combined = current + added
+
+    # ── Lo que ya produjo algo no se borra del alcance ────────────────
+    if removed:
+        planeados = repos_planned(task_dir)
+        shipped = set()
+        log = task_dir / "ship.log"
+        if log.exists():
+            for line in log.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    shipped.add(json.loads(line).get("repo"))
+                except json.JSONDecodeError:
+                    continue
+        for repo in removed:
+            if (task_dir / f"verdict-{repo}.json").exists():
+                fail("POLICY-REPOS-005",
+                     f"'{repo}' tiene veredicto sellado (tasks/{task_dir.name}/"
+                     f"verdict-{repo}.json): se revisó, o sea que fue parte del "
+                     "trabajo, y sacarlo del alcance borraría esa prueba. "
+                     "Remediación: si el repo no debía participar, borrá su "
+                     "veredicto a mano NO es opción: dejalo en el alcance y "
+                     "documentá en el juicio por qué no shippeó")
+            if repo in shipped:
+                fail("POLICY-REPOS-005",
+                     f"'{repo}' ya shippeó (aparece en tasks/{task_dir.name}/"
+                     "ship.log): quitarlo del alcance dejaría un cambio en main "
+                     "que ninguna tarea declara")
+            if repo in planeados:
+                fail("POLICY-REPOS-006",
+                     f"'{repo}' está en tasks/{task_dir.name}/dag.json, que ES el "
+                     "plan: sacarlo solo de state.repos no destraba nada, porque "
+                     "el gate lee las dos fuentes en unión. Si el plan lo "
+                     "descartó, el DAG no debería nombrarlo. Remediación: "
+                     "regenerá el DAG sin ese repo (fase rfc) y validalo con "
+                     f"'harness-policy.py validate-dag tasks/{task_dir.name}/dag.json'")
+
+    combined = [r for r in current + added if r not in removed]
+    if not combined:
+        fail("POLICY-REPOS-007",
+             "eso deja la tarea sin ningún repo, y una tarea sin repos no tiene "
+             "nada que shippear. Remediación: cancelá la tarea en vez de "
+             "vaciarla, o dejá al menos el repo donde vive el cambio")
     lane = state.get("lane", "full")
     vet_repos_for_lane(lane, combined, task_dir.parent.parent)
     state["repos"] = combined
-    state.setdefault("history", []).append({
-        "kind": "repos", "added": added,
-        "actor": args.actor, "reason": args.reason,
-    })
+    entry = {"kind": "repos", "actor": args.actor, "reason": args.reason}
+    if added:
+        entry["added"] = added
+    if removed:
+        entry["removed"] = removed
+    state.setdefault("history", []).append(entry)
     atomic(path, state)
+    cambio = []
+    if added:
+        cambio.append(f"+{', '.join(added)}")
+    if removed:
+        cambio.append(f"-{', '.join(removed)}")
     emit_bus(task_dir, "decision",
-             f"alcance ampliado: +{', '.join(added)} ({args.reason})")
-    print(f"✅ {task_dir.name}: repos {', '.join(combined)} (+{', '.join(added)})")
-    print("   esos repos ahora exigen veredicto antes de review → ship "
-          "(POLICY-SHIP-004)")
+             f"alcance {' '.join(cambio)} ({args.reason})")
+    print(f"✅ {task_dir.name}: repos {', '.join(combined)} ({' '.join(cambio)})")
+    if added:
+        print("   los sumados ahora exigen veredicto antes de review → ship "
+              "(POLICY-SHIP-004)")
+    if removed:
+        print("   los quitados ya no lo exigen: la tarea puede cerrar sin ellos")
     return 0
 
 
@@ -1466,15 +1557,19 @@ def build_parser() -> argparse.ArgumentParser:
     rollback.add_argument("--reason", required=True)
     rollback.set_defaults(func=cmd_rollback)
     repos_cmd = sub.add_parser("repos",
-                               help="suma repos a una tarea ya iniciada: init "
-                                    "no se re-corre y editar state.json a mano "
-                                    "está prohibido")
+                               help="cambia el alcance de una tarea ya iniciada "
+                                    "(--add / --remove): init no se re-corre y "
+                                    "editar state.json a mano está prohibido")
     repos_cmd.add_argument("task_dir")
-    repos_cmd.add_argument("--add", required=True,
+    repos_cmd.add_argument("--add", default="",
                            help="repos a sumar, separados por coma")
+    repos_cmd.add_argument("--remove", default="",
+                           help="repos a quitar, separados por coma; solo los "
+                                "que no produjeron nada (sin veredicto, sin "
+                                "ship, fuera del dag)")
     repos_cmd.add_argument("--actor", required=True)
     repos_cmd.add_argument("--reason", required=True,
-                           help="la evidencia que descubrió el repo")
+                           help="la evidencia que descubrió o descartó el repo")
     repos_cmd.set_defaults(func=cmd_repos)
     deliv = sub.add_parser("delivery",
                            help="promueve la entrega declarada de la tarea "

@@ -102,6 +102,18 @@ contra una instalación real).
   funcionando mientras el puntero esté.
 
 ### Fixed
+- **Cambiar el alcance dejó de leerse como una edición a mano de `state.json`.**
+  `phase_is_declared` (el control que detecta ediciones manuales comparando
+  `history[-1].to` contra `phase`) salteaba las entradas `kind=delivery` por
+  NOMBRE, y el kind siguiente que apareció, `kind=repos`, cayó en la misma
+  trampa sin que nadie lo notara: un `repos --add` legítimo dejaba la tarea
+  acusada de `POLICY-STATE-003` en el `validate-ship`. Con `--remove` habría
+  sido peor, porque ese es el camino de salida de una tarea trabada:
+  destrabarla la volvía a trabar un paso después. El filtro pasa a ser
+  ESTRUCTURAL: un movimiento de fase es, por definición, una entrada que
+  declara `to`, y lo que no lo declara no movió nada. Así el próximo `kind`
+  nace correcto sin tocar la función. La otra mitad no cambia: una entrada que
+  no es un objeto sigue delatando la edición manual.
 - **`pytest` sin tests que colectar deja de ser un ship imposible.** `pytest`
   sale 5 cuando no colectó NINGÚN caso, y eso no es un fallo: bajo `set -e` el
   gate de Python lo trataba como error fatal, así que un repo de contratos

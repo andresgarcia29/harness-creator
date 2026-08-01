@@ -229,6 +229,44 @@ class PolicyTest(unittest.TestCase):
                                    "--verdict", verdict)
         self.assertEqual(declared.returncode, 0, declared.stderr)
 
+    def test_a_repos_entry_is_not_a_phase_move_and_does_not_look_hand_edited(self):
+        """Cambiar el ALCANCE no mueve la fase, así que no puede delatar una
+        edición a mano. `phase_is_declared` salteaba solo kind=delivery, y una
+        entrada kind=repos (que tampoco trae `to`) quedaba de último movimiento:
+        el que usaba el CLI para ampliar o recortar el alcance recibía
+        POLICY-STATE-003 acusándolo de editar state.json a mano, que es
+        exactamente lo que el comando existe para evitar. Peor todavía en el
+        caso de --remove, porque ESE es el camino de salida de una tarea trabada:
+        destrabarla la volvía a trabar un paso después."""
+        self.reach("rfc", "implement", "review")
+        commit = "d" * 40
+        verdict = self.valid_verdict(commit)
+        # --add: el alcance se amplía por CLI, con motivo y actor
+        self.assertEqual(self.run_policy(
+            "repos", self.task, "--add", "proto", "--actor", "orchestrator",
+            "--reason", "el enrichment lo encontró").returncode, 0)
+        (self.task / "verdict-proto.json").write_text(json.dumps({
+            "schema": 1, "commit": commit, "verdict": "pass", "qa": "pass",
+            "reviewer": "rev", "implementation_agents": ["agent-a"],
+        }))
+        after_add = self.run_policy("validate-ship", self.task, "--commit", commit,
+                                    "--verdict", verdict)
+        self.assertEqual(after_add.returncode, 0,
+                         f"un repos --add no puede leerse como edición a mano: {after_add.stderr}")
+        # --remove: y el camino de salida de la tarea trabada, igual. El
+        # candidato entra y sale sin producir nada, que es justo el caso real.
+        self.assertEqual(self.run_policy(
+            "repos", self.task, "--add", "muse", "--actor", "orchestrator",
+            "--reason", "candidato del intake").returncode, 0)
+        rm = self.run_policy("repos", self.task, "--remove", "muse",
+                             "--actor", "orchestrator",
+                             "--reason", "el plan lo descartó")
+        self.assertEqual(rm.returncode, 0, rm.stderr)
+        after_rm = self.run_policy("validate-ship", self.task, "--commit", commit,
+                                   "--verdict", verdict)
+        self.assertEqual(after_rm.returncode, 0,
+                         f"un repos --remove tampoco: {after_rm.stderr}")
+
     def test_untouched_task_still_ships(self):
         # el invariante no puede romper el camino feliz de siempre
         self.reach("rfc", "implement", "review")

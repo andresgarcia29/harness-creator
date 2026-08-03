@@ -30,7 +30,37 @@ printf '#!/bin/sh\n[ -f .doctor-red ] && exit 1\nexit 0\n' > "$IWS/scripts/docto
 chmod +x "$IWS/scripts/doctor.sh"
 git -C "$IWS" add -A && git -C "$IWS" commit -qm "instala harness"
 
-run_is() { ( cd "$IWS" && PATH="$WS/bin:$(t_path_without gitleaks)" bash scripts/instance-ship.sh 2>&1 ); }
+run_is() { ( cd "$IWS" && PATH="$WS/bin:$(t_path_without gitleaks)" bash scripts/instance-ship.sh "$@" 2>&1 ); }
+
+echo "── los argumentos se parsean ANTES de cualquier gate (issue #63)"
+
+# El bug del issue: el script ignoraba "$@", así que `--help` (o un typo, o
+# un --dry-run que no existe) corría el ship COMPLETO, con push irreversible
+# a origin/main incluido. Acá hay un commit pendiente sin publicar: si el
+# argumento se tragara como antes, origin se movería y el test lo vería.
+antes="$(git -C "$WS/origin.git" rev-parse main)"
+
+out="$(run_is --help)"; rc=$?
+assert_eq 0 "$rc" "--help: exit 0"
+assert_contains "$out" "Uso:" "e imprime el uso"
+assert_eq "$antes" "$(git -C "$WS/origin.git" rev-parse main)" \
+  "--help: origin NO se movió (nada de gates ni de push)"
+assert_no_file "$IWS/locks/instance.lock.d" "--help: ni siquiera tomó el lock"
+
+out="$(run_is -h)"; rc=$?
+assert_eq 0 "$rc" "-h: mismo atajo, exit 0"
+assert_contains "$out" "Uso:" "e imprime el uso"
+
+out="$(run_is --dry-run)"; rc=$?
+assert_eq 2 "$rc" "argumento desconocido: exit != 0"
+assert_contains "$out" "no soportados" "y nombra la causa"
+assert_contains "$out" "Uso:" "y apunta al uso"
+assert_eq "$antes" "$(git -C "$WS/origin.git" rev-parse main)" \
+  "argumento desconocido: origin NO se movió (rechazo antes de los gates)"
+
+out="$(run_is main)"; rc=$?
+assert_eq 2 "$rc" "un typo de argumento posicional: exit != 0"
+assert_eq "$antes" "$(git -C "$WS/origin.git" rev-parse main)" "y tampoco toca nada"
 
 echo "── el camino feliz: gates y push adentro del script (el hook no aplica)"
 

@@ -503,6 +503,8 @@ class PolicyTest(unittest.TestCase):
         "  - name: atlas\n    kind: service\n    agent: svc\n"
         "  - name: terraform-core\n    kind: infra-module\n    agent: infra\n"
         "  - name: net-live\n    kind: infra-live\n    agent: infra\n"
+        "  - name: proto\n    kind: service\n    agent: svc\n"
+        "  - name: muse\n    kind: service\n    agent: svc\n"
     )
 
     def ws_task(self, manifest=MANIFEST):
@@ -673,6 +675,46 @@ class PolicyTest(unittest.TestCase):
         self.assertIn("POLICY-SHIP-004", blocked.stderr)
         self.assertIn("proto", blocked.stderr)
         self.assertEqual(self.state_of(task)["phase"], "review")   # no se movió
+
+    # ── REPOS --add contra manifest.yaml (issue #62) ──────────────────────
+    # Caso de campo: `--add reponoexiste` se aceptó y quedó en state.repos,
+    # pero worktree-task.sh lo rechazaba ("repo desconocido", contra el clon
+    # que manifest.yaml manda tener): el veredicto que POLICY-SHIP-004 exige
+    # era imposible de producir y la tarea quedó trabada en review → ship.
+
+    def test_repos_add_refuses_a_repo_that_is_not_in_the_manifest(self):
+        task = self.ws_task()
+        self.assertEqual(self.run_policy("init", task, "--lane", "express",
+                                         "--repos", "atlas").returncode, 0)
+        refused = self.add_repos(task, "reponoexiste")
+        self.assertEqual(refused.returncode, 3)
+        self.assertIn("POLICY-REPOS-008", refused.stderr)
+        self.assertIn("reponoexiste", refused.stderr)
+        self.assertIn("manifest.yaml", refused.stderr)   # dónde declararlo
+        self.assertEqual(self.state_of(task)["repos"], ["atlas"])   # sin cambios
+
+    def test_repos_add_of_a_manifest_repo_still_works(self):
+        # El freno es para el repo que NO existe, no para ampliar el alcance:
+        # un repo declarado en manifest.yaml entra igual que antes.
+        task = self.ws_task()
+        self.assertEqual(self.run_policy("init", task, "--lane", "express",
+                                         "--repos", "atlas").returncode, 0)
+        added = self.add_repos(task, "proto")
+        self.assertEqual(added.returncode, 0, added.stderr)
+        self.assertNotIn("POLICY-REPOS-008", added.stderr)
+        self.assertEqual(self.state_of(task)["repos"], ["atlas", "proto"])
+
+    def test_repos_add_without_manifest_degrades_with_a_warning(self):
+        # Decisión documentada en cmd_repos: sin manifest no hay contra qué
+        # validar y se degrada (fail-open con aviso, como vet_repos_for_lane);
+        # el backstop es worktree-task.sh, que rechaza el repo no clonado.
+        task = self.ws_task(manifest=None)
+        self.assertEqual(self.run_policy("init", task, "--lane", "express",
+                                         "--repos", "atlas").returncode, 0)
+        added = self.add_repos(task, "reponoexiste")
+        self.assertEqual(added.returncode, 0, added.stderr)
+        self.assertIn("--add NO se validó", added.stderr)
+        self.assertEqual(self.state_of(task)["repos"], ["atlas", "reponoexiste"])
 
     # ── REPOS --remove: el candidato que el plan descartó (issue #61) ─────
     # Caso de campo: init recibe los repos CANDIDATOS del intake y el patrón

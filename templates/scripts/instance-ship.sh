@@ -23,8 +23,27 @@
 #      escape declarado de HARNESS_KNOWN_BUG para el rojo que NO es tuyo
 #
 # Uso: instance-ship.sh
+#   -h, --help   imprime el uso y sale sin efectos.
 # Portabilidad: bash 3.2, BSD userland.
 set -euo pipefail
+
+# ── Argumentos: se parsean ANTES de cualquier gate (issue #63) ──────
+# Sin este parser, `instance-ship.sh --help` (o un typo, o un --dry-run que
+# no existe) corría el ship COMPLETO con su push irreversible a origin: el
+# script ignoraba "$@" y caía directo en los gates. El único argumento válido
+# es -h/--help: imprime el uso y sale 0 SIN efectos. Cualquier otra cosa se
+# rechaza antes de pisar el repo.
+if [ "$#" -eq 1 ] && { [ "$1" = "-h" ] || [ "$1" = "--help" ]; }; then
+  echo "Uso: instance-ship.sh"
+  echo "  Publica el repo de la instancia a origin (la puerta a main, con gates)."
+  echo "  -h, --help   imprime este uso y sale sin efectos."
+  exit 0
+fi
+if [ "$#" -gt 0 ]; then
+  echo "❌ argumento(s) no soportados: $*"
+  echo "   ↳ Uso: instance-ship.sh  (sin argumentos; -h/--help imprime la ayuda)"
+  exit 2
+fi
 
 WS="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$WS"

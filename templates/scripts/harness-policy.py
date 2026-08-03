@@ -501,6 +501,30 @@ def repo_kinds(ws: Path) -> dict:
     return kinds
 
 
+def repo_names(ws: Path) -> "set | None":
+    """Nombres declarados en manifest.yaml, o None si no se pudo leer.
+
+    Mismo parseo a mano que repo_kinds (sin dependencia yaml), pero NO se
+    puede reusar repo_kinds: ese dict solo registra el repo cuando encuentra
+    su 'kind:', y un manifest con una entrada sin kind haría "desconocido" a
+    un repo real, cosa que un rechazo duro (repos --add) no puede permitirse.
+
+    None distingue "no pude leer" de "leí y no había repos": sin manifest (o
+    ilegible) el llamador degrada con aviso, igual que vet_repos_for_lane;
+    el backstop sigue siendo worktree-task.sh, que rechaza el repo no
+    clonado al crear el worktree."""
+    try:
+        text = (ws / "manifest.yaml").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    names = set()
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line.startswith("- name:"):
+            names.add(line[len("- name:"):].strip().strip("'\""))
+    return names
+
+
 def vet_repos_for_lane(lane: str, repos: list, ws: Path) -> None:
     """Chequea carril vs repos ANTES de gastar un implementer.
 
@@ -1334,6 +1358,36 @@ def cmd_repos(args: argparse.Namespace) -> int:
              "vaciarla, o dejá al menos el repo donde vive el cambio")
     lane = state.get("lane", "full")
     vet_repos_for_lane(lane, combined, task_dir.parent.parent)
+    # ── Un --add se valida contra manifest.yaml, igual que worktree-task.sh ──
+    # Caso de campo (issue #62): `--add reponoexiste` se aceptaba y quedaba en
+    # state.repos, pero worktree-task.sh ("repo desconocido", contra el clon
+    # que el manifest manda tener) y verdict-scaffold.sh SÍ lo rechazaban: el
+    # veredicto que POLICY-SHIP-004 exige era IMPOSIBLE de producir y la tarea
+    # quedaba trabada en review → ship para siempre. Va DESPUÉS de
+    # vet_repos_for_lane para que las promesas del carril (LANE-004/005) se
+    # cobren con su propio código, y solo sobre `added`: un repo viejo ya
+    # declarado no se re-juzga.
+    if added:
+        names = repo_names(task_dir.parent.parent)
+        if names is None:
+            # Degradar NO es aceptar en silencio: sin manifest no hay contra
+            # qué validar (misma política fail-open que vet_repos_for_lane) y
+            # el backstop sigue siendo worktree-task.sh al crear el worktree.
+            print("⚠️  manifest.yaml ausente o ilegible en "
+                  f"{task_dir.parent.parent}: --add NO se validó contra la "
+                  "lista de repos; el backstop es worktree-task.sh, que "
+                  "rechaza un repo no clonado", file=sys.stderr)
+        else:
+            unknown = [r for r in added if r not in names]
+            if unknown:
+                fail("POLICY-REPOS-008",
+                     f"repo desconocido: {', '.join(unknown)} (ver "
+                     "manifest.yaml). worktree-task.sh lo rechazaría al crear "
+                     "el worktree y su veredicto sería imposible de producir: "
+                     "la tarea quedaría trabada en review → ship "
+                     "(POLICY-SHIP-004). Remediación: si el repo es real, "
+                     "declaralo en manifest.yaml y clonalo bajo repos/ antes "
+                     "de sumarlo a la tarea")
     state["repos"] = combined
     entry = {"kind": "repos", "actor": args.actor, "reason": args.reason}
     if added:

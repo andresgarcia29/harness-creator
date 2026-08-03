@@ -751,4 +751,131 @@ assert_contains "$out" "🟢 deploy de apollo verificado por driver=actions: act
 assert_contains "$(bus)" '"ok":true' "y emite su deploy al bus"
 rm -f "$WS/harness-answers.yaml"
 
+echo
+echo "── issue #66: un run SUCCESS con build SKIPPED no es verde (skipped != success)"
+# Caso real: deploy.yml condiciona el job build a un bump semver por
+# conventional commits; un ship sin prefijo dejo tag con bump_type=none y el
+# build SKIPPED. La conclusion del RUN es success igual (un job saltado no la
+# mancha), y el watcher canto 🟢 sin imagen construida ni deploy. La conclusion
+# del run no alcanza: hay que mirar la de CADA job.
+gh_con_jobs() {  # gh_con_jobs <json-de-jobs>: gh stub cuyo run view devuelve esos jobs
+  cat > "$WS/bin/gh" <<STUB
+#!/usr/bin/env bash
+case "\$*" in
+  *"run list"*)  echo 30568698782 ;;
+  *"run watch"*) exit 0 ;;
+  *"run view"*)  jq -r "\${@: -1}" <<'JSON'
+$1
+JSON
+  ;;
+  *) exit 1 ;;
+esac
+STUB
+  chmod +x "$WS/bin/gh"
+}
+
+# driver=gitops (el del caso real): el rojo se declara en la etapa de Actions,
+# sin esperar 900s a un ArgoCD que jamas va a recibir la revision.
+: > "$WS/.harness/events.jsonl"
+gh_con_jobs '{"jobs":[{"name":"tag","conclusion":"success"},{"name":"build","conclusion":"skipped"}]}'
+out="$(run676)"; rc=$?
+assert_not_contains "$out" "✅ actions verde" "build skipped: actions NO se declara verde"
+assert_not_contains "$out" "🟢" "y no hay cierre verde de ningun tipo"
+[ "$rc" -ne 0 ] && pass "y sale != 0 (el deploy NO paso)" || fail "build skipped salio 0"
+assert_contains "$out" "skipped != success" "dice por que: un job saltado no es un job verde"
+assert_contains "$out" "SKIPPED: build" "y nombra el job que no corrio"
+assert_contains "$out" "NO propongo revertir" "no manda a revertir: no se desplego nada nuevo"
+assert_not_contains "$out" "revert en git de" "y no ensaya un revert sobre un deploy que no existio"
+assert_contains "$(bus)" '"ok":false' "el bus NO lo da por desplegado"
+
+# contra-mitad: TODOS los jobs en success cierran verde como siempre
+printf 'project: demo\ndeploy:\n  apollo:\n    driver: actions\n' > "$WS/harness-answers.yaml"
+: > "$WS/.harness/events.jsonl"
+gh_con_jobs '{"jobs":[{"name":"tag","conclusion":"success"},{"name":"build","conclusion":"success"}]}'
+out="$(run676)"; rc=$?
+assert_contains "$out" "✅ actions verde" "todos los jobs success: actions verde, como siempre"
+assert_contains "$out" "🟢 deploy de apollo verificado por driver=actions: actions" \
+  "y el cierre es verde"
+assert_eq 0 "$rc" "y sale 0"
+rm -f "$WS/harness-answers.yaml"
+
+echo
+echo "── issue #64: Healthy+Synced en la revisión VIEJA no es verde"
+# Caso real: ship de corvux-landing @ 744e0a8; el watcher observo
+# revision=1b46ab06f42d (el commit ANTERIOR), Healthy+Synced, y canto verde
+# con el cambio sin desplegar. El verde exige la revision shippeada, con la
+# MISMA comparacion que el camino rojo (prefijo en cualquiera de los dos
+# sentidos: ship.log guardo shas cortos y la API devuelve completos).
+corre_health_sha() {  # corre_health_sha <timeout> <sha-shippeado>
+  ( export PATH="$WS/bin:$PATH" DEPLOY_POLL_SECS=1
+    APP=demo; TIMEOUT="$1"; LOG="$WS/h.log"; OBSERVED_REVISION=""
+    LANDED_SHA="$2"
+    say() { echo "$1"; }
+    . "$WS/health.sh"
+    check_argocd_health; echo "RC=$?" )
+}
+
+mk_kubectl "Synced Healthy 1b46ab06f42d0000000000000000000000000000"
+start=$(date +%s)
+out="$(corre_health_sha 3 744e0a8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)"
+elapsed=$(( $(date +%s) - start ))
+assert_not_contains "$out" "RC=0" "sano en la revision ANTERIOR: NUNCA verde"
+assert_contains "$out" "RC=3" "espera hasta el deadline y lo reporta aparte (rc=3)"
+assert_contains "$out" "aún no llega" "y lo dice mientras espera"
+[ "$elapsed" -lt 30 ] && pass "respetando el deadline (${elapsed}s)" \
+  || fail "se paso del deadline: ${elapsed}s"
+
+# contra-mitad 1: sano en la revision shippeada SI cierra verde
+mk_kubectl "Synced Progressing 744e0a8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
+  "Synced Healthy 744e0a8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+out="$(corre_health_sha 30 744e0a8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)"
+assert_contains "$out" "RC=0" "sano en la revision shippeada: verde legitimo"
+
+# contra-mitad 2: sha corto en el log contra sha completo del cluster
+mk_kubectl "Synced Healthy 744e0a8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+out="$(corre_health_sha 30 744e0a8)"
+assert_contains "$out" "RC=0" "sha corto vs completo: matchea por prefijo (como el camino rojo)"
+
+# contra-mitad 3: sin revision observada no se inventa la comparacion
+mk_kubectl "Synced Healthy "
+out="$(corre_health_sha 30 744e0a8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)"
+assert_contains "$out" "RC=0" "cluster sin revision: verde degradado al de siempre"
+rm -f "$WS/bin/kubectl"
+
+echo
+echo "── issue #64 (extremo a extremo): sano en revision vieja cierra en rojo SIN rollback"
+kubectl_rev() {  # kubectl_rev <revision>: stub de kubectl que declara sano en esa revision
+  cat > "$WS/bin/kubectl" <<STUB
+#!/usr/bin/env bash
+case "\$*" in
+  *"get applications"*) exit 1 ;;
+  *"get application "*) printf 'Synced Healthy $1' ;;
+  *) exit 1 ;;
+esac
+STUB
+  chmod +x "$WS/bin/kubectl"
+}
+
+# El ship de apollo en T9 es $SHA40; el cluster declara sano el commit ANTERIOR.
+kubectl_rev "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+: > "$WS/.harness/events.jsonl"
+out="$(run676)"; rc=$?
+assert_not_contains "$out" "🟢" "sano en la revision ANTERIOR al ship: no hay verde"
+[ "$rc" -ne 0 ] && pass "y sale != 0 (el deploy NO aterrizo)" \
+  || fail "revision vieja salio 0"
+assert_contains "$out" "nunca llegó al cluster" "dice que el cambio no aterrizo"
+assert_contains "$out" "NO propongo revertir" "rojo SIN rollback: el cluster esta sano en la version anterior"
+assert_not_contains "$out" "revert en git de" "y no ensaya revert alguno"
+assert_contains "$(bus)" '"ok":false' "el bus NO lo da por desplegado"
+
+# y sano en la revision shippeada: el verde de verdad sigue verde
+kubectl_rev "$SHA40"
+: > "$WS/.harness/events.jsonl"
+out="$(run676)"; rc=$?
+assert_contains "$out" "🟢 deploy de apollo verificado" "sano en la revision shippeada: verde legitimo"
+assert_contains "$out" "actions + health de argocd" "con los dos tramos observados"
+assert_contains "$(bus)" '"ok":true' "y su deploy ok=true en el bus"
+assert_eq 0 "$rc" "y sale 0"
+rm -f "$WS/bin/kubectl"
+
 t_done

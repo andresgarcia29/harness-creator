@@ -508,6 +508,31 @@ if [ "$DRIVER" != "none" ] && command -v gh >/dev/null; then
   if [ -n "$run_id" ]; then
     gh run watch --repo "$ORG/$REPO" "$run_id" --exit-status >>"$LOG" 2>&1 \
       || red "Actions falló (run $run_id). Logs: gh run view --repo $ORG/$REPO $run_id --log-failed"
+    # ── UN RUN EN success CON JOBS SALTADOS NO ES VERDE (skipped != success)
+    # Caso real (issue #66): deploy.yml condiciona el job build a un bump
+    # semver por conventional commits. Un ship sin prefijo (feat:/fix:) dejó
+    # tag con bump_type=none y build SKIPPED, y como un job saltado NO mancha
+    # la conclusión del run, el watcher cantó "🟢 verificado por driver=gitops:
+    # actions" sin imagen construida ni deploy. La conclusión del run no
+    # alcanza: hay que mirar la de CADA job. Cualquier skipped se reporta con
+    # nombre: la API no distingue requeridos de opcionales, y un tramo del
+    # pipeline que no corrió no puede pasar por verificado en silencio.
+    # Es rojo observado pero SIN rollback: no se desplegó nada nuevo, el
+    # cluster sigue en la versión anterior; revertir no construye la imagen.
+    skipped_jobs="$(gh run view --repo "$ORG/$REPO" "$run_id" --json jobs \
+      --jq '[.jobs[] | select(.conclusion == "skipped") | .name] | join(", ")' \
+      2>/dev/null || echo "")"
+    if [ -n "$skipped_jobs" ]; then
+      say "🔴 el run $run_id cerró SUCCESS pero con job(s) SKIPPED: $skipped_jobs."
+      say "   skipped != success: ese tramo del pipeline NO corrió, así que no"
+      say "   se construyó artefacto y NO hay nada que desplegar."
+      say "   NO propongo revertir nada: no se desplegó nada nuevo. La remediación"
+      say "   es que el build CORRA (p. ej. shippear con prefijo conventional"
+      say "   commits si el bump de versión lo condiciona) y volver a correr esto."
+      emit deploy "$REPO: Actions success con job(s) skipped ($skipped_jobs), sin artefacto" false
+      emit stop "deploy de $REPO sin artefacto: el run $run_id dejó skipped: $skipped_jobs"
+      exit 1
+    fi
     say "✅ actions verde (run $run_id)"
     verified "actions"
   fi
@@ -583,9 +608,11 @@ fi
 # unspecified", y el script lo reportaba como "no llegó a Healthy+Synced en
 # 900s": falso dos veces, porque ni esperó 900 s ni supo nada del health.
 #
-#   0 = observé y está SANO
+#   0 = observé y está SANO (y en la revisión shippeada, si la conozco)
 #   1 = observé y NO está sano   → rojo de verdad, con rollback
 #   2 = NO pude observar         → aviso y supuesto, sin tocar nada
+#   3 = observé SANO pero nunca llegó la revisión shippeada (issue #64)
+#       → rojo SIN rollback: no hay nada desplegado que revertir
 #
 # Se prefiere kubectl: lee el Application directo del cluster y no necesita
 # el login del CLI. El CLI es el respaldo, y solo si tiene con qué hablar.
@@ -615,8 +642,8 @@ argocd_cli_ready() {
   return 1
 }
 
-check_argocd_health() {  # → 0 sano · 1 no sano · 2 no concluyente
-  local sync health out deadline
+check_argocd_health() {  # → 0 sano · 1 no sano · 2 no concluyente · 3 sano en revisión ajena
+  local sync health out deadline avisada=""
   if command -v kubectl >/dev/null 2>&1; then
     # ── ESPERAR NO ES OPCIONAL: "Progressing" NO ES "ROTO" ──────────────
     # Esta lectura era INSTANTÁNEA: una sola consulta, sin loop y sin usar el
@@ -644,8 +671,40 @@ check_argocd_health() {  # → 0 sano · 1 no sano · 2 no concluyente
       health="$(printf '%s' "$out" | awk '{print $2}')"
       OBSERVED_REVISION="$(printf '%s' "$out" | awk '{print $3}')"
       say "   estado observado: sync=$sync health=$health${OBSERVED_REVISION:+ revision=${OBSERVED_REVISION:0:12}}"
-      [ "$sync" = "Synced" ] && [ "$health" = "Healthy" ] && return 0
-      [ "$(date +%s)" -ge "$deadline" ] && return 1
+      if [ "$sync" = "Synced" ] && [ "$health" = "Healthy" ]; then
+        # ── SANO EN LA REVISIÓN VIEJA NO ES VERDE (issue #64) ──────────
+        # Healthy+Synced lo está TAMBIÉN la revisión anterior: el cluster no
+        # distingue "sano CON mi cambio" de "sano SIN él". Caso real: ship de
+        # corvux-landing @ 744e0a8, el watcher observó revision=1b46ab06f42d
+        # (el commit ANTERIOR), Healthy+Synced, y cantó verde con el cambio
+        # sin desplegar. Sabiendo el sha shippeado y declarando el cluster
+        # OTRO, esto no es verde: es "mi cambio todavía no llega", un
+        # transitorio más que se espera hasta el deadline.
+        # La comparación es la MISMA del camino rojo (rollback_advice):
+        # prefijo en cualquiera de los dos sentidos, porque ship.log guardó
+        # shas cortos y la API devuelve completos. Sin sha o sin revisión no
+        # se inventa la comparación: el verde se degrada al de siempre.
+        if [ -n "$OBSERVED_REVISION" ] && [ -n "${LANDED_SHA:-}" ]; then
+          case "$OBSERVED_REVISION" in
+            "$LANDED_SHA"*) return 0 ;;
+            *) case "$LANDED_SHA" in
+                 "$OBSERVED_REVISION"*) return 0 ;;
+               esac ;;
+          esac
+          [ -z "$avisada" ] && {
+            say "   ⏳ sano, pero en la revisión ${OBSERVED_REVISION:0:12}: mi ship (${LANDED_SHA:0:12}) aún no llega"
+            avisada=1
+          }
+        else
+          return 0
+        fi
+      fi
+      # En el deadline, Synced+Healthy solo puede ser revisión AJENA (la mía
+      # ya devolvió 0 arriba): el cambio nunca aterrizó. Se reporta aparte.
+      [ "$(date +%s)" -ge "$deadline" ] && {
+        [ "$sync" = "Synced" ] && [ "$health" = "Healthy" ] && return 3
+        return 1
+      }
       sleep "${DEPLOY_POLL_SECS:-10}"
     done
   fi
@@ -667,11 +726,32 @@ check_argocd_health() {  # → 0 sano · 1 no sano · 2 no concluyente
 }
 
 # 3 · Health de ArgoCD
+# El verde compara contra el sha SHIPPEADO (issue #64): sin esa comparación,
+# Healthy+Synced de la revisión ANTERIOR se leía como deploy verificado. La
+# etapa de Actions ya resolvió LANDED_SHA si gh está; si no, se intenta acá.
+# Sin sha no se compara (el verde se degrada al de siempre), pero no se
+# inventa el dato.
+[ -n "$LANDED_SHA" ] || resolve_landed_sha || true
 say "── argocd: verificando $APP (timeout ${TIMEOUT}s) ──"
 check_argocd_health; health_rc=$?
 case "$health_rc" in
   0) say "✅ $APP Healthy + Synced"; verified "health de argocd" cluster ;;
   1) red "$APP existe y NO está Healthy+Synced" ;;
+  3) # Sano pero NUNCA en mi revisión, hasta el deadline: el cambio no
+     # aterrizó. Es rojo (el deploy no pasó) pero SIN rollback: revertir un
+     # commit sano que nunca se desplegó no arregla nada, y el cluster corre
+     # la versión anterior, que está sana.
+     say "🔴 $APP está Healthy+Synced pero en la revisión ${OBSERVED_REVISION:0:12},"
+     say "   que NO es la shippeada (${LANDED_SHA:0:12}): esperé ${TIMEOUT}s y mi"
+     say "   cambio nunca llegó al cluster. El deploy NO se hizo."
+     say "   NO propongo revertir nada: el cluster está sano en la versión"
+     say "   anterior; revertir no acelera la llegada del cambio."
+     say "   ↳ causa típica: el CI no construyó/publicó artefacto para este"
+     say "     commit (job de build skipped, tag sin bump) o la app no apunta"
+     say "     a la ref esperada. Revisá el run de Actions y el spec de $APP."
+     emit deploy "$REPO: nunca llegó la revisión ${LANDED_SHA:0:12} (el cluster sigue en ${OBSERVED_REVISION:0:12})" false
+     emit stop "deploy de $REPO no aterrizó: $APP sano en revisión ajena tras ${TIMEOUT}s"
+     exit 1 ;;
   2) say "⚠️  no pude verificar el health de '$APP'."
      say "   Puede faltar kubectl, faltar credenciales de ArgoCD, o que la app"
      say "   no exista con ese nombre. Es CEGUERA, no un deploy rojo: no"

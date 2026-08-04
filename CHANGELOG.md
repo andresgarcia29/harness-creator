@@ -125,6 +125,98 @@ contra una instalación real).
   funcionando mientras el puntero esté.
 
 ### Fixed
+- **El acotador de llamadas externas no acotaba, y por eso `deploy-watch` se
+  colgaba.** `gh run watch` se cuelga POR DISEÑO: su loop es
+  `for run.Status != Completed` sin deadline ni context cancelable, y sus
+  únicas flags son `--compact`, `--exit-status` e `--interval`. No existe
+  `--timeout` ni feature request en cli/cli. Un run en `queued` (sin runner),
+  `waiting` (aprobación de environment, hasta 30 días) o `pending`
+  (concurrency group) nunca llega a `completed`, y el techo real de un run son
+  35 DÍAS: `timeout-minutes` no salva porque acota ejecución, no cola.
+  Debajo había algo peor: el idiom que el harness usaba para acotar
+  (`perl -e 'alarm N; exec @ARGV'`, en `con_limite` de ship.sh y en la etapa
+  verify de deploy-watch) mata UN proceso, no el árbol. Medido con su forma
+  exacta: timeout de 2s y VEINTE segundos de reloj, porque un nieto huérfano
+  sostenía el pipe del `$( )`; y con un hijo que ignora SIGALRM devolvía
+  **rc=0**, o sea un cuelgue reportado como verde.
+  Nuevo `scripts/bounded.sh` con `run_bounded`: prefiere `timeout`/`gtimeout` y
+  cae a un perl con `fork` + `setpgid` + `kill(-$pid)` + escalada a SIGKILL,
+  saliendo 124 en los dos caminos. `gh run watch` se reemplazó por un poll
+  acotado que además late a consola (antes todo iba a `$LOG` y no se podía
+  distinguir "esperando bien" de "colgado") y nombra la causa al agotarse
+  (`pending_deployments` para la aprobación, `runner_id` vacío para el runner
+  ausente, concurrency group). Agotarse sale por ceguera, nunca por rojo: un
+  run encolado no desplegó nada y proponer rollback sería un falso rojo.
+  Las nueve llamadas de red del watcher van por `run_bounded`, con
+  `min(por_llamada, presupuesto_restante)` y la guarda ANTES de la llamada (el
+  deadline del loop de ArgoCD se evaluaba solo ENTRE iteraciones, así que un
+  `kubectl` colgado volvía ficción los 900s).
+- **`deploy-watch` daba rojo falso cuando ArgoCD estaba sano en un commit
+  DESCENDIENTE del sha shippeado** (issue #73, regresión del #64). La
+  comparación era por PREFIJO en los dos sentidos, que cubre "sha corto contra
+  sha largo" y nada más. Con el layout de infra-live donde un promotor de
+  imagen commitea el bump del tag ENCIMA del merge, la revisión desplegada
+  nunca es igual ni prefijo del ship, así que TODO ship terminaba en rojo
+  falso diciendo "el deploy NO se hizo" sobre un commit que CONTIENE el
+  cambio, tras quemar 900s. Ahora la ancestría se decide con
+  `merge-base --is-ancestor`, con fetch acotado y memoizado, y cuando el objeto
+  no está ni lo trae el fetch hay un CUARTO estado: ceguera declarada, porque
+  afirmar que el deploy no se hizo necesita evidencia. El mismo agujero estaba
+  en `rollback_advice`, que declaraba "ajena" una revisión que contiene tu
+  cambio y declinaba el revert con un motivo inventado.
+- **`gate_test_muerde` quedaba ciego en los seis servicios Go** (issue #75). El
+  gate levanta el árbol base en un worktree temporal FUERA del workspace, o sea
+  sin `go.work` alcanzable, así que el `replace ... => ../../pkg` del monorepo
+  no resolvía y el paquete ni compilaba. Los seis servicios Go usan ese layout,
+  o sea que el gate más caro del precheck no verificaba nada en ninguno. Nuevo
+  modo `gowork.sh --base <dir>` que arma el go.work para un árbol arbitrario, y
+  el gate lo invoca antes de correr Go. La ceguera declarada del #43 NO se
+  revierte: si el helper falta o falla, el gate sigue diciendo la verdad en vez
+  de inventar un verde.
+- **`worktree-task.sh` no refrescaba los clones de los que un repo Go depende**
+  (issue #76). Un `replace` relativo se resuelve contra `repos/` canónico, y si
+  ese clon quedó atrás `go build` falla en CUALQUIER tarea del repo, incluida
+  la base sin cambios, con un símbolo faltante que no habla de staleness (media
+  hora de diagnóstico en campo). `pull-all.sh` no alcanza: salta a propósito
+  los clones con cambios versionados. Ahora se leen las rutas del `go.work` de
+  la tarea y se refresca lo que esa tarea va a compilar, con la misma guarda de
+  no pisar trabajo ajeno, y cuando no se puede el aviso nombra la CONSECUENCIA.
+- **Escalar desde `/quick` daba vuelta la entrega en silencio** (issue #74).
+  quick no declara `delivery` a propósito (su ship publica con el `flow` del
+  workspace), pero la remediación que el propio harness prescribe al rebotarlo
+  es `escalate` y seguir por `/smart`, cuyo encabezado declara sin condición
+  `delivery: review`, o sea que NO PUBLICA NADA. Caso de campo: cinco fixes de
+  una línea, pipeline completo con RFC, 5 implementers, 4 reviewers, QA, cuatro
+  veredictos pass, y CERO commits publicados. `escalate` ahora MATERIALIZA la
+  entrega implicada por el flow cuando el campo está ausente (traduciendo:
+  `trunk-merge-commit` no es un delivery válido; `trunk-staging` no se
+  materializa porque ship lo rechaza y prometerlo sería mentir).
+- **`POLICY-LANE-004` bloqueaba quick y express por el kind del repo, no por el
+  diff** (issue #71). Rechazaba antes de que existiera un diff, cuando el gate
+  que decía anticipar (`gate_lane`) decide por las RUTAS QUE EL DIFF TOCA.
+  Medido: 20 de 31 repos del workspace son infra-* por llevar su `terraform/`
+  al lado del código, así que un `.gitignore` de dos líneas no tenía ningún
+  carril rápido y el único camino era un RFC con abogados. Ahora avisa (con el
+  identificador intacto, que la gente ya lo reconoce) y el freno vive en
+  `gate_lane`. Va ATADO a cerrar el hueco de `.tf`/`.tfvars` sueltos en
+  `LANE_GUARD_PATTERN` (un infra-module lleva los `.tf` en la raíz, sin
+  directorio `terraform/`): sin eso, el aviso habría dejado pasar terraform
+  crudo sin ningún freno. `POLICY-LANE-005` sigue siendo rechazo duro.
+- **`pull-all.sh` contaba como "al día" un clon con una rama de tarea
+  checkeada** (issue #77). Refrescaba `origin/<trunk>` pero el árbol que un
+  agente lee seguía en la rama vieja, y el resumen decía "ya al día". Caso de
+  campo: `design-system` en `task/workspace-x1n`, 149 commits atrás, el único
+  de 31 repos en ese estado y justo el que había que auditar; se seleccionaron
+  10 defectos leyendo ese árbol y 4 ya estaban arreglados en main (uno se había
+  arreglado y revertido, y su blocker ya no existía). Duele especialmente
+  porque leer `repos/<repo>` es la ruta que el CLAUDE.md RECOMIENDA para
+  orientarse. Ahora es su propia categoría en el resumen, con la distancia, y
+  resta del conteo "al día"; el chequeo va ANTES del pull, lo que arregla de
+  paso la otra cara del bug (una rama de tarea sin upstream hacía fallar el
+  pull y salía un `✗` que diagnosticaba "red o conflicto de rebase", ni una
+  cosa ni la otra). La rama ajena NO se toca: puede tener commits sin publicar.
+  El mismo chequeo se agregó a `doctor.sh`, que es el que corre sin que nadie
+  lo pida.
 - **El `flow` que manda es el del `harness-answers.yaml`, no el que se selló al
   instalar** (issue #67). `{{FLOW}}` se sustituía UNA vez, en la generación, y
   `ship.sh` no volvía a abrir el archivo: editar el answers no cambiaba cómo

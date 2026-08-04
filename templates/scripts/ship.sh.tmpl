@@ -390,6 +390,19 @@ esac
 # shellcheck source=/dev/null
 [ -f "$WS/scripts/emit.sh" ] && . "$WS/scripts/emit.sh" || emit() { :; }
 
+# El acotador de sondas. NO es fail-open como el bus: una sonda sin límite es
+# el modo de falla #57 (25 minutos colgado a 1% de CPU, sin una línea), así que
+# si el helper falta se DICE y se sigue sin límite, en vez de fingir que hay uno.
+# shellcheck source=/dev/null
+if [ -f "$WS/scripts/bounded.sh" ]; then
+  . "$WS/scripts/bounded.sh"
+else
+  run_bounded() {
+    echo "⚠️  falta scripts/bounded.sh: esta sonda corre SIN límite de tiempo" >&2
+    shift 2; "$@"
+  }
+fi
+
 # Instrumentación en UN solo punto: si estamos empezando un gate, el anterior
 # pasó. El trap sabe cuál falló. Cero riesgo de olvidarse de instrumentar uno.
 #
@@ -2038,12 +2051,21 @@ muerde_node() {  # → MUERDE_NODE_RUNNERS con los runners declarados E instalad
 # La 3 existe porque las dos primeras dependen de que el runner se porte bien,
 # y la lección de este bug es justamente que no hay que confiar en eso.
 con_limite() {  # con_limite <segundos> <comando...>
-  # perl y no `timeout`: timeout no viene en macOS, y perl ya es dependencia
-  # del harness (build-slot.sh lo usa para el flock del semáforo).
-  # `die` y no un exit numérico a propósito: el contrato de códigos de salida
-  # del header es de ship.sh, y un número acá lo ensuciaría con uno que no es
-  # suyo (lo caza tests/test_precheck.sh, que cruza cada exit con la tabla).
-  perl -e 'alarm shift @ARGV; exec @ARGV; die "no pude ejecutar: $!"' "$@"
+  # ── ESTO ACOTABA A MEDIAS Y ESA MITAD ERA LA QUE NO IMPORTABA ───────
+  # Era `perl -e 'alarm N; exec @ARGV'`, y contra un runner de node es
+  # exactamente el caso que NO cubre: mata un proceso, no el árbol. Medido: el
+  # padre muere a los 2s y el `$( )` sigue bloqueado 20s más porque un nieto
+  # heredó stdout y sostiene el pipe. O sea que la capa 3 de este bloque, la
+  # que existe porque las otras dos dependen de que el runner se porte bien,
+  # dependía a su vez de que el runner no dejara hijos. Un runner de node
+  # SIEMPRE deja hijos.
+  # Peor: SIGALRM la atrapan muchos programas para sus propios timers, y el que
+  # la ignora devolvía rc=0. Un cuelgue reportado como sonda limpia.
+  # El detalle sigue en scripts/bounded.sh, que es donde vive el arreglo.
+  #
+  # La gracia va corta a propósito: una sonda que ya se pasó del límite no
+  # merece 10s más de cortesía antes del SIGKILL.
+  run_bounded "$1" 2 "${@:2}"
 }
 muerde_node_colecta() {  # muerde_node_colecta <archivo> → MUERDE_NODE_RUNNER
   local r out

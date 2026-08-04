@@ -665,7 +665,11 @@ echo "── gate_test_muerde: un test que no puede fallar no prueba nada"
 # mutation-sentinel contesta al día siguiente. La única pregunta que lo caza es
 # mecánica: ¿este test falla sobre el árbol base?
 
-extract muerde_limpia > "$WS/gate_muerde.sh"
+# bounded.sh va PRIMERO: con_limite delega en run_bounded, y sin el helper el
+# gate extraido muere con 127 igual que sin delta_seccion. ship.sh lo sourcea
+# de scripts/bounded.sh; aca se pega el template real, no una imitacion.
+cat "$ROOT/templates/scripts/bounded.sh" > "$WS/gate_muerde.sh"
+extract muerde_limpia >> "$WS/gate_muerde.sh"
 # delta_seccion, declara_tests_nuevos y muerde_go_base_compila viajan CON el
 # gate: son sus tres lecturas (el delta-spec, el diff y el grafo de modulos de
 # la base). Sin ellas el gate extraido muere con 127 en vez de decidir.
@@ -949,13 +953,33 @@ assert_contains "$out" "MUERDE" "y llega a su veredicto en vez de quedarse esper
 
 # La tercera capa, probada aparte para no pagar el timeout en la suite: un
 # comando que ignora todo y se cuelga igual tiene un limite duro de tiempo.
+# con_limite delega en run_bounded (scripts/bounded.sh), asi que el test lo
+# sourcea igual que lo hace ship.sh de verdad.
 extract con_limite > "$WS/limite.sh"
 t0=$(date +%s)
-( . "$WS/limite.sh"; con_limite 1 sleep 30 ) >/dev/null 2>&1 || true
+( . "$ROOT/templates/scripts/bounded.sh"; . "$WS/limite.sh"; con_limite 1 sleep 30 ) >/dev/null 2>&1 || true
 t1=$(date +%s)
 [ $((t1 - t0)) -le 5 ] \
   && pass "con_limite corta un comando colgado (una sonda no puede ser eterna)" \
   || fail "con_limite no corto: la sonda puede colgar el gate entero"
+
+# El caso que el idiom viejo NO cubria y es JUSTO el de un runner de node: la
+# sonda deja un hijo que hereda stdout. El padre moria y el $( ) seguia
+# bloqueado hasta que el nieto terminaba (medido: 20s con un limite de 2).
+cat > "$WS/sonda-con-hijo.sh" <<'EOF'
+#!/bin/sh
+sleep 30 &
+echo "colectando"
+wait
+EOF
+chmod +x "$WS/sonda-con-hijo.sh"
+t0=$(date +%s)
+( . "$ROOT/templates/scripts/bounded.sh"; . "$WS/limite.sh"
+  out="$(con_limite 1 "$WS/sonda-con-hijo.sh")" ) >/dev/null 2>&1 || true
+t1=$(date +%s)
+[ $((t1 - t0)) -le 8 ] \
+  && pass "con_limite corta la sonda que dejo un hijo vivo (el \$( ) no espera al nieto)" \
+  || fail "el nieto sostuvo el pipe $((t1 - t0))s: la sonda sigue pudiendo colgar el gate"
 
 # (j) COR-656: vitest declarado pero con un include que no alcanza a e2e/. La
 #     invocación salía 1 ("No test files found") y el gate, que por decisión

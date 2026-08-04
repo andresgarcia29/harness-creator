@@ -10,6 +10,14 @@ t_ws
 
 mkdir -p "$WS/scripts" "$WS/bin" "$WS/.harness"
 cp "$ROOT/templates/scripts/emit.sh" "$WS/scripts/"
+# Cada llamada de red del watcher va por run_bounded, asi que los tramos que se
+# extraen del template lo necesitan definido igual que en el script completo.
+# Se copia el template REAL: una imitacion en el test probaria la imitacion.
+cp "$ROOT/templates/scripts/bounded.sh" "$WS/scripts/"
+acota() {  # lo que todo tramo extraido necesita del preambulo del watcher
+  . "$WS/scripts/bounded.sh"
+  CALL_TIMEOUT=10; CALL_GRACE=2
+}
 
 # El bloque de kargo del template, con el placeholder resuelto. Se extrae solo
 # ese tramo: el resto del watcher habla con GitHub Actions y ArgoCD reales.
@@ -23,6 +31,7 @@ run_kargo() {  # run_kargo: corre el tramo con el stub de kargo que esté en $WS
     export PATH="$WS/bin:$PATH" CLAUDE_PROJECT_DIR="$WS"
     cd "$WS"; REPO=videocore; LOG="$WS/deploy.log"
     say() { echo "$1" | tee -a "$LOG"; }
+    acota
     . "$WS/scripts/emit.sh"
     . "$WS/kargo.sh" ) 2>&1
 }
@@ -178,7 +187,8 @@ assert_contains "$out" "kargo CLI no está" "kargo ausente: también se dice (un
 dwt="$(cat "$ROOT/templates/scripts/deploy-watch.sh.tmpl")"
 assert_contains "$dwt" "trap mute_guard EXIT" "existe el guard de salida muda"
 assert_contains "$dwt" "SIN haber dicho una palabra" "y su mensaje nombra el bug con el contexto"
-assert_contains "$dwt" 'say() { SAID=1' "say alimenta el guard (toda línea cuenta como habla)"
+assert_contains "$dwt" 'SAID=1' "say alimenta el guard (toda línea cuenta como habla)"
+assert_contains "$dwt" 'ETAPA="${1#── }"' "y ademas registra la etapa, para que el watchdog pueda decir donde murio"
 
 echo
 echo "── verify declarado por repo: corre para TODOS los drivers, incluido none"
@@ -483,6 +493,7 @@ stale_head="$( cd "$WS/repos/stale" && git rev-parse HEAD )"
 out="$( set -u; WS="$WS"; REPO=stale; TASK=T7; BASE_REF=main
         ROLLBACK_MODE=manual; OBSERVED_REVISION=""
         LOG="$WS/rb2.log"; say() { echo "$1"; }; emit() { :; }
+        acota
         . "$WS/rb.sh"; rollback_advice "$MINE_S" 2>&1 )"
 assert_contains "$out" "PARO" "ensayo contra el main REAL: detecta el conflicto y para"
 assert_not_contains "$out" "revert manual sugerido" \
@@ -575,6 +586,7 @@ corre_health() {  # corre_health <timeout>
     APP=demo; TIMEOUT="$1"; LOG="$WS/h.log"; OBSERVED_REVISION=""
     say() { echo "$1"; }
     PATH="$WS/bin:$PATH"
+    acota
     . "$WS/health.sh"
     check_argocd_health; echo "RC=$?" )
 }
@@ -637,7 +649,9 @@ cat > "$WS/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 case "$*" in
   *"run list"*)  echo 30568698782 ;;
-  *"run watch"*) exit 0 ;;
+  # el watcher ya no usa `gh run watch` (se cuelga por diseño: su loop no tiene
+  # deadline). Ahora poll-ea status+conclusion en UNA llamada.
+  *"--json status,conclusion"*) printf 'completed\tsuccess\n' ;;
   *) exit 1 ;;
 esac
 STUB
@@ -657,6 +671,7 @@ SIN_KUBECTL="$(t_path_without kubectl)"
 run676() {  # run676 [env...]: corre el watcher de apollo con el PATH de $WS/bin
   ( cd "$WS" && CLAUDE_PROJECT_DIR="$WS" PATH="$WS/bin:$SIN_KUBECTL" \
       DEPLOY_TIMEOUT="${DW_TIMEOUT:-3}" DEPLOY_POLL_SECS=1 \
+      DEPLOY_ACTIONS_TIMEOUT="${DW_ACTIONS_TIMEOUT:-5}" DEPLOY_ACTIONS_POLL_SECS=1 \
       env -u ARGOCD_AUTH_TOKEN -u ARGOCD_URL -u ARGOCD_SERVER \
       bash scripts/dw676.sh T9 apollo ) 2>&1
 }
@@ -763,7 +778,9 @@ gh_con_jobs() {  # gh_con_jobs <json-de-jobs>: gh stub cuyo run view devuelve es
 #!/usr/bin/env bash
 case "\$*" in
   *"run list"*)  echo 30568698782 ;;
-  *"run watch"*) exit 0 ;;
+  # el poll va PRIMERO: tambien es un \`run view\`, y sin esta rama caeria en la
+  # de abajo y le correria la expresion de status al JSON de jobs.
+  *"--json status,conclusion"*) printf 'completed\tsuccess\n' ;;
   *"run view"*)  jq -r "\${@: -1}" <<'JSON'
 $1
 JSON
@@ -798,6 +815,97 @@ assert_contains "$out" "🟢 deploy de apollo verificado por driver=actions: act
   "y el cierre es verde"
 assert_eq 0 "$rc" "y sale 0"
 rm -f "$WS/harness-answers.yaml"
+
+echo
+echo "── un run que NUNCA termina no cuelga al watcher (y no es rojo)"
+# ESTE es el tramo que no tenia cobertura de cuelgue, y es el que colgaba en
+# campo. `gh run watch` se cuelga POR DISENO: su loop es `for run.Status !=
+# Completed` sin deadline ni context cancelable, y sus unicas flags son
+# --compact, --exit-status e --interval. No existe --timeout. El techo real de
+# un run son 35 DIAS. Se reemplazo por un poll con deadline propio.
+gh_pegado() {  # gh_pegado <status>: el run se queda en ese estado para siempre
+  cat > "$WS/bin/gh" <<STUB
+#!/usr/bin/env bash
+case "\$*" in
+  *"run list"*)                  echo 30568698782 ;;
+  *"--json status,conclusion"*)  printf '$1\t\n' ;;
+  *"pending_deployments"*)       echo "environment prod: espera aprobación de ana, beto" ;;
+  *"/jobs"*)                     echo "job build: runner SIN ASIGNAR, labels [self-hosted, linux]" ;;
+  *) exit 1 ;;
+esac
+STUB
+  chmod +x "$WS/bin/gh"
+}
+run_pegado() {  # run_pegado: como run676 pero con el presupuesto de Actions en 2s
+  ( cd "$WS" && CLAUDE_PROJECT_DIR="$WS" PATH="$WS/bin:$SIN_KUBECTL" \
+      DEPLOY_TIMEOUT=2 DEPLOY_POLL_SECS=1 \
+      DEPLOY_ACTIONS_TIMEOUT=2 DEPLOY_ACTIONS_POLL_SECS=1 \
+      env -u ARGOCD_AUTH_TOKEN -u ARGOCD_URL -u ARGOCD_SERVER \
+      bash scripts/dw676.sh T9 apollo ) 2>&1
+}
+
+printf 'project: demo\ndeploy:\n  apollo:\n    driver: actions\n' > "$WS/harness-answers.yaml"
+: > "$WS/.harness/events.jsonl"
+gh_pegado queued
+inicio=$(date +%s); out="$(run_pegado)"; rc=$?; elapsed=$(( $(date +%s) - inicio ))
+
+# (1) LO PRIMERO: que TERMINE. Con `gh run watch` esto no volvia nunca.
+[ "$elapsed" -lt 60 ] \
+  && pass "el watcher TERMINA con un run pegado en queued (${elapsed}s, no infinito)" \
+  || fail "sigue colgado: ${elapsed}s"
+
+# (2) Y que el $( ) vuelva enseguida. El watchdog corre en background y, si
+#     hereda stdout, sostiene el pipe aunque el script ya haya salido: 40
+#     minutos de cuelgue DESPUES de terminar. Lo cazo este mismo test cuando
+#     el watchdog se escribio sin el >/dev/null.
+[ "$elapsed" -lt 60 ] \
+  && pass "y el \$( ) que lo captura vuelve con el (el watchdog no sostiene stdout)" \
+  || fail "el watchdog dejo el pipe abierto"
+
+# (3) AGOTARSE NO ES ROJO. Un run en queued no desplego nada: el cluster corre
+#     la version anterior, que esta sana. Proponer un revert aca mandaria a
+#     revertir un commit que nunca llego a ningun lado.
+assert_not_contains "$out" "🔴 Actions" "agotarse NO se declara rojo"
+assert_not_contains "$out" "git revert" "y NO propone revertir nada"
+assert_not_contains "$out" "🟢" "tampoco lo da por verde"
+assert_contains "$out" "no terminó en 2s" "dice cuanto espero"
+assert_contains "$out" "sigue en 'queued'" "y en que estado quedo"
+assert_contains "$(bus)" '"kind":"assumption"' "queda como SUPUESTO, que es la categoria de 'no pude ver'"
+assert_not_contains "$(bus)" '"ok":true' "y el bus no lo da por desplegado"
+
+# (4) LA CAUSA SE NOMBRA. "Se agoto el tiempo" no le dice al humano que hacer;
+#     "el job sigue encolado sin runner" si. runner_id vacio es la senal.
+assert_contains "$out" "sin runner asignado" "nombra la causa: ningun runner tomo el job"
+assert_contains "$out" "job build" "y nombra el job concreto"
+assert_contains "$out" "self-hosted" "con las labels que nadie matchea"
+
+# (5) LATIDO: el estado se dice a la consola. Antes todo iba a \$LOG y la
+#     consola quedaba muda toda la etapa, asi que no se podia distinguir
+#     "esperando bien" de "colgado", y por eso el humano lo mataba.
+assert_contains "$out" "run 30568698782: queued" "hay latido a consola con el estado"
+
+# (6) waiting es OTRA causa y se dice distinto: no es infraestructura, es que
+#     alguien tiene que apretar un boton. Puede durar 30 dias.
+: > "$WS/.harness/events.jsonl"
+gh_pegado waiting
+out="$(run_pegado)"
+assert_contains "$out" "APROBACIÓN HUMANA" "waiting: dice que espera a una persona, no a un runner"
+assert_contains "$out" "environment prod" "y nombra el environment"
+assert_contains "$out" "ana, beto" "y a quienes tienen que aprobar"
+assert_not_contains "$out" "git revert" "tampoco propone revertir por una aprobacion pendiente"
+
+# (7) pending es la tercera: bloqueado por un concurrency group.
+: > "$WS/.harness/events.jsonl"
+gh_pegado pending
+out="$(run_pegado)"
+assert_contains "$out" "CONCURRENCY GROUP" "pending: nombra el concurrency group"
+rm -f "$WS/harness-answers.yaml"
+# EL STUB SE RESTAURA. Dejarlo pegado en 'pending' hace que el test SIGUIENTE
+# poll-ee con el presupuesto por defecto (1800s) y cuelgue la suite entera: pasó
+# al escribir este bloque, y la ironia de que el test del cuelgue colgara la
+# suite es exactamente el punto. run676 ademas acota su presupuesto de Actions
+# por si alguien vuelve a olvidarse.
+gh_con_jobs '{"jobs":[{"name":"tag","conclusion":"success"},{"name":"build","conclusion":"success"}]}'
 
 echo
 echo "── issue #64: Healthy+Synced en la revisión VIEJA no es verde"

@@ -2367,6 +2367,21 @@ CKEOF
     if [ "$corre_node" -eq 1 ] && [ ! -e "$MUERDE_BASE/node_modules" ]; then
       ln -s "$WT/node_modules" "$MUERDE_BASE/node_modules"
     fi
+    # ── EL ÁRBOL BASE NECESITA SU go.work (#75) ────────────────────────
+    # Sin esto, el árbol base (un worktree bajo mktemp, o sea FUERA del
+    # workspace) no tiene go.work alcanzable, el `replace ... => ../../pkg` del
+    # layout monorepo no resuelve, y el paquete ni compila. El #43 hizo que eso
+    # dejara de ser un falso verde y pasara a declararse como ceguera, que fue
+    # la mejora correcta; pero la ceguera seguía siendo el estado NORMAL en los
+    # SEIS servicios Go de la plataforma, o sea que el gate más caro del
+    # precheck no verificaba nada en ninguno de ellos.
+    #
+    # Best-effort a propósito: si falla, la ceguera del #43 sigue diciendo la
+    # verdad. Un gate que no puede prepararse NO puede convertirse en un verde.
+    if [ "$corre_go" -eq 1 ] && [ -f "$WS/scripts/gowork.sh" ]; then
+      bash "$WS/scripts/gowork.sh" --base "$MUERDE_BASE" >/dev/null 2>&1 \
+        || echo "   (no pude armar el go.work del árbol base; lo que no compile queda declarado como ciego)"
+    fi
     if [ "$corre_py" -eq 1 ];   then muerde_corre_grupo py   "$py_files";   fi
     if [ "$corre_go" -eq 1 ];   then muerde_corre_grupo go   "$go_dirs";    fi
     if [ "$corre_node" -eq 1 ]; then muerde_corre_grupo node "$node_files"; fi

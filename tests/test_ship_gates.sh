@@ -1056,6 +1056,57 @@ assert_contains "$out" "EMIT assumption" "con el supuesto en el bus"
 assert_not_contains "$out" "o sea que MUERDE" "sin cobrar el fallo de compilación como verificación"
 rm -f "$WS/bin-muerde/go"
 
+# (m2) #75: la ceguera del (m) era el estado NORMAL en los SEIS servicios Go de
+#      la plataforma (atlas, hermes, muse, apollo, argos, gateway), porque todos
+#      usan ese layout. O sea que el gate mas caro del precheck no verificaba
+#      nada en ninguno, y su verde declaraba un tramo sin mirar.
+#      La pieza que lo arregla ya existia: gowork.sh sabe armar el go.work con
+#      los replaces resueltos contra repos/ canonico. Solo faltaba que el gate
+#      la apuntara al arbol base (gowork.sh --base).
+#      El stub modela la unica distincion que importa: CON go.work el modulo
+#      resuelve y el test corre (y falla, o sea MUERDE); SIN go.work no compila.
+cp "$ROOT/templates/scripts/gowork.sh" "$WS/scripts/gowork.sh" 2>/dev/null || \
+  { mkdir -p "$WS/scripts"; cp "$ROOT/templates/scripts/gowork.sh" "$WS/scripts/gowork.sh"; }
+cat > "$WS/bin-muerde/go" <<'SH'
+#!/bin/sh
+if [ -f ./go.work ]; then
+  # con el go.work el grafo resuelve: el test nuevo corre y falla sobre la base
+  case "$1" in
+    build) exit 0 ;;
+    test)  echo "--- FAIL: TestNuevo (undefined)"; exit 1 ;;
+  esac
+  exit 0
+fi
+echo "pkg@v0.0.0: replacement directory ../../pkg does not exist" >&2
+exit 1
+SH
+chmod +x "$WS/bin-muerde/go"
+mkdir -p "$WS/repos/pkg"
+printf 'module example.com/pkg\n\ngo 1.21\n' > "$WS/repos/pkg/go.mod"
+mk_muerde_repo "$WS/mu11b"
+printf 'module example.com/svc\n\ngo 1.22\n\nrequire example.com/pkg v0.0.0\n\nreplace example.com/pkg => ../../pkg\n' > go.mod
+printf 'package svc\n\nfunc TestNuevo(t *testing.T) {}\n' > svc_test.go
+git add -A && git commit -qm "test go en monorepo, con el go.work armado por el gate"
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "#75: el gate VERIFICA en un monorepo Go (antes quedaba ciego siempre)"
+assert_contains "$out" "MUERDE" "y llega a un veredicto de verdad"
+assert_not_contains "$out" "el ÁRBOL BASE no compila sin tu cambio" \
+  "sin declarar la ceguera que era el estado normal en los seis servicios Go"
+
+# La degradacion del #43 NO se revierte: sin gowork.sh disponible, el gate
+# sigue declarando la ceguera en vez de inventar un verde.
+mv "$WS/scripts/gowork.sh" "$WS/scripts/gowork.sh.off"
+mk_muerde_repo "$WS/mu11c"
+printf 'module example.com/svc\n\ngo 1.22\n\nrequire example.com/pkg v0.0.0\n\nreplace example.com/pkg => ../../pkg\n' > go.mod
+printf 'package svc\n\nfunc TestNuevo(t *testing.T) {}\n' > svc_test.go
+git add -A && git commit -qm "sin gowork.sh en la instancia"
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "sin gowork.sh: el gate no inventa un rojo"
+assert_contains "$out" "el ÁRBOL BASE no compila sin tu cambio" "y la ceguera del #43 sigue diciendose"
+assert_contains "$out" "EMIT assumption" "con su supuesto en el bus"
+mv "$WS/scripts/gowork.sh.off" "$WS/scripts/gowork.sh"
+rm -f "$WS/bin-muerde/go"
+
 # (n) COR-625: un .tftest.hcl NI SIQUIERA entraba al alcance del gate (el
 #     patron no lo miraba) y no habia runner para el. Un repo de infra sumaba
 #     tests nuevos y este gate salia verde sin haber corrido ninguno.

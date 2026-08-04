@@ -80,6 +80,30 @@ mkdir -p migrations && echo 'ALTER TABLE x;' > migrations/001.sql && git add . &
 run_gate_lane '{"lane":"express"}'; rc=$?
 assert_eq 3 "$rc" "express tocando migrations/: bloquea"
 
+# 3b. express + un .tf SUELTO en la raíz → bloquea (#71)
+# Un infra-module lleva los .tf en la RAIZ, sin directorio terraform/. Mientras
+# POLICY-LANE-004 rechazaba por el kind del repo este hueco no se notaba, porque
+# nada de infra llegaba a un carril corto. Al pasar LANE-004 a aviso, este patrón
+# quedó como ÚNICO freno: con el hueco abierto, un quick podía shippear
+# terraform crudo sin que nadie lo mirara.
+mk_repo "$WS/r3b"
+echo 'resource "aws_s3_bucket" "b" {}' > main.tf && git add . && git commit -qm tf
+run_gate_lane '{"lane":"express"}'; rc=$?
+assert_eq 3 "$rc" "express tocando un .tf en la RAIZ: bloquea (el hueco que dejaba pasar terraform crudo)"
+
+mk_repo "$WS/r3c"
+echo 'region = "us-east-1"' > prod.tfvars && git add . && git commit -qm tfvars
+run_gate_lane '{"lane":"quick"}'; rc=$?
+assert_eq 3 "$rc" "quick tocando un .tfvars: bloquea igual"
+
+# 3d. contra-mitad: el freno es por lo que TOCA, no por donde vive. Un cambio
+#     que no roza infra pasa aunque el repo sea un infra-module entero.
+mk_repo "$WS/r3d"
+printf 'dist/\nnode_modules/\n' > .gitignore && git add . && git commit -qm "dos lineas al gitignore"
+run_gate_lane '{"lane":"quick"}' \
+  && pass "quick con un .gitignore de dos lineas: pasa (el caso medido del #71)" \
+  || fail "el carril rapido sigue cerrado para un cambio que no toca infra"
+
 # 4. full + toca proto → NO es asunto de gate_lane (lo custodia buf breaking)
 cd "$WS/r2"
 run_gate_lane '{"lane":"full"}' \
@@ -665,7 +689,11 @@ echo "── gate_test_muerde: un test que no puede fallar no prueba nada"
 # mutation-sentinel contesta al día siguiente. La única pregunta que lo caza es
 # mecánica: ¿este test falla sobre el árbol base?
 
-extract muerde_limpia > "$WS/gate_muerde.sh"
+# bounded.sh va PRIMERO: con_limite delega en run_bounded, y sin el helper el
+# gate extraido muere con 127 igual que sin delta_seccion. ship.sh lo sourcea
+# de scripts/bounded.sh; aca se pega el template real, no una imitacion.
+cat "$ROOT/templates/scripts/bounded.sh" > "$WS/gate_muerde.sh"
+extract muerde_limpia >> "$WS/gate_muerde.sh"
 # delta_seccion, declara_tests_nuevos y muerde_go_base_compila viajan CON el
 # gate: son sus tres lecturas (el delta-spec, el diff y el grafo de modulos de
 # la base). Sin ellas el gate extraido muere con 127 en vez de decidir.
@@ -949,13 +977,33 @@ assert_contains "$out" "MUERDE" "y llega a su veredicto en vez de quedarse esper
 
 # La tercera capa, probada aparte para no pagar el timeout en la suite: un
 # comando que ignora todo y se cuelga igual tiene un limite duro de tiempo.
+# con_limite delega en run_bounded (scripts/bounded.sh), asi que el test lo
+# sourcea igual que lo hace ship.sh de verdad.
 extract con_limite > "$WS/limite.sh"
 t0=$(date +%s)
-( . "$WS/limite.sh"; con_limite 1 sleep 30 ) >/dev/null 2>&1 || true
+( . "$ROOT/templates/scripts/bounded.sh"; . "$WS/limite.sh"; con_limite 1 sleep 30 ) >/dev/null 2>&1 || true
 t1=$(date +%s)
 [ $((t1 - t0)) -le 5 ] \
   && pass "con_limite corta un comando colgado (una sonda no puede ser eterna)" \
   || fail "con_limite no corto: la sonda puede colgar el gate entero"
+
+# El caso que el idiom viejo NO cubria y es JUSTO el de un runner de node: la
+# sonda deja un hijo que hereda stdout. El padre moria y el $( ) seguia
+# bloqueado hasta que el nieto terminaba (medido: 20s con un limite de 2).
+cat > "$WS/sonda-con-hijo.sh" <<'EOF'
+#!/bin/sh
+sleep 30 &
+echo "colectando"
+wait
+EOF
+chmod +x "$WS/sonda-con-hijo.sh"
+t0=$(date +%s)
+( . "$ROOT/templates/scripts/bounded.sh"; . "$WS/limite.sh"
+  out="$(con_limite 1 "$WS/sonda-con-hijo.sh")" ) >/dev/null 2>&1 || true
+t1=$(date +%s)
+[ $((t1 - t0)) -le 8 ] \
+  && pass "con_limite corta la sonda que dejo un hijo vivo (el \$( ) no espera al nieto)" \
+  || fail "el nieto sostuvo el pipe $((t1 - t0))s: la sonda sigue pudiendo colgar el gate"
 
 # (j) COR-656: vitest declarado pero con un include que no alcanza a e2e/. La
 #     invocación salía 1 ("No test files found") y el gate, que por decisión
@@ -1030,6 +1078,57 @@ assert_eq 0 "$rc" "la base Go no compila: el gate no inventa un rojo"
 assert_contains "$out" "el ÁRBOL BASE no compila sin tu cambio" "y dice que quedó ciego"
 assert_contains "$out" "EMIT assumption" "con el supuesto en el bus"
 assert_not_contains "$out" "o sea que MUERDE" "sin cobrar el fallo de compilación como verificación"
+rm -f "$WS/bin-muerde/go"
+
+# (m2) #75: la ceguera del (m) era el estado NORMAL en los SEIS servicios Go de
+#      la plataforma (atlas, hermes, muse, apollo, argos, gateway), porque todos
+#      usan ese layout. O sea que el gate mas caro del precheck no verificaba
+#      nada en ninguno, y su verde declaraba un tramo sin mirar.
+#      La pieza que lo arregla ya existia: gowork.sh sabe armar el go.work con
+#      los replaces resueltos contra repos/ canonico. Solo faltaba que el gate
+#      la apuntara al arbol base (gowork.sh --base).
+#      El stub modela la unica distincion que importa: CON go.work el modulo
+#      resuelve y el test corre (y falla, o sea MUERDE); SIN go.work no compila.
+cp "$ROOT/templates/scripts/gowork.sh" "$WS/scripts/gowork.sh" 2>/dev/null || \
+  { mkdir -p "$WS/scripts"; cp "$ROOT/templates/scripts/gowork.sh" "$WS/scripts/gowork.sh"; }
+cat > "$WS/bin-muerde/go" <<'SH'
+#!/bin/sh
+if [ -f ./go.work ]; then
+  # con el go.work el grafo resuelve: el test nuevo corre y falla sobre la base
+  case "$1" in
+    build) exit 0 ;;
+    test)  echo "--- FAIL: TestNuevo (undefined)"; exit 1 ;;
+  esac
+  exit 0
+fi
+echo "pkg@v0.0.0: replacement directory ../../pkg does not exist" >&2
+exit 1
+SH
+chmod +x "$WS/bin-muerde/go"
+mkdir -p "$WS/repos/pkg"
+printf 'module example.com/pkg\n\ngo 1.21\n' > "$WS/repos/pkg/go.mod"
+mk_muerde_repo "$WS/mu11b"
+printf 'module example.com/svc\n\ngo 1.22\n\nrequire example.com/pkg v0.0.0\n\nreplace example.com/pkg => ../../pkg\n' > go.mod
+printf 'package svc\n\nfunc TestNuevo(t *testing.T) {}\n' > svc_test.go
+git add -A && git commit -qm "test go en monorepo, con el go.work armado por el gate"
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "#75: el gate VERIFICA en un monorepo Go (antes quedaba ciego siempre)"
+assert_contains "$out" "MUERDE" "y llega a un veredicto de verdad"
+assert_not_contains "$out" "el ÁRBOL BASE no compila sin tu cambio" \
+  "sin declarar la ceguera que era el estado normal en los seis servicios Go"
+
+# La degradacion del #43 NO se revierte: sin gowork.sh disponible, el gate
+# sigue declarando la ceguera en vez de inventar un verde.
+mv "$WS/scripts/gowork.sh" "$WS/scripts/gowork.sh.off"
+mk_muerde_repo "$WS/mu11c"
+printf 'module example.com/svc\n\ngo 1.22\n\nrequire example.com/pkg v0.0.0\n\nreplace example.com/pkg => ../../pkg\n' > go.mod
+printf 'package svc\n\nfunc TestNuevo(t *testing.T) {}\n' > svc_test.go
+git add -A && git commit -qm "sin gowork.sh en la instancia"
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "sin gowork.sh: el gate no inventa un rojo"
+assert_contains "$out" "el ÁRBOL BASE no compila sin tu cambio" "y la ceguera del #43 sigue diciendose"
+assert_contains "$out" "EMIT assumption" "con su supuesto en el bus"
+mv "$WS/scripts/gowork.sh.off" "$WS/scripts/gowork.sh"
 rm -f "$WS/bin-muerde/go"
 
 # (n) COR-625: un .tftest.hcl NI SIQUIERA entraba al alcance del gate (el

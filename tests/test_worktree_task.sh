@@ -151,4 +151,102 @@ mkdir -p "$WS/locks/wt-T13__repoE.lock.d"
 bash "$WS/scripts/worktree-task.sh" --rm T13 >/dev/null 2>&1
 assert_no_file "$WS/locks/wt-T13__repoE.lock.d" "--rm purga los locks de creación de la tarea"
 
+
+echo
+echo "── #76: las DEPENDENCIAS del go.work tambien se refrescan al crear el worktree"
+# Un repo Go del monorepo depende de otros por `replace` relativo, y el go.work
+# de la tarea los resuelve contra repos/ canonico. Si uno de esos clones quedo
+# atras, `go build` falla en CUALQUIER tarea del repo, INCLUIDA LA BASE SIN
+# CAMBIOS, con un error que no habla de staleness sino de un simbolo que no
+# existe (`req.GetTokenDirect undefined`). El precheck sale rojo por una causa
+# que no es del cambio; costo media hora diagnosticarlo.
+# pull-all.sh no alcanza: SALTA los clones con cambios versionados (correcto) y
+# deja la dependencia vieja igual.
+D="$WS/d76"; mkdir -p "$D/scripts" "$D/worktrees"
+cp "$ROOT/templates/scripts/worktree-task.sh" "$D/scripts/"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$D/scripts/fe.sh"
+chmod +x "$D/scripts"/*.sh
+
+# gowork.sh stubbeado: escribe el go.work de la tarea apuntando a repos/pkg, que
+# es exactamente el artefacto que worktree-task tiene que leer para saber QUE
+# clones va a compilar esta tarea.
+cat > "$D/scripts/gowork.sh" <<'STUB'
+#!/usr/bin/env bash
+WS="$(cd "$(dirname "$0")/.." && pwd)"
+task="${1:-}"
+[ -d "$WS/worktrees/$task" ] || exit 0
+cat > "$WS/worktrees/$task/go.work" <<EOF
+go 1.22
+
+use (
+	./svc
+	../../repos/pkg
+)
+
+replace example.com/pkg v0.0.0 => ../../repos/pkg
+EOF
+STUB
+chmod +x "$D/scripts/gowork.sh"
+
+# origin de verdad (bare) para que el pull tenga de donde traer.
+mk_con_origin() {  # mk_con_origin <repo>
+  local r="$D/repos/$1" o="$D/origins/$1.git"
+  mkdir -p "$r" "$o"; git init -q --bare -b main "$o"
+  git init -q -b main "$r"
+  git -C "$r" config user.email t@t; git -C "$r" config user.name t
+  echo v1 > "$r/f.txt"; git -C "$r" add -A; git -C "$r" commit -qm v1
+  git -C "$r" remote add origin "$o"
+  git -C "$r" push -q origin main
+  git -C "$r" branch --set-upstream-to=origin/main main >/dev/null 2>&1 || true
+}
+avanza_origin() {  # avanza_origin <repo>: un commit que el clon canonico NO tiene
+  local o="$D/origins/$1.git" c="$WS/clone-$1"
+  rm -rf "$c"; git clone -q "$o" "$c"
+  git -C "$c" config user.email t@t; git -C "$c" config user.name t
+  echo v2 > "$c/f.txt"; git -C "$c" add -A; git -C "$c" commit -qm v2
+  git -C "$c" push -q origin main
+  git -C "$c" rev-parse HEAD
+}
+
+mk_con_origin svc
+mk_con_origin pkg
+PKG_NUEVO="$(avanza_origin pkg)"
+PKG_ANTES="$( git -C "$D/repos/pkg" rev-parse HEAD )"
+[ "$PKG_NUEVO" != "$PKG_ANTES" ] || fail "el fixture no dejo a pkg atrasado"
+
+out76="$(bash "$D/scripts/worktree-task.sh" T76 svc 2>&1)" || true
+PKG_DESPUES="$( git -C "$D/repos/pkg" rev-parse HEAD )"
+# RED-FIRST: hoy nadie refresca pkg, asi que quedaba en PKG_ANTES.
+assert_eq "$PKG_NUEVO" "$PKG_DESPUES" \
+  "la dependencia del go.work queda AL DIA (antes se descubria por un simbolo faltante)"
+
+echo
+echo "── pero un clon con trabajo versionado NUNCA se pisa"
+# Es el invariante de pull-all.sh y la unica forma de que este script destruya
+# algo. Se avisa, no se fuerza.
+PKG_NUEVO2="$(avanza_origin pkg)"
+( cd "$D/repos/pkg"; echo "de otro" > wip.txt; git add wip.txt )
+PKG_SUCIO="$( git -C "$D/repos/pkg" rev-parse HEAD )"
+rm -rf "$D/worktrees/T77"
+out77="$(bash "$D/scripts/worktree-task.sh" T77 svc 2>&1)" || true
+assert_eq "$PKG_SUCIO" "$( git -C "$D/repos/pkg" rev-parse HEAD )" \
+  "clon con cambios versionados: el HEAD NO se movio"
+[ -n "$( git -C "$D/repos/pkg" status --porcelain )" ] \
+  && pass "y su trabajo sigue ahi (nada se barrio)" \
+  || fail "se perdio el trabajo versionado del clon canonico"
+assert_contains "$out77" "no está limpio" "lo dice en vez de callarse"
+assert_contains "$out77" "DEPENDENCIA del go.work" \
+  "y nombra la CONSECUENCIA, no solo el hecho"
+assert_contains "$out77" "símbolos que no existen" \
+  "para que el rojo del compilador no sea una sorpresa"
+
+echo
+echo "── un repo sin Go no genera ruido de dependencias"
+rm -f "$D/scripts/gowork.sh"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$D/scripts/gowork.sh"; chmod +x "$D/scripts/gowork.sh"
+rm -rf "$D/worktrees/T78"
+out78="$(bash "$D/scripts/worktree-task.sh" T78 svc 2>&1)" || true
+assert_not_contains "$out78" "DEPENDENCIA del go.work" \
+  "sin go.work no hay nada que refrescar, y no se inventa un aviso"
+
 t_done

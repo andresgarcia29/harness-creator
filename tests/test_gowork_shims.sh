@@ -188,4 +188,57 @@ out_np="$(bash "$GD/scripts/gowork.sh" T1 nopin 2>&1)"; rc_np=$?
 assert_eq 1 "$rc_np" "pin inexistente: exit 1, no un go.work en un dir inventado"
 assert_contains "$out_np" "verdict-scaffold.sh" "con la remediación exacta (quién clava el pin)"
 
+
+echo
+echo "── gowork.sh --base: un go.work para un arbol FUERA del workspace (#75)"
+# gate_test_muerde levanta el arbol BASE en un worktree temporal bajo mktemp, o
+# sea fuera del workspace: no hay go.work alcanzable subiendo desde el cwd, el
+# `replace ... => ../../pkg` no resuelve, y el paquete ni compila. El gate
+# declaraba el tramo sin poder mirarlo, y los SEIS servicios Go de la plataforma
+# usan ese layout, o sea que el gate mas caro del precheck no verificaba nada en
+# ninguno.
+GB="$WS/gobase"; mkdir -p "$GB/scripts" "$GB/repos/pkg"
+cp "$ROOT/templates/scripts/gowork.sh" "$GB/scripts/gowork.sh"
+cat > "$GB/repos/pkg/go.mod" <<'EOF'
+module example.com/pkg
+
+go 1.21
+EOF
+# El arbol base vive FUERA del workspace, como el worktree temporal del gate.
+BASE="$WS/arbol-base"; mkdir -p "$BASE"
+cat > "$BASE/go.mod" <<'EOF'
+module example.com/svcbase
+
+go 1.22
+
+require example.com/pkg v0.0.0
+
+replace example.com/pkg => ../../pkg
+EOF
+
+out_b="$(bash "$GB/scripts/gowork.sh" --base "$BASE" 2>&1)"; rc_b=$?
+assert_eq 0 "$rc_b" "--base: genera sin morir (antes ni parseaba el flag)"
+assert_file "$BASE/go.work" "--base: el go.work nace DENTRO del arbol dado, no en el workspace"
+gb_content="$(cat "$BASE/go.work" 2>/dev/null || true)"
+assert_contains "$gb_content" "example.com/pkg" "y resuelve el replace roto contra repos/ canonico"
+assert_contains "$gb_content" "replace example.com/pkg v0.0.0 =>" "con el replace VERSIONADO (el mismo que el loop nativo)"
+assert_contains "$gb_content" "use (" "y declara los modulos con use"
+assert_no_file "$GB/go.work" "y NO escribe el go.work de la raiz del workspace"
+
+# Las rutas tienen que RESOLVER desde el arbol base: un go.work con un replace
+# que apunta a la nada no arregla nada, solo cambia el mensaje de error.
+tgt="$(awk '/^replace example.com\/pkg/{print $NF}' "$BASE/go.work")"
+resuelto="$(cd "$BASE" && cd "$tgt" 2>/dev/null && pwd || true)"
+[ "$resuelto" = "$(cd "$GB/repos/pkg" && pwd)" ] \
+  && pass "--base: la ruta del replace resuelve de verdad desde el arbol base" \
+  || fail "--base: el replace apunta a '$tgt', que no resuelve a repos/pkg"
+
+# Higiene del flag: una ruta relativa o inexistente se rechaza, no se inventa.
+bash "$GB/scripts/gowork.sh" --base "relativo/no" >/dev/null 2>&1; rc_rel=$?
+assert_eq 1 "$rc_rel" "--base con ruta relativa: exit 1 (no adivina desde donde)"
+bash "$GB/scripts/gowork.sh" --base "$WS/no-existe" >/dev/null 2>&1; rc_ne=$?
+assert_eq 1 "$rc_ne" "--base con dir inexistente: exit 1"
+bash "$GB/scripts/gowork.sh" --base >/dev/null 2>&1; rc_sd=$?
+assert_eq 1 "$rc_sd" "--base sin argumento: exit 1"
+
 t_done

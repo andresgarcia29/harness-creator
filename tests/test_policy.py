@@ -515,15 +515,48 @@ class PolicyTest(unittest.TestCase):
             (ws / "manifest.yaml").write_text(manifest)
         return task
 
-    def test_express_with_infra_repo_is_refused_at_init(self):
+    def test_express_with_infra_repo_warns_and_proceeds(self):
+        """#71: LANE-004 avisa, no rechaza.
+
+        Rechazaba por el KIND del repo, antes de que existiera un diff, cuando
+        el gate que decia anticipar (gate_lane) decide por las RUTAS QUE EL DIFF
+        TOCA. Medido: 20 de 31 repos del workspace son infra-* porque llevan su
+        terraform/ al lado del codigo, asi que un .gitignore de dos lineas no
+        tenia ningun carril rapido."""
         task = self.ws_task()
         r = self.run_policy("init", task, "--lane", "express",
                             "--repos", "terraform-core")
-        self.assertEqual(r.returncode, 3)
-        self.assertIn("POLICY-LANE-004", r.stderr)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("POLICY-LANE-004", r.stderr)    # sigue siendo grepeable
+        self.assertIn("aviso", r.stderr)
         self.assertIn("terraform-core", r.stderr)
-        self.assertIn("standard", r.stderr)           # la remediación nombra el carril
-        self.assertFalse((task / "state.json").exists())   # no dejó estado a medias
+        self.assertIn("gate_lane", r.stderr)          # nombra a quien SI lo verifica
+        self.assertTrue((task / "state.json").exists())
+        self.assertEqual(self.state_of(task)["repos"], ["terraform-core"])
+
+    def test_lane_005_is_still_a_hard_refusal(self):
+        """#71 relajo LANE-004, no LANE-005.
+
+        Que quick sea de UN repo es una promesa ESTRUCTURAL (quick no genera
+        DAG, o sea que nada ordena el ship entre repos) y ningun diff la
+        arregla. Si este test se pone rojo, el aviso se comio de mas."""
+        task = self.ws_task()
+        r = self.run_policy("init", task, "--lane", "quick",
+                            "--repos", "atlas,muse")
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("POLICY-LANE-005", r.stderr)
+        self.assertFalse((task / "state.json").exists())
+
+    def test_infra_warning_points_at_the_gate_that_decides(self):
+        """El aviso tiene que decir QUIEN verifica de verdad y CON QUE criterio.
+
+        Si solo dijera "ojo, infra", el agente no sabria si seguir; nombrando a
+        gate_lane y el criterio (lo que el diff TOCA) la decision es tomable."""
+        task = self.ws_task()
+        r = self.run_policy("init", task, "--lane", "quick", "--repos", "net-live")
+        self.assertIn("gate_lane", r.stderr)
+        self.assertIn("precheck", r.stderr)
+        self.assertIn("TOCA", r.stderr)
 
     def test_express_with_service_repo_records_repos(self):
         task = self.ws_task()
@@ -616,15 +649,16 @@ class PolicyTest(unittest.TestCase):
         self.assertIn("POLICY-LANE-005", refused.stderr)
         self.assertEqual(self.state_of(task)["repos"], ["atlas"])   # sin cambios
 
-    def test_repos_add_cannot_smuggle_infra_into_express(self):
+    def test_repos_add_of_infra_into_express_warns(self):
         task = self.ws_task()
         self.assertEqual(self.run_policy("init", task, "--lane", "express",
                                          "--repos", "atlas").returncode, 0)
-        refused = self.add_repos(task, "terraform-core")
-        self.assertEqual(refused.returncode, 3)
-        self.assertIn("POLICY-LANE-004", refused.stderr)
-        self.assertIn("terraform-core", refused.stderr)
-        self.assertEqual(self.state_of(task)["repos"], ["atlas"])
+        avisado = self.add_repos(task, "terraform-core")
+        self.assertEqual(avisado.returncode, 0, avisado.stderr)
+        self.assertIn("POLICY-LANE-004", avisado.stderr)
+        self.assertIn("terraform-core", avisado.stderr)
+        # #71: el repo SI entra; quien decide es gate_lane, sobre el diff
+        self.assertEqual(self.state_of(task)["repos"], ["atlas", "terraform-core"])
 
     def test_repos_add_without_a_reason_is_an_edit_by_hand(self):
         task = self.ws_task()
@@ -1202,18 +1236,17 @@ class PolicyTest(unittest.TestCase):
         self.assertEqual(created.returncode, 0, created.stderr)
         self.assertEqual(json.loads((task / "state.json").read_text())["repos"], ["atlas"])
 
-    def test_quick_with_infra_repo_is_refused_at_init_too(self):
-        # mismo criterio que express: el carril corto promete cero infra, y
-        # descubrirlo en el precheck cuesta el trabajo del implementer
+    def test_quick_with_infra_repo_only_warns_too(self):
+        # mismo criterio que express (#71): lo que decide si un cambio es de
+        # infra es lo que TOCA, no en que repo vive. El freno vive en gate_lane.
         task = self.ws_task()
-        refused = self.run_policy("init", task, "--lane", "quick",
+        avisado = self.run_policy("init", task, "--lane", "quick",
                                   "--repos", "net-live")
-        self.assertEqual(refused.returncode, 3)
-        self.assertIn("POLICY-LANE-004", refused.stderr)
-        self.assertIn("quick", refused.stderr)
-        self.assertIn("net-live", refused.stderr)
-        self.assertIn("standard", refused.stderr)
-        self.assertFalse((task / "state.json").exists())
+        self.assertEqual(avisado.returncode, 0, avisado.stderr)
+        self.assertIn("POLICY-LANE-004", avisado.stderr)
+        self.assertIn("quick", avisado.stderr)
+        self.assertIn("net-live", avisado.stderr)
+        self.assertTrue((task / "state.json").exists())
 
     def test_escalate_from_quick_lands_where_the_new_lane_can_move(self):
         # La trampa que abrió el carril nuevo: escalar mandaba SIEMPRE a rfc, y
@@ -1236,6 +1269,80 @@ class PolicyTest(unittest.TestCase):
         self.assertEqual(up.returncode, 0, up.stderr)
         self.assertEqual(self.state()["phase"], "rfc")
         self.assertEqual(self.transition("implement").returncode, 0)
+
+    # ── #74: escalar daba vuelta la entrega EN SILENCIO ──────────────
+    # quick NO declara delivery a proposito (su ship publica con el flow del
+    # workspace). Pero cuando gate_lane o LANE-004 lo rebotan, la remediacion
+    # que el harness PRESCRIBE es escalate y seguir por /smart, y /smart declara
+    # en su encabezado, sin condicion, que registra delivery: review, o sea que
+    # NO PUBLICA NADA. Caso de campo: cinco fixes de una linea, pipeline
+    # completo con RFC, 5 implementers, 4 reviewers, QA, cuatro veredictos pass,
+    # y CERO commits publicados. Nada en el camino aviso.
+    def _ws_with_flow(self, flow):
+        ws = Path(self.tmp.name)
+        if flow is not None:
+            (ws / "harness-answers.yaml").write_text(
+                "project: t\nflow: %s\ntickets: linear\n" % flow)
+        task = ws / "tasks" / "AUTO-20260804-delivery"
+        task.mkdir(parents=True)
+        return task
+
+    def _escalate(self, task, to="express"):
+        return self.run_policy("escalate", task, "--to", to, "--actor", "orch",
+                               "--reason", "gate_lane lo reboto")
+
+    def test_escalate_materializes_delivery_from_workspace_flow(self):
+        task = self._ws_with_flow("prs")
+        self.assertEqual(self.run_policy("init", task, "--lane", "quick",
+                                         "--repos", "atlas").returncode, 0)
+        self.assertEqual(self.run_policy("transition", task, "implement",
+                                         "--actor", "orch").returncode, 0)
+        up = self._escalate(task)
+        self.assertEqual(up.returncode, 0, up.stderr)
+        state = json.loads((task / "state.json").read_text())
+        self.assertEqual(state["delivery"], "prs")
+        self.assertIn("materializada", up.stdout)
+        self.assertTrue(any(h.get("kind") == "delivery" for h in state["history"]),
+                        "la materializacion tiene que quedar en el history")
+
+    def test_escalate_translates_a_trunk_flavoured_flow(self):
+        # `flow` y `delivery` NO son el mismo vocabulario: trunk-merge-commit no
+        # es un delivery valido, y copiarlo crudo moriria tipado despues.
+        task = self._ws_with_flow("trunk-merge-commit")
+        self.assertEqual(self.run_policy("init", task, "--lane", "quick",
+                                         "--repos", "atlas").returncode, 0)
+        self.assertEqual(self._escalate(task).returncode, 0)
+        self.assertEqual(json.loads((task / "state.json").read_text())["delivery"], "trunk")
+
+    def test_escalate_keeps_a_delivery_that_was_declared(self):
+        task = self._ws_with_flow("trunk")
+        self.assertEqual(self.run_policy("init", task, "--lane", "quick",
+                                         "--repos", "atlas",
+                                         "--delivery", "review").returncode, 0)
+        up = self._escalate(task)
+        self.assertEqual(up.returncode, 0, up.stderr)
+        self.assertEqual(json.loads((task / "state.json").read_text())["delivery"], "review")
+        self.assertNotIn("materializada", up.stdout)
+
+    def test_escalate_without_readable_flow_leaves_delivery_absent(self):
+        # No se inventa: sin answers legible queda ausente y manda el flow
+        # vigente al shippear, que es la conducta de siempre. Pero se DICE.
+        task = self._ws_with_flow(None)
+        self.assertEqual(self.run_policy("init", task, "--lane", "quick",
+                                         "--repos", "atlas").returncode, 0)
+        up = self._escalate(task)
+        self.assertEqual(up.returncode, 0, up.stderr)
+        self.assertNotIn("delivery", json.loads((task / "state.json").read_text()))
+        self.assertIn("no pude leer el flow", up.stderr)
+
+    def test_escalate_does_not_materialize_a_flow_ship_refuses(self):
+        # trunk-staging lo RECHAZA ship.sh (no lo implementa): traducirlo a
+        # trunk prometeria una publicacion que no va a ocurrir.
+        task = self._ws_with_flow("trunk-staging")
+        self.assertEqual(self.run_policy("init", task, "--lane", "quick",
+                                         "--repos", "atlas").returncode, 0)
+        self.assertEqual(self._escalate(task).returncode, 0)
+        self.assertNotIn("delivery", json.loads((task / "state.json").read_text()))
 
     def test_escalate_down_to_quick_is_rejected(self):
         self.assertEqual(self.run_policy("init", self.task, "--lane", "express").returncode, 0)

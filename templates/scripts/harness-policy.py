@@ -195,6 +195,54 @@ def delivery_of(state: dict) -> "str | None":
     return value
 
 
+def workspace_delivery(ws: Path) -> "str | None":
+    """La entrega que el flow del workspace implica, o None si no se puede saber.
+
+    Existe para el issue #74: escalar desde /quick daba vuelta la entrega EN
+    SILENCIO. quick no declara `delivery` a propósito (su ship publica con el
+    flow del workspace), pero la remediación que el propio harness prescribe al
+    rebotarlo es `escalate` y seguir por `/smart`, y el encabezado de /smart
+    declara sin condición que registra `delivery: review`, o sea que NO PUBLICA
+    NADA. Caso de campo: cinco fixes de una línea, pipeline completo con RFC,
+    5 implementers, 4 reviewers, QA, cuatro veredictos pass, y CERO commits
+    publicados. Nada en el camino avisó que la entrega había cambiado.
+
+    Materializar la entrega en el escalate cierra el agujero sin depender de que
+    alguien lea una advertencia en el momento justo.
+
+    OJO con el mapeo: `flow` y `delivery` NO son el mismo vocabulario. El flow
+    del answers puede ser trunk-direct-to-prod o trunk-merge-commit, que no son
+    valores válidos de delivery. Se traduce explícitamente y lo que no se
+    entiende NO se inventa: devolver None deja la conducta de hoy, que es que
+    manda el flow del workspace al shippear."""
+    answers = ws / "harness-answers.yaml"
+    try:
+        text = answers.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    flow = None
+    for line in text.splitlines():
+        # anclado en columna 0, igual que el parser de ship.sh: una clave `flow`
+        # anidada bajo otro bloque no es el knob de primer nivel.
+        if not line.startswith("flow:"):
+            continue
+        value = line[len("flow:"):]
+        value = value.split("#", 1)[0]                 # comentario al margen
+        flow = value.strip().strip('"').strip("'").strip()
+        break
+    if not flow or "{{" in flow:
+        # Placeholder sin sustituir: esa instancia se generó a medias y un
+        # literal no es una respuesta.
+        return None
+    if flow == "prs":
+        return "prs"
+    # trunk-staging lo RECHAZA ship.sh (no lo implementa), así que traducirlo a
+    # `trunk` prometería una publicación que no va a ocurrir.
+    if flow.startswith("trunk") and "staging" not in flow:
+        return "trunk"
+    return None
+
+
 def repos_pending_ship(task_dir: Path) -> list:
     """Repos de la tarea que ya tienen veredicto pero todavía no shippearon.
 
@@ -534,8 +582,13 @@ def vet_repos_for_lane(lane: str, repos: list, ws: Path) -> None:
     divergen en silencio justo donde el carril promete algo que gate_lane va a
     cobrar al final.
 
-    Los mensajes NO cambian a propósito: hay tests que comparan texto literal,
-    y quien los lee en la terminal ya aprendió a reconocerlos."""
+    Los mensajes NO cambian sin motivo: hay tests que comparan texto literal, y
+    quien los lee en la terminal ya aprendió a reconocerlos. La excepción
+    deliberada es POLICY-LANE-004, que pasó de RECHAZO a AVISO (#71) porque
+    decidía por el kind del repo y no por el diff; el identificador se conserva
+    justo para que siga siendo grepeable y reconocible. POLICY-LANE-005 sigue
+    siendo rechazo duro: que quick sea de un solo repo es una promesa
+    estructural que ningún diff arregla."""
     if not repos:
         return
     # quick es de UN repo, y eso se puede comprobar ACÁ: es la única
@@ -573,12 +626,34 @@ def vet_repos_for_lane(lane: str, repos: list, ws: Path) -> None:
     if lane in ("quick", "express"):
         infra = [r for r in repos if kinds.get(r) in ("infra-live", "infra-module")]
         if infra:
-            fail("POLICY-LANE-004",
-                 f"carril {lane} con repos de infra: {', '.join(infra)} "
-                 f"(kind infra-module/infra-live en manifest.yaml). El carril "
-                 f"{lane} promete cero infra y gate_lane lo va a bloquear "
-                 "DESPUÉS de que el implementer trabaje. Remediación: iniciá "
-                 "con --lane standard (o full), o quitá ese repo de la tarea")
+            # ── AVISA, NO RECHAZA (#71) ────────────────────────────────
+            # Esto rechazaba por el KIND DEL REPO, antes de que existiera un
+            # diff. El gate que decía anticipar (gate_lane, en ship.sh) decide
+            # por las RUTAS QUE EL DIFF TOCA, así que este chequeo era
+            # estrictamente MÁS GRUESO que el que protege: miraba el repo
+            # entero, no el cambio.
+            #
+            # Medido: 20 de 31 repos del workspace son infra-* porque son apps
+            # que llevan su terraform/ al lado del código. Agregar dos líneas a
+            # un .gitignore no tenía NINGÚN carril rápido: el único camino era
+            # --lane standard, o sea RFC con abogados para un cambio de dos
+            # líneas que gate_lane habría dejado pasar. Eso empuja justo adonde
+            # la Ley 15 dice que no: ceremonia desproporcionada, o saltarse el
+            # carril.
+            #
+            # El freno no desaparece, se muda a donde el criterio es correcto:
+            # gate_lane corre en el PRECHECK, antes de gastar reviewer, así que
+            # descubrirlo ahí es barato. Y va atado a haber cerrado el hueco de
+            # `.tf` suelto en LANE_GUARD_PATTERN: sin eso, este aviso dejaría
+            # pasar un terraform crudo sin ningún freno.
+            print(f"⚠️  POLICY-LANE-004 (aviso): carril {lane} con repos de "
+                  f"infra: {', '.join(infra)} (kind infra-module/infra-live en "
+                  "manifest.yaml). El carril promete cero contratos, "
+                  "migraciones ni infra, y quien lo verifica es gate_lane en el "
+                  "precheck, sobre lo que el diff TOCA: si tu cambio no toca "
+                  "terraform/helm/proto/migraciones, pasa; si los toca, ahí "
+                  "escalás y no perdiste el trabajo",
+                  file=sys.stderr)
     unknown = [r for r in repos if kinds and r not in kinds]
     if unknown:
         print(f"⚠️  repos fuera de manifest.yaml (sin kind conocido): "
@@ -667,6 +742,35 @@ def cmd_escalate(args: argparse.Namespace) -> int:
         "from": previous_phase, "to": destination, "actor": args.actor,
         "lane": f"{current_lane}→{args.to}", "reason": args.reason,
     })
+    # ── LA ENTREGA ES EL TERCER DATO DE NACIMIENTO (#74) ────────────────
+    # Escalar ya conserva worktree y commits. La entrega era el único de los
+    # tres que el salto de carril dejaba a merced de la prosa del comando de
+    # DESTINO: una tarea de /quick llega acá SIN el campo, y /smart declara en
+    # su encabezado, sin condición, que registra `delivery: review` y no publica
+    # nada. El humano invocó algo que iba a aterrizar, siguió la remediación que
+    # el harness le indicó, y terminó verde y sin publicar.
+    #
+    # Materializar no publica MÁS de lo prometido: sin escalar, ese /quick iba a
+    # aterrizar por el flow del workspace igual. La escalación solo agrega
+    # deliberación en el medio, no cambia el destino.
+    if delivery_of(state) is None:
+        implied = workspace_delivery(task_dir.parent.parent)
+        if implied:
+            state["delivery"] = implied
+            state["history"].append({
+                "kind": "delivery", "delivery": implied, "actor": args.actor,
+                "reason": "escalate: la entrega de nacimiento no cambia de carril "
+                          f"(materializada del flow del workspace)",
+            })
+            print(f"📦 entrega materializada: {implied} (la tarea nació para publicar "
+                  "por el flow del workspace; subir de carril no lo cambia)")
+        else:
+            # No se inventa. Sin answers legible, queda ausente y al shippear
+            # manda el flow vigente, que es exactamente la conducta de hoy.
+            print("⚠️  no pude leer el flow del workspace: la entrega queda sin "
+                  "declarar y al shippear manda el flow vigente. Si seguís por "
+                  "/smart, ojo que ese comando registra delivery: review",
+                  file=sys.stderr)
     atomic(path, state)
     emit_bus(task_dir, "decision", f"carril {current_lane} → {args.to}: vuelve a {destination}")
     print(f"⤴️  {task_dir.name}: carril {current_lane} → {args.to}, fase {destination}")

@@ -1853,6 +1853,68 @@ out="$(puerta gitflow trunk 2>&1)" || true
 assert_contains "$out" "trunk-merge-commit" "el rechazo de un flow ajeno nombra los tres implementados"
 
 echo
+echo "── #67: el flow vigente es el del answers, no el sellado en la instalación"
+# El bug: {{FLOW}} se sustituía UNA vez al instalar y ship.sh no volvía a abrir
+# el archivo, así que editar harness-answers.yaml no cambiaba cómo aterrizaba el
+# ship (y el rechazo decía "harness-answers.yaml declara..." nombrando un
+# archivo que nunca había leído). El que pedía merge commit para poder revertir
+# de un tirón recibía un fast-forward sin una línea de aviso.
+PUERTA_BLK="$WS/puerta-ans.sh"
+puerta_ans() {  # puerta_ans <sellado> <caso> <answers|SIN-ANSWERS> → salida + exit
+  PUERTA_ANS="$WS/ans-$2"; rm -rf "$PUERTA_ANS"; mkdir -p "$PUERTA_ANS"
+  # %b y no %s: los casos multilínea llegan con \n (un answers de verdad tiene
+  # más de una clave, y la anidada solo se puede probar con varias líneas).
+  [ "$3" = "SIN-ANSWERS" ] || printf '%b\n' "$3" > "$PUERTA_ANS/harness-answers.yaml"
+  sed "s/{{FLOW}}/$1/" "$WS/puerta-raw.sh" > "$PUERTA_BLK"
+  ( set -euo pipefail
+    WS="$PUERTA_ANS"; TASK=T1; REPO=svc
+    PRECHECK=0; LANG_ONLY=0; CI_MODE=0
+    DMOUT="flow"; DMRC=0
+    python3() { printf '%b' "$DMOUT"; return "$DMRC"; }
+    . "$PUERTA_BLK"
+    echo "FLOW_MODE=$FLOW_MODE LAND_MERGE=$LAND_MERGE FUENTE=$FLOW_SRC" ) 2>&1
+}
+
+# EL CASO DEL CAMPO: el humano editó el answers a trunk-merge-commit y el
+# ship.sh instalado sigue sellado en trunk. Antes: fast-forward en silencio.
+out="$(puerta_ans trunk edita 'flow: trunk-merge-commit')"; rc=$?
+assert_eq 0 "$rc" "answers editado a trunk-merge-commit: la puerta se resuelve"
+assert_contains "$out" "LAND_MERGE=1" "y aterriza con merge commit, aunque el sellado diga trunk"
+assert_contains "$out" "FUENTE=harness-answers.yaml" "porque el valor salió del archivo, no del literal"
+
+out="$(puerta_ans trunk aprs 'flow: prs')"
+assert_contains "$out" "FLOW_MODE=prs" "y del otro lado igual: answers prs sobre sellado trunk"
+
+# El sellado sigue siendo el respaldo: sin archivo, o sin la clave, no cambia
+# nada de lo que las instancias de hoy ya hacen.
+out="$(puerta_ans trunk-merge-commit sinarch SIN-ANSWERS)"
+assert_contains "$out" "LAND_MERGE=1" "sin harness-answers.yaml: manda el valor sellado"
+assert_contains "$out" "FUENTE=scripts/ship.sh" "y lo dice sin nombrar un archivo que no abrió"
+out="$(puerta_ans trunk-merge-commit sinclave 'project:\n  name: x')"
+assert_contains "$out" "LAND_MERGE=1" "answers sin la clave flow: manda el sellado"
+# Un placeholder crudo en el answers es una instancia generada a medias, no una
+# respuesta: el sellado es mejor dato que un literal sin sustituir.
+out="$(puerta_ans prs placeholder 'flow: {{FLOW}}')"
+assert_contains "$out" "FLOW_MODE=prs" "placeholder sin sustituir en el answers: manda el sellado"
+
+# El parser del knob: comillas, comentario al margen, y NADA de claves anidadas
+# homónimas (deploy.<repo>.flow no es el flujo del workspace).
+out="$(puerta_ans trunk comillas 'flow: "trunk-merge-commit"   # lo edité yo')"
+assert_contains "$out" "LAND_MERGE=1" "el valor se lee con comillas y comentario al margen"
+out="$(puerta_ans trunk anidada 'deploy:\n  svc:\n    flow: prs')"
+assert_contains "$out" "FLOW_MODE=trunk" "una clave flow anidada NO se confunde con el knob de primer nivel"
+
+# Y el rechazo nombra la fuente REAL, que es lo que hacía imposible depurarlo.
+out="$(puerta_ans trunk ajeno 'flow: gitflow')"; rc=$?
+assert_eq 7 "$rc" "un flow ajeno en el answers frena el ship (exit 7)"
+assert_contains "$out" "harness-answers.yaml declara flow: gitflow" "y el rechazo nombra el archivo que SÍ leyó"
+assert_contains "$out" "se relee en cada corrida" "con la remediación correcta: editar el answers alcanza"
+out="$(puerta_ans gitflow sellado SIN-ANSWERS)"; rc=$?
+assert_eq 7 "$rc" "un flow ajeno sellado también frena"
+assert_contains "$out" "el valor sellado al instalar) declara flow: gitflow" \
+  "y ahí el mensaje NO le echa la culpa a un archivo que no existe"
+
+echo
 echo "── #58: el merge commit se arma sin tocar el árbol, y es revertible de un tirón"
 # Caso de campo: un humano autoriza un cambio grande y pide poder deshacerlo. Con
 # fast-forward hay que conocer el rango exacto; con merge commit es un comando.
@@ -1884,6 +1946,79 @@ tras="$(printf '%s' "$mcout" | sed -n 's/^TRAS_REVERT:\[\(.*\)\]$/\1/p')"
 esp="$(printf '%s' "$mcout" | sed -n 's/^ESPERADO:\[\(.*\)\]$/\1/p')"
 assert_eq "$esp" "$tras" "git revert -m 1 devuelve el árbol EXACTO de antes de la tarea"
 assert_contains "$mcout" "FEATURE_TRAS_REVERT:[no]" "incluidos los archivos que la tarea agregó"
+
+echo
+echo "── #68: el merge que aterriza declara el bump que trae (o dice que no trae)"
+# Caso de campo: el merge decía "merge: <task> en <repo>", que no matchea ningún
+# prefijo de conventional commits. El CI condiciona el build al bump semver del
+# commit que llega a la trunk, así que salió bump_type=none, build SKIPPED: main
+# avanzó con el cambio y NO se construyó ni se desplegó nada. El fast-forward no
+# tenía el problema porque el CI ve los commits de la rama con sus prefijos; el
+# merge los esconde detrás de UN mensaje, y ese mensaje tiene que decir lo mismo.
+{ extract merge_bump_type; extract merge_commit_message; } > "$WS/mergemsg.sh"
+grep -q 'BREAKING CHANGE' "$WS/mergemsg.sh" || { echo "no pude extraer merge_bump_type"; exit 1; }
+grep -q 'Task: %s' "$WS/mergemsg.sh" || { echo "no pude extraer merge_commit_message"; exit 1; }
+
+BR="$WS/bump"; mkdir -p "$BR"
+( cd "$BR"; git init -q .; git config user.email t@t; git config user.name t
+  echo base > app.txt; git add -A; git commit -qm "chore: base"
+  git update-ref refs/remotes/origin/main HEAD ) >/dev/null 2>&1
+bump() {  # bump <asunto>... → el tipo que declararía el merge de esos commits
+  ( set -euo pipefail; cd "$BR"
+    git checkout -q -B probe origin/main
+    for s in "$@"; do echo "$s" >> app.txt; git commit -qam "$s"; done
+    . "$WS/mergemsg.sh"
+    merge_bump_type "origin/main..HEAD" ) 2>&1
+}
+assert_eq "fix" "$(bump "chore: mueve cosas" "fix(api): arregla el 500")" \
+  "un fix entre chores: el merge declara fix (patch), que es lo que trae"
+assert_eq "feat" "$(bump "fix: parche" "feat: endpoint nuevo" "docs: notas")" \
+  "el tipo más FUERTE gana, no el del último commit (el CI vería el feat)"
+assert_eq "feat!" "$(bump "feat: endpoint" "refactor!: cambia el contrato")" \
+  "un breaking con ! no se pierde en el merge: viaja como feat!"
+assert_eq "feat!" "$(bump "$(printf 'perf: mas rapido\n\nBREAKING CHANGE: cambia el contrato')")" \
+  "y el breaking declarado en el CUERPO tampoco (las dos grafías cuentan)"
+assert_eq "chore" "$(bump "chore: sube dependencia")" \
+  "un chore-only sigue siendo chore: NO se inventa un fix que dispararía un release"
+assert_eq "" "$(bump "arregla el bug del login" "otro arreglo")" \
+  "sin un solo commit conventional NO hay tipo que declarar (vacío, no inventado)"
+
+# El mensaje: asunto conventional cuando hay bump, `merge:` cuando no, y el
+# trailer Task: en los dos (es lo que ata el commit a la tarea).
+( set -euo pipefail; . "$WS/mergemsg.sh"
+  merge_commit_message "feat!" "AUTO-1" "svc" "main" ) > "$WS/msg-con.txt" 2>&1
+( set -euo pipefail; . "$WS/mergemsg.sh"
+  merge_commit_message "" "AUTO-1" "svc" "main" ) > "$WS/msg-sin.txt" 2>&1
+assert_eq "feat!: AUTO-1 en svc (merge)" "$(head -1 "$WS/msg-con.txt")" \
+  "con bump, el asunto es conventional y sigue diciendo que es un merge"
+assert_eq "merge: AUTO-1 en svc" "$(head -1 "$WS/msg-sin.txt")" \
+  "sin bump, el asunto no finge uno"
+assert_contains "$(cat "$WS/msg-con.txt")" "Task: AUTO-1" "el trailer Task: sobrevive al cambio de asunto"
+assert_contains "$(cat "$WS/msg-sin.txt")" "Task: AUTO-1" "en las dos formas del mensaje"
+assert_contains "$(cat "$WS/msg-con.txt")" "revert -m 1" "y el cuerpo dice cómo deshacerlo (la razón del modo)"
+
+# E2E con el plumbing real: el merge que ship.sh arma con este mensaje tiene que
+# seguir siendo revertible de un tirón. Un asunto conventional no puede costar la
+# propiedad que #58 compró.
+( set -euo pipefail; cd "$BR"
+  git checkout -q -B e2e origin/main
+  BASE_TREE="$(git rev-parse 'HEAD^{tree}')"
+  echo tarea >> app.txt; git commit -qam "feat(api): el trabajo de la tarea"
+  . "$WS/mergemsg.sh"
+  t="$(merge_bump_type "origin/main..HEAD")"
+  m="$(git commit-tree "$(git rev-parse 'HEAD^{tree}')" \
+        -p "$(git rev-parse origin/main)" -p "$(git rev-parse HEAD)" \
+        -m "$(merge_commit_message "$t" T1 svc main)")"
+  git update-ref refs/heads/e2e "$m"; git reset -q --hard "$m"
+  echo "ASUNTO:[$(git log -1 --format=%s)]"
+  echo "PADRES:[$(git rev-list --parents -n 1 HEAD | wc -w | tr -d ' ')]"
+  git revert -m 1 --no-edit HEAD >/dev/null
+  echo "REVERT_OK:[$([ "$(git rev-parse 'HEAD^{tree}')" = "$BASE_TREE" ] && echo si || echo no)]"
+) > "$WS/e2e.out" 2>&1
+e2e="$(cat "$WS/e2e.out")"
+assert_contains "$e2e" "ASUNTO:[feat: T1 en svc (merge)]" "el commit que aterriza de verdad lleva el prefijo (el CI ya puede bumpear)"
+assert_contains "$e2e" "PADRES:[3]" "y sigue siendo un merge de dos padres"
+assert_contains "$e2e" "REVERT_OK:[si]" "y git revert -m 1 sigue devolviendo el árbol de antes de la tarea"
 
 # (d) sin campo delivery (el subcomando contesta 'flow') → conducta de HOY
 out="$(puerta prs flow)"

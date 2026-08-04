@@ -154,6 +154,65 @@ assert_not_contains "$(cat "$WS/tasks/COR-12/evidence.log")" "no-existe.txt" \
   "un archivo inexistente no deja rastro (leer de verdad es el criterio)"
 
 echo
+echo "── Serena: leer por símbolo también es leer"
+# El harness le PIDE al implementer que navegue por símbolo, y este hook no
+# registraba nada de eso: el agente obediente llegaba a gate_evidence sin una
+# línea en el log y el gate lo acusaba de citar lo que "nadie leyó". El camino
+# barato para pasarlo era volver a grep, o sea que el incentivo estaba dado
+# vuelta contra la propia constitución.
+
+mkdir -p "$WS/worktrees/COR-20/atlas/internal/auth"
+echo 'package auth' > "$WS/worktrees/COR-20/atlas/internal/auth/auth.go"
+
+# 15. activate_project fija el ancla: proyecto (para reconstruir rutas) y tarea
+jq -nc '{tool_name:"mcp__serena__activate_project",
+         tool_input:{project:"'"$WS"'/worktrees/COR-20/atlas"},
+         session_id:"sess-serena", cwd:"'"$WS"'"}' | "$HOOK"
+assert_file "$WS/.harness/session-task/sess-serena.serena" \
+  "activate_project recuerda el proyecto de la sesión"
+
+# 16. find_symbol trae la ruta RELATIVA al proyecto: se reconstruye y la tarea
+#     se deriva de la RUTA (kind 'sym'), no del puntero de sesión
+jq -nc '{tool_name:"mcp__serena__find_symbol",
+         tool_input:{name_path:"Login", relative_path:"internal/auth/auth.go"},
+         session_id:"sess-serena", cwd:"'"$WS"'"}' | "$HOOK"
+log="$(cat "$WS/tasks/COR-20/evidence.log" 2>/dev/null)"
+assert_contains "$log" "internal/auth/auth.go" \
+  "find_symbol deja el archivo en evidence.log de SU tarea"
+assert_contains "$log" "	sym	" "y con kind 'sym' (lectura simbólica)"
+assert_not_contains "$log" "sym-ws" \
+  "atribuido por RUTA reconstruida, no por puntero de sesión"
+
+# 16b. gate_evidence matchea por substring, así que la cita worktree-relativa
+#      del reviewer (internal/auth/auth.go) casa con lo registrado. Esta es la
+#      mitad que hacía impasable el gate para quien usaba Serena.
+assert_contains "$log" "worktrees/COR-20/atlas/internal/auth/auth.go" \
+  "la ruta queda completa: casa con la cita worktree-relativa y con la del ws"
+
+# 17. editar un símbolo cuenta igual que leerlo
+jq -nc '{tool_name:"mcp__serena__replace_symbol_body",
+         tool_input:{name_path:"Login", relative_path:"internal/auth/auth.go", body:"x"},
+         session_id:"sess-serena", cwd:"'"$WS"'"}' | "$HOOK"
+assert_contains "$(cat "$WS/tasks/COR-20/evidence.log")" "sym" \
+  "replace_symbol_body también registra (nadie reemplaza lo que no vio)"
+
+# 18. sin activate_project previo se cae al workspace y se marca 'sym-ws':
+#     peor atribución, pero registro al fin (antes no había ninguno)
+payload Read "{\"file_path\":\"$WS/worktrees/COR-21/atlas/x.go\"}" | "$HOOK"
+jq -nc '{tool_name:"mcp__serena__get_symbols_overview",
+         tool_input:{relative_path:"internal/pay.go"},
+         session_id:"sess-test", cwd:"'"$WS"'"}' | "$HOOK"
+assert_contains "$(cat "$WS/tasks/COR-21/evidence.log" 2>/dev/null)" "sym-ws" \
+  "sin proyecto activado: se atribuye por sesión y queda marcado sym-ws"
+
+# 19. una tool de Serena que no lee nada no inventa evidencia
+antes="$(cat "$WS/tasks/COR-20/evidence.log")"
+jq -nc '{tool_name:"mcp__serena__list_dir", tool_input:{relative_path:"internal"},
+         session_id:"sess-serena", cwd:"'"$WS"'"}' | "$HOOK"
+assert_eq "$antes" "$(cat "$WS/tasks/COR-20/evidence.log")" \
+  "list_dir no es una lectura: no toca el log"
+
+echo
 echo "── mark-read.sh: el registro de lecturas SIN el hook (otros agentes)"
 # Caso de campo: operando el harness desde otro agente (AGENTS.md lo promete),
 # evidence.log no existía jamás y gate_evidence era impasable; la salida era

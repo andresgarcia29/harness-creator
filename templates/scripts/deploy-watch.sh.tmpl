@@ -493,9 +493,69 @@ fi
 # revisión que el cluster declara enferma, y ensayando el revert en seco.
 OBSERVED_REVISION=""   # lo llena check_argocd_health cuando el cluster lo dice
 
+# ── LA REVISIÓN DESPLEGADA PUEDE CONTENER MI SHIP SIN SER MI SHIP ─────
+# El arreglo del #64 comparaba por PREFIJO en los dos sentidos, que cubre "sha
+# corto contra sha largo" y nada más. No cubre el layout de infra-live donde un
+# promotor de imagen commitea el bump del tag ENCIMA del merge, en el MISMO repo
+# que ArgoCD sigue (#73):
+#
+#     fb10e79 chore: Update SVC image tag    ← lo que ArgoCD tiene desplegado
+#     5abd3d2 feat: TASK en SVC (merge)      ← lo que ship.sh reportó shippeado
+#
+# Ahí la revisión desplegada NUNCA es igual ni prefijo del sha shippeado, así
+# que TODO ship terminaba en rojo falso, quemando los 900s antes de mentir, y
+# el rojo decía literalmente "el deploy NO se hizo" cuando el commit desplegado
+# CONTIENE el cambio. Es el mismo error del #64 en la dirección contraria, y la
+# peligrosa: frena el archive y empuja a rollbacks innecesarios.
+#
+# `git merge-base --is-ancestor` lo decide exacto y sin juicio. Y no deshace el
+# #64: un commit es ancestro de sí mismo (el caso "igual" sigue verde) y una
+# revisión ANTERIOR al ship no lo contiene (sigue rojo), porque la pregunta es
+# dirigida: ¿mi sha es ancestro de lo desplegado?
+#
+# ── PERO NO ALCANZA CON LA LÍNEA SUELTA QUE PROPONE EL ISSUE ──────────
+# El objeto de la revisión observada casi nunca está en el clon local: lo pushea
+# el promotor directo al remoto. Sin él, `--is-ancestor` sale 128 y confundir
+# eso con "no lo contiene" reintroduce el mismo rojo falso por otra puerta.
+# Entonces: un fetch (acotado, y UNO SOLO por corrida: el loop de health pollea
+# cada 10s y sin memo martillaría la red), y si aun así falta el objeto, la
+# respuesta honesta es "no pude decidir", que NO es ni verde ni rojo.
+ANCESTRY_FETCHED=""
+revision_contiene_ship() {  # <mio> <observada> → 0 la contiene · 1 no · 2 no pude decidir
+  local mine="$1" obs="$2" dir="$WS/repos/$REPO" full rc
+  # `:-` y no la global pelada: esta función se extrae sola en los tests y
+  # corre bajo `set -u`, donde una global sin inicializar mata el bloque.
+  [ -n "$mine" ] && [ -n "$obs" ] || return 2
+  [ -d "$dir/.git" ] || [ -f "$dir/.git" ] || return 2
+  # ship.log guardó shas CORTOS hasta hace poco y `--is-ancestor` quiere un
+  # commit resoluble: sin expandir, un sha viejo daba 128 y se leía como ceguera
+  # cuando el dato estaba ahí.
+  full="$(git -C "$dir" rev-parse --verify --quiet "${mine}^{commit}" 2>/dev/null)" || return 2
+  if ! git -C "$dir" cat-file -e "${obs}^{commit}" 2>/dev/null; then
+    if [ -z "${ANCESTRY_FETCHED:-}" ]; then
+      ANCESTRY_FETCHED=1
+      run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+        git -C "$dir" fetch origin --quiet 2>/dev/null || true
+    fi
+    git -C "$dir" cat-file -e "${obs}^{commit}" 2>/dev/null || return 2
+  fi
+  git -C "$dir" merge-base --is-ancestor "$full" "$obs" 2>/dev/null; rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) return 2 ;;   # 128 y compañía: no pude decidir, y eso no es un "no"
+  esac
+}
+
 rollback_advice() {  # rollback_advice <sha-completo-de-mi-ship>
   local mine="$1" after="" dry
-  git -C "$WS/repos/$REPO" fetch origin --quiet 2>/dev/null || true
+  # `git fetch` también es red: contra un remoto que no responde por SSH se
+  # queda en el handshake sin timeout propio. Es la última llamada sin acotar
+  # que quedaba, y encima corre en el camino del ROJO, donde el humano ya está
+  # esperando una respuesta.
+  run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+    git -C "$WS/repos/$REPO" fetch origin --quiet 2>/dev/null || true
+  ANCESTRY_FETCHED=1   # ya se pagó acá: que el helper no lo vuelva a pagar
 
   # ¿La revisión enferma es la mía? Si el cluster nombra otra, revertir lo mío
   # es tocar producción por un problema que no es mío.
@@ -506,13 +566,37 @@ rollback_advice() {  # rollback_advice <sha-completo-de-mi-ship>
         case "$mine" in
           "$OBSERVED_REVISION"*) : ;;
           *)
-            say "⏪ NO propongo revertir nada mío: el cluster declara enferma la"
-            say "   revisión ${OBSERVED_REVISION:0:12} y mi ship fue ${mine:0:12}."
-            say "   Otro workspace aterrizó después. Revertir mi commit no arregla"
-            say "   ese deploy y ensucia el trunk compartido."
-            say "   ↳ quien puede decidir acá es quien shippeó ${OBSERVED_REVISION:0:12}."
-            emit assumption "deploy rojo de $REPO en revisión ajena ${OBSERVED_REVISION:0:12}: no propongo rollback"
-            return 0 ;;
+            # ── EL MISMO AGUJERO DEL #73, ACÁ TAMBIÉN ────────────────
+            # Este camino usaba la misma comparación por prefijo, así que con el
+            # layout del promotor de imagen declaraba "ajena" una revisión que
+            # CONTIENE mi cambio: mi commit sí es sospechoso y el revert sí
+            # corresponde, y el watcher lo declinaba con un motivo inventado.
+            revision_contiene_ship "$mine" "$OBSERVED_REVISION"; local anc=$?
+            if [ "$anc" -eq 2 ]; then
+              # No pude decidir. Se declina igual (no se propone una acción
+              # destructiva sobre producción sin poder comprobarla) pero el
+              # motivo tiene que ser el verdadero: decir "otro aterrizó después"
+              # sin saberlo es exactamente la clase de invento que este script
+              # se niega a hacer en todos los demás lados.
+              say "⏪ NO propongo revertir nada: el cluster declara enferma la revisión"
+              say "   ${OBSERVED_REVISION:0:12} y NO pude establecer si contiene mi ship"
+              say "   (${mine:0:12}): ese objeto no está en repos/$REPO ni lo trajo el fetch."
+              say "   Sin esa relación, revertir sería a ciegas. Diagnosticá y decidí vos."
+              emit assumption "deploy rojo de $REPO: no pude relacionar la revisión ${OBSERVED_REVISION:0:12} con mi ship"
+              return 0
+            fi
+            if [ "$anc" -eq 1 ]; then
+              say "⏪ NO propongo revertir nada mío: el cluster declara enferma la"
+              say "   revisión ${OBSERVED_REVISION:0:12} y mi ship fue ${mine:0:12}."
+              say "   Otro workspace aterrizó después. Revertir mi commit no arregla"
+              say "   ese deploy y ensucia el trunk compartido."
+              say "   ↳ quien puede decidir acá es quien shippeó ${OBSERVED_REVISION:0:12}."
+              emit assumption "deploy rojo de $REPO en revisión ajena ${OBSERVED_REVISION:0:12}: no propongo rollback"
+              return 0
+            fi
+            # anc = 0: la revisión enferma DESCIENDE de mi ship, o sea que lo
+            # contiene. Mi commit es sospechoso legítimo: sigue al ensayo.
+            say "   (la revisión enferma ${OBSERVED_REVISION:0:12} desciende de mi ship: lo contiene)" ;;
         esac ;;
     esac
   fi
@@ -944,8 +1028,9 @@ argocd_cli_ready() {
   return 1
 }
 
-check_argocd_health() {  # → 0 sano · 1 no sano · 2 no concluyente · 3 sano en revisión ajena
-  local sync health out deadline avisada=""
+check_argocd_health() {  # → 0 sano · 1 no sano · 2 no concluyente · 3 revisión ajena · 4 relación indecidible
+  local sync health out deadline rem avisada="" anc=0
+  ANCESTRY_CIEGA=""
   if command -v kubectl >/dev/null 2>&1; then
     # ── ESPERAR NO ES OPCIONAL: "Progressing" NO ES "ROTO" ──────────────
     # Esta lectura era INSTANTÁNEA: una sola consulta, sin loop y sin usar el
@@ -1022,6 +1107,21 @@ check_argocd_health() {  # → 0 sano · 1 no sano · 2 no concluyente · 3 sano
                  "$OBSERVED_REVISION"*) return 0 ;;
                esac ;;
           esac
+          # ── LOS PREFIJOS NO ALCANZAN: FALTA LA ANCESTRÍA (#73) ───────
+          # Van primero porque son gratis y preservan el #64 tal cual. Pero con
+          # el promotor de imagen commiteando el bump ENCIMA del merge, la
+          # revisión desplegada contiene mi ship SIN ser prefijo suyo, y sin
+          # esta rama el loop la trataba como transitorio hasta quemar los 900s
+          # y después declaraba "el deploy NO se hizo" sobre un deploy hecho.
+          revision_contiene_ship "$LANDED_SHA" "$OBSERVED_REVISION"; anc=$?
+          [ "$anc" -eq 0 ] && {
+            say "   ✓ la revisión ${OBSERVED_REVISION:0:12} desciende de mi ship (${LANDED_SHA:0:12}): lo contiene"
+            return 0
+          }
+          # anc=2 es NO PUDE DECIDIR, y no puede terminar en el rojo que afirma
+          # "el deploy no se hizo": esa afirmación necesita evidencia. Se anota
+          # y en el deadline sale por el estado de ceguera, no por el rojo.
+          [ "$anc" -eq 2 ] && ANCESTRY_CIEGA=1
           [ -z "$avisada" ] && {
             say "   ⏳ sano, pero en la revisión ${OBSERVED_REVISION:0:12}: mi ship (${LANDED_SHA:0:12}) aún no llega"
             avisada=1
@@ -1033,7 +1133,10 @@ check_argocd_health() {  # → 0 sano · 1 no sano · 2 no concluyente · 3 sano
       # En el deadline, Synced+Healthy solo puede ser revisión AJENA (la mía
       # ya devolvió 0 arriba): el cambio nunca aterrizó. Se reporta aparte.
       [ "$(date +%s)" -ge "$deadline" ] && {
-        [ "$sync" = "Synced" ] && [ "$health" = "Healthy" ] && return 3
+        [ "$sync" = "Synced" ] && [ "$health" = "Healthy" ] && {
+          [ -n "${ANCESTRY_CIEGA:-}" ] && return 4
+          return 3
+        }
         return 1
       }
       sleep "${DEPLOY_POLL_SECS:-10}"
@@ -1091,6 +1194,24 @@ case "$health_rc" in
      emit deploy "$REPO: nunca llegó la revisión ${LANDED_SHA:0:12} (el cluster sigue en ${OBSERVED_REVISION:0:12})" false
      emit stop "deploy de $REPO no aterrizó: $APP sano en revisión ajena tras ${TIMEOUT}s"
      exit 1 ;;
+  4) # ── SANO, PERO NO PUDE RELACIONAR LA REVISIÓN CON MI SHIP ────────
+     # El rc=3 de arriba AFIRMA que el deploy no se hizo, y esa afirmación
+     # necesita evidencia. Cuando el objeto de la revisión no está en el clon
+     # local ni lo trae el fetch, no hay con qué decidir: la revisión podría
+     # perfectamente CONTENER el cambio (es el caso del #73, el promotor que
+     # commitea el bump encima). Declararlo rojo ahí es el mismo rojo falso por
+     # otra puerta. Es ceguera: se dice, se registra, y no se toca nada.
+     say "⚠️  $APP está Healthy+Synced en la revisión ${OBSERVED_REVISION:0:12}, pero"
+     say "   NO pude establecer si contiene mi ship (${LANDED_SHA:0:12}): ese objeto no"
+     say "   está en repos/$REPO y el fetch no lo trajo."
+     say "   NO digo que el deploy no se hizo, porque no lo sé, y NO propongo"
+     say "   revertir nada. Es CEGUERA, no un deploy rojo."
+     say "   ↳ remediación: refrescá el clon (git -C repos/$REPO fetch origin) y"
+     say "     volvé a correr; si el repo que ArgoCD sigue es OTRO (layout de"
+     say "     promoción con repo de manifiestos aparte), este watcher no puede"
+     say "     comparar shas entre dos repos distintos y hay que verificar a mano."
+     emit assumption "deploy de $REPO NO verificado: no pude relacionar la revisión ${OBSERVED_REVISION:0:12} con el ship ${LANDED_SHA:0:12}"
+     ciego "argocd: revisión ${OBSERVED_REVISION:0:12} sin relación establecible con el ship" ;;
   2) say "⚠️  no pude verificar el health de '$APP'."
      say "   Puede faltar kubectl, faltar credenciales de ArgoCD, o que la app"
      say "   no exista con ese nombre. Es CEGUERA, no un deploy rojo: no"

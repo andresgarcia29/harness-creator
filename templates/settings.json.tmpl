@@ -12,6 +12,12 @@
         ]
       },
       {
+        "matcher": "Grep",
+        "hooks": [
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/guard-symbol-grep.sh" }
+        ]
+      },
+      {
         "matcher": "Edit|Write|MultiEdit",
         "hooks": [
           { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/guard-canonical.sh" },
@@ -21,7 +27,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Read|Grep|Glob|Bash|NotebookRead",
+        "matcher": "Read|Grep|Glob|Bash|NotebookRead|mcp__serena__.*",
         "hooks": [
           { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/track-read.sh", "async": true }
         ]

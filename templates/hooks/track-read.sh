@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # track-read.sh — el libro de a bordo de la evidencia. PostToolUse sobre
-# Read/Grep/Glob/Bash: apunta QUÉ artefactos abrió realmente un agente, en
-# tasks/<id>/evidence.log. ship.sh (gate_evidence) intersecta lo CITADO por la
-# compliance matrix con lo LEÍDO aquí.
+# Read/Grep/Glob/Bash y sobre las tools de Serena: apunta QUÉ artefactos abrió
+# realmente un agente, en tasks/<id>/evidence.log. ship.sh (gate_evidence)
+# intersecta lo CITADO por la compliance matrix con lo LEÍDO aquí.
 #
 # POR QUÉ EXISTE: el reviewer escribe una matriz que dice "AUTH-3 está cubierto
 # por auth_test.go". Nada comprobaba que hubiera abierto auth_test.go. La ley del
@@ -81,6 +81,16 @@ remember_task() { ok_id "$sid" || return 0
 
 recall_task() { ok_id "$sid" || return 0
   head -1 "$STATE_DIR/$sid" 2>/dev/null; }
+
+# El proyecto que la sesión activó en Serena, al lado del puntero de tarea y
+# con la misma disciplina: por session_id, jamás global. Ver el bloque SERENA
+# de más abajo para por qué hace falta.
+remember_proj() { ok_id "$sid" || return 0
+  mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+  printf '%s\n' "$1" > "$STATE_DIR/$sid.serena" 2>/dev/null || true; }
+
+recall_proj() { ok_id "$sid" || return 0
+  head -1 "$STATE_DIR/$sid.serena" 2>/dev/null; }
 
 # ── ¿este comando CORRE una suite? ───────────────────────────────────
 # Antes se decidía por SUBSTRING desnudo (*test*|*spec*|...), y eso marcaba
@@ -178,7 +188,11 @@ emit() {
     kind="$kind-ws"                   # marcado: se atribuyó por sesión, no por ruta
   fi
   set -- "$kind" "$2" "$3"
-  case "$task" in *[!A-Za-z0-9._-]*) return 0 ;; esac   # id raro → no construimos rutas con él
+  # id raro → no construimos rutas con él. `.` y `..` van aparte porque PASAN
+  # el filtro de caracteres (el punto es legítimo en un task-id) y son justo
+  # los dos que se salen de tasks/: un id `..` escribiría el evidence.log en la
+  # raíz del workspace, donde ningún gate lo va a buscar.
+  case "$task" in *[!A-Za-z0-9._-]*|.|..) return 0 ;; esac
   local log="$WS/tasks/$task/evidence.log"
   mkdir -p "$WS/tasks/$task" 2>/dev/null || return 0
   printf '%s\t%s\t%s\t%s\n' "$ts" "$sid" "$1" "$2" >> "$log" 2>/dev/null
@@ -242,6 +256,53 @@ case "$tool" in
         emit ran-file "${base#"$WS"/}" "$t"
       fi
     done
+    ;;
+
+  # ── SERENA: LEER POR SÍMBOLO TAMBIÉN ES LEER ──────────────────────
+  # El harness le pide al implementer que navegue y edite por símbolo
+  # (find_symbol, find_referencing_symbols) en vez de abrir archivos enteros:
+  # es el ahorro de tokens más grande de la implementación. Pero este hook solo
+  # miraba Read/Grep/Glob/Bash, así que el agente OBEDIENTE no dejaba ni una
+  # línea en evidence.log, y gate_evidence lo acusaba después de citar
+  # artefactos que "nadie leyó". O sea: el gate castigaba exactamente la
+  # conducta que la constitución exige, y el camino barato para pasarlo era
+  # volver a grep. Un incentivo invertido no se arregla con otra frase en el
+  # prompt; se arregla acá.
+  #
+  # LA RUTA VIENE RELATIVA AL PROYECTO ACTIVADO, no al workspace: Serena es
+  # por-proyecto y el implementer hace activate_project sobre su worktree.
+  # Por eso se recuerda ese proyecto (por sesión) y se reconstruye la ruta
+  # completa: así la tarea se sigue derivando de la RUTA, que es la ley de
+  # este hook, en vez de depender del puntero de sesión.
+  mcp__serena__*)
+    op="${tool#mcp__serena__}"
+    case "$op" in
+      activate_project)
+        # El ancla de todo lo que sigue. También fija el puntero de tarea si la
+        # ruta la trae, que es el caso normal: worktrees/<task>/<repo>.
+        proj="$(printf '%s' "$payload" | jq -r '.tool_input.project // .tool_input.project_root // ""' 2>/dev/null)"
+        [ -n "$proj" ] || exit 0
+        remember_proj "$proj"
+        t="$(task_of "$proj")"; [ -n "$t" ] && remember_task "$t"
+        ;;
+      find_symbol|find_referencing_symbols|get_symbols_overview|read_file|search_for_pattern|replace_symbol_body|insert_after_symbol|insert_before_symbol|replace_regex)
+        # Editar un símbolo cuenta igual que leerlo: nadie reemplaza el cuerpo
+        # de una función sin haber visto lo que reemplaza.
+        rp="$(printf '%s' "$payload" | jq -r '.tool_input.relative_path // ""' 2>/dev/null)"
+        [ -n "$rp" ] || exit 0
+        case "$rp" in
+          /*) t="$rp" ;;
+          *) proj="$(recall_proj)"
+             # Sin activate_project visto (sesión reanudada, hook que se perdió
+             # el evento) se cae al workspace: la tarea saldrá del puntero de
+             # sesión y el registro quedará marcado `sym-ws`. Peor atribución,
+             # pero registro al fin: gate_evidence matchea por substring, así
+             # que la cita del reviewer casa igual.
+             if [ -n "$proj" ]; then t="$proj/$rp"; else t="$WS/$rp"; fi ;;
+        esac
+        emit sym "${t#"$WS"/}" "$t"
+        ;;
+    esac
     ;;
 esac
 exit 0

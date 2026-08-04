@@ -36,7 +36,10 @@ session="$(printf '%s' "$payload" | jq -r '.session_id // ""' 2>/dev/null)"
 # es exacto (sabemos qué sesión terminó) en vez de esperar una caducidad.
 case "$session" in
   *[!A-Za-z0-9._-]*) : ;;
-  *) rm -f "$WS/.harness/session-task/$session" 2>/dev/null || true ;;
+  # El `.serena` de al lado es el proyecto que la sesión activó, y muere con
+  # ella por la misma razón: sin sesión no hay ruta que reconstruir.
+  *) rm -f "$WS/.harness/session-task/$session" \
+           "$WS/.harness/session-task/$session.serena" 2>/dev/null || true ;;
 esac
 
 [ -s "$BUS" ] || exit 0

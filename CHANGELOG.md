@@ -7,6 +7,29 @@ contra una instalación real).
 ## [Sin publicar]
 
 ### Added
+- **Serena deja de ser una sugerencia: el incentivo invertido, arreglado, y un
+  aviso con diente.** En campo Serena casi no se usaba y el grep ganaba
+  siempre, pese a que la edición simbólica está pedida en DOS lugares (la
+  economía de tokens de `CLAUDE.md` y el contrato del implementer). La causa
+  no era solo desobediencia: `track-read.sh` no miraba las tools de Serena, o
+  sea que el agente que OBEDECÍA llegaba a `gate_evidence` sin una línea en
+  `evidence.log` y el gate lo acusaba de citar artefactos que "nadie leyó". El
+  camino barato para pasar el gate era volver a grep: la ley premiaba lo que
+  prohibía. Ahora el hook registra `find_symbol`, `find_referencing_symbols`,
+  `get_symbols_overview`, `read_file`, `search_for_pattern` y las tools de
+  edición simbólica (kind `sym`), reconstruyendo la ruta con el proyecto que
+  vio en `activate_project` (Serena entrega rutas relativas al proyecto
+  activado), así la tarea se sigue derivando de la RUTA y no de un puntero.
+  La otra mitad es `guard-symbol-grep.sh`, PreToolUse sobre `Grep`: avisa UNA
+  vez por tarea cuando el patrón tiene forma de SÍMBOLO dentro de un worktree
+  y hay serena en `.mcp.json`, con el `find_symbol` equivalente escrito. Es
+  fail-OPEN y deliberadamente estrecho (se calla ante una regex de verdad,
+  ante una palabra suelta de prosa como `timeout`, fuera de un worktree y sin
+  serena instalada), y el mensaje dice que repetir el mismo Grep pasa: un
+  aviso puesto sobre la tool más usada del harness no puede dejar a nadie
+  atascado, o termina siendo el guard que alguien desactiva. Como efecto
+  colateral el mix de retrieval quedó medible sin nada nuevo:
+  `grep -c '	sym	' tasks/*/evidence.log` contra `scan`.
 - **`gate_test_muerde`: un test nuevo tiene que MORDER.** Tercer gate de
   integridad, de la corrida de campo que pagó una ronda entera por un assert
   que no podía fallar (evaluaba antes de que el dato llegara): en el precheck

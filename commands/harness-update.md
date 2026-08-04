@@ -148,8 +148,9 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
      **los hooks Y el archivo que los cablea**, que van JUNTOS o el update
      entrega un hook que nunca corre:
      `.claude/hooks/{block-direct-push,guard-canonical,guard-worktree,
-     guard-build-slot,guard-ws-scripts,guard-broad-add,track-read,ui-emit,
-     on-compact,session-summary}.sh` más `.claude/settings.json`, que es
+     guard-build-slot,guard-ws-scripts,guard-broad-add,guard-symbol-grep,
+     track-read,ui-emit,on-compact,session-summary}.sh` más
+     `.claude/settings.json`, que es
      el que los registra en sus matchers. Un hook nuevo copiado sin
      re-generar `settings.json` llega al disco y no lo invoca nadie: es
      una protección que el humano cree tener y no tiene. `settings.json`

@@ -20,6 +20,13 @@ assert_contains "$ship" 'FLOW="{{FLOW}}"' "ship.sh ahora lee el flujo configurad
 assert_contains "$ship" "ship.sh implementa tres" "y dice qué implementa de verdad"
 assert_contains "$ship" "trunk-merge-commit" "incluido el modo que aterriza con merge commit (#58)"
 assert_contains "$ship" "a espaldas de una política" "y por qué se niega en vez de seguir"
+# #67: media perilla muerta. El valor se sustituía UNA vez, al instalar, y
+# ship.sh no volvía a abrir el archivo: editar el answers no cambiaba nada hasta
+# el próximo /harness-update, y el rechazo nombraba un archivo que nunca leyó.
+assert_contains "$ship" 'if [ -n "${WS:-}" ] && [ -f "$WS/harness-answers.yaml" ]; then' \
+  "y lo relee del answers en cada corrida, no solo al instalar"
+assert_contains "$ship" 'FLOW_SRC="harness-answers.yaml"' \
+  "con la fuente pegada al valor, para que el rechazo no le eche la culpa al archivo equivocado"
 
 # El guard tiene que dejar pasar trunk y frenar el resto. Se extrae el case.
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT

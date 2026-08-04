@@ -41,7 +41,8 @@
 # exit 5 · agotados los reintentos de push: es contención con otro workspace,
 #          no un rojo del cambio.
 # exit 6 · el lock del repo siguió ocupado más de 10 min (otro ship en curso).
-# exit 7 · harness-answers.yaml declara un flow que este script no implementa.
+# exit 7 · el flow vigente (harness-answers.yaml, o el sellado al instalar si el
+#          archivo no lo declara) no es uno de los que este script implementa.
 # exit 8 · la tarea declaró entrega SIN publicación (delivery: review) y este
 #          script publica: no es un rojo, es lo que pidió la invocación. Para
 #          publicar se PROMUEVE la entrega (harness-policy.py delivery ... --to
@@ -288,18 +289,49 @@ resolve_delivery() {  # → DELIVERY: prs|trunk|flow, o se niega (8 sin publicar
 if [ "$PRECHECK" -eq 0 ] && [ "$LANG_ONLY" -eq 0 ] && [ "$CI_MODE" -eq 0 ]; then
   resolve_delivery
 fi
-# El flujo a main que el humano eligió en la entrevista. Este script SOLO
-# implementa trunk direct-to-prod: hace `git push origin HEAD:$BASE_REF`. Las
-# otras dos respuestas (trunk-staging, prs) se ofrecían, se registraban en
-# harness-answers.yaml, y NADIE las leía, así que quien eligió "prs" por
-# política de su empresa recibía commits directos a main, en silencio.
-#
-# Se falla CERRADO y no se finge: implementar PRs o staging cambia también
-# lo que significa "shippeado" para deploy-watch y para /archive, y hacerlo
-# a medias produciría un archive que fusiona specs de un cambio que sigue
-# sin mergear. Mientras tanto, el que configuró otra cosa se entera acá y
-# no en producción.
+# El flujo a main que el humano eligió en la entrevista. Este script implementa
+# tres (trunk, trunk-merge-commit, prs) y con cualquier otro falla CERRADO: la
+# respuesta se ofrecía, se registraba en harness-answers.yaml y NADIE la leía,
+# así que quien eligió "prs" por política de su empresa recibía commits directos
+# a main, en silencio. Fingir un flujo que no está implementado cambiaría también
+# lo que significa "shippeado" para deploy-watch y para /archive, y produciría un
+# archive que fusiona specs de un cambio que sigue sin mergear. El que configuró
+# otra cosa se entera acá y no en producción.
 FLOW="{{FLOW}}"
+# ── EL FLOW VIGENTE ES EL DEL ANSWERS, NO EL SELLADO AL INSTALAR ──────
+# Caso de campo (#67): {{FLOW}} se sustituye UNA sola vez, en la instalación, y
+# ship.sh no volvía a abrir el archivo. Editar harness-answers.yaml no cambiaba
+# nada hasta el próximo /harness-update, así que quien pedía merge commit para
+# poder revertir de un tirón recibía un fast-forward SIN UNA LÍNEA DE AVISO y se
+# enteraba mirando el grafo después de publicar. Y el rechazo de más abajo decía
+# "harness-answers.yaml declara flow: X" nombrando un archivo que jamás había
+# leído: la decisión registrada era decorativa y el mensaje sostenía que no.
+#
+# Ahora manda el archivo, que es el registro canónico de la entrevista, y el
+# valor sellado queda de respaldo para la instancia que no lo tenga (o que le
+# haya borrado el knob). FLOW_SRC viaja con el valor para que el rechazo nombre
+# de dónde salió de verdad.
+FLOW_SRC="scripts/ship.sh (el valor sellado al instalar)"
+flow_declared=""
+if [ -n "${WS:-}" ] && [ -f "$WS/harness-answers.yaml" ]; then
+  # `flow` es un knob de primer nivel: se ancla en la columna 0 para no
+  # confundirlo con una clave homónima anidada bajo otro bloque.
+  flow_declared="$(awk '
+    /^flow:/ {
+      v=$0; sub(/^flow:[[:space:]]*/, "", v)   # el valor
+      sub(/[[:space:]]*#.*$/, "", v)           # comentario al margen
+      gsub(/["\047]/, "", v)                   # comillas de cualquier signo
+      sub(/[[:space:]]+$/, "", v)
+      print v; exit
+    }' "$WS/harness-answers.yaml" 2>/dev/null || true)"
+  # Un placeholder sin sustituir en el answers no es una respuesta: esa
+  # instancia se generó a medias y el sellado es mejor dato que un literal.
+  case "$flow_declared" in *'{{'*) flow_declared="" ;; esac
+fi
+if [ -n "$flow_declared" ]; then
+  FLOW="$flow_declared"
+  FLOW_SRC="harness-answers.yaml"
+fi
 # La grafía varía (la entrevista ofrecía "trunk direct-to-prod" y el answers
 # documenta "trunk-direct-to-prod"), así que se normaliza en vez de exigir una
 # forma exacta. Un placeholder sin sustituir o vacío se trata como trunk: es
@@ -326,13 +358,15 @@ case "$flow_norm" in
   trunkmergecommit|trunkmerge) FLOW_MODE=trunk; LAND_MERGE=1 ;;
   prs|pr) FLOW_MODE=prs ;;
   *)
-    echo "❌ harness-answers.yaml declara flow: $FLOW, y ship.sh implementa tres:"
+    echo "❌ $FLOW_SRC declara flow: $FLOW, y ship.sh implementa tres:"
     echo "   'trunk' (push directo tras los gates), 'trunk-merge-commit' (igual,"
     echo "   pero aterriza con un merge commit para poder revertir de un tirón)"
     echo "   y 'prs' (rama + PR)."
     echo "   NO voy a pushear a espaldas de una política que dice otra cosa."
-    echo "   ↳ opciones: cambiá flow a 'trunk' o a 'prs', o abrí el PR a mano"
-    echo "     desde la rama task/<id> tras un --precheck verde."
+    echo "   ↳ opciones: poné flow a 'trunk', 'trunk-merge-commit' o 'prs' en"
+    echo "     harness-answers.yaml (se relee en cada corrida: no hace falta"
+    echo "     re-instanciar), o abrí el PR a mano desde la rama task/<id> tras"
+    echo "     un --precheck verde."
     exit 7 ;;
 esac
 # ── La entrega de la TAREA manda sobre el default de la INSTANCIA ─────
@@ -3006,6 +3040,60 @@ if [ "$PRECHECK" -eq 1 ]; then
   exit 0
 fi
 
+# ── EL MERGE QUE ATERRIZA DECLARA EL BUMP QUE TRAE ────────────────────
+# Caso de campo (#68): con flow trunk-merge-commit el mensaje era
+# "merge: <task> en <repo>", que no matchea ningún prefijo de conventional
+# commits. El CI del repo condiciona el build al bump semver del commit que
+# aterriza, así que salió bump_type=none, build SKIPPED, notify SKIPPED: la
+# trunk avanzó con el cambio y NO se construyó ni se desplegó nada. El run
+# cerró en success (un job saltado no mancha la conclusión), y solo lo cazó
+# deploy-watch mirando job por job.
+#
+# El fast-forward no tenía el problema porque el CI ve los commits de la rama,
+# con sus prefijos. El merge commit los esconde detrás de UN mensaje, así que
+# ese mensaje tiene que decir lo mismo: el tipo más FUERTE de lo que aterriza.
+# No se inventa un bump (un `fix:` de oficio convertiría un docs-only en un
+# release), y no se pierde uno: si la rama trae un breaking, el merge lo
+# declara con `!`.
+merge_bump_type() {  # merge_bump_type <rango> → feat! | feat | fix | <tipo> | vacío
+  local range="$1" subjects bodies breaking=0
+  subjects="$(git log --format='%s' "$range" 2>/dev/null || true)"
+  [ -n "$subjects" ] || return 0
+  bodies="$(git log --format='%b' "$range" 2>/dev/null || true)"
+  # Las dos grafías del breaking de conventional commits: el `!` del asunto
+  # (lo mira el awk) y el footer del cuerpo.
+  case "$bodies" in *"BREAKING CHANGE"*) breaking=1 ;; esac
+  # awk y no `grep -q`: acá se lee TODA la entrada. Un grep que corta al primer
+  # match cierra el pipe, el productor muere con SIGPIPE y bajo `set -o pipefail`
+  # el `if` vería un fallo justo cuando SÍ hubo match.
+  printf '%s\n' "$subjects" | awk -v breaking="$breaking" '
+    BEGIN { rank["feat"] = 3; rank["fix"] = 2; rank["perf"] = 1; best = -1 }
+    {
+      if (match($0, /^[a-z]+(\([^)]*\))?!?:/) == 0) next
+      head = substr($0, 1, RLENGTH)
+      if (index(head, "!:") > 0) breaking = 1
+      sub(/[(!:].*$/, "", head)              # el tipo pelado, sin scope
+      if (nuevo == "") nuevo = head          # git log ordena del más nuevo al más viejo
+      r = (head in rank) ? rank[head] : 0
+      if (r > best) { best = r; fuerte = head }
+    }
+    END {
+      if (best < 0) exit 0                   # ni un commit con tipo: no hay bump que declarar
+      if (breaking) { print "feat!"; exit 0 }
+      if (best > 0) print fuerte; else print nuevo
+    }'
+}
+
+merge_commit_message() {  # merge_commit_message <tipo> <task> <repo> <base> → mensaje
+  local type="$1" task="$2" repo="$3" base="$4" subject
+  if [ -n "$type" ]; then subject="$type: $task en $repo (merge)"
+  else                    subject="merge: $task en $repo"; fi
+  printf '%s\n\n' "$subject"
+  printf 'Aterriza la rama de la tarea sobre %s con merge commit. El primer padre\n' "$base"
+  printf 'es la trunk, así que se deshace entero con git revert -m 1.\n\n'
+  printf 'Task: %s\n' "$task"
+}
+
 # ── Loop de ship ──────────────────────────────────────────────────────
 cd "$WT"
 gate_ship_preflight
@@ -3123,12 +3211,23 @@ El sha que aterrice NO sera este si la cola de merge rebasea o hace squash." 2>/
   # rebase por contención cambia HEAD y el trunk, y el merge hay que rehacerlo.
   push_ref="HEAD"
   if [ "$LAND_MERGE" -eq 1 ]; then
+    # El rango es el de ESTE intento: cada rebase por contención cambia HEAD y
+    # el trunk, y con ellos lo que el merge está aterrizando.
+    merge_type="$(merge_bump_type "origin/$BASE_REF..HEAD")"
+    if [ -z "$merge_type" ]; then
+      echo "⚠️  ningún commit de $TASK declara tipo de conventional commits, así que"
+      echo "   el merge que aterriza tampoco puede declararlo sin inventarlo. Si tu"
+      echo "   CI condiciona el build al bump semver del commit que llega a"
+      echo "   $BASE_REF, va a SALTARSE el build: la trunk avanza y no se despliega"
+      echo "   nada (el run cierra en success con los jobs saltados; deploy-watch"
+      echo "   lo reporta como rojo)."
+      echo "   ↳ remediación: prefijá los commits de la tarea (fix:/feat:) y"
+      echo "     re-corré el ship, o disparás el build a mano en tu CI."
+    fi
     if ! merge_sha="$(git commit-tree "$(git rev-parse 'HEAD^{tree}')" \
                         -p "$(git rev-parse "origin/$BASE_REF")" \
                         -p "$(git rev-parse HEAD)" \
-                        -m "merge: $TASK en $REPO
-
-Task: $TASK")"; then
+                        -m "$(merge_commit_message "$merge_type" "$TASK" "$REPO" "$BASE_REF")")"; then
       echo "❌ no pude armar el merge commit para aterrizar $TASK en $BASE_REF."
       echo "   ↳ el ship NO publicó nada. Con flow 'trunk' (sin merge commit) el"
       echo "     camino sigue abierto; este modo existe para poder revertir de un"
@@ -3158,6 +3257,11 @@ Task: $TASK")"; then
     if [ "$LAND_MERGE" -eq 1 ]; then
       echo "   ↩︎  para deshacerlo entero: git -C repos/$REPO revert -m 1 $short"
       echo "      (aterrizó con merge commit; el primer padre es $BASE_REF)"
+      # Lo que el CI va a leer, dicho acá: es la única línea del mensaje que
+      # existe, y de ella depende que el build corra (#68).
+      if [ -n "${merge_type:-}" ]; then
+        echo "   🏷️  el merge declara '$merge_type:' (el bump más fuerte que traen sus commits)"
+      fi
     fi
     request_ship_phase
     echo "→ siguiente: scripts/deploy-watch.sh $TASK $REPO (o /ship se encarga)"

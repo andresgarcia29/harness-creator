@@ -2,7 +2,7 @@
 # Lo escribe scripts/templates-manifest.sh; el CI verifica que esté al día.
 # Un generador DEBE escribir el digest de abajo en .harness-templates de
 # la instancia: sin eso, nadie puede saber con qué set se generó.
-plugin_version: 0.57.12
+plugin_version: 0.57.13
 2e1c0e68a608709a99a1b3d8571cfbf592dfc8b30481d657d1054e02a44414a8  scripts/doctor.sh
 b1348ebaff9f0f47c231a188bf577de7337cfe2b900604b0a2192a3b07c650f6  templates/AGENTS.md.tmpl
 0abfddba94a72009e55fabdc2010856f471680e51eaaa33b29628eae7077f48b  templates/CLAUDE.md.tmpl

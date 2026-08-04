@@ -803,7 +803,13 @@ gate_lane() {
     express|quick) ;;
     *) return 0 ;;
   esac
-  local pat="${LANE_GUARD_PATTERN:-(\.proto\$|(^|/)proto/|(^|/)migrations?/|\.sql\$|(^|/)helm/|(^|/)charts/|(^|/)terraform/|(^|/)openapi\.|(^|/)swagger\.)}"
+  # `\.tf\$|\.tfvars\$` van ademas de `(^|/)terraform/` y no es redundante: un
+  # infra-module lleva los .tf en la RAIZ, sin directorio terraform/. Mientras
+  # POLICY-LANE-004 rechazaba por el kind del repo ese hueco no se notaba,
+  # porque nada de infra llegaba a un carril corto. Al pasar LANE-004 a aviso
+  # (#71) este patron quedo como UNICO freno, y con el hueco abierto un quick
+  # podia shippear terraform crudo sin que nadie lo mirara.
+  local pat="${LANE_GUARD_PATTERN:-(\.proto\$|(^|/)proto/|(^|/)migrations?/|\.sql\$|(^|/)helm/|(^|/)charts/|(^|/)terraform/|\.tf\$|\.tfvars\$|(^|/)openapi\.|(^|/)swagger\.)}"
   local hits
   # Tres puntos: el carril promete sobre EL CAMBIO DE LA RAMA. Con dos puntos se
   # comparan las PUNTAS, así que un .proto que el trunk sumó después del branch

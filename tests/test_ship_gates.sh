@@ -80,6 +80,30 @@ mkdir -p migrations && echo 'ALTER TABLE x;' > migrations/001.sql && git add . &
 run_gate_lane '{"lane":"express"}'; rc=$?
 assert_eq 3 "$rc" "express tocando migrations/: bloquea"
 
+# 3b. express + un .tf SUELTO en la raíz → bloquea (#71)
+# Un infra-module lleva los .tf en la RAIZ, sin directorio terraform/. Mientras
+# POLICY-LANE-004 rechazaba por el kind del repo este hueco no se notaba, porque
+# nada de infra llegaba a un carril corto. Al pasar LANE-004 a aviso, este patrón
+# quedó como ÚNICO freno: con el hueco abierto, un quick podía shippear
+# terraform crudo sin que nadie lo mirara.
+mk_repo "$WS/r3b"
+echo 'resource "aws_s3_bucket" "b" {}' > main.tf && git add . && git commit -qm tf
+run_gate_lane '{"lane":"express"}'; rc=$?
+assert_eq 3 "$rc" "express tocando un .tf en la RAIZ: bloquea (el hueco que dejaba pasar terraform crudo)"
+
+mk_repo "$WS/r3c"
+echo 'region = "us-east-1"' > prod.tfvars && git add . && git commit -qm tfvars
+run_gate_lane '{"lane":"quick"}'; rc=$?
+assert_eq 3 "$rc" "quick tocando un .tfvars: bloquea igual"
+
+# 3d. contra-mitad: el freno es por lo que TOCA, no por donde vive. Un cambio
+#     que no roza infra pasa aunque el repo sea un infra-module entero.
+mk_repo "$WS/r3d"
+printf 'dist/\nnode_modules/\n' > .gitignore && git add . && git commit -qm "dos lineas al gitignore"
+run_gate_lane '{"lane":"quick"}' \
+  && pass "quick con un .gitignore de dos lineas: pasa (el caso medido del #71)" \
+  || fail "el carril rapido sigue cerrado para un cambio que no toca infra"
+
 # 4. full + toca proto → NO es asunto de gate_lane (lo custodia buf breaking)
 cd "$WS/r2"
 run_gate_lane '{"lane":"full"}' \

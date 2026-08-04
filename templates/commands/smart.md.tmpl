@@ -166,10 +166,14 @@ significa compatibilidad y el ship publica con el `flow` del workspace, como
 siempre.
 
 Los repos son los mismos del paso 0 que usaste para clasificar el carril:
-con ellos `init`
-rechaza en el acto un express que incluya un repo de infra
-(`POLICY-LANE-004`, kind `infra-module`/`infra-live` en manifest.yaml),
-ANTES de gastar un implementer en trabajo que `gate_lane` va a devolver.
+con ellos `init` **avisa** (no rechaza) si un carril corto incluye un repo de
+infra (`POLICY-LANE-004`, kind `infra-module`/`infra-live` en manifest.yaml).
+Es un aviso y no un freno a propósito: lo que decide si un cambio es de infra es
+lo que el diff TOCA, no en qué repo vive, y quien lo verifica con ese criterio
+es `gate_lane` en el precheck, antes de gastar reviewer. Medido: 20 de 31 repos
+del workspace son infra-* por llevar su `terraform/` al lado del código, así que
+rechazar por el kind dejaba un `.gitignore` de dos líneas sin ningún carril
+rápido.
 Si el enrichment descubre CON EVIDENCIA que la tarea toca un repo que el init
 no declaró, se registra con `scripts/harness-policy.py repos tasks/<id> --add
 <repo> --actor orchestrator --reason "<evidencia>"`: jamás re-corras `init` (se

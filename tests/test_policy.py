@@ -515,15 +515,48 @@ class PolicyTest(unittest.TestCase):
             (ws / "manifest.yaml").write_text(manifest)
         return task
 
-    def test_express_with_infra_repo_is_refused_at_init(self):
+    def test_express_with_infra_repo_warns_and_proceeds(self):
+        """#71: LANE-004 avisa, no rechaza.
+
+        Rechazaba por el KIND del repo, antes de que existiera un diff, cuando
+        el gate que decia anticipar (gate_lane) decide por las RUTAS QUE EL DIFF
+        TOCA. Medido: 20 de 31 repos del workspace son infra-* porque llevan su
+        terraform/ al lado del codigo, asi que un .gitignore de dos lineas no
+        tenia ningun carril rapido."""
         task = self.ws_task()
         r = self.run_policy("init", task, "--lane", "express",
                             "--repos", "terraform-core")
-        self.assertEqual(r.returncode, 3)
-        self.assertIn("POLICY-LANE-004", r.stderr)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("POLICY-LANE-004", r.stderr)    # sigue siendo grepeable
+        self.assertIn("aviso", r.stderr)
         self.assertIn("terraform-core", r.stderr)
-        self.assertIn("standard", r.stderr)           # la remediación nombra el carril
-        self.assertFalse((task / "state.json").exists())   # no dejó estado a medias
+        self.assertIn("gate_lane", r.stderr)          # nombra a quien SI lo verifica
+        self.assertTrue((task / "state.json").exists())
+        self.assertEqual(self.state_of(task)["repos"], ["terraform-core"])
+
+    def test_lane_005_is_still_a_hard_refusal(self):
+        """#71 relajo LANE-004, no LANE-005.
+
+        Que quick sea de UN repo es una promesa ESTRUCTURAL (quick no genera
+        DAG, o sea que nada ordena el ship entre repos) y ningun diff la
+        arregla. Si este test se pone rojo, el aviso se comio de mas."""
+        task = self.ws_task()
+        r = self.run_policy("init", task, "--lane", "quick",
+                            "--repos", "atlas,muse")
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("POLICY-LANE-005", r.stderr)
+        self.assertFalse((task / "state.json").exists())
+
+    def test_infra_warning_points_at_the_gate_that_decides(self):
+        """El aviso tiene que decir QUIEN verifica de verdad y CON QUE criterio.
+
+        Si solo dijera "ojo, infra", el agente no sabria si seguir; nombrando a
+        gate_lane y el criterio (lo que el diff TOCA) la decision es tomable."""
+        task = self.ws_task()
+        r = self.run_policy("init", task, "--lane", "quick", "--repos", "net-live")
+        self.assertIn("gate_lane", r.stderr)
+        self.assertIn("precheck", r.stderr)
+        self.assertIn("TOCA", r.stderr)
 
     def test_express_with_service_repo_records_repos(self):
         task = self.ws_task()
@@ -616,15 +649,16 @@ class PolicyTest(unittest.TestCase):
         self.assertIn("POLICY-LANE-005", refused.stderr)
         self.assertEqual(self.state_of(task)["repos"], ["atlas"])   # sin cambios
 
-    def test_repos_add_cannot_smuggle_infra_into_express(self):
+    def test_repos_add_of_infra_into_express_warns(self):
         task = self.ws_task()
         self.assertEqual(self.run_policy("init", task, "--lane", "express",
                                          "--repos", "atlas").returncode, 0)
-        refused = self.add_repos(task, "terraform-core")
-        self.assertEqual(refused.returncode, 3)
-        self.assertIn("POLICY-LANE-004", refused.stderr)
-        self.assertIn("terraform-core", refused.stderr)
-        self.assertEqual(self.state_of(task)["repos"], ["atlas"])
+        avisado = self.add_repos(task, "terraform-core")
+        self.assertEqual(avisado.returncode, 0, avisado.stderr)
+        self.assertIn("POLICY-LANE-004", avisado.stderr)
+        self.assertIn("terraform-core", avisado.stderr)
+        # #71: el repo SI entra; quien decide es gate_lane, sobre el diff
+        self.assertEqual(self.state_of(task)["repos"], ["atlas", "terraform-core"])
 
     def test_repos_add_without_a_reason_is_an_edit_by_hand(self):
         task = self.ws_task()
@@ -1202,18 +1236,17 @@ class PolicyTest(unittest.TestCase):
         self.assertEqual(created.returncode, 0, created.stderr)
         self.assertEqual(json.loads((task / "state.json").read_text())["repos"], ["atlas"])
 
-    def test_quick_with_infra_repo_is_refused_at_init_too(self):
-        # mismo criterio que express: el carril corto promete cero infra, y
-        # descubrirlo en el precheck cuesta el trabajo del implementer
+    def test_quick_with_infra_repo_only_warns_too(self):
+        # mismo criterio que express (#71): lo que decide si un cambio es de
+        # infra es lo que TOCA, no en que repo vive. El freno vive en gate_lane.
         task = self.ws_task()
-        refused = self.run_policy("init", task, "--lane", "quick",
+        avisado = self.run_policy("init", task, "--lane", "quick",
                                   "--repos", "net-live")
-        self.assertEqual(refused.returncode, 3)
-        self.assertIn("POLICY-LANE-004", refused.stderr)
-        self.assertIn("quick", refused.stderr)
-        self.assertIn("net-live", refused.stderr)
-        self.assertIn("standard", refused.stderr)
-        self.assertFalse((task / "state.json").exists())
+        self.assertEqual(avisado.returncode, 0, avisado.stderr)
+        self.assertIn("POLICY-LANE-004", avisado.stderr)
+        self.assertIn("quick", avisado.stderr)
+        self.assertIn("net-live", avisado.stderr)
+        self.assertTrue((task / "state.json").exists())
 
     def test_escalate_from_quick_lands_where_the_new_lane_can_move(self):
         # La trampa que abrió el carril nuevo: escalar mandaba SIEMPRE a rfc, y

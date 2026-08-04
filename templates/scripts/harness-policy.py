@@ -582,8 +582,13 @@ def vet_repos_for_lane(lane: str, repos: list, ws: Path) -> None:
     divergen en silencio justo donde el carril promete algo que gate_lane va a
     cobrar al final.
 
-    Los mensajes NO cambian a propósito: hay tests que comparan texto literal,
-    y quien los lee en la terminal ya aprendió a reconocerlos."""
+    Los mensajes NO cambian sin motivo: hay tests que comparan texto literal, y
+    quien los lee en la terminal ya aprendió a reconocerlos. La excepción
+    deliberada es POLICY-LANE-004, que pasó de RECHAZO a AVISO (#71) porque
+    decidía por el kind del repo y no por el diff; el identificador se conserva
+    justo para que siga siendo grepeable y reconocible. POLICY-LANE-005 sigue
+    siendo rechazo duro: que quick sea de un solo repo es una promesa
+    estructural que ningún diff arregla."""
     if not repos:
         return
     # quick es de UN repo, y eso se puede comprobar ACÁ: es la única
@@ -621,12 +626,34 @@ def vet_repos_for_lane(lane: str, repos: list, ws: Path) -> None:
     if lane in ("quick", "express"):
         infra = [r for r in repos if kinds.get(r) in ("infra-live", "infra-module")]
         if infra:
-            fail("POLICY-LANE-004",
-                 f"carril {lane} con repos de infra: {', '.join(infra)} "
-                 f"(kind infra-module/infra-live en manifest.yaml). El carril "
-                 f"{lane} promete cero infra y gate_lane lo va a bloquear "
-                 "DESPUÉS de que el implementer trabaje. Remediación: iniciá "
-                 "con --lane standard (o full), o quitá ese repo de la tarea")
+            # ── AVISA, NO RECHAZA (#71) ────────────────────────────────
+            # Esto rechazaba por el KIND DEL REPO, antes de que existiera un
+            # diff. El gate que decía anticipar (gate_lane, en ship.sh) decide
+            # por las RUTAS QUE EL DIFF TOCA, así que este chequeo era
+            # estrictamente MÁS GRUESO que el que protege: miraba el repo
+            # entero, no el cambio.
+            #
+            # Medido: 20 de 31 repos del workspace son infra-* porque son apps
+            # que llevan su terraform/ al lado del código. Agregar dos líneas a
+            # un .gitignore no tenía NINGÚN carril rápido: el único camino era
+            # --lane standard, o sea RFC con abogados para un cambio de dos
+            # líneas que gate_lane habría dejado pasar. Eso empuja justo adonde
+            # la Ley 15 dice que no: ceremonia desproporcionada, o saltarse el
+            # carril.
+            #
+            # El freno no desaparece, se muda a donde el criterio es correcto:
+            # gate_lane corre en el PRECHECK, antes de gastar reviewer, así que
+            # descubrirlo ahí es barato. Y va atado a haber cerrado el hueco de
+            # `.tf` suelto en LANE_GUARD_PATTERN: sin eso, este aviso dejaría
+            # pasar un terraform crudo sin ningún freno.
+            print(f"⚠️  POLICY-LANE-004 (aviso): carril {lane} con repos de "
+                  f"infra: {', '.join(infra)} (kind infra-module/infra-live en "
+                  "manifest.yaml). El carril promete cero contratos, "
+                  "migraciones ni infra, y quien lo verifica es gate_lane en el "
+                  "precheck, sobre lo que el diff TOCA: si tu cambio no toca "
+                  "terraform/helm/proto/migraciones, pasa; si los toca, ahí "
+                  "escalás y no perdiste el trabajo",
+                  file=sys.stderr)
     unknown = [r for r in repos if kinds and r not in kinds]
     if unknown:
         print(f"⚠️  repos fuera de manifest.yaml (sin kind conocido): "

@@ -8,6 +8,27 @@
 #
 # Uso: deploy-watch.sh <task-id> <repo>
 # Córrelo autenticado: scripts/with-secrets.sh scripts/deploy-watch.sh ...
+#
+# ── PERILLAS DE TIEMPO ────────────────────────────────────────────────
+# Este script NUNCA espera para siempre, y eso se sostiene con dos escalas
+# distintas. Confundirlas fue el bug que costó el rediseño: un deadline de
+# etapa no acota una llamada, así que una sola consulta colgada volvía ficción
+# el presupuesto entero de la etapa.
+#
+#   DEPLOY_CALL_TIMEOUT     30    cuánto puede tardar UNA consulta (gh, kubectl,
+#                                 argocd, kargo, git). Pasado eso no está lenta,
+#                                 está muerta.
+#   DEPLOY_CALL_GRACE        5    de SIGTERM a SIGKILL, por consulta
+#   DEPLOY_ACTIONS_TIMEOUT 1800   cuánto se espera a que el run de Actions
+#                                 TERMINE. GitHub no pone ningún techo útil: un
+#                                 run puede vivir 35 días.
+#   DEPLOY_ACTIONS_POLL_SECS 10   cada cuánto se le pregunta
+#   DEPLOY_TIMEOUT          900   cuánto se espera a que ArgoCD llegue a sano
+#   DEPLOY_POLL_SECS         10   cada cuánto se le pregunta al cluster
+#   DEPLOY_SMOKE_TIMEOUT    120   cuánto puede tardar el smoke del canary
+#   DEPLOY_HARD_LIMIT      2400   techo TOTAL del script. Backstop: si algún
+#                                 camino nuevo se olvida de acotar, esto lo mata
+#                                 igual y dice en qué etapa estaba.
 set -uo pipefail
 
 TASK="${1:?uso: deploy-watch.sh <task-id> <repo>}"
@@ -20,8 +41,36 @@ WS="$(cd "$(dirname "$0")/.." && pwd)"
 # lo que promete. Nos pasó: la primera versión de esta línea iba arriba.)
 # shellcheck source=/dev/null
 [ -f "$WS/scripts/emit.sh" ] && . "$WS/scripts/emit.sh" || emit() { :; }
+
+# ── EL ACOTADOR. NO ES FAIL-OPEN, Y ESA ES TODA LA DIFERENCIA ─────────
+# Este watcher bordea la red en nueve lugares. Ninguna de las CLIs del stack
+# tiene timeout propio que sirva: `gh` no tiene ninguno (la librería go-gh sí
+# soporta el campo, gh nunca lo puebla), `kargo` tampoco, `argocd` solo en
+# `app wait|sync|get`, y `kubectl --request-timeout` viene en 0 y acota UNA
+# request, no la invocación. O sea que este helper no es redundante con las
+# flags nativas: para gh y kargo es el ÚNICO límite que existe.
+#
+# Si falta, se dice. Un watcher que se cuelga es el bug que este archivo entero
+# viene a matar, y degradar a "sin límite" en silencio sería repetirlo.
+# shellcheck source=/dev/null
+if [ -f "$WS/scripts/bounded.sh" ]; then
+  . "$WS/scripts/bounded.sh"
+else
+  run_bounded() { shift 2; "$@"; }
+  FALTA_BOUNDED=1
+fi
+
 LOG="$WS/tasks/$TASK/deploy-$REPO.log"; mkdir -p "$WS/tasks/$TASK"
 ORG="{{GITHUB_ORG}}"
+
+# ── PRESUPUESTOS ──────────────────────────────────────────────────────
+# Dos escalas distintas, y confundirlas fue el bug de fondo de este archivo:
+#   · POR LLAMADA: cuánto puede tardar UNA consulta antes de declararla colgada.
+#   · POR ETAPA:   cuánto se espera a que un deploy progrese (eso es DEPLOY_TIMEOUT).
+# Una consulta que no contesta en 30s no está lenta, está muerta; esperarle los
+# 900s de la etapa es lo que hacía que el deadline de la etapa fuera ficción.
+CALL_TIMEOUT="${DEPLOY_CALL_TIMEOUT:-30}"   # por consulta individual
+CALL_GRACE="${DEPLOY_CALL_GRACE:-5}"        # de SIGTERM a SIGKILL
 # ── EL NOMBRE DE LA APP SE RESUELVE, NO SE COMPONE ────────────────────
 # Componerlo del prefijo era el enfoque equivocado, no solo una
 # concatenación mal hecha. Medido en un cluster real de 17 apps: el nombre
@@ -50,7 +99,12 @@ resolve_argocd_app() {  # resolve_argocd_app <repo> → nombre de la app
   local repo="$1" found=""
   [ -n "${ARGOCD_APP:-}" ] && { printf '%s' "$ARGOCD_APP"; return 0; }
   if command -v kubectl >/dev/null 2>&1; then
-    found="$(kubectl get applications -n "${ARGOCD_NAMESPACE:-argocd}" \
+    # Doble cinturón, y los dos hacen falta. `--request-timeout` es de kubectl y
+    # acota UNA request (viene en "0", o sea sin límite), pero una invocación
+    # puede hacer discovery + list y pasarse igual; `run_bounded` acota la
+    # invocación entera. Contra un cluster blackholeado, sin esto no vuelve nunca.
+    found="$(run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+      kubectl --request-timeout="${CALL_TIMEOUT}s" get applications -n "${ARGOCD_NAMESPACE:-argocd}" \
       -o jsonpath='{range .items[*]}{.metadata.name} {.spec.source.repoURL}{"\n"}{end}' 2>/dev/null \
       | awk -v r="$repo" '$2 ~ ("/" r "(\\.git)?$") { print $1; exit }')"
     [ -n "$found" ] && { printf '%s' "$found"; return 0; }
@@ -59,11 +113,21 @@ resolve_argocd_app() {  # resolve_argocd_app <repo> → nombre de la app
   # que tenemos, y si no hay prefijo, el nombre del repo.
   app_name "$repo"
 }
-APP="$(resolve_argocd_app "$REPO")"
 TIMEOUT="${DEPLOY_TIMEOUT:-900}"
 ROLLBACK_MODE="{{ROLLBACK_MODE}}"   # auto | manual
 
-say() { SAID=1; echo "$1" | tee -a "$LOG"; }
+# ── SIEMPRE SE SABE EN QUÉ ETAPA ESTÁ ─────────────────────────────────
+# El humano que mata un watcher colgado necesita UNA cosa: dónde estaba. `say`
+# la registra sola, del propio encabezado de etapa, para que ningún camino nuevo
+# tenga que acordarse de actualizarla a mano.
+ETAPA="arranque"
+say() {
+  SAID=1
+  case "$1" in
+    "── "*) ETAPA="${1#── }"; ETAPA="${ETAPA%% ──*}" ;;
+  esac
+  echo "$1" | tee -a "$LOG"
+}
 
 # ── ESTE SCRIPT NO PUEDE SALIR MUDO, POR CONSTRUCCIÓN ─────────────────
 # Caso de campo: "deploy-watch salió 0 con salida vacía". Un watcher que
@@ -72,9 +136,65 @@ say() { SAID=1; echo "$1" | tee -a "$LOG"; }
 # mano, que es lo que este script existe para evitar. El trap garantiza al
 # menos una línea SIEMPRE, con el exit code y el contexto: si algún camino
 # nuevo sale temprano y callado, se vuelve diagnosticable en vez de mudo.
+#
+# ── PERO UN SCRIPT COLGADO NO SALE, Y ENTONCES ESTE TRAP NUNCA CORRE ──
+# Ese era el agujero: el trap cubría el camino "salgo callado" y no el camino
+# "no salgo". Y la resolución de la app de ArgoCD (un `kubectl get` sin límite)
+# vivía ARRIBA de esta línea, así que con un cluster inalcanzable el watcher se
+# colgaba antes de existir el trap: mudo y eterno, las dos cosas que este bloque
+# promete que no pasan. Ahora hay un watchdog, y APP se resuelve DESPUÉS.
 SAID=""
+HARD_LIMIT="${DEPLOY_HARD_LIMIT:-2400}"
+WATCHDOG_FLAG="$WS/tasks/$TASK/.watchdog-$REPO"
+rm -f "$WATCHDOG_FLAG"
+
+# `$$` y NO `$BASHPID`: macOS trae bash 3.2.57, donde $BASHPID no existe y
+# expande a CADENA VACÍA en silencio. `kill -TERM $BASHPID` se vuelve
+# `kill -TERM` y el watchdog no mata nada, justo en la plataforma donde este
+# script corre más. `$$` además es estable dentro del `( ) &`, que es lo que
+# hace falta acá.
+MAIN_PID=$$
+# ── EL WATCHDOG NO PUEDE SOSTENER EL stdout DEL SCRIPT ────────────────
+# `( sleep N; ... ) &` a secas HEREDA stdout, así que cualquiera que capture
+# este script en un `$( )` o lo pipee se queda esperando al watchdog aunque el
+# script ya haya terminado. Lo cazaron los tests apenas se escribió: el watcher
+# salía en un segundo y el `$( )` seguía bloqueado. Es exactamente el mismo bug
+# de árbol de procesos que run_bounded vino a arreglar, cometido de nuevo un
+# archivo más abajo. El `>/dev/null 2>&1` es lo que suelta el pipe.
+#
+# Y el sueño va PICADO, no un `sleep 2400` de una: matar al subshell NO mata a
+# su `sleep` (bash muere y el hijo queda huérfano sosteniendo lo que tuviera),
+# así que un sueño largo dejaría un proceso colgando 40 minutos por cada
+# corrida. Con tramos cortos el huérfano vive segundos. El `kill -0` además lo
+# hace auto-terminante: si el script ya murió, el watchdog se va solo, sin
+# depender de que el reap del trap haya funcionado.
+#
+# La bandera se toca ANTES de la señal: sin ella el trap no puede distinguir
+# "se acabó el presupuesto" de "el humano me mató", y decir lo primero cuando
+# pasó lo segundo es inventar.
+(
+  esperado=0
+  while [ "$esperado" -lt "$HARD_LIMIT" ]; do
+    sleep 5
+    esperado=$(( esperado + 5 ))
+    kill -0 "$MAIN_PID" 2>/dev/null || exit 0   # el script ya terminó
+  done
+  : > "$WATCHDOG_FLAG"
+  kill -TERM "$MAIN_PID" 2>/dev/null
+) >/dev/null 2>&1 &
+WATCHDOG_PID=$!
+
 mute_guard() {
   local rc=$?
+  # Lo PRIMERO, antes de cualquier cosa lenta: matar y REAPEAR el watchdog.
+  # Sin el `wait`, medido: el script terminó en 0.2s, salió 0, y dos segundos
+  # después el watchdog huérfano despertó y disparó. En una máquina ocupada ese
+  # PID pudo reciclarse y el SIGTERM le llega a un proceso inocente.
+  if [ -n "${WATCHDOG_PID:-}" ]; then
+    kill "$WATCHDOG_PID" 2>/dev/null
+    wait "$WATCHDOG_PID" 2>/dev/null
+  fi
+  rm -f "$WATCHDOG_FLAG" 2>/dev/null
   if [ -z "$SAID" ]; then
     echo "⚠️  deploy-watch está saliendo (exit $rc) SIN haber dicho una palabra."
     echo "   Eso es un bug del harness, no un estado del deploy: repórtalo con"
@@ -82,6 +202,41 @@ mute_guard() {
   fi
 }
 trap mute_guard EXIT
+
+# SIGTERM y no SIGINT. Medido en bash 3.2: un script no interactivo matado con
+# SIGINT mientras esperaba a un hijo en foreground no hizo NADA por 30s y salió
+# **0**, o sea que el watchdog no habría acotado nada y el llamador habría
+# leído éxito. Con SIGTERM el trap corre y el exit code es real.
+#
+# El trap se DIFIERE detrás del comando en foreground (del man de bash: "the
+# trap will not be executed until the command completes"), así que el watchdog
+# solo es un backstop: lo que acota de verdad es que cada llamada de red va por
+# `run_bounded`. Sin eso, esto llegaría tarde por siempre.
+watchdog_trap() {
+  if [ -f "$WATCHDOG_FLAG" ]; then
+    say "🔴 presupuesto total agotado (${HARD_LIMIT}s) en la etapa: $ETAPA"
+    say "   No es un deploy rojo: es que este watcher no terminó de mirar. NO"
+    say "   propongo revertir nada. Subí DEPLOY_HARD_LIMIT si la etapa era legítima."
+    emit assumption "deploy de $REPO NO verificado: presupuesto agotado en '$ETAPA'"
+  else
+    say "⚠️  deploy-watch recibió SIGTERM en la etapa: $ETAPA"
+    say "   (si lo mataste vos, eso es lo que estaba mirando cuando lo hiciste)"
+  fi
+  exit 124
+}
+trap watchdog_trap TERM
+
+# ── LA APP SE RESUELVE ACÁ ABAJO, Y NO ES COSMÉTICO ───────────────────
+# `resolve_argocd_app` hace un `kubectl get` que, contra un cluster blackholeado
+# (VPN caída: los paquetes se pierden en vez de rebotar), no vuelve nunca. Vivía
+# antes del primer `say` y antes de todo trap. Acá abajo ya hay watchdog, ya hay
+# mute_guard, y la llamada va acotada.
+APP="$(resolve_argocd_app "$REPO")"
+
+if [ -n "${FALTA_BOUNDED:-}" ]; then
+  say "⚠️  falta scripts/bounded.sh: las consultas de este watcher corren SIN límite."
+  say "   Puede colgarse. Actualizá la instancia (make update) para recuperarlo."
+fi
 
 # ── EL SHA QUE SE VIGILA SALE DE ship.log, NO DE UN WORKTREE ──────────
 # Bug de origen: este script usaba `git -C "$WT" rev-parse HEAD` y $WT NUNCA se
@@ -139,7 +294,17 @@ resolve_landed_sha() {
     # entre "no mergeo todavia" (1) y "no pude mirar" (3) decide si el watcher
     # se calla o declara un supuesto: son cosas distintas.
     local rc=0
-    sha="$(forge_pr_merged "$WS/repos/$REPO" "$branch" 2>/dev/null)" || rc=$?
+    # `forge_pr_merged` es una FUNCIÓN de bash y `run_bounded` ejecuta binarios:
+    # pasársela directo daría 127 siempre. Se acota un bash hijo que la
+    # re-sourcea. Lo de adentro (`gh pr list`, `glab mr view`) es la llamada de
+    # red que puede colgarse, y es exactamente la que queda acotada.
+    sha="$(run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+             bash -c '. "$1" 2>/dev/null || exit 3; forge_pr_merged "$2" "$3"' \
+             _ "$WS/scripts/forge.sh" "$WS/repos/$REPO" "$branch" 2>/dev/null)" || rc=$?
+    # Agotarse es CEGUERA, no "todavía no mergeó". El 3 ya tiene la salida
+    # honesta ("no pude preguntarle al forge") que para sin inventar; el 1
+    # afirmaría que el PR sigue abierto, que es justo lo que no sabemos.
+    [ "$rc" -eq 124 ] && rc=3
     if [ "$rc" -eq 0 ] && [ -n "$sha" ]; then
       say "── el PR de $branch ya mergeó: vigilo el commit que aterrizó (${sha:0:12}), no el que verificó ship.sh ──"
       LANDED_SHA="$sha"; return 0
@@ -328,9 +493,69 @@ fi
 # revisión que el cluster declara enferma, y ensayando el revert en seco.
 OBSERVED_REVISION=""   # lo llena check_argocd_health cuando el cluster lo dice
 
+# ── LA REVISIÓN DESPLEGADA PUEDE CONTENER MI SHIP SIN SER MI SHIP ─────
+# El arreglo del #64 comparaba por PREFIJO en los dos sentidos, que cubre "sha
+# corto contra sha largo" y nada más. No cubre el layout de infra-live donde un
+# promotor de imagen commitea el bump del tag ENCIMA del merge, en el MISMO repo
+# que ArgoCD sigue (#73):
+#
+#     fb10e79 chore: Update SVC image tag    ← lo que ArgoCD tiene desplegado
+#     5abd3d2 feat: TASK en SVC (merge)      ← lo que ship.sh reportó shippeado
+#
+# Ahí la revisión desplegada NUNCA es igual ni prefijo del sha shippeado, así
+# que TODO ship terminaba en rojo falso, quemando los 900s antes de mentir, y
+# el rojo decía literalmente "el deploy NO se hizo" cuando el commit desplegado
+# CONTIENE el cambio. Es el mismo error del #64 en la dirección contraria, y la
+# peligrosa: frena el archive y empuja a rollbacks innecesarios.
+#
+# `git merge-base --is-ancestor` lo decide exacto y sin juicio. Y no deshace el
+# #64: un commit es ancestro de sí mismo (el caso "igual" sigue verde) y una
+# revisión ANTERIOR al ship no lo contiene (sigue rojo), porque la pregunta es
+# dirigida: ¿mi sha es ancestro de lo desplegado?
+#
+# ── PERO NO ALCANZA CON LA LÍNEA SUELTA QUE PROPONE EL ISSUE ──────────
+# El objeto de la revisión observada casi nunca está en el clon local: lo pushea
+# el promotor directo al remoto. Sin él, `--is-ancestor` sale 128 y confundir
+# eso con "no lo contiene" reintroduce el mismo rojo falso por otra puerta.
+# Entonces: un fetch (acotado, y UNO SOLO por corrida: el loop de health pollea
+# cada 10s y sin memo martillaría la red), y si aun así falta el objeto, la
+# respuesta honesta es "no pude decidir", que NO es ni verde ni rojo.
+ANCESTRY_FETCHED=""
+revision_contiene_ship() {  # <mio> <observada> → 0 la contiene · 1 no · 2 no pude decidir
+  local mine="$1" obs="$2" dir="$WS/repos/$REPO" full rc
+  # `:-` y no la global pelada: esta función se extrae sola en los tests y
+  # corre bajo `set -u`, donde una global sin inicializar mata el bloque.
+  [ -n "$mine" ] && [ -n "$obs" ] || return 2
+  [ -d "$dir/.git" ] || [ -f "$dir/.git" ] || return 2
+  # ship.log guardó shas CORTOS hasta hace poco y `--is-ancestor` quiere un
+  # commit resoluble: sin expandir, un sha viejo daba 128 y se leía como ceguera
+  # cuando el dato estaba ahí.
+  full="$(git -C "$dir" rev-parse --verify --quiet "${mine}^{commit}" 2>/dev/null)" || return 2
+  if ! git -C "$dir" cat-file -e "${obs}^{commit}" 2>/dev/null; then
+    if [ -z "${ANCESTRY_FETCHED:-}" ]; then
+      ANCESTRY_FETCHED=1
+      run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+        git -C "$dir" fetch origin --quiet 2>/dev/null || true
+    fi
+    git -C "$dir" cat-file -e "${obs}^{commit}" 2>/dev/null || return 2
+  fi
+  git -C "$dir" merge-base --is-ancestor "$full" "$obs" 2>/dev/null; rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) return 2 ;;   # 128 y compañía: no pude decidir, y eso no es un "no"
+  esac
+}
+
 rollback_advice() {  # rollback_advice <sha-completo-de-mi-ship>
   local mine="$1" after="" dry
-  git -C "$WS/repos/$REPO" fetch origin --quiet 2>/dev/null || true
+  # `git fetch` también es red: contra un remoto que no responde por SSH se
+  # queda en el handshake sin timeout propio. Es la última llamada sin acotar
+  # que quedaba, y encima corre en el camino del ROJO, donde el humano ya está
+  # esperando una respuesta.
+  run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+    git -C "$WS/repos/$REPO" fetch origin --quiet 2>/dev/null || true
+  ANCESTRY_FETCHED=1   # ya se pagó acá: que el helper no lo vuelva a pagar
 
   # ¿La revisión enferma es la mía? Si el cluster nombra otra, revertir lo mío
   # es tocar producción por un problema que no es mío.
@@ -341,13 +566,37 @@ rollback_advice() {  # rollback_advice <sha-completo-de-mi-ship>
         case "$mine" in
           "$OBSERVED_REVISION"*) : ;;
           *)
-            say "⏪ NO propongo revertir nada mío: el cluster declara enferma la"
-            say "   revisión ${OBSERVED_REVISION:0:12} y mi ship fue ${mine:0:12}."
-            say "   Otro workspace aterrizó después. Revertir mi commit no arregla"
-            say "   ese deploy y ensucia el trunk compartido."
-            say "   ↳ quien puede decidir acá es quien shippeó ${OBSERVED_REVISION:0:12}."
-            emit assumption "deploy rojo de $REPO en revisión ajena ${OBSERVED_REVISION:0:12}: no propongo rollback"
-            return 0 ;;
+            # ── EL MISMO AGUJERO DEL #73, ACÁ TAMBIÉN ────────────────
+            # Este camino usaba la misma comparación por prefijo, así que con el
+            # layout del promotor de imagen declaraba "ajena" una revisión que
+            # CONTIENE mi cambio: mi commit sí es sospechoso y el revert sí
+            # corresponde, y el watcher lo declinaba con un motivo inventado.
+            revision_contiene_ship "$mine" "$OBSERVED_REVISION"; local anc=$?
+            if [ "$anc" -eq 2 ]; then
+              # No pude decidir. Se declina igual (no se propone una acción
+              # destructiva sobre producción sin poder comprobarla) pero el
+              # motivo tiene que ser el verdadero: decir "otro aterrizó después"
+              # sin saberlo es exactamente la clase de invento que este script
+              # se niega a hacer en todos los demás lados.
+              say "⏪ NO propongo revertir nada: el cluster declara enferma la revisión"
+              say "   ${OBSERVED_REVISION:0:12} y NO pude establecer si contiene mi ship"
+              say "   (${mine:0:12}): ese objeto no está en repos/$REPO ni lo trajo el fetch."
+              say "   Sin esa relación, revertir sería a ciegas. Diagnosticá y decidí vos."
+              emit assumption "deploy rojo de $REPO: no pude relacionar la revisión ${OBSERVED_REVISION:0:12} con mi ship"
+              return 0
+            fi
+            if [ "$anc" -eq 1 ]; then
+              say "⏪ NO propongo revertir nada mío: el cluster declara enferma la"
+              say "   revisión ${OBSERVED_REVISION:0:12} y mi ship fue ${mine:0:12}."
+              say "   Otro workspace aterrizó después. Revertir mi commit no arregla"
+              say "   ese deploy y ensucia el trunk compartido."
+              say "   ↳ quien puede decidir acá es quien shippeó ${OBSERVED_REVISION:0:12}."
+              emit assumption "deploy rojo de $REPO en revisión ajena ${OBSERVED_REVISION:0:12}: no propongo rollback"
+              return 0
+            fi
+            # anc = 0: la revisión enferma DESCIENDE de mi ship, o sea que lo
+            # contiene. Mi commit es sospechoso legítimo: sigue al ensayo.
+            say "   (la revisión enferma ${OBSERVED_REVISION:0:12} desciende de mi ship: lo contiene)" ;;
         esac ;;
     esac
   fi
@@ -419,7 +668,8 @@ red() { # red <motivo>
   say "🔴 $1"
   emit deploy "$REPO — $1" false
   emit stop "deploy rojo de $REPO: rollback primero; diagnóstico en tasks/$TASK/deploy-$REPO.log"
-  if command -v kubectl >/dev/null && kubectl argo rollouts get rollout "$APP" >/dev/null 2>&1; then
+  if command -v kubectl >/dev/null && run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+       kubectl --request-timeout="${CALL_TIMEOUT}s" argo rollouts get rollout "$APP" >/dev/null 2>&1; then
     say "⏪ workload con Argo Rollouts: verifica el abort-to-stable automático:"
     say "   kubectl argo rollouts status $APP"
   fi
@@ -455,6 +705,111 @@ red() { # red <motivo>
   exit 1
 }
 
+# ── POR QUÉ ESTO ES UN POLL Y NO `gh run watch` ──────────────────────
+# `gh run watch` se cuelga POR DISEÑO, no por un bug. Su loop, textual, es
+#
+#     for run.Status != shared.Completed { ... time.Sleep(duration) }
+#
+# sin deadline, sin tope de iteraciones y sin context cancelable. Sus únicas
+# flags son --compact, --exit-status e --interval: NO existe --timeout, y
+# tampoco existe el feature request en cli/cli, así que no hay nada que esperar.
+#
+# Un error de API tampoco lo cuelga (rompe el loop y devuelve error). O sea que
+# colgarse SIEMPRE significa que el status genuinamente nunca llega a
+# `completed`, y hay cuatro maneras de que eso pase:
+#   queued    → ningún runner matchea `runs-on`
+#   waiting   → un environment espera aprobación humana (hasta 30 días)
+#   pending   → bloqueado por un concurrency group
+#   requested → aceptado y todavía sin encolar
+# El techo real de un run son 35 DÍAS (límite de workflow run, incluye espera y
+# aprobación). El límite de 24h en cola está documentado solo para self-hosted;
+# para runners de GitHub no hay ninguno. Y `timeout-minutes` del workflow no
+# salva: acota EJECUCIÓN, y el reloj arranca cuando el job empieza a correr, así
+# que un job encolado no lo consume nunca. No hay configuración que haga que
+# GitHub resuelva esto: el límite lo pone este script o no lo pone nadie.
+#
+# El poll además gana dos cosas que el watch no da:
+#   · LATIDO. `gh run watch` mandaba todo a $LOG y la consola quedaba muda toda
+#     la etapa: no se podía distinguir "esperando bien" de "colgado", y por eso
+#     el humano lo mataba. Acá cada cambio de estado se dice.
+#   · UNA request por tick. El watch nativo, a --interval 3, hace 2400+ por hora
+#     contra un presupuesto de 5000, más una por job para anotaciones: un watch
+#     largo se autoinflige el rate limit.
+ACTIONS_TIMEOUT="${DEPLOY_ACTIONS_TIMEOUT:-1800}"
+RUN_STATUS=""
+RUN_CONCLUSION=""
+
+espera_run() {  # espera_run <run_id> → 0 verde · 1 rojo · 3 no pude preguntar · 124 agotado
+  local run_id="$1" deadline out prev=""
+  deadline=$(( $(date +%s) + ACTIONS_TIMEOUT ))
+  RUN_STATUS=""; RUN_CONCLUSION=""
+  while :; do
+    # Los DOS campos en UNA llamada. Pedirlos con dos `gh run view` duplica el
+    # gasto de rate limit para nada. `--jq` es de gh, así que no depende de jq.
+    out="$(run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+      gh run view "$run_id" --repo "$ORG/$REPO" --json status,conclusion \
+      --jq '[.status, (.conclusion // "")] | @tsv' 2>/dev/null)" || return 3
+    [ -n "$out" ] || return 3
+    RUN_STATUS="$(printf '%s' "$out" | awk -F'\t' '{print $1}')"
+    RUN_CONCLUSION="$(printf '%s' "$out" | awk -F'\t' '{print $2}')"
+    [ "$RUN_STATUS" != "$prev" ] && { say "   run $run_id: $RUN_STATUS"; prev="$RUN_STATUS"; }
+    if [ "$RUN_STATUS" = completed ]; then
+      # `success` y nada más. Ojo con el `--exit-status` de gh, que se usaba
+      # antes: también devuelve non-zero para `skipped` y `neutral`, o sea que
+      # mezclaba dos decisiones distintas en un exit code. Acá la conclusión
+      # queda explícita y el bloque de jobs skipped decide lo suyo aparte.
+      [ "$RUN_CONCLUSION" = success ] && return 0
+      return 1
+    fi
+    # La guarda va DESPUÉS de leer y ANTES de dormir: con el deadline arriba del
+    # loop, un run que termina justo en el límite se reportaría como agotado.
+    [ "$(date +%s)" -ge "$deadline" ] && return 124
+    sleep "${DEPLOY_ACTIONS_POLL_SECS:-10}"
+  done
+}
+
+# ── AGOTARSE TIENE CAUSA, Y LA CAUSA SE PUEDE PREGUNTAR ───────────────
+# "Se agotó el tiempo" no le dice al humano qué hacer. "El environment prod
+# espera que apruebe fulano" sí. Una ronda de diagnóstico antes de rendirse.
+# Límite honesto: NO existe API que diga "este job no se puede agendar nunca".
+# Que no haya runner se INFIERE de runner_id vacío más el tiempo transcurrido.
+diagnostica_run() {  # diagnostica_run <run_id> <status>
+  local run_id="$1" st="$2" out l
+  case "$st" in
+    waiting)
+      out="$(run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+        gh api "repos/$ORG/$REPO/actions/runs/$run_id/pending_deployments" \
+        --jq '.[] | "environment \(.environment.name): espera aprobación de \([.reviewers[].reviewer | (.login // .name)] | join(", "))"' \
+        2>/dev/null || echo "")"
+      if [ -n "$out" ]; then
+        say "   causa: APROBACIÓN HUMANA pendiente, no un problema de infraestructura."
+        while IFS= read -r l; do [ -n "$l" ] && say "     $l"; done <<< "$out"
+      else
+        say "   causa: el run está en 'waiting': una regla de protección de environment lo frena."
+      fi ;;
+    pending)
+      say "   causa: bloqueado por un CONCURRENCY GROUP: hay otro run del mismo grupo corriendo."
+      say "   ↳ mirá cuál con: gh run list --repo $ORG/$REPO --status in_progress" ;;
+    queued|requested)
+      # runner_id/runner_name vacío ⇒ ningún runner asignado todavía.
+      out="$(run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+        gh api "repos/$ORG/$REPO/actions/runs/$run_id/jobs" \
+        --jq '.jobs[] | select(.status == "queued" or .status == "waiting") | "job \(.name): runner \(.runner_name // "SIN ASIGNAR"), labels [\([.labels[]] | join(", "))]"' \
+        2>/dev/null || echo "")"
+      if [ -n "$out" ]; then
+        say "   causa: el/los job(s) siguen encolados sin runner asignado:"
+        while IFS= read -r l; do [ -n "$l" ] && say "     $l"; done <<< "$out"
+        say "   ↳ si son self-hosted: ¿hay alguno online con TODAS esas labels?"
+        say "     gh api orgs/$ORG/actions/runners --jq '.runners[] | \"\(.name) \(.status) busy=\(.busy)\"'"
+        say "   ↳ si son runners de GitHub, no hay API de capacidad: mirá githubstatus.com"
+      else
+        say "   causa: el run sigue en '$st' y no pude leer sus jobs para decir por qué."
+      fi ;;
+    *)
+      say "   el run sigue en '$st': no es un estado terminal y no terminó a tiempo." ;;
+  esac
+}
+
 # 1 · GitHub Actions del push a main (driver none: no aplica; su señal es
 #     el verify declarado y/o el smoke, más abajo)
 # gh AUSENTE se DICE: antes la etapa entera se saltaba en silencio, y el
@@ -483,7 +838,8 @@ if [ "$DRIVER" != "none" ] && command -v gh >/dev/null; then
       # la API del forge devuelve el completo. Con == la comparación no
       # matcheaba NUNCA para logs viejos, o sea el mismo silencio por otra
       # puerta. Los shas nuevos son completos y comparan exacto igual.
-      run_id="$(gh run list --repo "$ORG/$REPO" --branch "$BASE_REF" --limit 20 \
+      run_id="$(run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+        gh run list --repo "$ORG/$REPO" --branch "$BASE_REF" --limit 20 \
         --json databaseId,headSha --jq \
         "map(select(.headSha | startswith(\"$head_sha\"))) | .[0].databaseId // empty" 2>/dev/null || echo "")"
       [ -n "$run_id" ] && break
@@ -506,8 +862,33 @@ if [ "$DRIVER" != "none" ] && command -v gh >/dev/null; then
     ciego "actions: ningún run para el commit ${head_sha:0:12}"
   fi
   if [ -n "$run_id" ]; then
-    gh run watch --repo "$ORG/$REPO" "$run_id" --exit-status >>"$LOG" 2>&1 \
-      || red "Actions falló (run $run_id). Logs: gh run view --repo $ORG/$REPO $run_id --log-failed"
+    espera_run "$run_id"; run_rc=$?
+    case "$run_rc" in
+      1) red "Actions falló (run $run_id, conclusión: $RUN_CONCLUSION). Logs: gh run view --repo $ORG/$REPO $run_id --log-failed" ;;
+      3) say "⚠️ no pude consultarle a GitHub el estado del run $run_id."
+         say "   La etapa de Actions NO se verificó: esto es ceguera, no un rojo."
+         emit assumption "Actions de $REPO NO verificado: gh no contestó por el run $run_id"
+         ciego "actions: gh no contestó por el run $run_id" ;;
+      124)
+         # ── AGOTARSE NO ES ROJO. ES EL CUARTO ESTADO ─────────────────
+         # Un run que sigue en `queued` NO DESPLEGÓ NADA: el cluster corre la
+         # versión anterior, que está sana. Mandarlo a red() propondría revertir
+         # un commit que nunca llegó a ningún lado, que es exactamente el falso
+         # rojo que el tri-state de ArgoCD vino a matar, entrando por acá.
+         say "⏱️  el run $run_id no terminó en ${ACTIONS_TIMEOUT}s (sigue en '$RUN_STATUS')."
+         diagnostica_run "$run_id" "$RUN_STATUS"
+         say "   NO es un deploy rojo y NO propongo revertir nada: nada se desplegó."
+         say "   ↳ resolvé lo de arriba, o subí DEPLOY_ACTIONS_TIMEOUT si es normal que tarde."
+         emit assumption "Actions de $REPO NO verificado: el run $run_id quedó en '$RUN_STATUS' tras ${ACTIONS_TIMEOUT}s"
+         ciego "actions: el run $run_id quedó en '$RUN_STATUS' tras ${ACTIONS_TIMEOUT}s" ;;
+    esac
+  fi
+  # El resto de la etapa solo tiene sentido sobre un run que TERMINÓ EN VERDE.
+  # Antes esto colgaba del mismo `if [ -n "$run_id" ]` y no miraba el resultado,
+  # así que un camino que no observó nada seguía derecho hasta `verified
+  # "actions"`: ceguera declarada arriba y verde cantado abajo, en el mismo
+  # bloque. (El rojo no llega acá: red() sale.)
+  if [ -n "$run_id" ] && [ "${run_rc:-1}" -eq 0 ]; then
     # ── UN RUN EN success CON JOBS SALTADOS NO ES VERDE (skipped != success)
     # Caso real (issue #66): deploy.yml condiciona el job build a un bump
     # semver por conventional commits. Un ship sin prefijo (feat:/fix:) dejó
@@ -519,7 +900,8 @@ if [ "$DRIVER" != "none" ] && command -v gh >/dev/null; then
     # pipeline que no corrió no puede pasar por verificado en silencio.
     # Es rojo observado pero SIN rollback: no se desplegó nada nuevo, el
     # cluster sigue en la versión anterior; revertir no construye la imagen.
-    skipped_jobs="$(gh run view --repo "$ORG/$REPO" "$run_id" --json jobs \
+    skipped_jobs="$(run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+      gh run view --repo "$ORG/$REPO" "$run_id" --json jobs \
       --jq '[.jobs[] | select(.conclusion == "skipped") | .name] | join(", ")' \
       2>/dev/null || echo "")"
     if [ -n "$skipped_jobs" ]; then
@@ -577,7 +959,11 @@ if command -v kargo >/dev/null; then
   #
   # El stderr se captura en vez de irse a $LOG: el motivo real (auth, proyecto
   # inexistente) era justo lo que no se veía.
-  if kargo_out="$(kargo get promotions --project "{{KARGO_PROJECT}}" 2>&1)"; then
+  # El CLI de kargo NO tiene timeout de ninguna clase: ni flag, ni variable de
+  # entorno, ni context con deadline en su cliente HTTP. run_bounded es el único
+  # límite que va a tener nunca.
+  if kargo_out="$(run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+                    kargo get promotions --project "{{KARGO_PROJECT}}" 2>&1)"; then
     printf '%s\n' "$kargo_out" | tail -5 | tee -a "$LOG"
     # Caso de campo: el warehouse no refresca solo tras el push y el freight
     # nuevo no aparece hasta que alguien lo pide. Si la lista no muestra nada
@@ -642,8 +1028,9 @@ argocd_cli_ready() {
   return 1
 }
 
-check_argocd_health() {  # → 0 sano · 1 no sano · 2 no concluyente · 3 sano en revisión ajena
-  local sync health out deadline avisada=""
+check_argocd_health() {  # → 0 sano · 1 no sano · 2 no concluyente · 3 revisión ajena · 4 relación indecidible
+  local sync health out deadline rem avisada="" anc=0
+  ANCESTRY_CIEGA=""
   if command -v kubectl >/dev/null 2>&1; then
     # ── ESPERAR NO ES OPCIONAL: "Progressing" NO ES "ROTO" ──────────────
     # Esta lectura era INSTANTÁNEA: una sola consulta, sin loop y sin usar el
@@ -661,7 +1048,36 @@ check_argocd_health() {  # → 0 sano · 1 no sano · 2 no concluyente · 3 sano
       # Se pide también la REVISIÓN: sin ella no se puede saber si el deploy
       # enfermo es el nuestro o el de otro workspace que aterrizó después, y esa
       # distinción es la que decide si proponer un rollback o callarse.
-      out="$(kubectl get application "$APP" -n "${ARGOCD_NAMESPACE:-argocd}" \
+      # ── EL DEADLINE DE UN LOOP NO ACOTA UNA LLAMADA ─────────────────
+      # Este loop tenía su chequeo de deadline solo ENTRE iteraciones, y la
+      # consulta no tenía límite propio. Contra un cluster blackholeado (VPN
+      # caída: los paquetes se pierden en vez de rebotar) el `kubectl` no vuelve
+      # nunca, el chequeo de abajo no se evalúa jamás y los ${TIMEOUT}s son
+      # ficción: el watcher se cuelga para siempre en el bloque que existe para
+      # esperar con paciencia. Es el mismo defecto que apimachinery/wait
+      # documenta de su propio poll y que Go resuelve clampeando el hijo al
+      # padre ("WithDeadline ... no later than d").
+      #
+      # Dos reglas, y las dos cargan peso:
+      #   · la guarda va ANTES de la llamada, no solo después
+      #   · el límite por llamada se clampea al presupuesto QUE QUEDA, así una
+      #     consulta sola no puede sobrevivir al deadline de la etapa
+      #
+      # La guarda NO puede ser un `break` pelado: caer al respaldo por CLI
+      # convertiría en ceguera (2) algo que YA observamos enfermo. Repite el
+      # mismo veredicto del chequeo de abajo, con la última lectura buena.
+      rem=$(( deadline - $(date +%s) ))
+      if [ "$rem" -le 0 ]; then
+        if [ "${sync:-}" = "Synced" ] && [ "${health:-}" = "Healthy" ]; then
+          [ -n "${ANCESTRY_CIEGA:-}" ] && return 4
+          return 3
+        fi
+        [ -n "${sync:-}" ] && return 1
+        break   # nunca llegamos a leer nada: eso sí es ceguera
+      fi
+      [ "$rem" -gt "$CALL_TIMEOUT" ] && rem="$CALL_TIMEOUT"
+      out="$(run_bounded "$rem" "$CALL_GRACE" \
+        kubectl --request-timeout="${rem}s" get application "$APP" -n "${ARGOCD_NAMESPACE:-argocd}" \
         -o jsonpath='{.status.sync.status} {.status.health.status} {.status.sync.revision}' 2>/dev/null)" || out=""
       # Salida VACÍA es ceguera, no enfermedad (no hay cluster, no hay app, no
       # hay permisos): se sale del loop en vez de esperarle 900s a algo que no
@@ -691,6 +1107,21 @@ check_argocd_health() {  # → 0 sano · 1 no sano · 2 no concluyente · 3 sano
                  "$OBSERVED_REVISION"*) return 0 ;;
                esac ;;
           esac
+          # ── LOS PREFIJOS NO ALCANZAN: FALTA LA ANCESTRÍA (#73) ───────
+          # Van primero porque son gratis y preservan el #64 tal cual. Pero con
+          # el promotor de imagen commiteando el bump ENCIMA del merge, la
+          # revisión desplegada contiene mi ship SIN ser prefijo suyo, y sin
+          # esta rama el loop la trataba como transitorio hasta quemar los 900s
+          # y después declaraba "el deploy NO se hizo" sobre un deploy hecho.
+          revision_contiene_ship "$LANDED_SHA" "$OBSERVED_REVISION"; anc=$?
+          [ "$anc" -eq 0 ] && {
+            say "   ✓ la revisión ${OBSERVED_REVISION:0:12} desciende de mi ship (${LANDED_SHA:0:12}): lo contiene"
+            return 0
+          }
+          # anc=2 es NO PUDE DECIDIR, y no puede terminar en el rojo que afirma
+          # "el deploy no se hizo": esa afirmación necesita evidencia. Se anota
+          # y en el deadline sale por el estado de ceguera, no por el rojo.
+          [ "$anc" -eq 2 ] && ANCESTRY_CIEGA=1
           [ -z "$avisada" ] && {
             say "   ⏳ sano, pero en la revisión ${OBSERVED_REVISION:0:12}: mi ship (${LANDED_SHA:0:12}) aún no llega"
             avisada=1
@@ -702,7 +1133,10 @@ check_argocd_health() {  # → 0 sano · 1 no sano · 2 no concluyente · 3 sano
       # En el deadline, Synced+Healthy solo puede ser revisión AJENA (la mía
       # ya devolvió 0 arriba): el cambio nunca aterrizó. Se reporta aparte.
       [ "$(date +%s)" -ge "$deadline" ] && {
-        [ "$sync" = "Synced" ] && [ "$health" = "Healthy" ] && return 3
+        [ "$sync" = "Synced" ] && [ "$health" = "Healthy" ] && {
+          [ -n "${ANCESTRY_CIEGA:-}" ] && return 4
+          return 3
+        }
         return 1
       }
       sleep "${DEPLOY_POLL_SECS:-10}"
@@ -715,10 +1149,18 @@ check_argocd_health() {  # → 0 sano · 1 no sano · 2 no concluyente · 3 sano
     # "no pude ver". Con el `get` adelante, un host inalcanzable cuesta segundos
     # y se declara ceguera; el `wait` solo corre cuando ya sabemos que hay con
     # quién hablar.
-    if ! argocd app get "$APP" >>"$LOG" 2>&1; then
+    # `app get` SÍ acepta --timeout (el CLI lo tiene en get/wait/sync), pero
+    # viene en 0 = esperar para siempre, y fuera de esos tres subcomandos no hay
+    # timeout global ni variable de entorno: lo único que protege es un dial de
+    # 30s y un handshake TLS de 10s, y una vez conectado no hay nada. O sea que
+    # el `--timeout` de acá y el run_bounded no son redundantes: el primero da
+    # el error limpio del CLI, el segundo es el que garantiza que vuelva.
+    if ! run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+           argocd app get "$APP" --timeout "$CALL_TIMEOUT" >>"$LOG" 2>&1; then
       return 2
     fi
-    argocd app wait "$APP" --health --sync --timeout "$TIMEOUT" >>"$LOG" 2>&1 && return 0
+    run_bounded $(( TIMEOUT + CALL_GRACE )) "$CALL_GRACE" \
+      argocd app wait "$APP" --health --sync --timeout "$TIMEOUT" >>"$LOG" 2>&1 && return 0
     # Llegar acá es la app EXISTE y no llegó a sano: eso sí es rojo.
     return 1
   fi
@@ -752,6 +1194,24 @@ case "$health_rc" in
      emit deploy "$REPO: nunca llegó la revisión ${LANDED_SHA:0:12} (el cluster sigue en ${OBSERVED_REVISION:0:12})" false
      emit stop "deploy de $REPO no aterrizó: $APP sano en revisión ajena tras ${TIMEOUT}s"
      exit 1 ;;
+  4) # ── SANO, PERO NO PUDE RELACIONAR LA REVISIÓN CON MI SHIP ────────
+     # El rc=3 de arriba AFIRMA que el deploy no se hizo, y esa afirmación
+     # necesita evidencia. Cuando el objeto de la revisión no está en el clon
+     # local ni lo trae el fetch, no hay con qué decidir: la revisión podría
+     # perfectamente CONTENER el cambio (es el caso del #73, el promotor que
+     # commitea el bump encima). Declararlo rojo ahí es el mismo rojo falso por
+     # otra puerta. Es ceguera: se dice, se registra, y no se toca nada.
+     say "⚠️  $APP está Healthy+Synced en la revisión ${OBSERVED_REVISION:0:12}, pero"
+     say "   NO pude establecer si contiene mi ship (${LANDED_SHA:0:12}): ese objeto no"
+     say "   está en repos/$REPO y el fetch no lo trajo."
+     say "   NO digo que el deploy no se hizo, porque no lo sé, y NO propongo"
+     say "   revertir nada. Es CEGUERA, no un deploy rojo."
+     say "   ↳ remediación: refrescá el clon (git -C repos/$REPO fetch origin) y"
+     say "     volvé a correr; si el repo que ArgoCD sigue es OTRO (layout de"
+     say "     promoción con repo de manifiestos aparte), este watcher no puede"
+     say "     comparar shas entre dos repos distintos y hay que verificar a mano."
+     emit assumption "deploy de $REPO NO verificado: no pude relacionar la revisión ${OBSERVED_REVISION:0:12} con el ship ${LANDED_SHA:0:12}"
+     ciego "argocd: revisión ${OBSERVED_REVISION:0:12} sin relación establecible con el ship" ;;
   2) say "⚠️  no pude verificar el health de '$APP'."
      say "   Puede faltar kubectl, faltar credenciales de ArgoCD, o que la app"
      say "   no exista con ese nombre. Es CEGUERA, no un deploy rojo: no"
@@ -775,8 +1235,23 @@ fi   # ← fin de las etapas exclusivas de gitops
 #     dependía de la tecnología de deploy, que no tiene nada que ver.
 if [ -x "$WS/scripts/smoke/$REPO.sh" ]; then
   say "── smoke: $REPO ──"
-  "$WS/scripts/smoke/$REPO.sh" >>"$LOG" 2>&1 || red "smoke del canary falló"
-  say "✅ smoke verde"; verified "smoke del canary" cluster
+  # El smoke es shell ARBITRARIO del usuario: casi siempre curl contra el
+  # canary, y un curl sin --max-time no vuelve. Es la última defensa del
+  # pipeline; que se cuelgue equivale a no tenerla.
+  SMOKE_TIMEOUT="${DEPLOY_SMOKE_TIMEOUT:-120}"
+  run_bounded "$SMOKE_TIMEOUT" "$CALL_GRACE" "$WS/scripts/smoke/$REPO.sh" >>"$LOG" 2>&1
+  smoke_rc=$?
+  case "$smoke_rc" in
+    0) say "✅ smoke verde"; verified "smoke del canary" cluster ;;
+    # Agotarse NO es un smoke rojo: no observamos nada malo, no observamos nada.
+    # Mandarlo a red() propondría revertir por una sonda lenta.
+    124) say "⏱️  el smoke de $REPO no terminó en ${SMOKE_TIMEOUT}s: lo corté."
+         say "   NO es un smoke rojo, es un smoke que no contestó. No propongo revertir."
+         say "   ↳ salida parcial en $LOG; subí DEPLOY_SMOKE_TIMEOUT si es normal que tarde."
+         emit assumption "smoke de $REPO NO concluyente: excedió ${SMOKE_TIMEOUT}s"
+         ciego "smoke: excedió ${SMOKE_TIMEOUT}s sin contestar" ;;
+    *) red "smoke del canary falló" ;;
+  esac
 else
   say "⚠️ sin smoke para $REPO (scripts/smoke/$REPO.sh) — agrégalo; el canary es la última defensa"
   ciego "smoke: no existe scripts/smoke/$REPO.sh"
@@ -793,10 +1268,15 @@ if [ -n "$VERIFY_CMD" ]; then
   VERIFY_TIMEOUT="$(answers_repo_key "$REPO" verify_timeout)"
   case "$VERIFY_TIMEOUT" in ''|*[!0-9]*) VERIFY_TIMEOUT=120 ;; esac
   say "── verify: $REPO (timeout ${VERIFY_TIMEOUT}s) ──"
-  # perl alarm y no timeout(1): BSD no lo trae (precedente: build-slot.sh)
+  # ── ESTE ERA EL ÚNICO TRAMO "ACOTADO", Y NO LO ESTABA ──────────────
+  # Decía `perl -e 'alarm N; exec "bash","-c",$ARGV[0]'`, capturado en un $( ).
+  # verify_cmd es shell del usuario: casi siempre curl o kubectl, o sea un
+  # proceso que deja hijos. El alarm mataba al bash intermedio y el nieto seguía
+  # sosteniendo el pipe: medido, 20 segundos de reloj con un límite de 2. Y si
+  # el comando ignoraba SIGALRM (muchos la usan para sus timers), devolvía 0.
+  # El detalle está en scripts/bounded.sh.
   vrc=0
-  vout="$(perl -e 'alarm shift @ARGV; exec "bash","-c",$ARGV[0]' \
-    "$VERIFY_TIMEOUT" "$VERIFY_CMD" 2>&1)" || vrc=$?
+  vout="$(run_bounded "$VERIFY_TIMEOUT" "$CALL_GRACE" bash -c "$VERIFY_CMD" 2>&1)" || vrc=$?
   printf '%s\n' "$vout" >> "$LOG"
   if [ "$vrc" -ne 0 ]; then
     red "verify de $REPO falló o excedió ${VERIFY_TIMEOUT}s (exit $vrc; salida en $LOG)"

@@ -221,8 +221,13 @@ propósito. El gate distingue los dos rojos y cada uno trae la suya:
   deliberación faltante, así que el salto es a `--to standard` y se entra por
   `/rfc <id>`.
 
-En los dos casos el worktree y los commits se conservan: lo único que se
-recupera es la deliberación que quick saltó. Escalar no es una falla ni una
+En los dos casos el worktree, los commits **y la entrega** se conservan.
+Lo de la entrega importa y no siempre fue así: quick no declara `delivery` (su
+ship publica con el `flow` del workspace), y `/smart` declara `review`, o sea
+que seguir la remediación te dejaba con el trabajo verde y sin publicar sin que
+nada lo avisara. Ahora `escalate` MATERIALIZA la entrega en `state.json` antes
+de saltar, así que una tarea que nació para aterrizar sigue naciendo para
+aterrizar. Lo único que se recupera es la deliberación que quick saltó. Escalar no es una falla ni una
 parada, es el precio de haber dimensionado de menos, y es exactamente por qué
 el carril puede recortar prosa sin recortar seguridad.
 

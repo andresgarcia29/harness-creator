@@ -390,4 +390,38 @@ for marker in "graphify" "bd ready" "AGENTS.md"; do
     || fail "check AUSENTE en doctor: $marker"
 done
 
+
+echo "── doctor: un canonico con rama de tarea checkeada NO es un clon sano (#77)"
+# El clon canonico es la ruta de lectura recomendada (el CLAUDE.md empuja ahi
+# para orientarse). Con una rama de tarea checkeada devuelve codigo viejo sin
+# ninguna señal: caso de campo, design-system 149 commits atras, y 4 de 10
+# defectos seleccionados leyendo ese arbol ya estaban arreglados en main.
+# pull-all lo avisa cuando alguien corre `make pull`; el doctor es el chequeo
+# continuo, y "clon podrido" ya es una categoria suya.
+DW="$WS/d77"; mkdir -p "$DW/repos" "$DW/origins"
+mk77() {  # mk77 <nombre>: origin bare + clon canonico
+  local n="$1" work="$DW/seed-$1"
+  git init -q --bare -b main "$DW/origins/$n.git"
+  git init -q -b main "$work"
+  git -C "$work" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base
+  git -C "$work" remote add origin "$DW/origins/$n.git"
+  git -C "$work" push -q origin main
+  git clone -q "$DW/origins/$n.git" "$DW/repos/$n"
+}
+mk77 enrama; mk77 sano
+git -C "$DW/repos/enrama" checkout -q -b task/x
+for i in 1 2; do git -C "$DW/seed-enrama" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "a$i"; done
+git -C "$DW/seed-enrama" push -q origin main
+# el doctor NO paga red: la distancia se mide contra el origin/main local, asi
+# que el fetch lo hace el fixture (como lo haria un make pull previo).
+git -C "$DW/repos/enrama" fetch -q origin
+
+out="$(bash "$ROOT/scripts/doctor.sh" "$DW" 2>&1)"
+assert_contains "$out" "repos/enrama" "el doctor nombra el repo en otra rama"
+assert_contains "$out" "task/x" "y la rama que tiene checkeada"
+assert_contains "$out" "2 commits atrás" "y la distancia (el dato que lo vuelve accionable)"
+assert_contains "$out" "checkout main" "con la remediacion exacta"
+# Y el caso negativo: un warn barato que suena siempre se aprende a ignorar.
+assert_not_contains "$out" "repos/sano" "un clon en su trunk NO dispara el aviso"
+
 t_done

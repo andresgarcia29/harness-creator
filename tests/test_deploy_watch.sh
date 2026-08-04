@@ -10,6 +10,14 @@ t_ws
 
 mkdir -p "$WS/scripts" "$WS/bin" "$WS/.harness"
 cp "$ROOT/templates/scripts/emit.sh" "$WS/scripts/"
+# Cada llamada de red del watcher va por run_bounded, asi que los tramos que se
+# extraen del template lo necesitan definido igual que en el script completo.
+# Se copia el template REAL: una imitacion en el test probaria la imitacion.
+cp "$ROOT/templates/scripts/bounded.sh" "$WS/scripts/"
+acota() {  # lo que todo tramo extraido necesita del preambulo del watcher
+  . "$WS/scripts/bounded.sh"
+  CALL_TIMEOUT=10; CALL_GRACE=2
+}
 
 # El bloque de kargo del template, con el placeholder resuelto. Se extrae solo
 # ese tramo: el resto del watcher habla con GitHub Actions y ArgoCD reales.
@@ -23,6 +31,7 @@ run_kargo() {  # run_kargo: corre el tramo con el stub de kargo que esté en $WS
     export PATH="$WS/bin:$PATH" CLAUDE_PROJECT_DIR="$WS"
     cd "$WS"; REPO=videocore; LOG="$WS/deploy.log"
     say() { echo "$1" | tee -a "$LOG"; }
+    acota
     . "$WS/scripts/emit.sh"
     . "$WS/kargo.sh" ) 2>&1
 }
@@ -178,7 +187,8 @@ assert_contains "$out" "kargo CLI no está" "kargo ausente: también se dice (un
 dwt="$(cat "$ROOT/templates/scripts/deploy-watch.sh.tmpl")"
 assert_contains "$dwt" "trap mute_guard EXIT" "existe el guard de salida muda"
 assert_contains "$dwt" "SIN haber dicho una palabra" "y su mensaje nombra el bug con el contexto"
-assert_contains "$dwt" 'say() { SAID=1' "say alimenta el guard (toda línea cuenta como habla)"
+assert_contains "$dwt" 'SAID=1' "say alimenta el guard (toda línea cuenta como habla)"
+assert_contains "$dwt" 'ETAPA="${1#── }"' "y ademas registra la etapa, para que el watchdog pueda decir donde murio"
 
 echo
 echo "── verify declarado por repo: corre para TODOS los drivers, incluido none"
@@ -417,7 +427,9 @@ grep -q 'branch "\$BASE_REF"' "$ROOT/templates/scripts/deploy-watch.sh.tmpl" \
 
 echo
 echo "── rollback en trunk compartido: no revertir por el rojo de otro"
-extract_fn rollback_advice > "$WS/rb.sh"
+# rollback_advice consulta revision_contiene_ship (#73): el helper viaja con el
+# bloque, igual que en el camino verde.
+{ extract_fn revision_contiene_ship; extract_fn rollback_advice; } > "$WS/rb.sh"
 mkdir -p "$WS/repos/videocore"
 git init -q -b main "$WS/repos/videocore"
 ( cd "$WS/repos/videocore"; git config user.email t@t; git config user.name t
@@ -425,18 +437,33 @@ git init -q -b main "$WS/repos/videocore"
   echo b > f.txt; git add -A; git commit -qm mio
   git update-ref refs/remotes/origin/main HEAD )
 MINE="$( cd "$WS/repos/videocore" && git rev-parse HEAD )"
+# Una revision AJENA de verdad: existe en el repo y NO desciende de MINE. Antes
+# este test usaba un sha inventado (999...9) y afirmaba que el watcher lo
+# declaraba "ajeno": eso era el bug del #73, no la conducta deseada. Con el
+# objeto ausente no se PUEDE saber si contiene el ship, y decir "otro aterrizo
+# despues" era inventar un culpable. El caso indecidible tiene su propio test
+# mas abajo, con el mensaje honesto.
+AJENA="$( cd "$WS/repos/videocore" \
+  && git commit-tree "$(git rev-parse HEAD~1^{tree})" -p "$(git rev-parse HEAD~1)" -m "de otro" )"
 
 run_rb() {  # run_rb <observed-revision> <sha>
   ( set -u; WS="$WS"; REPO=videocore; TASK=T7; BASE_REF=main
     ROLLBACK_MODE=auto; OBSERVED_REVISION="$1"
     LOG="$WS/rb.log"; say() { echo "$1"; }; emit() { :; }
+    acota
     . "$WS/rb.sh"; rollback_advice "$2" ) 2>&1
 }
 
-out="$(run_rb "9999999999999999999999999999999999999999" "$MINE")"
+out="$(run_rb "$AJENA" "$MINE")"
 assert_contains "$out" "NO propongo revertir nada mío" \
   "revisión enferma AJENA: no propone revertir lo propio"
 assert_contains "$out" "workspace aterrizó después" "y dice por qué"
+
+# Y el sha que NO existe en el clon: se declina igual (no se toca produccion a
+# ciegas) pero el motivo es el verdadero, no un culpable inventado.
+out="$(run_rb "9999999999999999999999999999999999999999" "$MINE")"
+assert_contains "$out" "NO pude establecer" "revisión que ni existe: dice que no pudo decidir"
+assert_not_contains "$out" "workspace aterrizó después" "sin atribuirsela a nadie"
 
 out="$(run_rb "$MINE" "$MINE")"
 assert_contains "$out" "revert en git de $MINE" "revisión enferma PROPIA: sí propone el revert"
@@ -483,6 +510,7 @@ stale_head="$( cd "$WS/repos/stale" && git rev-parse HEAD )"
 out="$( set -u; WS="$WS"; REPO=stale; TASK=T7; BASE_REF=main
         ROLLBACK_MODE=manual; OBSERVED_REVISION=""
         LOG="$WS/rb2.log"; say() { echo "$1"; }; emit() { :; }
+        acota
         . "$WS/rb.sh"; rollback_advice "$MINE_S" 2>&1 )"
 assert_contains "$out" "PARO" "ensayo contra el main REAL: detecta el conflicto y para"
 assert_not_contains "$out" "revert manual sugerido" \
@@ -557,7 +585,9 @@ echo "── el health por kubectl ESPERA: 'Progressing' no es 'roto'"
 # Progressing es lo NORMAL y transitorio, y ese estado devolvia 1 = rojo = red()
 # = propuesta de rollback sobre un deploy que iba bien. Es el mismo falso rojo
 # que esta familia de bugs vino a matar, entrando por otra puerta.
-extract_fn check_argocd_health > "$WS/health.sh"
+# check_argocd_health ahora consulta revision_contiene_ship (#73): sin el helper
+# el tramo extraido muere con 127 igual que sin run_bounded.
+{ extract_fn revision_contiene_ship; extract_fn check_argocd_health; } > "$WS/health.sh"
 mk_kubectl() {  # mk_kubectl <linea1> <linea2...>: respuestas sucesivas
   : > "$WS/kubectl.calls"
   { printf '#!/usr/bin/env bash\n'
@@ -575,6 +605,7 @@ corre_health() {  # corre_health <timeout>
     APP=demo; TIMEOUT="$1"; LOG="$WS/h.log"; OBSERVED_REVISION=""
     say() { echo "$1"; }
     PATH="$WS/bin:$PATH"
+    acota
     . "$WS/health.sh"
     check_argocd_health; echo "RC=$?" )
 }
@@ -623,7 +654,19 @@ echo "── COR-676: Actions verde NO es un deploy verificado; el cluster es qu
 # sea exactamente lo que solo se ve corriendo en el pod. Un falso verde asi es
 # peor que un rojo: nadie vuelve a mirar.
 mkdir -p "$WS/bin" "$WS/tasks/T9"
-SHA40="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+# El clon canonico de apollo tiene que EXISTIR y tener los objetos: desde el #73
+# la relacion entre la revision desplegada y el ship se decide con git, y sin
+# objetos la respuesta honesta es "no pude decidir" (rc=4), no el rojo que
+# AFIRMA que el deploy no se hizo. Los shas sinteticos de antes probaban un
+# escenario que en produccion no existe: ahi siempre hay clon.
+mkdir -p "$WS/repos/apollo"
+git init -q -b main "$WS/repos/apollo"
+( cd "$WS/repos/apollo"; git config user.email t@t; git config user.name t
+  echo v1 > app.txt; git add -A; git commit -qm "anterior"
+  echo v2 > app.txt; git add -A; git commit -qm "mi ship"
+  git update-ref refs/remotes/origin/main HEAD )
+SHA_PREV="$( cd "$WS/repos/apollo" && git rev-parse HEAD~1 )"
+SHA40="$( cd "$WS/repos/apollo" && git rev-parse HEAD )"
 sed -e "s|{{KARGO_PROJECT}}|p|g" -e "s|{{GITHUB_ORG}}|org|g" \
     -e "s|{{ARGO_APP_PREFIX}}|corvux|g" -e "s|{{ROLLBACK_MODE}}|auto|g" \
     "$ROOT/templates/scripts/deploy-watch.sh.tmpl" > "$WS/scripts/dw676.sh"
@@ -637,7 +680,9 @@ cat > "$WS/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 case "$*" in
   *"run list"*)  echo 30568698782 ;;
-  *"run watch"*) exit 0 ;;
+  # el watcher ya no usa `gh run watch` (se cuelga por diseño: su loop no tiene
+  # deadline). Ahora poll-ea status+conclusion en UNA llamada.
+  *"--json status,conclusion"*) printf 'completed\tsuccess\n' ;;
   *) exit 1 ;;
 esac
 STUB
@@ -657,6 +702,7 @@ SIN_KUBECTL="$(t_path_without kubectl)"
 run676() {  # run676 [env...]: corre el watcher de apollo con el PATH de $WS/bin
   ( cd "$WS" && CLAUDE_PROJECT_DIR="$WS" PATH="$WS/bin:$SIN_KUBECTL" \
       DEPLOY_TIMEOUT="${DW_TIMEOUT:-3}" DEPLOY_POLL_SECS=1 \
+      DEPLOY_ACTIONS_TIMEOUT="${DW_ACTIONS_TIMEOUT:-5}" DEPLOY_ACTIONS_POLL_SECS=1 \
       env -u ARGOCD_AUTH_TOKEN -u ARGOCD_URL -u ARGOCD_SERVER \
       bash scripts/dw676.sh T9 apollo ) 2>&1
 }
@@ -763,7 +809,9 @@ gh_con_jobs() {  # gh_con_jobs <json-de-jobs>: gh stub cuyo run view devuelve es
 #!/usr/bin/env bash
 case "\$*" in
   *"run list"*)  echo 30568698782 ;;
-  *"run watch"*) exit 0 ;;
+  # el poll va PRIMERO: tambien es un \`run view\`, y sin esta rama caeria en la
+  # de abajo y le correria la expresion de status al JSON de jobs.
+  *"--json status,conclusion"*) printf 'completed\tsuccess\n' ;;
   *"run view"*)  jq -r "\${@: -1}" <<'JSON'
 $1
 JSON
@@ -800,24 +848,128 @@ assert_eq 0 "$rc" "y sale 0"
 rm -f "$WS/harness-answers.yaml"
 
 echo
+echo "── un run que NUNCA termina no cuelga al watcher (y no es rojo)"
+# ESTE es el tramo que no tenia cobertura de cuelgue, y es el que colgaba en
+# campo. `gh run watch` se cuelga POR DISENO: su loop es `for run.Status !=
+# Completed` sin deadline ni context cancelable, y sus unicas flags son
+# --compact, --exit-status e --interval. No existe --timeout. El techo real de
+# un run son 35 DIAS. Se reemplazo por un poll con deadline propio.
+gh_pegado() {  # gh_pegado <status>: el run se queda en ese estado para siempre
+  cat > "$WS/bin/gh" <<STUB
+#!/usr/bin/env bash
+case "\$*" in
+  *"run list"*)                  echo 30568698782 ;;
+  *"--json status,conclusion"*)  printf '$1\t\n' ;;
+  *"pending_deployments"*)       echo "environment prod: espera aprobación de ana, beto" ;;
+  *"/jobs"*)                     echo "job build: runner SIN ASIGNAR, labels [self-hosted, linux]" ;;
+  *) exit 1 ;;
+esac
+STUB
+  chmod +x "$WS/bin/gh"
+}
+run_pegado() {  # run_pegado: como run676 pero con el presupuesto de Actions en 2s
+  ( cd "$WS" && CLAUDE_PROJECT_DIR="$WS" PATH="$WS/bin:$SIN_KUBECTL" \
+      DEPLOY_TIMEOUT=2 DEPLOY_POLL_SECS=1 \
+      DEPLOY_ACTIONS_TIMEOUT=2 DEPLOY_ACTIONS_POLL_SECS=1 \
+      env -u ARGOCD_AUTH_TOKEN -u ARGOCD_URL -u ARGOCD_SERVER \
+      bash scripts/dw676.sh T9 apollo ) 2>&1
+}
+
+printf 'project: demo\ndeploy:\n  apollo:\n    driver: actions\n' > "$WS/harness-answers.yaml"
+: > "$WS/.harness/events.jsonl"
+gh_pegado queued
+inicio=$(date +%s); out="$(run_pegado)"; rc=$?; elapsed=$(( $(date +%s) - inicio ))
+
+# (1) LO PRIMERO: que TERMINE. Con `gh run watch` esto no volvia nunca.
+[ "$elapsed" -lt 60 ] \
+  && pass "el watcher TERMINA con un run pegado en queued (${elapsed}s, no infinito)" \
+  || fail "sigue colgado: ${elapsed}s"
+
+# (2) Y que el $( ) vuelva enseguida. El watchdog corre en background y, si
+#     hereda stdout, sostiene el pipe aunque el script ya haya salido: 40
+#     minutos de cuelgue DESPUES de terminar. Lo cazo este mismo test cuando
+#     el watchdog se escribio sin el >/dev/null.
+[ "$elapsed" -lt 60 ] \
+  && pass "y el \$( ) que lo captura vuelve con el (el watchdog no sostiene stdout)" \
+  || fail "el watchdog dejo el pipe abierto"
+
+# (3) AGOTARSE NO ES ROJO. Un run en queued no desplego nada: el cluster corre
+#     la version anterior, que esta sana. Proponer un revert aca mandaria a
+#     revertir un commit que nunca llego a ningun lado.
+assert_not_contains "$out" "🔴 Actions" "agotarse NO se declara rojo"
+assert_not_contains "$out" "git revert" "y NO propone revertir nada"
+assert_not_contains "$out" "🟢" "tampoco lo da por verde"
+assert_contains "$out" "no terminó en 2s" "dice cuanto espero"
+assert_contains "$out" "sigue en 'queued'" "y en que estado quedo"
+assert_contains "$(bus)" '"kind":"assumption"' "queda como SUPUESTO, que es la categoria de 'no pude ver'"
+assert_not_contains "$(bus)" '"ok":true' "y el bus no lo da por desplegado"
+
+# (4) LA CAUSA SE NOMBRA. "Se agoto el tiempo" no le dice al humano que hacer;
+#     "el job sigue encolado sin runner" si. runner_id vacio es la senal.
+assert_contains "$out" "sin runner asignado" "nombra la causa: ningun runner tomo el job"
+assert_contains "$out" "job build" "y nombra el job concreto"
+assert_contains "$out" "self-hosted" "con las labels que nadie matchea"
+
+# (5) LATIDO: el estado se dice a la consola. Antes todo iba a \$LOG y la
+#     consola quedaba muda toda la etapa, asi que no se podia distinguir
+#     "esperando bien" de "colgado", y por eso el humano lo mataba.
+assert_contains "$out" "run 30568698782: queued" "hay latido a consola con el estado"
+
+# (6) waiting es OTRA causa y se dice distinto: no es infraestructura, es que
+#     alguien tiene que apretar un boton. Puede durar 30 dias.
+: > "$WS/.harness/events.jsonl"
+gh_pegado waiting
+out="$(run_pegado)"
+assert_contains "$out" "APROBACIÓN HUMANA" "waiting: dice que espera a una persona, no a un runner"
+assert_contains "$out" "environment prod" "y nombra el environment"
+assert_contains "$out" "ana, beto" "y a quienes tienen que aprobar"
+assert_not_contains "$out" "git revert" "tampoco propone revertir por una aprobacion pendiente"
+
+# (7) pending es la tercera: bloqueado por un concurrency group.
+: > "$WS/.harness/events.jsonl"
+gh_pegado pending
+out="$(run_pegado)"
+assert_contains "$out" "CONCURRENCY GROUP" "pending: nombra el concurrency group"
+rm -f "$WS/harness-answers.yaml"
+# EL STUB SE RESTAURA. Dejarlo pegado en 'pending' hace que el test SIGUIENTE
+# poll-ee con el presupuesto por defecto (1800s) y cuelgue la suite entera: pasó
+# al escribir este bloque, y la ironia de que el test del cuelgue colgara la
+# suite es exactamente el punto. run676 ademas acota su presupuesto de Actions
+# por si alguien vuelve a olvidarse.
+gh_con_jobs '{"jobs":[{"name":"tag","conclusion":"success"},{"name":"build","conclusion":"success"}]}'
+
+echo
 echo "── issue #64: Healthy+Synced en la revisión VIEJA no es verde"
 # Caso real: ship de corvux-landing @ 744e0a8; el watcher observo
 # revision=1b46ab06f42d (el commit ANTERIOR), Healthy+Synced, y canto verde
 # con el cambio sin desplegar. El verde exige la revision shippeada, con la
 # MISMA comparacion que el camino rojo (prefijo en cualquiera de los dos
 # sentidos: ship.log guardo shas cortos y la API devuelve completos).
+mkdir -p "$WS/repos/promo"
+git init -q -b main "$WS/repos/promo"
+( cd "$WS/repos/promo"; git config user.email t@t; git config user.name t
+  echo base > f.txt; git add -A; git commit -qm base
+  echo mio > f.txt;  git add -A; git commit -qm "feat: mi ship (merge)"
+  echo bump > chart.yaml; git add -A; git commit -qm "chore: Update image tag"
+  git update-ref refs/remotes/origin/main HEAD )
+C_BASE="$( cd "$WS/repos/promo" && git rev-parse HEAD~2 )"
+C_SHIP="$( cd "$WS/repos/promo" && git rev-parse HEAD~1 )"
+C_BUMP="$( cd "$WS/repos/promo" && git rev-parse HEAD )"
+
 corre_health_sha() {  # corre_health_sha <timeout> <sha-shippeado>
   ( export PATH="$WS/bin:$PATH" DEPLOY_POLL_SECS=1
+    WS="$WS"; REPO=promo; BASE_REF=main
     APP=demo; TIMEOUT="$1"; LOG="$WS/h.log"; OBSERVED_REVISION=""
     LANDED_SHA="$2"
     say() { echo "$1"; }
+    acota
     . "$WS/health.sh"
     check_argocd_health; echo "RC=$?" )
 }
 
-mk_kubectl "Synced Healthy 1b46ab06f42d0000000000000000000000000000"
+mk_kubectl "Synced Healthy $C_BASE"
 start=$(date +%s)
-out="$(corre_health_sha 3 744e0a8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)"
+out="$(corre_health_sha 3 "$C_SHIP")"
 elapsed=$(( $(date +%s) - start ))
 assert_not_contains "$out" "RC=0" "sano en la revision ANTERIOR: NUNCA verde"
 assert_contains "$out" "RC=3" "espera hasta el deadline y lo reporta aparte (rc=3)"
@@ -826,21 +978,98 @@ assert_contains "$out" "aún no llega" "y lo dice mientras espera"
   || fail "se paso del deadline: ${elapsed}s"
 
 # contra-mitad 1: sano en la revision shippeada SI cierra verde
-mk_kubectl "Synced Progressing 744e0a8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
-  "Synced Healthy 744e0a8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-out="$(corre_health_sha 30 744e0a8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)"
+mk_kubectl "Synced Progressing $C_SHIP" "Synced Healthy $C_SHIP"
+out="$(corre_health_sha 30 "$C_SHIP")"
 assert_contains "$out" "RC=0" "sano en la revision shippeada: verde legitimo"
 
 # contra-mitad 2: sha corto en el log contra sha completo del cluster
-mk_kubectl "Synced Healthy 744e0a8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-out="$(corre_health_sha 30 744e0a8)"
+mk_kubectl "Synced Healthy $C_SHIP"
+out="$(corre_health_sha 30 "${C_SHIP:0:7}")"
 assert_contains "$out" "RC=0" "sha corto vs completo: matchea por prefijo (como el camino rojo)"
 
 # contra-mitad 3: sin revision observada no se inventa la comparacion
 mk_kubectl "Synced Healthy "
-out="$(corre_health_sha 30 744e0a8aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)"
+out="$(corre_health_sha 30 "$C_SHIP")"
 assert_contains "$out" "RC=0" "cluster sin revision: verde degradado al de siempre"
 rm -f "$WS/bin/kubectl"
+
+echo
+echo "── issue #73: la revision desplegada DESCIENDE del ship (el promotor commitea encima)"
+# El #64 dejo la comparacion por PREFIJO en los dos sentidos. No cubre el layout
+# de infra-live donde un promotor de imagen commitea el bump del tag ENCIMA del
+# merge, en el mismo repo que ArgoCD sigue: ahi la revision desplegada nunca es
+# igual ni prefijo del sha shippeado, y TODO ship terminaba en rojo falso
+# diciendo "el deploy NO se hizo" sobre un commit que CONTIENE el cambio.
+corre_health_repo() {  # corre_health_repo <timeout> <sha-shippeado> <repo>
+  ( export PATH="$WS/bin:$PATH" DEPLOY_POLL_SECS=1
+    WS="$WS"; REPO="$3"; BASE_REF=main
+    APP=demo; TIMEOUT="$1"; LOG="$WS/h.log"; OBSERVED_REVISION=""
+    LANDED_SHA="$2"
+    say() { echo "$1"; }
+    acota
+    . "$WS/health.sh"
+    check_argocd_health; echo "RC=$?" )
+}
+
+# RED-FIRST: hoy esto da RC=3 tras quemar el timeout entero.
+mk_kubectl "Synced Healthy $C_BUMP"
+start=$(date +%s)
+out="$(corre_health_repo 20 "$C_SHIP" promo)"
+elapsed=$(( $(date +%s) - start ))
+assert_contains "$out" "RC=0" "sano en un DESCENDIENTE del ship: verde (el commit desplegado lo contiene)"
+assert_contains "$out" "desciende de mi ship" "y lo dice, en vez de callar por que dio verde"
+[ "$elapsed" -lt 15 ] \
+  && pass "y no quema el timeout entero antes de decidir (${elapsed}s)" \
+  || fail "espero ${elapsed}s: sigue tratando el descendiente como transitorio"
+
+# EL #64 NO SE DESHACE: la revision ANTERIOR al ship sigue sin ser verde, porque
+# la pregunta es dirigida (mi sha ancestro de lo desplegado, no al reves).
+mk_kubectl "Synced Healthy $C_BASE"
+out="$(corre_health_repo 3 "$C_SHIP" promo)"
+assert_contains "$out" "RC=3" "revision ANTERIOR al ship: sigue en rojo (#64 intacto)"
+assert_not_contains "$out" "RC=0" "y no se cuela por la rama de ancestria"
+
+# CEGUERA: la revision observada no existe en el clon y el fetch no la trae.
+# No puede terminar en el rojo que AFIRMA que el deploy no se hizo.
+mk_kubectl "Synced Healthy cafe1234cafe1234cafe1234cafe1234cafe1234"
+out="$(corre_health_repo 3 "$C_SHIP" promo)"
+assert_contains "$out" "RC=4" "revision indecidible: cuarto estado, ni verde ni el rojo que afirma"
+assert_not_contains "$out" "RC=3" "NO se declara 'el deploy no se hizo' sin poder comprobarlo"
+
+# Sin repo local no hay con que comparar: tambien es ceguera, no rojo.
+mk_kubectl "Synced Healthy $C_BUMP"
+out="$(corre_health_repo 3 "$C_SHIP" no-existe)"
+assert_contains "$out" "RC=4" "sin clon local: ceguera declarada, no un rojo inventado"
+rm -f "$WS/bin/kubectl"
+
+echo
+echo "── issue #73 en el camino ROJO: el mismo agujero estaba en rollback_advice"
+# Una revision ENFERMA que desciende de mi ship SI lo contiene: mi commit es
+# sospechoso legitimo y el revert corresponde. La comparacion por prefijo la
+# declaraba "ajena" y declinaba con un motivo inventado.
+run_rb_repo() {  # run_rb_repo <observed-revision> <sha> <repo>
+  ( set -u; WS="$WS"; REPO="$3"; TASK=T7; BASE_REF=main
+    ROLLBACK_MODE=manual; OBSERVED_REVISION="$1"
+    LOG="$WS/rb3.log"; say() { echo "$1"; }; emit() { :; }
+    acota
+    . "$WS/rb.sh"; rollback_advice "$2" ) 2>&1
+}
+
+out="$(run_rb_repo "$C_BUMP" "$C_SHIP" promo)"
+assert_contains "$out" "desciende de mi ship" "revision enferma DESCENDIENTE: reconoce que contiene mi cambio"
+assert_not_contains "$out" "Otro workspace aterrizó después" \
+  "y NO la declara ajena (era el motivo inventado)"
+
+# Contra-mitad: una revision de verdad ajena sigue declinando como siempre.
+out="$(run_rb_repo "$C_BASE" "$C_SHIP" promo)"
+assert_contains "$out" "NO propongo revertir nada mío" "revision que NO contiene mi ship: sigue declinando"
+assert_contains "$out" "Otro workspace aterrizó después" "con el motivo de siempre"
+
+# Indecidible: se declina igual (no se toca produccion a ciegas) pero el motivo
+# es el verdadero, no "otro aterrizo despues", que seria inventar.
+out="$(run_rb_repo "cafe1234cafe1234cafe1234cafe1234cafe1234" "$C_SHIP" promo)"
+assert_contains "$out" "NO pude establecer" "revision indecidible: dice que no pudo, y declina"
+assert_not_contains "$out" "Otro workspace aterrizó después" "sin inventar un culpable"
 
 echo
 echo "── issue #64 (extremo a extremo): sano en revision vieja cierra en rojo SIN rollback"
@@ -857,7 +1086,7 @@ STUB
 }
 
 # El ship de apollo en T9 es $SHA40; el cluster declara sano el commit ANTERIOR.
-kubectl_rev "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+kubectl_rev "$SHA_PREV"
 : > "$WS/.harness/events.jsonl"
 out="$(run676)"; rc=$?
 assert_not_contains "$out" "🟢" "sano en la revision ANTERIOR al ship: no hay verde"

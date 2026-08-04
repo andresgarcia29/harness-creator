@@ -57,6 +57,25 @@ git_id "$WS/seed-sinup" commit -q --allow-empty -m avance2
 git -C "$WS/seed-sinup" push -q origin main
 nuevo_sinup="$(git -C "$WS/seed-sinup" rev-parse --short HEAD)"
 
+# ── #77: el clon canonico con una RAMA DE TAREA checkeada ────────────
+# enrama: la rama existe en el origin (el caso de campo, design-system). El
+# pull refrescaba origin/main y cantaba "ya al dia" mientras el arbol que un
+# agente lee seguia 3 commits atras.
+mk_pair enrama
+git_id "$WS/repos/enrama" checkout -q -b task/vieja
+git -C "$WS/repos/enrama" push -q -u origin task/vieja
+for i in 1 2 3; do git_id "$WS/seed-enrama" commit -q --allow-empty -m "avance$i"; done
+git -C "$WS/seed-enrama" push -q origin main
+nuevo_enrama="$(git -C "$WS/seed-enrama" rev-parse HEAD)"
+
+# enrama2: rama local que NUNCA se pusheo (el caso post-merge, la mas comun).
+# Hoy el set-upstream falla, el pull falla, y sale un "✗" que diagnostica "red
+# o conflicto de rebase": mentira, y ademas cuenta como fallo con exit 1.
+mk_pair enrama2
+git_id "$WS/repos/enrama2" checkout -q -b task/nunca-pusheada
+git_id "$WS/seed-enrama2" commit -q --allow-empty -m avance
+git -C "$WS/seed-enrama2" push -q origin main
+
 echo "── pull-all: paralelo, seguro con mugre, honesto con fallos"
 
 out="$(bash "$WS/scripts/pull-all.sh" 2>&1)"; rc=$?
@@ -79,15 +98,32 @@ assert_contains "$out" "upstream reconfigurado a origin/main" "sin upstream: se 
 assert_eq "$nuevo_sinup" "$(git -C "$WS/repos/sinup" rev-parse --short HEAD)" "sinup quedo al HEAD nuevo (antes quedaba atras)"
 assert_not_contains "$out" "✗ sinup" "sin upstream ya no es un fallo criptico"
 
+# ── #77: la rama de tarea checkeada es su PROPIA categoria, no un verde
+assert_contains "$out" "OTRA RAMA checkeada" "el resumen tiene su seccion (el detalle se pierde en el scroll)"
+assert_contains "$out" "enrama → task/vieja (3 commits atrás de origin/main)" \
+  "nombra el repo, la rama y la DISTANCIA (el dato que convierte el falso en señal)"
+assert_not_contains "$out" "✓ enrama: ya al día" "murio el falso verde"
+assert_not_contains "$out" "✗ enrama2" "la rama sin upstream ya no se disfraza de fallo de red"
+assert_contains "$out" "enrama2 → task/nunca-pusheada" "y tambien se nombra"
+# El invariante en sus dos mitades: el arbol ajeno NO se toca, y la ref de la
+# trunk queda fresca igual (el fetch se paga).
+assert_eq "task/vieja" "$(git -C "$WS/repos/enrama" branch --show-current)" \
+  "la rama ajena NO se toca (puede tener commits sin publicar)"
+assert_eq "$nuevo_enrama" "$(git -C "$WS/repos/enrama" rev-parse origin/main)" \
+  "pero origin/main SI queda fresco: el fetch se pago"
+
 # sin el roto: exit 0, pero el resumen NO puede decir 'todo al día' con saltados
 rm -rf "$WS/repos/roto"
 out="$(bash "$WS/scripts/pull-all.sh" 2>&1)"; rc=$?
-assert_eq 0 "$rc" "sin fallos reales: exit 0 (saltado es aviso, no fallo)"
+assert_eq 0 "$rc" "sin fallos reales: exit 0 (saltado y en-rama son aviso, no fallo)"
 assert_not_contains "$out" "todo al día" "con repos saltados el resumen NO miente 'todo al día'"
-assert_contains "$out" "al día: 4 de 5 repos" "dice cuántos sí quedaron al día"
+assert_contains "$out" "al día: 4 de 7 repos" "dice cuántos sí quedaron al día (los en-rama tampoco cuentan)"
 
-# limpio el versionado: ahora sí, todo al día
+# limpio el versionado y devuelvo los clones a su trunk: ahora sí, todo al día.
+# Es la remediacion exacta que el propio resumen indica.
 git -C "$WS/repos/versionado" checkout -q -- f.txt
+git -C "$WS/repos/enrama" checkout -q main
+git -C "$WS/repos/enrama2" checkout -q main
 out="$(bash "$WS/scripts/pull-all.sh" 2>&1)"; rc=$?
 assert_eq 0 "$rc" "todo limpio: exit 0"
 assert_contains "$out" "todo al día" "y el resumen de siempre vuelve"

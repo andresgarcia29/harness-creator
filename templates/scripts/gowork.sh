@@ -57,6 +57,32 @@ WT_DIR="$WS/worktrees"
 task="${1:-}"
 repo="${2:-}"
 
+# ── MODO --base: un go.work para un ÁRBOL ARBITRARIO fuera del workspace ──
+# Lo pide gate_test_muerde de ship.sh (#75). Ese gate levanta el árbol BASE en
+# un worktree temporal bajo mktemp, o sea fuera del workspace, así que no hay
+# go.work alcanzable subiendo desde el cwd y el `replace ... => ../../pkg` del
+# layout monorepo no resuelve. El paquete ni compila, y el gate declaraba el
+# tramo sin poder mirarlo:
+#
+#   ⚠️  el ARBOL BASE no compila sin tu cambio: NO puedo verificar este test
+#       replacement directory ../../pkg does not exist
+#
+# Los SEIS servicios Go de la plataforma usan ese layout, o sea que el gate más
+# caro del precheck no verificaba nada en ninguno. La pieza ya existía acá; lo
+# único que faltaba era poder apuntarla a un directorio cualquiera.
+#
+# Las deps salen de repos/ canónico, NO del worktree vivo de la tarea: el árbol
+# base tiene que ser "todo igual MENOS tu cambio", y colar el worktree por la
+# vía del módulo compartido contaminaría justo lo que el gate mide.
+base=""
+if [ "${1:-}" = "--base" ]; then
+  base="${2:-}"; task=""; repo=""
+  [ -n "$base" ] || { echo "❌ --base necesita un directorio"; exit 1; }
+  case "$base" in /*) ;; *) echo "❌ --base quiere una ruta ABSOLUTA (recibí '$base')"; exit 1 ;; esac
+  [ -d "$base" ] || { echo "❌ --base: el directorio no existe ($base)"; exit 1; }
+  base="$(cd "$base" && pwd)"
+fi
+
 # ── descubrimiento: go.mod bajo un root, podando ruido y (opcional) una ruta extra ──
 discover() { # $1=root  [$2=ruta absoluta a podar]
   local root="$1" extra="${2:-}"
@@ -132,7 +158,14 @@ collect() { # lee paths de go.mod por stdin y agrega registros
 }
 
 donde=""
-if [ -z "$task" ]; then
+if [ -n "$base" ]; then
+  # Mismo patrón que el modo tarea: canónico primero, el árbol dado GANA por
+  # module-path. Así el paquete bajo prueba se resuelve contra la copia base y
+  # sus deps del monorepo contra repos/.
+  workfile="$base/go.work"; workdir="$base"; donde=" [árbol base del gate muerde]"
+  collect < <(discover "$REPOS_DIR")
+  collect < <(discover "$base")
+elif [ -z "$task" ]; then
   workfile="$WS/go.work"; workdir="$WS"
   collect < <(discover "$WS" "$WT_DIR")               # raíz: poda worktrees
 else

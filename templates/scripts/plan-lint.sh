@@ -192,7 +192,10 @@ fi
 LANE=""
 [ -f "$DIR/state.json" ] && LANE="$(sed -n 's/.*"lane"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' "$DIR/state.json" | head -1)"
 if [ "$LANE" = "express" ]; then
-  pat="${LANE_GUARD_PATTERN:-(\.proto$|(^|/)proto/|(^|/)migrations?/|\.sql$|(^|/)helm/|(^|/)charts/|(^|/)terraform/|(^|/)openapi\.|(^|/)swagger\.)}"
+  # `\.tf$|\.tfvars$` van ademas de `(^|/)terraform/`: un infra-module lleva los
+  # .tf en la RAIZ, sin directorio terraform/. Se agrego al pasar POLICY-LANE-004
+  # de rechazo a aviso (#71), cuando este patron quedo como unico freno.
+  pat="${LANE_GUARD_PATTERN:-(\.proto$|(^|/)proto/|(^|/)migrations?/|\.sql$|(^|/)helm/|(^|/)charts/|(^|/)terraform/|\.tf$|\.tfvars$|(^|/)openapi\.|(^|/)swagger\.)}"
   planned="$(awk '
     /^[ \t]*[-*][ \t]+[Aa]rchivos[ \t]*:/ {
       line = $0; sub(/^[^:]*:[ \t]*/, "", line)

@@ -93,7 +93,7 @@ if [ -d "$WS/repos" ]; then
 fi
 
 # 2 · Scripts de instancia ejecutables
-for s in ship.sh worktree-task.sh quiet.sh with-secrets.sh emit.sh          build-slot.sh gowork.sh py.sh fe.sh repo-brief.sh          stamp-models.sh graph-refresh.sh pull-all.sh skills-sync.sh          verdict-scaffold.sh minion-probe.sh pipeline-steps.sh plan-lint.sh          harness-bug.sh; do
+for s in ship.sh worktree-task.sh quiet.sh with-secrets.sh emit.sh bounded.sh          build-slot.sh gowork.sh py.sh fe.sh repo-brief.sh          stamp-models.sh graph-refresh.sh pull-all.sh skills-sync.sh          verdict-scaffold.sh minion-probe.sh pipeline-steps.sh plan-lint.sh          harness-bug.sh; do
   if [ -f "$WS/scripts/$s" ]; then
     [ -x "$WS/scripts/$s" ] && ok "scripts/$s ejecutable" || fail "scripts/$s no ejecutable" "chmod +x scripts/$s"
     bash -n "$WS/scripts/$s" 2>/dev/null && ok "scripts/$s sintaxis válida" || fail "scripts/$s con error de sintaxis" "revisa el archivo (bash -n scripts/$s)"
@@ -386,6 +386,35 @@ if [ -d "$WS/repos" ]; then
   if [ "$total_r" -gt 0 ] && [ $((old_fetch * 2)) -gt "$total_r" ]; then
     warn "clones posiblemente podridos: $old_fetch/$total_r sin fetch en 48h — corre make pull antes de explorar"
   fi
+
+  # ── LA OTRA FORMA DEL CLON PODRIDO: NO ES LA TRUNK (#77) ────────────
+  # El de arriba mide si el clon se fetcheó; este mide si lo que se LEE es la
+  # trunk. Un canónico con una rama de tarea checkeada tiene el fetch fresco y
+  # la ref de la trunk al día, así que pasa el chequeo anterior, y el árbol
+  # igual devuelve código de hace cientos de commits.
+  #
+  # Caso de campo: design-system en task/workspace-x1n, 149 commits atrás, el
+  # único de 31 repos en ese estado y justo el que había que auditar. Se
+  # eligieron 10 defectos leyendo ese árbol; 4 ya estaban arreglados en main.
+  # Duele especialmente porque leer repos/<repo> es la ruta que el CLAUDE.md
+  # RECOMIENDA para orientarse: el camino barato devolvía una respuesta falsa.
+  #
+  # Se nombra repo por repo (no agregado como el de FETCH_HEAD) porque serán
+  # cero o dos casos y el nombre es la parte útil. Sin red: el doctor es
+  # determinista, así que la distancia va contra el origin/<trunk> LOCAL y
+  # puede quedar corta; para un warn alcanza, y el número no se promete exacto.
+  for r in "$WS"/repos/*/; do
+    [ -d "$r/.git" ] || continue
+    rn="$(basename "$r")"
+    rb="$(git -C "$r" symbolic-ref --short HEAD 2>/dev/null || true)"
+    rt="$(git -C "$r" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
+    [ -n "$rt" ] || continue          # sin origin/HEAD no hay contra qué comparar
+    [ "$rb" = "$rt" ] && continue
+    rd="$(git -C "$r" rev-list --count "HEAD..origin/$rt" 2>/dev/null || echo '?')"
+    warn "repos/$rn tiene checkeada ${rb:-un HEAD desacoplado}, no $rt ($rd commits atrás de origin/$rt): lo que leas ahí NO es $rt"
+    echo "   ↳ cuando la rama ya no haga falta: git -C repos/$rn checkout $rt && make pull"
+    echo "     (no se toca sola: esa rama puede tener commits sin publicar)"
+  done
 fi
 
 # · Port-forwards declarados: el bloque necesita su consumidor y su esquema.

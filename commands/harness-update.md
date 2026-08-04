@@ -140,7 +140,7 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
      y no nombrarlo acá deja a las instancias sin recibirlo).
      scripts/{doctor,bootstrap,secrets,ship,worktree-task,quiet,with-secrets,
      repo-brief,stamp-models,change-id,verdict-scaffold,plan-lint,build-slot,
-     deploy-watch,emit,forge,gowork,graph-refresh,minion-probe,pull-all,
+     deploy-watch,bounded,emit,forge,gowork,graph-refresh,minion-probe,pull-all,
      ticket-close,ticket-pull,harness-bug,harness-version,skills-sync,
      pipeline-steps,py,fe,archived-repos,mark-read,verdict-beads,ship-wave,
      port-forwards,instance-ship,adr-new}.sh,

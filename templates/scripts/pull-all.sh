@@ -32,7 +32,52 @@ pull_one() {  # pull_one <dir> <slot>
   untracked="$(git -C "$d" status --porcelain 2>/dev/null | grep -c '^??' || true)"
   [ "${untracked:-0}" -gt 0 ] && note=" [$untracked untracked: no estorban al rebase]"
   branch="$(git -C "$d" symbolic-ref --short HEAD 2>/dev/null || echo desconocida)"
-  case "$branch" in main|master) ;; *) note="$note [rama: $branch]" ;; esac
+
+  # ── UN ÁRBOL QUE NO ES LA TRUNK ES UNA RESPUESTA FALSA SIN SEÑAL ─────
+  # El clon canónico es la ruta de lectura RECOMENDADA: el CLAUDE.md generado
+  # empuja al agente a consultarlo para orientarse, porque abrir veinte
+  # archivos del worktree es el anti-patrón. Con una rama de tarea checkeada,
+  # ese camino barato devuelve código viejo y este script decía "ya al día".
+  #
+  # Caso de campo: design-system en task/workspace-x1n, 149 commits atrás,
+  # el único de 31 repos en ese estado y justo el que había que auditar. Se
+  # seleccionaron 10 defectos leyendo ese árbol y 4 ya estaban arreglados en
+  # main (uno se había arreglado y revertido, y su blocker ya no existía).
+  # El pull refrescaba origin/<trunk>, así que la ref avanzaba y el árbol no.
+  #
+  # La rama ajena NO se toca: puede tener commits sin publicar, y es el mismo
+  # invariante que la guarda de refresh_canonical en worktree-task.sh (un pull
+  # sobre trabajo versionado de otro es la única forma de que esto destruya
+  # algo). Lo que sí se paga es el fetch, para que la distancia sea un número
+  # real y origin/<trunk> quede fresco para quien lee refs.
+  #
+  # Va ANTES del pull a propósito, y eso arregla de paso la otra cara del
+  # mismo bug: una rama de tarea SIN upstream (borrada del remoto tras el
+  # merge, el caso más común) hacía fallar el pull y salía un "✗" que
+  # diagnosticaba "red o conflicto de rebase". Ni red ni conflicto: el árbol
+  # simplemente no era la trunk.
+  trunk="$(git -C "$d" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')"
+  if [ -n "$trunk" ] && [ "$branch" != "$trunk" ]; then
+    local behind lbl suf="" fetched=1
+    git -C "$d" fetch origin >/dev/null 2>&1 || fetched=0
+    git -C "$d" remote set-head origin -a >/dev/null 2>&1 || true
+    behind="$(git -C "$d" rev-list --count "HEAD..origin/$trunk" 2>/dev/null || echo '?')"
+    [ "$fetched" = 0 ] && suf=" [el fetch falló: la distancia es contra el origin/$trunk local y puede ser mayor]"
+    lbl="$branch"; [ "$branch" = "desconocida" ] && lbl="HEAD desacoplado"
+    echo "◇ $name: $lbl checkeado; el árbol NO es $trunk ($behind commits atrás)$suf" > "$OUT/$slot.txt"
+    printf '%s → %s (%s commits atrás de origin/%s)%s\n' \
+      "$name" "$lbl" "$behind" "$trunk" "$suf" > "$OUT/$slot.branch"
+    # rc 3: ni fallo (1) ni saltado por mugre (2). Es aviso, no rompe el exit.
+    echo 3 > "$OUT/$slot.rc"
+    return
+  fi
+  # La nota de rama queda solo para el caso que este bloque no cubre (sin
+  # origin/HEAD resoluble). Antes decía `main|master` cableado, que además
+  # daba nota espuria en un repo con trunk `develop`.
+  [ -n "$trunk" ] || case "$branch" in
+    main|master) ;;
+    *) note="$note [rama: $branch]" ;;
+  esac
   # Sin upstream, git pull --rebase no sabe contra que rebasar: el clon queda
   # atras con un "✗" criptico que diagnostica "red o conflicto". Caso de campo
   # (COR-642): videocore quedo 40 commits atras y un doc canonico se escribio
@@ -122,12 +167,27 @@ if [ "$skip_n" -gt 0 ]; then
   echo "   Auditar sobre un clon viejo produce inventarios de código que ya no existe."
   echo "   Limpia el canónico (git -C repos/<repo> stash) y re-corre make pull."
 fi
+# Misma ley que los saltados: si no se nombra ACÁ, se pierde en el scroll y el
+# resumen vuelve a ser la mentira cara.
+branch_n=0
+for f in "$OUT"/*.branch; do
+  [ -f "$f" ] || continue
+  branch_n=$((branch_n+1))
+done
+if [ "$branch_n" -gt 0 ]; then
+  echo "── ⚠️  $branch_n repo(s) con OTRA RAMA checkeada (lo que leas ahí NO es la trunk):"
+  for f in "$OUT"/*.branch; do [ -f "$f" ] || continue; printf '     %s' "$(cat "$f")"; echo; done
+  echo "   Leer ese clon devuelve respuestas viejas sin ninguna señal, y es la ruta"
+  echo "   de lectura que el CLAUDE.md recomienda para orientarse."
+  echo "   Cuando la rama ya no haga falta: git -C repos/<repo> checkout <trunk> && make pull."
+  echo "   (la rama NO se toca sola: puede tener commits sin publicar)"
+fi
 if [ "$fails" -gt 0 ]; then
   echo "── $fails pull(s) FALLARON (red o conflicto de rebase); detalle arriba"
   exit 1
 fi
-if [ "$skip_n" -gt 0 ]; then
-  echo "── al día: $((slot - skip_n)) de $slot repos ($skip_n saltados, arriba en rojo)"
+if [ "$skip_n" -gt 0 ] || [ "$branch_n" -gt 0 ]; then
+  echo "── al día: $((slot - skip_n - branch_n)) de $slot repos ($skip_n saltados, $branch_n en otra rama; arriba en rojo)"
 else
   echo "── todo al día: $slot repos en paralelo"
 fi

@@ -29,6 +29,92 @@ base_branch() {  # base_branch <dir-del-repo> → rama trunk, sin prefijo
   printf '%s' "$b"
 }
 
+# ── REFRESCAR UN CLON CANÓNICO SIN PISAR TRABAJO AJENO ────────────────
+# Refresca el clon canónico ANTES de crear el worktree: los worktrees nacen
+# frescos de la rama trunk, pero repos/<repo> queda stale y todo lo que compone
+# contra el canónico (shims de py.sh, fallback de gowork.sh, verifies) se rompe
+# silencioso.
+#
+# La GUARDA es el invariante, no un detalle: solo se hace `pull --ff-only` si el
+# clon está en su trunk y limpio. Es la misma decisión que toma pull-all.sh, y
+# por el mismo motivo: el clon canónico es COMPARTIDO y un pull sobre trabajo
+# versionado de otro es la única forma de que este script destruya algo.
+# Best-effort: offline o dirty NO bloquea, el worktree nace de la trunk igual
+# gracias al fetch.
+#
+# Vive en una función porque ahora tiene DOS llamadores (el repo pedido y las
+# dependencias del go.work, issue #76) y dos copias divergirían justo en la
+# guarda, que es lo que no puede fallar.
+# El trunk se PASA, no se recalcula: el llamador del bucle ya lo necesita para
+# el `worktree add`, y tenerlo local acá dejaba esa variable sin definir mas
+# abajo (lo caza el test de re-entrada: "bb: unbound variable").
+refresh_canonical() {  # refresh_canonical <nombre-repo> <dir-del-repo> <trunk> [motivo]
+  local repo="$1" base="$2" bb="$3" motivo="${4:-}" cur
+  cur="$(git -C "$base" symbolic-ref --short HEAD 2>/dev/null || true)"
+  if [ "$cur" = "$bb" ] && [ -z "$(git -C "$base" status --porcelain 2>/dev/null)" ]; then
+    git -C "$base" pull --ff-only origin "$bb" >/dev/null 2>&1 \
+      || echo "⚠️  no pude refrescar repos/$repo (offline o divergió) — sigo; el worktree nace de origin/$bb."
+  else
+    echo "⚠️  repos/$repo no está limpio en $bb${cur:+ (rama: $cur)} — no lo refresco${motivo}"
+  fi
+}
+
+# ── LAS DEPENDENCIAS DEL go.work TAMBIÉN TIENEN QUE ESTAR AL DÍA (#76) ─
+# Un repo Go del monorepo depende de otros por `replace` relativo, y el go.work
+# de la tarea los resuelve contra repos/ canónico. Si uno de esos clones quedó
+# atrás, `go build` falla en CUALQUIER tarea del repo, INCLUIDA LA BASE SIN
+# CAMBIOS, y el error no habla de staleness sino de un símbolo que no existe:
+#
+#   req.GetTokenDirect undefined (type *hermespb.EmbeddedSignupRequest
+#   has no field or method GetTokenDirect)
+#
+# El precheck sale rojo por una causa que no es del cambio, y el diagnóstico
+# costó media hora la primera vez.
+#
+# pull-all.sh no alcanza: SALTA los clones con cambios versionados (correcto, no
+# se pisa trabajo ajeno) y deja la dependencia vieja igual. Acá se refresca lo
+# que ESTA tarea va a compilar, con la misma guarda, y cuando no se puede el
+# aviso nombra la CONSECUENCIA en vez de dejarla para que la descubra un rojo.
+refresh_gowork_deps() {  # refresh_gowork_deps <task-id> <repos-ya-refrescados...>
+  local task="$1"; shift
+  local work="$WS/worktrees/$task/go.work" dep name repos_real
+  [ -f "$work" ] || return 0
+  # Los DOS lados se canonizan igual. En macOS /var es un symlink a /private/var,
+  # asi que abs_path devuelve /private/var/... y el prefijo $WS/repos/ no
+  # matcheaba: la funcion entera se volvia un no-op mudo justo en la plataforma
+  # donde mas se corre.
+  repos_real="$(perl -MCwd -e 'print(Cwd::abs_path($ARGV[0]) // $ARGV[0])' "$WS/repos" 2>/dev/null)"
+  [ -n "$repos_real" ] || repos_real="$WS/repos"
+  # Las rutas del go.work son relativas al dir que lo contiene. Se resuelven, se
+  # quedan solo las que caen bajo repos/, y se mapea al nombre del repo (primer
+  # componente). perl y no realpath: BSD no lo trae (mismo criterio que el resto
+  # del harness), y perl ya es dependencia.
+  awk '/^[[:space:]]*use[[:space:]]*\(/{u=1;next} u&&/^[[:space:]]*\)/{u=0;next}
+       u{gsub(/^[[:space:]]+|[[:space:]]+$/,"");if($0!="")print}
+       /^replace[[:space:]]/{for(i=1;i<=NF;i++) if($i=="=>"&&i<NF) print $(i+1)}' "$work" \
+  | while IFS= read -r dep; do
+      [ -n "$dep" ] || continue
+      # abs_path y no solo rel2abs: rel2abs CONCATENA y deja los `..` adentro
+      # ($WS/worktrees/T/../../repos/pkg), asi que el filtro de prefijo de mas
+      # abajo no matcheaba NUNCA y la funcion entera era un no-op silencioso.
+      perl -MFile::Spec -MCwd -e '
+        my $p = File::Spec->rel2abs($ARGV[0], $ARGV[1]);
+        my $r = Cwd::abs_path($p);
+        print(($r // $p), "\n");' "$dep" "$WS/worktrees/$task" 2>/dev/null || true
+    done \
+  | sed -n "s|^$repos_real/\([^/]*\).*|\1|p" \
+  | sort -u \
+  | while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      # Los repos que esta invocación ya refrescó no se vuelven a tocar.
+      case " $* " in *" $name "*) continue ;; esac
+      [ -d "$WS/repos/$name/.git" ] || continue
+      git -C "$WS/repos/$name" fetch origin --quiet >/dev/null 2>&1 || true
+      refresh_canonical "$name" "$WS/repos/$name" "$(base_branch "$WS/repos/$name")" \
+        ". Y es DEPENDENCIA del go.work de esta tarea: puede estar atrás, y entonces go build falla con símbolos que no existen, en cualquier tarea de este repo."
+    done
+}
+
 if [ "${1:-}" = "--rm" ]; then
   TASK="${2:?uso: worktree-task.sh --rm <task-id>}"
   # ── El pin de review (.review-<repo>) TAMBIÉN es un worktree ──────────
@@ -185,13 +271,7 @@ for repo in "$@"; do
   # (shims de py.sh, fallback de gowork.sh, verifies) se rompe silencioso. Best-effort:
   # offline o dirty NO bloquea: el worktree nace de la rama trunk igual gracias al fetch.
   bb="$(base_branch "$base")"
-  cur="$(git -C "$base" symbolic-ref --short HEAD 2>/dev/null || true)"
-  if [ "$cur" = "$bb" ] && [ -z "$(git -C "$base" status --porcelain 2>/dev/null)" ]; then
-    git -C "$base" pull --ff-only origin "$bb" >/dev/null 2>&1 \
-      || echo "⚠️  no pude refrescar repos/$repo (offline o divergió) — sigo; el worktree nace de origin/$bb."
-  else
-    echo "⚠️  repos/$repo no está limpio en $bb${cur:+ (rama: $cur)} — no lo refresco (el worktree nace de origin/$bb igual)."
-  fi
+  refresh_canonical "$repo" "$base" "$bb"
   # Sin 2>/dev/null: silenciar el primer intento convertía cualquier colisión
   # (rama ya tomada por otro worktree, index.lock ajeno) en una muerte muda a
   # mitad del bucle multi-repo. El fallback aplica SOLO al caso legítimo: la
@@ -208,6 +288,10 @@ done
 # Loop interno nativo de Go: regenera el go.work de la tarea (worktree ∪ canónico como
 # fallback). Best-effort — no-op limpio si no hay módulos Go (Ley 9).
 bash "$WS/scripts/gowork.sh" "$TASK" >/dev/null 2>&1 || true
+
+# Y con el go.work ya escrito se sabe QUÉ clones va a compilar esta tarea: se
+# refrescan ahora, no cuando el compilador se queje de un símbolo (#76).
+refresh_gowork_deps "$TASK" "$@"
 
 # Prepara los worktrees frontend AL CREARLOS. Un worktree nace de origin/main:
 # sin node_modules y sin los tipos de `astro sync`, el gate ts de ship.sh no

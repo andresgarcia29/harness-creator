@@ -93,6 +93,29 @@ for via in nativo perl; do
 done
 
 echo
+echo "── el 137 de timeout(1) se normaliza a 124 (lo cazó el CI, no esta máquina)"
+# `timeout` documenta DOS salidas para el mismo hecho: 124 si el comando se pasó
+# del tiempo, y 137 si ademas hubo que escalar a SIGKILL. El fallback en perl
+# sale 124 en los dos casos, asi que sin normalizar los caminos DIVERGEN, que es
+# justo lo que el encabezado de bounded.sh advierte.
+# Se prueba con un stub y no con el binario real a proposito: en macOS no hay
+# `timeout`, y sin esto la normalizacion queda sin guardia en la mitad de las
+# maquinas. El binario real igual se ejercita arriba, donde existe.
+cat > "$WS/bin/timeout" <<'EOF'
+#!/bin/sh
+# imita a GNU: -k <dur> <dur> <cmd...>, y sale 137 cuando tuvo que usar KILL
+exit 137
+EOF
+chmod +x "$WS/bin/timeout"
+set -- $( ( set +u
+  PATH="$WS/bin:$PATH"
+  . "$WS/scripts/bounded.sh"
+  rc=0; run_bounded 1 1 true >/dev/null 2>&1 || rc=$?
+  echo "$rc $HARNESS_TIMEOUT_BIN" ) )
+assert_eq 124 "$1" "el 137 del binario nativo se reporta como 124 (un hecho, un numero)"
+rm -f "$WS/bin/timeout"
+
+echo
 echo "── el contrato está escrito donde se lee"
 
 src="$(cat "$ROOT/templates/scripts/bounded.sh")"
@@ -100,6 +123,7 @@ assert_contains "$src" 'kill("TERM", -$pid)' "el fallback señala al GRUPO (el P
 assert_contains "$src" 'kill("KILL", -$pid)' "el fallback escala a SIGKILL"
 assert_contains "$src" 'exec { $ARGV[0] } @ARGV' "usa la forma de bloque: nunca pasa por /bin/sh"
 assert_contains "$src" "exit 124" "se agota con 124, igual que timeout(1)"
+assert_contains "$src" '[ "$rc" -eq 137 ] && rc=124' "y el 137 del nativo se normaliza al mismo numero"
 
 # ── El idiom viejo NO puede volver a aparecer en ningún script ────────
 # Es la regresión que este archivo existe para hacer imposible: se escribe una

@@ -58,8 +58,29 @@ run_bounded() {  # run_bounded <segundos> <gracia> <comando...> → 124 si se ag
   local secs="$1" gracia="$2"
   shift 2
   if [ -n "$HARNESS_TIMEOUT_BIN" ]; then
+    local rc
     "$HARNESS_TIMEOUT_BIN" -k "${gracia}s" "${secs}s" "$@"
-    return $?
+    rc=$?
+    # ── LOS DOS CAMINOS TIENEN QUE DECIR EL MISMO NÚMERO ───────────────
+    # `timeout(1)` documenta DOS salidas para el mismo hecho: 124 cuando el
+    # comando se pasó del tiempo, y 137 (128+9) cuando además hubo que
+    # ESCALAR a SIGKILL porque ignoró el TERM. Los dos significan "lo
+    # cortamos nosotros", y el fallback en perl sale 124 en ambos.
+    #
+    # Esta línea es literalmente el bug que el encabezado de este archivo
+    # advierte y que igual se shippeó: en macOS no hay `timeout`, así que el
+    # camino nativo no se ejercitaba y el test pasaba; en el CI de Ubuntu,
+    # donde sí existe, el hijo que ignora TERM devolvió 137 contra un 124
+    # esperado. Por eso el test corre los DOS caminos: si solo probara el que
+    # tiene la máquina de quien escribe, esto sale a producción.
+    #
+    # Se normaliza a 124 y no al revés: el contrato de run_bounded es "se
+    # agotó", un hecho y un número. Un hijo que muere de SIGKILL por su cuenta
+    # dentro de la ventana (un OOM, por ejemplo) también se leerá como agotado,
+    # y es aceptable: la salida parcial sigue en el log y la reacción del
+    # llamador es la misma.
+    [ "$rc" -eq 137 ] && rc=124
+    return $rc
   fi
   # shellcheck disable=SC2016  # comillas simples a propósito: las $ son de perl
   perl -e '

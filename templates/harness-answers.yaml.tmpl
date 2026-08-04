@@ -29,9 +29,15 @@ instance:
 #           un cambio grande de un tirón: con merge commit revertir es
 #           `git revert -m 1 <sha>`, y con fast-forward hay que conocer el
 #           rango exacto, que nadie tiene a mano. El primer padre es la trunk.
+#           El asunto del merge declara el bump semver más fuerte que traen sus
+#           commits (feat!/feat/fix/...), porque un CI que condiciona el build
+#           al bump solo ve ESE mensaje: con un asunto sin prefijo, la trunk
+#           avanza y no se despliega nada.
 #   prs   → misma verificación, pero publica la rama y abre el PR: el cambio NO
 #           está en la trunk cuando ship.sh termina, y deploy-watch espera al
 #           merge para resolver el commit que de verdad aterrizó
+# ship.sh RELEE este valor en cada corrida: editarlo acá alcanza, no hace falta
+# re-instanciar (el sellado en scripts/ship.sh es solo el respaldo).
 flow: {{FLOW}}
 
 # Sandwich de razonamiento: juicio caro solo donde hay juicio.

@@ -117,6 +117,8 @@ harness; cada agente es contexto y mantenimiento.
    `git revert -m 1 <sha>` en vez de averiguar el rango exacto de un
    fast-forward, que el humano no tiene a mano en el momento en que lo
    necesita. El costo es una historia con merges en la trunk.
+   Esta respuesta se puede cambiar después editando `flow` en el answers:
+   `ship.sh` lo relee en cada corrida, sin re-instanciar.
 3. **DAG**: propón el orden inferido (contracts → shared → services →
    frontends) y pide corrección.
 4. **Ownership por abogado**: qué posee / no posee / invariantes.

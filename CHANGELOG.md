@@ -102,6 +102,34 @@ contra una instalación real).
   funcionando mientras el puntero esté.
 
 ### Fixed
+- **El `flow` que manda es el del `harness-answers.yaml`, no el que se selló al
+  instalar** (issue #67). `{{FLOW}}` se sustituía UNA vez, en la generación, y
+  `ship.sh` no volvía a abrir el archivo: editar el answers no cambiaba cómo
+  aterrizaba el ship hasta el próximo `/harness-update`, así que la decisión
+  registrada era decorativa. Fallaba en SILENCIO, que es lo peor: quien pedía
+  `trunk-merge-commit` para poder revertir de un tirón recibía un fast-forward
+  sin una línea de aviso y se enteraba mirando el grafo después de publicar. Y
+  el rechazo de un flow no implementado decía "harness-answers.yaml declara
+  flow: X" nombrando un archivo que jamás había leído. Ahora el knob se relee en
+  cada corrida (anclado en la columna 0, tolerando comillas y comentario al
+  margen), el valor sellado queda de respaldo para la instancia que no tenga el
+  archivo o le haya borrado la clave, y el mensaje de rechazo nombra la fuente
+  REAL del valor con su remediación (editar el answers alcanza).
+- **El merge commit con el que aterriza `trunk-merge-commit` ya declara el bump
+  semver que trae** (issue #68). El mensaje era `merge: <task> en <repo>`, que no
+  matchea ningún prefijo de conventional commits: un CI que condiciona el build
+  al bump del commit que llega a la trunk resolvía `bump_type=none` y saltaba
+  `build` y el notify de deploy. La trunk avanzaba con el cambio y NO se
+  construía ni se desplegaba nada, con el run cerrando en `success` (un job
+  saltado no mancha la conclusión). El fast-forward no tenía el problema porque
+  el CI ve los commits de la rama con sus prefijos; el merge los esconde detrás
+  de UN mensaje, así que ese mensaje pasa a decir lo mismo: el tipo más FUERTE
+  de lo que aterriza (`feat!` si la rama trae un breaking por `!` o por footer,
+  y si no `feat` > `fix` > `perf` > el tipo del commit más nuevo). No se inventa
+  un bump: sin un solo commit conventional el asunto sigue siendo `merge:` y el
+  ship lo AVISA con su remediación, porque un `fix:` de oficio convertiría un
+  cambio de docs en un release. El ship anuncia qué tipo declaró, y el merge
+  sigue siendo revertible con `git revert -m 1` (la propiedad de #58, con test).
 - **`harness-version.sh` reventaba al final cuando NO había supuestos que
   auditar.** `grep -c` imprime `0` y ADEMÁS sale 1 cuando no encuentra nada, así
   que el `|| echo 0` que protegía la línea agregaba un segundo `0`: la variable

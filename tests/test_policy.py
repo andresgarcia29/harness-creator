@@ -1237,6 +1237,80 @@ class PolicyTest(unittest.TestCase):
         self.assertEqual(self.state()["phase"], "rfc")
         self.assertEqual(self.transition("implement").returncode, 0)
 
+    # ── #74: escalar daba vuelta la entrega EN SILENCIO ──────────────
+    # quick NO declara delivery a proposito (su ship publica con el flow del
+    # workspace). Pero cuando gate_lane o LANE-004 lo rebotan, la remediacion
+    # que el harness PRESCRIBE es escalate y seguir por /smart, y /smart declara
+    # en su encabezado, sin condicion, que registra delivery: review, o sea que
+    # NO PUBLICA NADA. Caso de campo: cinco fixes de una linea, pipeline
+    # completo con RFC, 5 implementers, 4 reviewers, QA, cuatro veredictos pass,
+    # y CERO commits publicados. Nada en el camino aviso.
+    def _ws_with_flow(self, flow):
+        ws = Path(self.tmp.name)
+        if flow is not None:
+            (ws / "harness-answers.yaml").write_text(
+                "project: t\nflow: %s\ntickets: linear\n" % flow)
+        task = ws / "tasks" / "AUTO-20260804-delivery"
+        task.mkdir(parents=True)
+        return task
+
+    def _escalate(self, task, to="express"):
+        return self.run_policy("escalate", task, "--to", to, "--actor", "orch",
+                               "--reason", "gate_lane lo reboto")
+
+    def test_escalate_materializes_delivery_from_workspace_flow(self):
+        task = self._ws_with_flow("prs")
+        self.assertEqual(self.run_policy("init", task, "--lane", "quick",
+                                         "--repos", "atlas").returncode, 0)
+        self.assertEqual(self.run_policy("transition", task, "implement",
+                                         "--actor", "orch").returncode, 0)
+        up = self._escalate(task)
+        self.assertEqual(up.returncode, 0, up.stderr)
+        state = json.loads((task / "state.json").read_text())
+        self.assertEqual(state["delivery"], "prs")
+        self.assertIn("materializada", up.stdout)
+        self.assertTrue(any(h.get("kind") == "delivery" for h in state["history"]),
+                        "la materializacion tiene que quedar en el history")
+
+    def test_escalate_translates_a_trunk_flavoured_flow(self):
+        # `flow` y `delivery` NO son el mismo vocabulario: trunk-merge-commit no
+        # es un delivery valido, y copiarlo crudo moriria tipado despues.
+        task = self._ws_with_flow("trunk-merge-commit")
+        self.assertEqual(self.run_policy("init", task, "--lane", "quick",
+                                         "--repos", "atlas").returncode, 0)
+        self.assertEqual(self._escalate(task).returncode, 0)
+        self.assertEqual(json.loads((task / "state.json").read_text())["delivery"], "trunk")
+
+    def test_escalate_keeps_a_delivery_that_was_declared(self):
+        task = self._ws_with_flow("trunk")
+        self.assertEqual(self.run_policy("init", task, "--lane", "quick",
+                                         "--repos", "atlas",
+                                         "--delivery", "review").returncode, 0)
+        up = self._escalate(task)
+        self.assertEqual(up.returncode, 0, up.stderr)
+        self.assertEqual(json.loads((task / "state.json").read_text())["delivery"], "review")
+        self.assertNotIn("materializada", up.stdout)
+
+    def test_escalate_without_readable_flow_leaves_delivery_absent(self):
+        # No se inventa: sin answers legible queda ausente y manda el flow
+        # vigente al shippear, que es la conducta de siempre. Pero se DICE.
+        task = self._ws_with_flow(None)
+        self.assertEqual(self.run_policy("init", task, "--lane", "quick",
+                                         "--repos", "atlas").returncode, 0)
+        up = self._escalate(task)
+        self.assertEqual(up.returncode, 0, up.stderr)
+        self.assertNotIn("delivery", json.loads((task / "state.json").read_text()))
+        self.assertIn("no pude leer el flow", up.stderr)
+
+    def test_escalate_does_not_materialize_a_flow_ship_refuses(self):
+        # trunk-staging lo RECHAZA ship.sh (no lo implementa): traducirlo a
+        # trunk prometeria una publicacion que no va a ocurrir.
+        task = self._ws_with_flow("trunk-staging")
+        self.assertEqual(self.run_policy("init", task, "--lane", "quick",
+                                         "--repos", "atlas").returncode, 0)
+        self.assertEqual(self._escalate(task).returncode, 0)
+        self.assertNotIn("delivery", json.loads((task / "state.json").read_text()))
+
     def test_escalate_down_to_quick_is_rejected(self):
         self.assertEqual(self.run_policy("init", self.task, "--lane", "express").returncode, 0)
         down = self.run_policy("escalate", self.task, "--to", "quick", "--actor", "orch")

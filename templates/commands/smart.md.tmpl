@@ -15,8 +15,18 @@ prudencia. La red que te protege no es el humano: son los gates
 deterministas, el canary y el rollback.
 
 **La entrega ya está decidida, y no la decidís vos: la declaró la invocación.**
-`/smart` registra `delivery: review` en `state.json` (paso 0.2), y eso significa
-que este comando NO PUBLICA NADA. Commits locales en el worktree SÍ, y son
+En una tarea NUEVA, `/smart` registra `delivery: review` en `state.json`
+(paso 0.2), y eso significa que este comando NO PUBLICA NADA.
+
+**Pero en una tarea RETOMADA manda lo que `state.json` ya declare.** Si llegaste
+acá escalando desde `/quick`, esa tarea nació para publicar por el `flow` del
+workspace y `escalate` deja la entrega MATERIALIZADA en el estado (`delivery:
+prs` o `trunk`): respetala, no la pises. Escalar sube el carril, no cambia el
+destino. Antes esto no estaba escrito y el resultado fue un pipeline completo
+(RFC, 5 implementers, 4 reviewers, QA, cuatro veredictos pass) con CERO commits
+publicados, porque este párrafo se leía como incondicional.
+
+Con `delivery: review`: Commits locales en el worktree SÍ, y son
 obligatorios: sin ellos no hay precheck, ni evidencia sellada, ni review. Push,
 PR o trunk JAMÁS. Si el trabajo tenía que publicarse solo, la invocación era
 `/smart-pr` (rama + PR) o `/smart-main` (directo a la trunk); cambiar de entrega

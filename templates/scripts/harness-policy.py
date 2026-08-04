@@ -195,6 +195,54 @@ def delivery_of(state: dict) -> "str | None":
     return value
 
 
+def workspace_delivery(ws: Path) -> "str | None":
+    """La entrega que el flow del workspace implica, o None si no se puede saber.
+
+    Existe para el issue #74: escalar desde /quick daba vuelta la entrega EN
+    SILENCIO. quick no declara `delivery` a propósito (su ship publica con el
+    flow del workspace), pero la remediación que el propio harness prescribe al
+    rebotarlo es `escalate` y seguir por `/smart`, y el encabezado de /smart
+    declara sin condición que registra `delivery: review`, o sea que NO PUBLICA
+    NADA. Caso de campo: cinco fixes de una línea, pipeline completo con RFC,
+    5 implementers, 4 reviewers, QA, cuatro veredictos pass, y CERO commits
+    publicados. Nada en el camino avisó que la entrega había cambiado.
+
+    Materializar la entrega en el escalate cierra el agujero sin depender de que
+    alguien lea una advertencia en el momento justo.
+
+    OJO con el mapeo: `flow` y `delivery` NO son el mismo vocabulario. El flow
+    del answers puede ser trunk-direct-to-prod o trunk-merge-commit, que no son
+    valores válidos de delivery. Se traduce explícitamente y lo que no se
+    entiende NO se inventa: devolver None deja la conducta de hoy, que es que
+    manda el flow del workspace al shippear."""
+    answers = ws / "harness-answers.yaml"
+    try:
+        text = answers.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    flow = None
+    for line in text.splitlines():
+        # anclado en columna 0, igual que el parser de ship.sh: una clave `flow`
+        # anidada bajo otro bloque no es el knob de primer nivel.
+        if not line.startswith("flow:"):
+            continue
+        value = line[len("flow:"):]
+        value = value.split("#", 1)[0]                 # comentario al margen
+        flow = value.strip().strip('"').strip("'").strip()
+        break
+    if not flow or "{{" in flow:
+        # Placeholder sin sustituir: esa instancia se generó a medias y un
+        # literal no es una respuesta.
+        return None
+    if flow == "prs":
+        return "prs"
+    # trunk-staging lo RECHAZA ship.sh (no lo implementa), así que traducirlo a
+    # `trunk` prometería una publicación que no va a ocurrir.
+    if flow.startswith("trunk") and "staging" not in flow:
+        return "trunk"
+    return None
+
+
 def repos_pending_ship(task_dir: Path) -> list:
     """Repos de la tarea que ya tienen veredicto pero todavía no shippearon.
 
@@ -667,6 +715,35 @@ def cmd_escalate(args: argparse.Namespace) -> int:
         "from": previous_phase, "to": destination, "actor": args.actor,
         "lane": f"{current_lane}→{args.to}", "reason": args.reason,
     })
+    # ── LA ENTREGA ES EL TERCER DATO DE NACIMIENTO (#74) ────────────────
+    # Escalar ya conserva worktree y commits. La entrega era el único de los
+    # tres que el salto de carril dejaba a merced de la prosa del comando de
+    # DESTINO: una tarea de /quick llega acá SIN el campo, y /smart declara en
+    # su encabezado, sin condición, que registra `delivery: review` y no publica
+    # nada. El humano invocó algo que iba a aterrizar, siguió la remediación que
+    # el harness le indicó, y terminó verde y sin publicar.
+    #
+    # Materializar no publica MÁS de lo prometido: sin escalar, ese /quick iba a
+    # aterrizar por el flow del workspace igual. La escalación solo agrega
+    # deliberación en el medio, no cambia el destino.
+    if delivery_of(state) is None:
+        implied = workspace_delivery(task_dir.parent.parent)
+        if implied:
+            state["delivery"] = implied
+            state["history"].append({
+                "kind": "delivery", "delivery": implied, "actor": args.actor,
+                "reason": "escalate: la entrega de nacimiento no cambia de carril "
+                          f"(materializada del flow del workspace)",
+            })
+            print(f"📦 entrega materializada: {implied} (la tarea nació para publicar "
+                  "por el flow del workspace; subir de carril no lo cambia)")
+        else:
+            # No se inventa. Sin answers legible, queda ausente y al shippear
+            # manda el flow vigente, que es exactamente la conducta de hoy.
+            print("⚠️  no pude leer el flow del workspace: la entrega queda sin "
+                  "declarar y al shippear manda el flow vigente. Si seguís por "
+                  "/smart, ojo que ese comando registra delivery: review",
+                  file=sys.stderr)
     atomic(path, state)
     emit_bus(task_dir, "decision", f"carril {current_lane} → {args.to}: vuelve a {destination}")
     print(f"⤴️  {task_dir.name}: carril {current_lane} → {args.to}, fase {destination}")

@@ -2235,19 +2235,33 @@ con_limite() {  # con_limite <segundos> <comando...>
   # merece 10s más de cortesía antes del SIGKILL.
   run_bounded "$1" 2 "${@:2}"
 }
-muerde_node_colecta() {  # muerde_node_colecta <archivo> → MUERDE_NODE_RUNNER
-  local r out
+# ── UNA SONDA QUE NO CONTESTA NO ES UNA SONDA QUE DICE "NO" (#85) ────
+# La sonda se tragaba el exit y la salida del runner con un `|| true`, así que
+# TRES hechos distintos aterrizaban en el mismo veredicto: "el include no
+# alcanza este archivo", "la config del árbol base no carga" y "la sonda se
+# pasó del límite de tiempo". Los tres apagaban la garantía del gate, y el
+# operador leía siempre lo mismo ("ningún runner lo COLECTA"), que en dos de
+# los tres casos es falso: el archivo SÍ se colecta, lo que falló fue preguntar.
+# Caso de campo: un test bajo `packages/<pkg>/src/` que el propio vitest.config
+# incluye explícitamente y que `vitest run <archivo>` corre sin chistar.
+# Por eso la sonda ahora GUARDA lo que el runner contestó, distingue el timeout
+# del "no encontré", y quien la llama vuelve a preguntar sobre el árbol de la
+# rama para separar "este archivo no se colecta en ningún lado" de "no se
+# colecta EN LA BASE porque tu cambio toca la config del runner".
+muerde_node_colecta_en() {  # muerde_node_colecta_en <árbol> <archivo> → MUERDE_NODE_RUNNER
+  local arbol="$1" f="$2" r out rc
+  MUERDE_COLECTA_DIAG=""
   # shellcheck disable=SC2086
   for r in $MUERDE_NODE_RUNNERS; do
-    out=""
+    out=""; rc=0
     case "$r" in
       vitest)
         # En vitest >= 2.1 `list` es un subcomando y contesta al instante. En
         # 1.6 es un filtro, así que corre ese archivo y tarda unos segundos:
         # las dos ramas contestan lo mismo (la salida nombra el archivo si lo
         # colecta), y la vieja solo paga tiempo.
-        out="$( cd "$MUERDE_BASE" && CI=true con_limite 120 \
-                 "$WT/node_modules/.bin/vitest" list --watch=false "$1" 2>&1 )" || true
+        out="$( cd "$arbol" && CI=true con_limite 120 \
+                 "$WT/node_modules/.bin/vitest" list --watch=false "$f" 2>&1 )" || rc=$?
         # vitest < 2.1 no conoce `list`. "No pude preguntar" no es "no colecta":
         # se cae a la invocación directa, que es el statu quo exacto de antes.
         case "$out" in
@@ -2255,18 +2269,32 @@ muerde_node_colecta() {  # muerde_node_colecta <archivo> → MUERDE_NODE_RUNNER
             MUERDE_NODE_RUNNER="vitest"; return 0 ;;
         esac ;;
       jest)
-        out="$( cd "$MUERDE_BASE" && CI=true con_limite 120 \
-                 "$WT/node_modules/.bin/jest" --listTests "$1" 2>&1 )" || true ;;
+        out="$( cd "$arbol" && CI=true con_limite 120 \
+                 "$WT/node_modules/.bin/jest" --listTests "$f" 2>&1 )" || rc=$? ;;
       playwright)
-        out="$( cd "$MUERDE_BASE" && CI=true con_limite 120 \
-                 "$WT/node_modules/.bin/playwright" test --list "$1" 2>&1 )" || true ;;
+        out="$( cd "$arbol" && CI=true con_limite 120 \
+                 "$WT/node_modules/.bin/playwright" test --list "$f" 2>&1 )" || rc=$? ;;
     esac
-    if printf '%s' "$out" | grep -qF -- "$(basename "$1")"; then
+    if printf '%s' "$out" | grep -qF -- "$(basename "$f")"; then
       MUERDE_NODE_RUNNER="$r"
       return 0
     fi
+    # 124 es el contrato de run_bounded para "se agotó" (scripts/bounded.sh):
+    # una sonda cortada no contestó que no, no contestó NADA, y decir lo
+    # contrario es justo el silencio que este bloque existe para romper.
+    if [ "$rc" -eq 124 ]; then
+      MUERDE_COLECTA_DIAG="$MUERDE_COLECTA_DIAG       $r: la sonda se pasó del límite (120s) y no llegó a contestar
+"
+    else
+      MUERDE_COLECTA_DIAG="$MUERDE_COLECTA_DIAG$(printf '%s' "$out" \
+        | grep -v '^[[:space:]]*$' | tail -3 | sed "s|^|       $r (exit $rc): |")
+"
+    fi
   done
   return 1
+}
+muerde_node_colecta() {  # muerde_node_colecta <archivo>: sobre el ÁRBOL BASE
+  muerde_node_colecta_en "$MUERDE_BASE" "$1"
 }
 muerde_corre() {  # muerde_corre <clase> <unidad> → el exit REAL sobre el árbol base
   case "$1" in
@@ -2340,7 +2368,22 @@ muerde_corre_grupo() {  # muerde_corre_grupo <clase> <lista>: unidad por unidad
     # Node: si ningún runner declarado COLECTA el archivo, su exit != 0 sería el
     # "No test files found" del runner equivocado, no el rojo del test.
     if [ "$clase" = "node" ] && ! muerde_node_colecta "$u"; then
-      echo "   ⚠️  $u: ningún runner declarado lo COLECTA (el include/testDir no lo alcanza): NO puedo verificarlo"
+      echo "   ⚠️  $u: ningún runner declarado lo COLECTA sobre el ÁRBOL BASE: NO puedo verificarlo"
+      # Lo que el runner CONTESTÓ, no lo que el gate supone (#85): sin estas
+      # líneas, un include que no alcanza, una config que no carga y una sonda
+      # que se pasó del tiempo se leían igual, y el operador no tenía por dónde
+      # empezar a mirar. La sonda ya sabe cuál de los tres fue; le faltaba decirlo.
+      [ -n "${MUERDE_COLECTA_DIAG:-}" ] && printf '%s' "$MUERDE_COLECTA_DIAG"
+      # Segunda pregunta, sobre TU árbol: si ahí sí se colecta, el archivo no es
+      # incolectable: lo que no lo alcanza es la config del runner EN LA BASE,
+      # o sea que tu cambio la toca (un paquete nuevo, un include nuevo). Es un
+      # diagnóstico distinto y una remediación distinta, y confundirlos fue
+      # justo lo que hizo que la garantía de este gate se apagara sin ruido.
+      if muerde_node_colecta_en "$WT" "$u"; then
+        echo "       ↳ tu árbol SÍ lo colecta ($MUERDE_NODE_RUNNER): lo que no lo alcanza es"
+        echo "         la config del runner en la BASE, que tu cambio modifica. El rojo"
+        echo "         sobre la base hay que verificarlo a mano y pegarlo en el veredicto."
+      fi
       MUERDE_SINRED="$MUERDE_SINRED   · $u
 "
       continue

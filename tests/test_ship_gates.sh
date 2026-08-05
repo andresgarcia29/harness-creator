@@ -725,7 +725,7 @@ extract muerde_limpia >> "$WS/gate_muerde.sh"
 # la base). Sin ellas el gate extraido muere con 127 en vez de decidir.
 for fn in delta_seccion declara_tests_nuevos muerde_pytest muerde_go \
           muerde_go_base_compila muerde_tf muerde_tf_root muerde_tf_base_init \
-          muerde_node con_limite muerde_node_colecta muerde_corre \
+          muerde_node con_limite muerde_node_colecta_en muerde_node_colecta muerde_corre \
           muerde_corre_grupo muerde_salto gate_test_muerde; do
   extract "$fn" >> "$WS/gate_muerde.sh"
 done
@@ -1050,6 +1050,52 @@ assert_eq 0 "$rc" "spec fuera del include del runner: ni verde ni rojo"
 assert_contains "$out" "COLECTA" "lo dice: ningún runner declarado lo colecta"
 assert_contains "$out" "EMIT assumption" "y el supuesto viaja al bus"
 assert_not_contains "$out" "o sea que MUERDE" "sin cobrar como verificación el exit del runner equivocado"
+# #85: y ademas DICE lo que el runner contesto. Sin esa linea, "el include no
+# alcanza", "la config no carga" y "la sonda se paso del tiempo" aterrizaban en
+# el mismo mensaje, y el operador no tenia por donde empezar a mirar.
+assert_contains "$out" "No test files found" "y muestra lo que el runner contestó, no solo la conclusión del gate"
+
+# (j2) #85: la sonda pregunta sobre el ARBOL BASE, y la config del runner NO
+# viaja ahi (no es un archivo de test). Un paquete nuevo, o un include nuevo en
+# vitest.config, hacen que la base no colecte un archivo que TU arbol colecta
+# sin chistar: el gate decia "ningun runner lo COLECTA" y apagaba su garantia
+# como si el archivo fuera incolectable. Caso de campo: un test bajo
+# packages/<pkg>/src/ que el propio vitest.config incluye y que `vitest run`
+# corre perfecto. Son dos diagnosticos distintos y ahora se distinguen.
+STUB_VITEST_CFG='#!/bin/sh
+sub=""
+case "$1" in list|run) sub="$1"; shift ;; esac
+for a; do case "$a" in --*) ;; *) t="$a" ;; esac; done
+if [ ! -f vitest.config.ts ]; then
+  echo "Error: cannot load config: no vitest.config.ts en este arbol"; exit 1
+fi
+if [ "$sub" = list ]; then echo "$t"; exit 0; fi
+echo "$t"; exit 1'
+mk_node_muerde "$WS/mu14" "$PKG_VITEST" vitest "$STUB_VITEST_CFG"
+mkdir -p packages/ui/src
+printf "export default { test: { include: ['packages/**'] } }\n" > vitest.config.ts
+printf "test('tokens', () => {})\n" > packages/ui/src/tokens.test.ts
+git add -A && git commit -qm "paquete nuevo con su include"
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "config del runner que solo existe en tu rama: ni verde ni rojo"
+assert_contains "$out" "ÁRBOL BASE" "el mensaje dice DONDE no se colecta, que es todo el punto"
+assert_contains "$out" "cannot load config" "y muestra el motivo real que dio el runner"
+assert_contains "$out" "tu árbol SÍ lo colecta" "la segunda sonda separa 'incolectable' de 'la base no lo alcanza'"
+assert_contains "$out" "EMIT assumption" "y el tramo sin red viaja como supuesto igual"
+
+# (j3) #85: una sonda CORTADA no contesto "no colecta", no contesto NADA, y
+# decir lo contrario es el mismo silencio con otro disfraz. El limite real son
+# 120s: aca se sustituye el acotador por uno de 1s para no pagarlos en la suite
+# (el acotador de verdad ya tiene sus propios casos, arriba).
+mkdir -p "$WS/hang/node_modules/.bin" "$WS/hang/base"
+printf '#!/bin/sh\nwhile :; do sleep 1; done\n' > "$WS/hang/node_modules/.bin/vitest"
+chmod +x "$WS/hang/node_modules/.bin/vitest"
+out="$( . "$WS/gate_muerde.sh"
+        WT="$WS/hang"; MUERDE_NODE_RUNNERS="vitest"
+        con_limite() { run_bounded 1 2 "${@:2}"; }
+        muerde_node_colecta_en "$WS/hang/base" x.test.ts || true
+        printf '%s' "${MUERDE_COLECTA_DIAG:-}" )"
+assert_contains "$out" "se pasó del límite" "una sonda cortada se reporta como timeout, no como 'no colecta'"
 
 # (k) COR-656: con @playwright/test declarado e instalado, el spec e2e SÍ se
 #     verifica. Antes muerde_node devolvía 1 ('no declara vitest ni jest') y el

@@ -1367,6 +1367,129 @@ run_lang_gates() {
       fi
     fi
   fi
+  # ── Helm: un chart TAMBIÉN es un stack (#80) ─────────────────────────
+  # Caso de campo: una library chart de la que dependen todos los servicios de
+  # una plataforma aterrizaba en main con `verificado: ninguno`. No tiene
+  # go.mod ni package.json, así que caía al aviso de stack no reconocido, que
+  # NO bloquea: un cambio suyo re-renderiza la plataforma entera y ningún gate
+  # automático miraba una sola línea. Mismo agujero que tenían los repos de
+  # infra antes de la rama de terraform, y por el mismo motivo (CONTRIBUTING
+  # #8: un eje sin implementación es un vendor cableado).
+  #
+  # Y hay una trampa propia de Helm, medida en el mismo reporte: la suite
+  # típica del chart corre `helm dependency update`, que REESCRIBE Chart.lock
+  # DENTRO del árbol que se está juzgando. Un verificador que ensucia lo que
+  # juzga se descalifica solo (la lección de tf_limpio), y además evidence.py
+  # rechaza el sello por árbol sucio, o sea que ni a mano había forma de
+  # sellar esa suite. Por eso acá corre SOLO lo que no muta el árbol: lint y
+  # template. Las dependencias sin vendorear NO se resuelven: se declara el
+  # tramo sin mirar, que es honesto, en vez de escribir en el artefacto.
+  local helm_charts helm_dir helm_type helm_vendored helm_v helm_unittest=0 helm_lintados=0
+  local helm_vals
+  helm_charts="$(git ls-files 'Chart.yaml' '*/Chart.yaml' 2>/dev/null \
+    | grep -v -E '(^|/)charts/' | awk -F/ 'NF<=4' || true)"
+  if [ -n "$helm_charts" ]; then
+    LANG_SEEN=1
+    if need helm Helm; then
+      gate helm
+      # `lint` PARSEA y `template` RENDERIZA, pero ninguno AFIRMA nada sobre lo
+      # renderizado: son el `validate` de Helm, no su `test`. Solo el plugin de
+      # unittest enciende TESTS_RAN, por el mismo criterio que separa
+      # `terraform validate` de `terraform test`.
+      if helm plugin list 2>/dev/null | grep -q '^unittest'; then helm_unittest=1; fi
+      # helm_corre <chart> <type> [args de helm...]: lint y, si no es library,
+      # render. Los dos fallos traen su remediación (la ley de la casa: el
+      # mensaje de error ES el prompt), porque el rojo de un chart casi siempre
+      # es una de dos cosas y la salida es distinta para cada una.
+      helm_corre() {
+        local d="$1" t="$2"; shift 2
+        echo "  → helm lint: $d"
+        if ! helm lint "$@" "$d"; then
+          echo "❌ helm lint rojo en $d"
+          echo "   ↳ remediación: si el template tiene un error, arreglalo. Si el"
+          echo "     chart NO renderiza sin valores de entorno (un 'required' sin"
+          echo "     default), la salida es la convención de chart-testing: poné"
+          echo "     esos valores en $d/ci/<caso>-values.yaml y este gate lintea y"
+          echo "     renderiza una vez por cada archivo de ahí."
+          return 1
+        fi
+        if [ "$t" = "library" ]; then
+          echo "     ($d es una library chart: no se renderiza, no es instalable)"
+          return 0
+        fi
+        echo "  → helm template: $d"
+        if ! helm template "$@" "$d" >/dev/null; then
+          echo "❌ helm template rojo en $d: el chart no renderiza"
+          echo "   ↳ remediación: la misma de arriba (un error del template, o"
+          echo "     valores que este chart exige y solo existen en el deploy:"
+          echo "     esos van en $d/ci/<caso>-values.yaml)."
+          return 1
+        fi
+      }
+      for helm_dir in $(printf '%s\n' "$helm_charts" \
+          | awk -F/ '{ if (NF == 1) print "."; else { sub("/[^/]*$", ""); print } }' \
+          | sort -u); do
+        # `dependencies:` A SECAS abre la lista; `dependencies: []` declara que
+        # no hay ninguna, y saltarse ese chart sería negarle el gate por una
+        # línea que dice justo lo contrario. Y vendoreadas quiere decir con
+        # ARCHIVOS adentro: un charts/ vacío no resuelve nada, y mandarlo a
+        # `helm lint` fabricaría un rojo que no habla del cambio.
+        helm_vendored=0
+        if ls "$helm_dir"/charts/* >/dev/null 2>&1; then helm_vendored=1; fi
+        if grep -qE '^dependencies:[[:space:]]*(#.*)?$' "$helm_dir/Chart.yaml" 2>/dev/null \
+           && [ "$helm_vendored" -eq 0 ]; then
+          echo "⚠️  $helm_dir declara dependencies y no están vendoreadas en $helm_dir/charts:"
+          echo "   NO lo lintié ni lo rendericé. Resolverlas ('helm dependency build')"
+          echo "   escribe Chart.lock y charts/*.tgz DENTRO del árbol que este gate"
+          echo "   juzga, y un verificador que ensucia lo que juzga deja de hablar del"
+          echo "   cambio para hablar de sí mismo."
+          echo "   ↳ para que se verifique: vendorea las dependencias (commitea"
+          echo "     $helm_dir/charts/) o corré la suite a mano y pegá la salida."
+          emit assumption "$REPO: chart $helm_dir NO lintado ni renderizado (dependencies sin vendorear)"
+          continue
+        fi
+        # ── UN GATE DURO NECESITA UN VERDE ALCANZABLE ────────────────────
+        # `helm lint` renderiza con los valores por defecto, así que un chart
+        # que EXIGE valores de entorno (un `required` sin default) saldría rojo
+        # SIEMPRE y sin salida legítima: el falso rojo que enseña a desconfiar
+        # de los gates. La salida existe y es la convención del ecosistema, no
+        # un invento de este script: chart-testing (`ct lint`) lintea una vez
+        # por cada `<chart>/ci/*-values.yaml`. Si están, se usan; si no, se
+        # lintea con los defaults, que es lo que hace cualquiera a mano.
+        helm_vals=()
+        for helm_v in "$helm_dir"/ci/*-values.yaml "$helm_dir"/ci/*-values.yml; do
+          [ -f "$helm_v" ] && helm_vals+=("$helm_v")
+        done
+        # Una library chart NO se instala: `helm template` sale rojo POR DISEÑO
+        # ("library charts are not installable"), y cobrar ese rojo sería
+        # inventar un veredicto sobre el chart más compartido del repo.
+        helm_type="$(sed -n 's/^type:[[:space:]]*//p' "$helm_dir/Chart.yaml" | head -1 | tr -d "\"' ")"
+        if [ "${#helm_vals[@]}" -eq 0 ]; then
+          helm_corre "$helm_dir" "$helm_type" || exit 3
+        else
+          # Uno por uno, no todos mezclados: cada archivo de ci/ describe UN
+          # caso (prod, minimal, con-ingress), y mezclarlos rendería un chart
+          # que no es ninguno de los tres.
+          for helm_v in "${helm_vals[@]}"; do
+            echo "     (valores de $helm_v)"
+            helm_corre "$helm_dir" "$helm_type" --values "$helm_v" || exit 3
+          done
+        fi
+        helm_lintados=1
+        if [ "$helm_unittest" -eq 1 ] && ls "$helm_dir"/tests/*_test.yaml >/dev/null 2>&1; then
+          echo "  → helm unittest: $helm_dir"
+          helm unittest "$helm_dir"
+          TESTS_RAN=1
+        fi
+      done
+      if [ "$helm_lintados" -eq 1 ] && [ "$helm_unittest" -eq 0 ]; then
+        echo "⚠️  lintié y rendericé los charts, pero NO corrí tests: falta el plugin"
+        echo "   helm-unittest ('helm plugin install https://github.com/helm-unittest/helm-unittest')."
+        echo "   Un render que no explota no AFIRMA nada sobre lo renderizado."
+        emit assumption "$REPO (Helm): charts lintados y renderizados, pero SIN suite (falta el plugin helm-unittest)"
+      fi
+    fi
+  fi
   # Gates de arquitectura y SQL: la CONFIG del repo es el opt-in (sin config,
   # silencio). Con config presente son gates duros — igual que go/ts. Config
   # sin herramienta instalada = warning honesto, no un gate fingido.
@@ -1439,7 +1562,7 @@ run_lang_gates() {
     echo "   Marcadores que busco: go.mod (raíz o subdirs, prof. 2),"
     echo "   package.json, pyproject.toml, pubspec.yaml, Cargo.toml, pom.xml,"
     echo "   build.gradle, Gemfile, composer.json, *.csproj/*.sln, mix.exs,"
-    echo "   buf.yaml y *.tf (raíz o subdirs, prof. 4)."
+    echo "   buf.yaml, y *.tf y Chart.yaml (raíz o subdirs, prof. 4)."
     echo "   Si este repo SÍ se construye, agregá su rama en run_lang_gates:"
     echo "   un eje sin implementación es un vendor cableado (CONTRIBUTING #8)."
     emit assumption "$REPO NO compilado ni testeado: run_lang_gates no reconoce su stack"

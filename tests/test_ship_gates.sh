@@ -1412,6 +1412,123 @@ check_stack "$WS/st-elixir" mix.exs       mix     Elixir
 check_stack "$WS/st-ruby"   Gemfile       bundle  Ruby        Rakefile
 check_stack "$WS/st-php"    composer.json composer PHP        phpunit.xml
 
+# ── Helm: un chart TAMBIEN es un stack (#80) ──────────────────────────
+# Caso de campo: una library chart de la que dependen todos los servicios de
+# una plataforma aterrizaba en main con `verificado: ninguno`. No tiene go.mod
+# ni package.json, asi que caia al aviso de stack no reconocido, que NO
+# bloquea: un cambio suyo re-renderiza la plataforma entera y ningun gate
+# automatico miraba una linea. Aca se mide con un helm de palo: lo que se
+# prueba es la RAMA (que exista, que lintee y que renderice), no helm.
+mk_helm_repo() {  # mk_helm_repo <dir> <ruta-Chart.yaml> [type]
+  mk_stack "$1" .gitkeep
+  cd "$1"
+  mkdir -p "$(dirname "$2")"
+  { printf 'apiVersion: v2\nname: c\nversion: 0.1.0\n'
+    [ -n "${3:-}" ] && printf 'type: %s\n' "$3"; } > "$2"
+  git add -A && git commit -qm chart
+  cd "$WS"
+}
+# El stub deja rastro en un ARCHIVO ademas de en stdout: `helm template` va a
+# /dev/null en el gate (lo que importa es su exit, no el YAML), asi que medir
+# solo stdout no distingue "lo renderizo" de "ni lo intento".
+HELMLOG="$WS/helm.log"
+run_helm() {  # run_helm <dir> <stub-helm> → stdout; el log queda en $HELMLOG
+  # OJO: esto se invoca dentro de un $( ), o sea en un subshell. Cualquier
+  # variable que se asigne aca muere con el; el ARCHIVO, no.
+  : > "$HELMLOG"
+  ( cd "$1"; WT="$1"; REPO=r; TASK=T1; BASE_REF=main; HELMLOG="$HELMLOG"
+    gate() { :; }; emit() { echo "EMIT $*"; }
+    eval "$2"
+    . "$WS/lang.sh"; run_lang_gates ) 2>&1
+}
+HELM_STUB='helm() { echo "HELM $*" >> "$HELMLOG"; echo "HELM $*"; }'
+
+mk_helm_repo "$WS/st-helm" chart/Chart.yaml
+out="$(run_helm "$WS/st-helm" "$HELM_STUB")"; log="$(cat "$HELMLOG")"
+assert_not_contains "$out" "no reconozco el stack" "un repo con Chart.yaml YA es un stack reconocido"
+assert_contains "$log" "HELM lint chart" "lo lintea"
+assert_contains "$log" "HELM template chart" "y lo renderiza (el 'compila' de un chart)"
+
+# La library chart del caso de campo: `helm template` sale rojo POR DISEÑO
+# ("library charts are not installable"), asi que cobrarlo seria inventar un
+# veredicto sobre el chart mas compartido del repo.
+mk_helm_repo "$WS/st-helm-lib" Chart.yaml library
+out="$(run_helm "$WS/st-helm-lib" "$HELM_STUB")"; log="$(cat "$HELMLOG")"
+assert_contains "$log" "HELM lint ." "la library chart de la raiz se lintea"
+assert_not_contains "$log" "HELM template" "y NO se renderiza: no es instalable"
+
+# El gate NO puede ensuciar lo que juzga (la leccion de tf_limpio): resolver
+# dependencias escribe Chart.lock y charts/*.tgz DENTRO del arbol juzgado, y
+# ademas evidence.py rechaza el sello por arbol sucio. Se declara, no se toca.
+mk_stack "$WS/st-helm-deps" .gitkeep
+cd "$WS/st-helm-deps"
+mkdir -p chart
+printf 'apiVersion: v2\nname: c\nversion: 0.1.0\ndependencies:\n  - name: lib\n    version: 1.0.0\n    repository: file://../lib\n' > chart/Chart.yaml
+git add -A && git commit -qm deps
+cd "$WS"
+out="$(run_helm "$WS/st-helm-deps" "$HELM_STUB")"; log="$(cat "$HELMLOG")"
+assert_not_contains "$log" "HELM lint" "con dependencies sin vendorear NO lintea: resolverlas ensucia el arbol"
+assert_contains "$out" "sin vendorear" "y lo dice, con su remediacion"
+assert_contains "$out" "EMIT assumption" "el tramo sin mirar viaja como supuesto"
+
+# Contra-mitad 1: con las dependencias vendoreadas SI se lintea. El salto es
+# por no poder resolverlas sin escribir, no por tener dependencias.
+cd "$WS/st-helm-deps"; mkdir -p chart/charts
+printf 'apiVersion: v2\nname: lib\nversion: 1.0.0\n' > chart/charts/lib.yaml
+git add -A && git commit -qm vendored; cd "$WS"
+out="$(run_helm "$WS/st-helm-deps" "$HELM_STUB")"; log="$(cat "$HELMLOG")"
+assert_contains "$log" "HELM lint chart" "con las deps vendoreadas: se lintea igual que cualquier chart"
+
+# Contra-mitad 2: `dependencies: []` DECLARA que no hay ninguna. Saltarse ese
+# chart seria negarle el gate por una linea que dice justo lo contrario.
+mk_stack "$WS/st-helm-vacio" .gitkeep
+cd "$WS/st-helm-vacio"; mkdir -p chart
+printf 'apiVersion: v2\nname: c\nversion: 0.1.0\ndependencies: []\n' > chart/Chart.yaml
+git add -A && git commit -qm sin-deps; cd "$WS"
+out="$(run_helm "$WS/st-helm-vacio" "$HELM_STUB")"; log="$(cat "$HELMLOG")"
+assert_contains "$log" "HELM lint chart" "'dependencies: []' no es tener dependencias: el chart se lintea"
+
+# ── UN GATE DURO NECESITA UN VERDE ALCANZABLE ─────────────────────────
+# `helm lint` renderiza con los valores por defecto, asi que un chart que EXIGE
+# valores de entorno (un `required` sin default) saldria rojo SIEMPRE. La salida
+# no la inventa este script: es la convencion de chart-testing, que lintea una
+# vez por cada <chart>/ci/*-values.yaml. Sin ella el gate seria un dead-end.
+mk_helm_repo "$WS/st-helm-ci" chart/Chart.yaml
+cd "$WS/st-helm-ci"; mkdir -p chart/ci
+printf 'image: {tag: prod}\n'    > chart/ci/prod-values.yaml
+printf 'image: {tag: minimal}\n' > chart/ci/minimal-values.yaml
+git add -A && git commit -qm ci-values; cd "$WS"
+out="$(run_helm "$WS/st-helm-ci" "$HELM_STUB")"; log="$(cat "$HELMLOG")"
+assert_contains "$log" "--values chart/ci/prod-values.yaml" "usa los valores de ci/ (la convencion de chart-testing)"
+assert_contains "$log" "--values chart/ci/minimal-values.yaml" "y uno por caso: mezclarlos renderiza un chart que no es ninguno"
+
+# Y el rojo trae su remediacion, que es la ley de la casa: el mensaje ES el
+# prompt. Sin ella, un chart que pide valores es un rojo sin salida.
+HELM_STUB_ROJO='helm() { if [ "$1" = "lint" ]; then echo "Error: required value not set"; return 1; fi; echo "HELM $*"; }'
+out="$(run_helm "$WS/st-helm" "$HELM_STUB_ROJO")"; rc=$?
+assert_eq 3 "$rc" "helm lint rojo: el gate bloquea (exit 3), no lo deja pasar"
+assert_contains "$out" "ci/<caso>-values.yaml" "y el rojo nombra la salida legitima, no deja al operador sin camino"
+
+# lint y template PARSEAN y RENDERIZAN, pero ninguno AFIRMA nada sobre lo
+# renderizado: sin el plugin de unittest el sello no puede decir "corri tests".
+out="$(run_helm "$WS/st-helm" "$HELM_STUB")"
+assert_contains "$out" "helm-unittest" "sin el plugin, dice que NO corrio tests"
+HELM_STUB_UT='helm() { if [ "$1" = "plugin" ]; then echo "unittest 0.5.0"; else echo "HELM $*" >> "$HELMLOG"; echo "HELM $*"; fi; }'
+cd "$WS/st-helm"; mkdir -p chart/tests
+printf 'suite: x\n' > chart/tests/values_test.yaml
+git add -A && git commit -qm unittest; cd "$WS"
+out="$(run_helm "$WS/st-helm" "$HELM_STUB_UT")"; log="$(cat "$HELMLOG")"
+assert_contains "$log" "HELM unittest chart" "con el plugin instalado y tests presentes, los corre"
+assert_not_contains "$out" "falta el plugin" "y ya no avisa de lo que si esta"
+
+# Marcador presente y toolchain ausente: la rama pasa por need(), igual que los
+# otros seis stacks (un PATH vacío acá no sirve de prueba: la deteccion misma
+# necesita git, asi que mediria otra cosa). El caso vivo lo cubre st-sinbin.
+grep -q 'need helm Helm' "$WS/lang.sh" \
+  && pass "la rama helm pasa por need(): sin la toolchain se dice, no se finge" \
+  || fail "la rama helm no usa need(): un chart sin helm saldria verde sin mirar nada"
+cd "$WS"
+
 # Marcador presente pero toolchain ausente: se dice, no se finge un veredicto.
 mk_stack "$WS/st-sinbin" Cargo.toml
 out="$( ( cd "$WS/st-sinbin"; WT="$WS/st-sinbin"; REPO=r; TASK=T1; BASE_REF=main

@@ -208,6 +208,23 @@ capabilities:
     profiles: [implementer, svc]
     detect: "repos con *.tf"
 
+  - name: helm
+    category: infra
+    purpose: "lint y render de charts: es el gate de lenguaje de un repo Helm puro, que sin helm no compila ni testea NADA"
+    provider: cli
+    bin: helm
+    install: "brew install helm"
+    install_kind: auto
+    install_alt: "https://helm.sh/docs/intro/install/"
+    # helm-unittest es un PLUGIN de helm, no un binario suelto: no puede tener
+    # su propia fila acá (el bootstrap instala binarios y el doctor los busca
+    # con `command -v`). El gate lo detecta con `helm plugin list` y, si falta,
+    # dice que lintió y renderizó pero que NO corrió tests.
+    note: "los tests del chart necesitan además el plugin: helm plugin install https://github.com/helm-unittest/helm-unittest"
+    permission_tier: read-only
+    profiles: [implementer, svc]
+    detect: "repos con Chart.yaml"
+
   - name: vault
     category: infra
     purpose: "HashiCorp Vault CLI: fuente única de secretos; secrets.sh lo materializa a .secrets"

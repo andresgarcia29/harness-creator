@@ -18,14 +18,36 @@ mk_verdict() {  # mk_verdict <non_blocking-json>
       verdict:"pass", qa:"pass", non_blocking:$nb}' > "$V"
 }
 
-# stub de bd que loggea y emite un id con el formato real
+# stub de bd con el formato real: soporta --silent (la interfaz de scripting) y
+# ensucia la salida ANTES del id, como bd en campo (nombre de db, avisos).
 export BDLOG="$WS/bd-calls.log"; : > "$BDLOG"
-cat > "$WS/bin/bd" <<'SH'
+mk_bd() {  # mk_bd  → bd moderno, con --silent
+  cat > "$WS/bin/bd" <<'SH'
 #!/bin/sh
 echo "bd $*" >> "$BDLOG"
-echo "Created hc-00$(wc -l < "$BDLOG" | tr -d ' ')"
+n=$(grep -c 'create' "$BDLOG" | tr -d ' ')
+echo "aviso: base de datos test-beads sin sincronizar" >&2
+case " $* " in
+  *" --silent "*) echo "workspace-00$n" ;;
+  *) echo "Created issue: workspace-00$n - $2" ;;
+esac
 SH
-chmod +x "$WS/bin/bd"
+  chmod +x "$WS/bin/bd"
+}
+mk_bd_viejo() {  # mk_bd_viejo → bd sin --silent: cobra falla al parsear la flag
+  cat > "$WS/bin/bd" <<'SH'
+#!/bin/sh
+echo "bd $*" >> "$BDLOG"
+case " $* " in
+  *" --silent "*) echo "Error: unknown flag: --silent" >&2; exit 1 ;;
+esac
+n=$(grep -c 'silent' "$BDLOG" | tr -d ' ')
+echo "aviso: base de datos test-beads sin sincronizar"
+echo "Created issue: workspace-00$n - $2"
+SH
+  chmod +x "$WS/bin/bd"
+}
+mk_bd
 run_beads() { ( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/verdict-beads.sh T1 atlas 2>&1 ); }
 
 echo "── string → objeto {text, bead}, con el origen en el cuerpo"
@@ -39,6 +61,10 @@ assert_eq "nombre de variable pobre" "$(jq -r '.non_blocking[0].text' "$V")" \
   "el texto original se conserva"
 assert_contains "$(cat "$BDLOG")" "T1 / atlas" "el cuerpo del bead nombra tarea y repo"
 assert_contains "$(cat "$BDLOG")" "verdict-atlas.json" "y la ruta del veredicto (el domicilio)"
+assert_eq "workspace-001" "$(jq -r '.non_blocking[0].bead' "$V")" \
+  "el bead escrito es el id que bd devolvió, no el primer token con guion de la salida"
+assert_not_contains "$(jq -r '[.non_blocking[].bead] | join(" ")' "$V")" "test-beads" \
+  "el aviso ruidoso de bd no se cuela como id (caso de campo: veredicto afirmando un bead inexistente)"
 
 echo "── idempotencia: la segunda corrida no toca nada"
 
@@ -49,6 +75,19 @@ assert_eq 0 "$rc" "segunda corrida: exit 0"
 assert_eq "$h1" "$(shasum "$V" | cut -d' ' -f1)" "el veredicto queda byte-idéntico"
 assert_eq "0" "$(grep -c 'bd create' "$BDLOG" || true)" "y bd no se invoca ni una vez"
 
+echo "── bd sin --silent: el id sale de la línea de creación, no del ruido"
+
+mk_bd_viejo
+: > "$BDLOG"
+mk_verdict '["hallazgo con un bd que no tiene la flag"]'
+out="$(run_beads)"; rc=$?
+assert_eq 0 "$rc" "bd viejo: exit 0 (reintenta sin la flag que rechaza)"
+assert_eq "workspace-001" "$(jq -r '.non_blocking[0].bead' "$V")" \
+  "el id es el de la línea Created, no el token con guion que bd imprime antes"
+assert_eq "2" "$(grep -c 'bd create' "$BDLOG" || true)" \
+  "dos invocaciones: la que rebota al parsear la flag (sin crear nada) y la real"
+
+mk_bd
 echo "── sin bd en PATH: honesto y sin tocar nada"
 
 mk_verdict '["hallazgo sin motor"]'

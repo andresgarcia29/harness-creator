@@ -2591,4 +2591,63 @@ else
   pass "un helper que no declara test NO entra al alcance"
 fi
 
+# ── RENOMBRAR EL TITULO DE UN it() NO ES UN TEST NUEVO (#82/#84) ──────
+# Mirar solo las lineas `+` contaba como test NUEVO lo que era un RENAME: el
+# diff trae una linea añadida y una eliminada (neto 0 declaraciones) y el grep
+# matcheaba igual. Consecuencia medida: el archivo perdia el escape MODIFIED
+# del delta-spec y volvia al alcance de gate_test_muerde, que le exige ser rojo
+# sobre la base. Un guard de forma NUNCA puede serlo, asi que corregirle un
+# typo al titulo de un test no tenia un solo camino verde y el gate empujaba a
+# dejar escritos nombres de test que MIENTEN.
+mk_repo "$WS/declrename" >/dev/null 2>&1
+BASE_REF=main
+cat > a.test.ts <<'TSEOF'
+describe("x", () => {
+  it("sin metrica el contador no se pinta", () => { expect(1).toBe(1) })
+  it("con metrica el contador se pinta", () => { expect(1).toBe(1) })
+})
+TSEOF
+git add -A >/dev/null && git commit -qm "dos casos" >/dev/null
+git update-ref refs/remotes/origin/main HEAD
+sed 's/sin metrica el/sin métrica el/' a.test.ts > a.tmp && mv a.tmp a.test.ts
+git add -A >/dev/null && git commit -qm "tilde en el titulo" >/dev/null
+if declara_tests_nuevos a.test.ts; then
+  fail "renombrar el titulo de un it() NO cuenta como test nuevo (neto 0)"
+else
+  pass "renombrar el titulo de un it() NO cuenta como test nuevo (neto 0)"
+fi
+
+# Contra-mitad, y es la guarda que motivo el conteo (COR-667): un archivo que
+# ADEMAS de tocarse agrega un caso de verdad sube el neto y sigue en el alcance.
+git update-ref refs/remotes/origin/main HEAD
+cat > a.test.ts <<'TSEOF'
+describe("x", () => {
+  it("sin métrica el contador NO se pinta", () => { expect(1).toBe(1) })
+  it("con metrica el contador se pinta", () => { expect(1).toBe(1) })
+  it("con metrica en cero el contador se pinta igual", () => { expect(1).toBe(1) })
+})
+TSEOF
+git add -A >/dev/null && git commit -qm "un caso mas, y otro rename" >/dev/null
+if declara_tests_nuevos a.test.ts; then
+  pass "un caso NUEVO sube el neto y sigue en el alcance (la guarda de COR-667 intacta)"
+else
+  fail "un caso NUEVO sube el neto y sigue en el alcance (la guarda de COR-667 intacta)"
+fi
+
+# Reordenar casos: mismas declaraciones, otro orden. Neto 0, refactor puro.
+git update-ref refs/remotes/origin/main HEAD
+cat > a.test.ts <<'TSEOF'
+describe("x", () => {
+  it("con metrica en cero el contador se pinta igual", () => { expect(1).toBe(1) })
+  it("con metrica el contador se pinta", () => { expect(1).toBe(1) })
+  it("sin métrica el contador NO se pinta", () => { expect(1).toBe(1) })
+})
+TSEOF
+git add -A >/dev/null && git commit -qm "reordenar" >/dev/null
+if declara_tests_nuevos a.test.ts; then
+  fail "reordenar casos existentes tampoco es declarar tests nuevos"
+else
+  pass "reordenar casos existentes tampoco es declarar tests nuevos"
+fi
+
 t_done

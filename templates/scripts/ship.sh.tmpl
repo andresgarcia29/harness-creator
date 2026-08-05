@@ -1945,9 +1945,40 @@ muerde_pytest() {  # → MUERDE_PY, o 1 con el motivo en MUERDE_MOTIVO
 # Se mira la DECLARACIÓN añadida, no cualquier línea: un archivo de test al que
 # solo se le tocó un helper o un fixture no trae conducta nueva que probar, y
 # meterlo al alcance haría correr la base para nada.
+#
+# ── AÑADIDAS MENOS ELIMINADAS, NO AÑADIDAS A SECAS (#82/#84) ──────────
+# Mirar solo las líneas `+` contaba como test NUEVO lo que era un RENAME: al
+# corregirle el título a un `it()` que ya existía, el diff trae una línea
+# añadida y una eliminada (neto 0 declaraciones), y el grep matcheaba igual.
+# Consecuencia medida en campo: el archivo perdía el escape MODIFIED del
+# delta-spec y volvía al alcance de gate_test_muerde, que le exige ser rojo
+# sobre la base. Un guard de forma (un test que asserta sobre un chart o un
+# manifiesto) NUNCA puede ser rojo ahí, así que un typo en el título de un test
+# no tenía un solo camino verde: el gate empujaba a dejar escritos nombres de
+# test que MIENTEN, que es exactamente lo contrario de lo que existe para
+# defender. El neto conserva intacto el caso que motivó la guarda (COR-667: un
+# archivo declarado MODIFIED que ADEMÁS agrega el único test del fix), porque
+# ahí el número SÍ sube.
 declara_tests_nuevos() {  # declara_tests_nuevos <archivo>
-  git diff -M "origin/$BASE_REF...HEAD" -- "$1" \
-    | grep -qE '^\+[[:space:]]*((func[[:space:]]+(Test|Benchmark|Fuzz|Example))|(def[[:space:]]+test_)|((it|test|Scenario)[[:space:]]*\()|((it|test)\.(each|only|concurrent)))'
+  local neto
+  # -M explícito por lo mismo que el resto de este archivo: sin él, un rename
+  # de ARCHIVO se lee como D+A y el alta entera parecería declaraciones nuevas.
+  # El patrón va DENTRO del awk (no por -v): en un valor de -v, awk procesa las
+  # secuencias de escape y `\(` se degrada a un paréntesis de agrupación, o sea
+  # que la regex cambiaría de significado en silencio.
+  neto="$(git diff -M "origin/$BASE_REF...HEAD" -- "$1" | awk '
+    BEGIN {
+      pat = "^((func[[:space:]]+(Test|Benchmark|Fuzz|Example))" \
+          "|(def[[:space:]]+test_)" \
+          "|((it|test|Scenario)[[:space:]]*\\()" \
+          "|((it|test)\\.(each|only|concurrent)))"
+    }
+    /^\+\+\+/ || /^---/ { next }
+    /^\+/ { l = substr($0, 2); sub(/^[[:space:]]+/, "", l); if (l ~ pat) n++; next }
+    /^-/  { l = substr($0, 2); sub(/^[[:space:]]+/, "", l); if (l ~ pat) n--; next }
+    END { print n + 0 }
+  ')"
+  [ "${neto:-0}" -gt 0 ]
 }
 muerde_go() {  # → 0 si hay toolchain Go
   if command -v go >/dev/null; then return 0; fi
@@ -2267,9 +2298,11 @@ gate_test_muerde() {
     # de seguridad sin la seguridad es peor que no tenerlo.
     #
     # Por eso el escape solo se concede si el archivo NO trae declaraciones de
-    # test nuevas. Un refactor puro no las trae (declara_tests_nuevos mira las
-    # líneas AÑADIDAS que declaran un test), así que la remediación que este
-    # gate imprime sigue funcionando para el caso que la motivó.
+    # test nuevas. Un refactor puro no las trae: declara_tests_nuevos cuenta
+    # declaraciones AÑADIDAS MENOS ELIMINADAS (#82/#84), así que renombrar el
+    # título de un `it()`, reordenar casos o reindentar da neto 0 y el escape
+    # se concede; agregar un caso de verdad da neto > 0 y no. Así la
+    # remediación que este gate imprime sigue funcionando para los dos casos.
     if printf '%s\n' "$escape" | grep -qiF -- "$(basename "$f")"; then
       if declara_tests_nuevos "$f"; then
         escapados="$escapados   ⚠️  $f: declarado bajo MODIFIED/REMOVED, pero AGREGA tests nuevos: sigue en el alcance

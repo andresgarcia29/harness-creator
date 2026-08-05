@@ -195,7 +195,10 @@ if [ "$LANE" = "express" ]; then
   # `\.tf$|\.tfvars$` van ademas de `(^|/)terraform/`: un infra-module lleva los
   # .tf en la RAIZ, sin directorio terraform/. Se agrego al pasar POLICY-LANE-004
   # de rechazo a aviso (#71), cuando este patron quedo como unico freno.
-  pat="${LANE_GUARD_PATTERN:-(\.proto$|(^|/)proto/|(^|/)migrations?/|\.sql$|(^|/)helm/|(^|/)charts/|(^|/)terraform/|\.tf$|\.tfvars$|(^|/)openapi\.|(^|/)swagger\.)}"
+  # `charts?/` y `Chart.yaml` cubren las tres grafias de un chart de Helm (#83):
+  # el `charts/` plural es el directorio de subcharts vendoreados, no el del
+  # chart propio, que en la practica se llama `chart/` o vive en la raiz.
+  pat="${LANE_GUARD_PATTERN:-(\.proto$|(^|/)proto/|(^|/)migrations?/|\.sql$|(^|/)helm/|(^|/)charts?/|(^|/)Chart\.yaml$|(^|/)terraform/|\.tf$|\.tfvars$|(^|/)openapi\.|(^|/)swagger\.)}"
   planned="$(awk '
     /^[ \t]*[-*][ \t]+[Aa]rchivos[ \t]*:/ {
       line = $0; sub(/^[^:]*:[ \t]*/, "", line)

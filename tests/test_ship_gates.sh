@@ -104,6 +104,32 @@ run_gate_lane '{"lane":"quick"}' \
   && pass "quick con un .gitignore de dos lineas: pasa (el caso medido del #71)" \
   || fail "el carril rapido sigue cerrado para un cambio que no toca infra"
 
+# 3e. express + un chart de Helm en `chart/` SINGULAR → bloquea (#83)
+# El patrón pedía `charts/` en plural, que es la grafía del directorio de
+# SUBCHARTS vendoreados, no la del chart propio: medido en una plataforma de 17
+# repos con chart, 17 usaban el singular y CERO el plural, o sea que el único
+# freno que impide que un carril corto shippee infra no frenaba un solo chart.
+mk_repo "$WS/r3e"
+mkdir -p chart/templates
+printf 'replicas: 3\n' > chart/values.yaml
+git add . && git commit -qm chart
+run_gate_lane '{"lane":"express"}'; rc=$?
+assert_eq 3 "$rc" "express tocando chart/ SINGULAR: bloquea (17 de 17 repos usaban esa grafía)"
+
+mk_repo "$WS/r3f"
+mkdir -p charts/subchart && printf 'x: 1\n' > charts/subchart/values.yaml
+git add . && git commit -qm subchart
+run_gate_lane '{"lane":"quick"}'; rc=$?
+assert_eq 3 "$rc" "y el plural sigue bloqueando: el patrón SUMA una grafía, no la cambia"
+
+# 3g. el chart en la RAIZ del repo, sin directorio que lo delate: lo delata su
+#     Chart.yaml (el mismo caso que `\.tf$` cubre para un infra-module).
+mk_repo "$WS/r3g"
+printf 'apiVersion: v2\nname: c\nversion: 0.1.0\n' > Chart.yaml
+git add . && git commit -qm chart-raiz
+run_gate_lane '{"lane":"express"}'; rc=$?
+assert_eq 3 "$rc" "express tocando el Chart.yaml de la raíz: bloquea"
+
 # 4. full + toca proto → NO es asunto de gate_lane (lo custodia buf breaking)
 cd "$WS/r2"
 run_gate_lane '{"lane":"full"}' \

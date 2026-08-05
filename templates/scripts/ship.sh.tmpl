@@ -809,7 +809,15 @@ gate_lane() {
   # porque nada de infra llegaba a un carril corto. Al pasar LANE-004 a aviso
   # (#71) este patron quedo como UNICO freno, y con el hueco abierto un quick
   # podia shippear terraform crudo sin que nadie lo mirara.
-  local pat="${LANE_GUARD_PATTERN:-(\.proto\$|(^|/)proto/|(^|/)migrations?/|\.sql\$|(^|/)helm/|(^|/)charts/|(^|/)terraform/|\.tf\$|\.tfvars\$|(^|/)openapi\.|(^|/)swagger\.)}"
+  #
+  # `charts?/` en SINGULAR Y plural, y `Chart.yaml` ademas (#83): la rama de
+  # Helm tenia el mismo hueco que los .tf de raiz. El patron pedia `charts/`
+  # plural, que es la grafia del directorio de SUBCHARTS vendoreados, no la del
+  # chart propio: medido en una plataforma de 17 servicios, 17 usaban `chart/`
+  # singular y CERO `charts/`, o sea que el freno no frenaba un solo chart.
+  # `Chart.yaml` cierra la tercera forma: el chart en la RAIZ del repo, sin
+  # directorio que lo delate (el mismo caso que `\.tf\$` cubre para terraform).
+  local pat="${LANE_GUARD_PATTERN:-(\.proto\$|(^|/)proto/|(^|/)migrations?/|\.sql\$|(^|/)helm/|(^|/)charts?/|(^|/)Chart\.yaml\$|(^|/)terraform/|\.tf\$|\.tfvars\$|(^|/)openapi\.|(^|/)swagger\.)}"
   local hits
   # Tres puntos: el carril promete sobre EL CAMBIO DE LA RAMA. Con dos puntos se
   # comparan las PUNTAS, así que un .proto que el trunk sumó después del branch

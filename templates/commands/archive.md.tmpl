@@ -96,6 +96,42 @@ hallazgo archivado sin bead deja de existir (Ley 7).
    queda ahí: sube a un ADR o a una regla en el paso siguiente. La nota guarda
    el camino; git guarda el destino.
 
+3c. **Exportá las métricas de la tarea**:
+   `python3 scripts/harness-sink.py push <id>` deja `docs/metrics/<id>.jsonl`,
+   una línea por AGENTE con costo, tokens, contexto medio, acierto de caché,
+   carril, repos, rondas y el link al ticket.
+
+   **El grano es el agente, no la tarea**, y eso no es un detalle: el hallazgo
+   que originó toda esta capa fue que el 87% del gasto vive en el orquestador y
+   no en los subagentes, y eso SOLO se ve con ese grano. Agregar hacia arriba es
+   un `GROUP BY`; desagregar lo que se guardó agregado es imposible.
+
+   Un archivo por tarea y no uno global: con varias personas appendeando al
+   mismo archivo hay conflicto de merge en cada push. El glob los lee todos
+   igual, así que no se pierde nada:
+
+   ```
+   duckdb -c "SELECT carril, round(avg(costo_usd),2), round(avg(rondas_review),1)
+              FROM read_json_auto('docs/metrics/*.jsonl') GROUP BY 1"
+   ```
+
+   Si el workspace tiene Postgres configurado (`harness-sink.py setup`), la
+   misma corrida escribe ahí también. Si la base está caída, el archivo ya
+   quedó escrito y solo avisa: **perder el archivado por una base caída sería el
+   peor canje posible**.
+
+3d. **Cerrá el ticket con UN comentario, no con el expediente** (solo si
+   `origin: ticket`). `scripts/with-secrets.sh scripts/ticket-close.sh <id>`, o
+   el MCP de Linear si el workspace lo tiene montado.
+
+   **Un solo comentario, y con el resultado, no con el proceso.** Lo que va:
+   qué cambió, el veredicto y las rondas por repo, el costo, y el link a
+   `docs/tareas/<id>.md`. Lo que NO va: el plan, el enrichment ni el ledger. Son
+   miles de palabras de artefactos de TRABAJO, que importan mientras la tarea
+   corre y no después; pegarlos ahoga la conversación humana, que es para lo
+   único que sirve un ticket, y crea una tercera copia que se desvía de las
+   otras dos. Nadie grepea los comentarios de un ticket cerrado.
+
 4. **Propón como diff** la fusión de specs al humano si algún
    requirement MODIFIED/REMOVED toca una spec ratificada — la ley la
    cambian humanos. ADDED puros: aplica directo.

@@ -59,7 +59,14 @@ import subprocess
 import sys
 
 HERE = Path(__file__).resolve().parent
+# `--ws` la pisa: el script tiene que servir contra un workspace cualquiera,
+# no solo desde adentro de la instancia que lo instaló.
 WS = Path(os.environ.get("HARNESS_WS") or HERE.parent)
+
+
+def set_ws(path: str) -> None:
+    global WS
+    WS = Path(os.path.abspath(os.path.expanduser(path)))
 
 EXIT_OK, EXIT_USAGE, EXIT_NOTASK = 0, 2, 3
 
@@ -312,7 +319,11 @@ def main(argv=None) -> int:
     ap.add_argument("task")
     ap.add_argument("--stdout", action="store_true",
                     help="imprime sin escribir")
+    ap.add_argument("--ws", default=None,
+                    help="el workspace donde vive tasks/ y docs/")
     args = ap.parse_args(argv)
+    if args.ws:
+        set_ws(args.ws)
 
     nota = build(args.task)
     if args.stdout:

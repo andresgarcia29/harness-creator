@@ -107,7 +107,7 @@ done
 # script de Python ahí hace que el doctor lo reporte roto estando sano, que es
 # la peor clase de observador: el que grita en verde. Se comprueba con el
 # compilador de Python, que es el equivalente exacto.
-for s in harness-policy.py evidence.py harness-metrics.py harness-cost.py task-note.py; do
+for s in harness-policy.py evidence.py harness-metrics.py harness-cost.py task-note.py harness-sink.py; do
   if [ -f "$WS/scripts/$s" ]; then
     [ -x "$WS/scripts/$s" ] && ok "scripts/$s ejecutable" || fail "scripts/$s no ejecutable" "chmod +x scripts/$s"
     python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$WS/scripts/$s" 2>/dev/null \

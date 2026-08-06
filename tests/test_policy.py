@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -1730,6 +1731,192 @@ class PolicyTest(unittest.TestCase):
         result = self.run_policy("dag-order", self.task)
         self.assertEqual(result.returncode, 3)
         self.assertIn("POLICY-DAG-010", result.stderr)
+
+
+class CostGateTest(unittest.TestCase):
+    """POLICY-BUDGET-003: el gasto frena la transicion, medido y solo.
+
+    POR QUE ESTA SUITE: POLICY-BUDGET-002 ya existia y no frenaba nada porque
+    dependia de que alguien corriera `record-cost`, que no tiene una sola
+    llamada desde codigo. Un techo que depende de la memoria del modelo es
+    prosa. Estos tests existen para que este no vuelva a serlo: fabrican
+    transcripts reales y comprueban que el gate MUERDE y que falla ABIERTO
+    cuando no hay nada que medir.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = (Path(self.tmp.name) / "ws").resolve()
+        self.task = self.ws / "tasks" / "AUTO-20260805-cost-gate"
+        self.task.mkdir(parents=True)
+        # El puente sid -> tarea que escribe track-read.sh
+        self.sid = "11111111-2222-3333-4444-555555555555"
+        st = self.ws / ".harness" / "session-task"
+        st.mkdir(parents=True)
+        (st / self.sid).write_text(self.task.name + "\n")
+        # Un CLAUDE_CONFIG_DIR propio: nunca tocamos los transcripts reales.
+        self.cfg = Path(self.tmp.name) / "cfg"
+        # El slug es el que calcula find_project_dir: no-alfanumerico -> "-".
+        slug = re.sub(r"[^a-zA-Z0-9]", "-", str(self.ws))
+        self.proj = self.cfg / "projects" / slug
+        self.proj.mkdir(parents=True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_transcript(self, turns, cache_read, cache_write, ctx_extra=0):
+        """Un transcript minimo con el usage que el medidor lee."""
+        lines = []
+        for _ in range(turns):
+            lines.append(json.dumps({
+                "type": "assistant",
+                "cwd": str(self.ws),
+                "timestamp": "2026-08-05T12:00:00.000Z",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-opus-5",
+                    "usage": {
+                        "input_tokens": ctx_extra,
+                        "cache_read_input_tokens": cache_read,
+                        "cache_creation_input_tokens": cache_write,
+                        "output_tokens": 500,
+                    },
+                    "content": [{"type": "tool_use", "id": "t", "name": "Bash",
+                                 "input": {}}],
+                },
+            }))
+        (self.proj / f"{self.sid}.jsonl").write_text("\n".join(lines) + "\n")
+
+    def transition(self, phase):
+        env = os.environ.copy()
+        env["CLAUDE_CONFIG_DIR"] = str(self.cfg)
+        env["HARNESS_WS"] = str(self.ws)
+        return subprocess.run(
+            ["python3", str(SCRIPT), "--policy", str(POLICY),
+             "transition", str(self.task), phase, "--actor", "orchestrator"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            check=False, env=env,
+        )
+
+    def init(self, budget=None):
+        args = ["python3", str(SCRIPT), "--policy", str(POLICY), "init",
+                str(self.task), "--lane", "express", "--repos", "atlas",
+                "--delivery", "review"]
+        if budget is not None:
+            args += ["--budget-usd", str(budget)]
+        return subprocess.run(args, text=True, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, check=False)
+
+    def test_cache_rota_frena_la_transicion(self):
+        # La firma medida en campo: mas escritura que lectura. La peor sesion
+        # real tuvo 23% de acierto y dejo $1472 en reescrituras.
+        self.assertEqual(self.init().returncode, 0)
+        self.write_transcript(turns=40, cache_read=20_000, cache_write=200_000)
+        r = self.transition("implement")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("POLICY-BUDGET-005", r.stderr)
+        self.assertIn("COST-CACHE", r.stderr)
+
+    def test_contexto_desbocado_frena_la_transicion(self):
+        self.assertEqual(self.init().returncode, 0)
+        # Caché sana, pero arrastra 400k de contexto: el otro modo de fuga.
+        self.write_transcript(turns=40, cache_read=400_000, cache_write=1_000)
+        r = self.transition("implement")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("COST-CTX", r.stderr)
+
+    def test_presupuesto_excedido_frena_la_transicion(self):
+        self.assertEqual(self.init(budget=0.50).returncode, 0)
+        self.write_transcript(turns=200, cache_read=100_000, cache_write=1_000)
+        r = self.transition("implement")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("COST-BUDGET", r.stderr)
+
+    def test_una_corrida_sana_pasa(self):
+        # CONTRA-MITAD obligatoria: un gate que siempre bloquea no es un gate,
+        # es un freno de mano. Caché sana y contexto chico tienen que pasar.
+        self.assertEqual(self.init(budget=100).returncode, 0)
+        self.write_transcript(turns=30, cache_read=40_000, cache_write=500)
+        r = self.transition("implement")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_la_remediacion_del_gate_EXISTE(self):
+        """El gate ofrecia una salida que no existia, y eso es peor que no ofrecer.
+
+        La primera version de POLICY-BUDGET-005 decia "subilo con
+        `init --budget-usd`". `init` se niega sobre una tarea con estado
+        (POLICY-STATE-001), asi que la unica remediacion escrita era FALSA y el
+        gate quedaba como callejon sin salida: exactamente el defecto que este
+        harness persigue (prosa que promete lo que el codigo no hace), cometido
+        por el gate que vino a arreglar el gasto.
+        """
+        self.assertEqual(self.init(budget=1).returncode, 0)
+        self.write_transcript(turns=200, cache_read=100_000, cache_write=1_000)
+        r = self.transition("implement")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+
+        # La salida que el mensaje nombra tiene que FUNCIONAR de verdad.
+        subir = subprocess.run(
+            ["python3", str(SCRIPT), "--policy", str(POLICY), "budget",
+             str(self.task), "--to", "500", "--actor", "humano",
+             "--reason", "refactor grande, justificado"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        self.assertEqual(subir.returncode, 0, subir.stderr)
+        self.assertIn("budget", (self.task / "state.json").read_text(),
+                      "el cambio de techo no quedo en el estado")
+        self.assertIn("humano", (self.task / "state.json").read_text(),
+                      "no quedo QUIEN lo autorizo: un techo sin actor es decorativo")
+        r2 = self.transition("implement")
+        self.assertEqual(r2.returncode, 0, r2.stdout + r2.stderr)
+
+    def test_el_presupuesto_no_se_baja(self):
+        # Misma ley que `delivery`: bajar el techo no deshace lo gastado, solo
+        # deja el estado mintiendo sobre lo que ya ocurrio.
+        self.assertEqual(self.init(budget=100).returncode, 0)
+        r = subprocess.run(
+            ["python3", str(SCRIPT), "--policy", str(POLICY), "budget",
+             str(self.task), "--to", "10", "--actor", "humano"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("POLICY-BUDGET-007", r.stderr)
+
+    def test_los_umbrales_de_emergencia_llegan_al_medidor(self):
+        # El ultimo recurso: `transition` copia el entorno al subprocess, asi
+        # que una emergencia de produccion puede mover el umbral sin editar
+        # nada. NO deja rastro, por eso es el ultimo recurso y no el primero,
+        # pero tiene que EXISTIR o el gate es un boton de apagado del harness.
+        self.assertEqual(self.init().returncode, 0)
+        self.write_transcript(turns=40, cache_read=400_000, cache_write=1_000)
+        self.assertEqual(self.transition("implement").returncode, 3)
+        env = os.environ.copy()
+        env.update(CLAUDE_CONFIG_DIR=str(self.cfg), HARNESS_WS=str(self.ws),
+                   HARNESS_CTX_CEILING="900000")
+        r = subprocess.run(
+            ["python3", str(SCRIPT), "--policy", str(POLICY), "transition",
+             str(self.task), "implement", "--actor", "orchestrator"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            check=False, env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_el_gate_no_agrega_latencia_perceptible(self):
+        # Corre en el camino caliente de CADA transicion. Medido: 0.08s con el
+        # filtro por tarea. Si alguien lo rompe y pasa a escanear todo, esto
+        # muerde antes de que un usuario lo sufra como "se colgo".
+        import time
+        self.assertEqual(self.init().returncode, 0)
+        self.write_transcript(turns=50, cache_read=40_000, cache_write=500)
+        t0 = time.monotonic()
+        r = self.transition("implement")
+        dt = time.monotonic() - t0
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertLess(dt, 10.0, f"la transicion tardo {dt:.1f}s: el gate escanea de mas")
+
+    def test_sin_transcripts_falla_abierto(self):
+        # Sin datos no se puede afirmar nada, y bloquear seria mentir al reves:
+        # exactamente el "verde silencioso" invertido. La tarea avanza.
+        self.assertEqual(self.init().returncode, 0)
+        r = self.transition("implement")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
 if __name__ == "__main__":

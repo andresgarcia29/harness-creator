@@ -1,7 +1,9 @@
 {
-  "_comment": "USD por millón de tokens. La báscula OFICIAL es ccusage; esto es un ESTIMADO. Un modelo que NO esté aquí muestra '—' en el panel: los tokens son reales, el dinero no se inventa (agrega tu modelo — GLM, Kimi, el que uses — y el histórico se re-cotiza solo). Multiplicadores de caché: lectura ~0.1x, escritura 1.25x. Verificado contra la doc de Anthropic el 2026-07-24.",
+  "_comment": "USD por millón de tokens. La báscula OFICIAL es ccusage; esto es un ESTIMADO. Un modelo que NO esté aquí muestra 'n/d' en el panel: los tokens son reales, el dinero no se inventa (agrega tu modelo, GLM o Kimi o el que uses, y el histórico se re-cotiza solo). Multiplicadores de caché: lectura ~0.1x; escritura 1.25x a 5 min y 2x a 1 hora. Verificado contra la doc de Anthropic el 2026-08-05.",
+  "_comment_ttl": "La escritura de caché tiene DOS precios y el harness cobraba uno solo. Medido sobre 663 transcripts: 504M de tokens escritos a TTL de 1h contra 305M a 5m, o sea que el tramo caro es la mayoría. Cobrarlo todo a 1.25x subestimaba la escritura en ~38%, y la escritura es un tercio de la factura. harness-cost.py usa el desglose por TTL cuando el transcript lo trae (campo cache_creation) y cae al plano de 5m cuando no.",
   "_cache_read_multiplier": 0.1,
   "_cache_write_multiplier": 1.25,
+  "_cache_write_1h_multiplier": 2.0,
   "models": {
     "claude-fable-5": {
       "input": 10.0,

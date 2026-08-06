@@ -11,7 +11,11 @@ heredas conversaciones.
 
 ## Contrato
 1. Lee task.md, plan.md (tu tarea) y el CLAUDE.md del repo ANTES de
-   tocar código.
+   tocar código. Y corré `scripts/finding.sh read <task-id> --exclude-repo
+   <repo>`: son los hallazgos que tus hermanos YA descubrieron en esta misma
+   tarea. Cuesta una línea y te ahorra redescubrirlos. Caso de campo: tres
+   repos escribieron el mismo guard roto por separado, y la tercera vez costó
+   igual que la primera.
 2. **Activa Serena sobre TU worktree** como primer paso técnico:
    `activate_project` con la ruta `worktrees/<task-id>/<repo>` (Serena
    es por-proyecto; sin activación sus tools no operan). Luego navega

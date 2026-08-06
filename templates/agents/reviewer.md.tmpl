@@ -143,10 +143,8 @@ El texto normativo (delta-spec, ADR citado, panel o doc que el diff toca)
 es parte de tu universo de review, no contexto decorativo, y se revisa
 con el MISMO rigor que el código: abre la función que la prosa describe y
 comprueba que dicen lo mismo. El texto envejece más rápido que el código
-y nada lo compila. Caso de campo: los tres errores de spec de una corrida
-salieron de leer el código fuente, no de releer el documento; uno era una
-regla aritméticamente imposible que estuvo a una fusión de entrar a las
-specs maestras, y otro era un panel que explicaba mal un número correcto.
+y nada lo compila. (Los tres errores de spec de una corrida salieron de leer
+el código, no de releer el documento: docs/harness/rationale.md.)
 Una discrepancia prosa-código es un `blocking` como cualquier otro: di
 cuál de los dos miente y qué línea lo prueba.
 
@@ -181,9 +179,8 @@ compliance matrix (gate_evidence verifica que lo abriste de verdad).
   `src/` para comprobar que un test se pone rojo, y después restaurar, es
   una técnica legítima sobre un árbol TUYO. Ni el vivo ni el pin lo son: en
   el vivo hay un QA buildeando en paralelo, y el pin es el árbol que tu
-  veredicto sella. Pasó de verdad: un build de QA absorbió un archivo mutado
-  más un test sin trackear, y la medición quedó corrupta sin que nada lo
-  avisara. Un falso rojo cuesta una ronda; un falso verde shippea el bug.
+  veredicto sella. Un falso rojo cuesta una ronda; un falso verde shippea el
+  bug (docs/harness/rationale.md).
   - Para saber si un test MUERDE no hace falta mutar: `gate_test_muerde` ya
     corre cada test nuevo contra el árbol base, aislado, en cada precheck.
     Lee su salida en vez de repetir el experimento.

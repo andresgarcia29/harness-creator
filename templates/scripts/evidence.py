@@ -296,6 +296,147 @@ def _test_slots(cores: int):
     return max(2, cores // 3)
 
 
+class BoundedEcho:
+    """Acota lo que la corrida mete en el CONTEXTO del agente, sin tocar el log.
+
+    POR QUÉ EXISTE: este runner es obligatorio ("todo comando que sustenta el
+    pass se ejecuta mediante el runner") y hasta hoy volcaba la salida COMPLETA
+    a stdout. Un vitest de 2000 líneas son ~30k tokens que entran a la ventana
+    del agente y se RE-LEEN en cada tool call posterior: a 88 llamadas restantes
+    son 2.6M de tokens de caché por un solo comando. Medido sobre 663
+    transcripts, releer contexto es el 43% de la factura y reescribirlo otro
+    31%; la salida de comandos es de lo poco que el harness controla de los dos.
+
+    El log completo SIEMPRE se escribe entero en disco: acá no se pierde nada,
+    se deja de pagar por mirarlo. Es la misma economía de `scripts/quiet.sh`,
+    que ya existía y solo estaba cableada para kubectl y gcloud.
+
+    REGLA DE ORO, heredada de quiet.sh: truncar es economía, truncar EL ERROR es
+    autolesión. El output de un fallo no es ruido, es la señal con la que el
+    agente se corrige. Por eso además de cabeza y cola se rescatan las líneas de
+    error del tramo omitido, y el marcador dice cuántas se omitieron: un
+    contexto lossy debe SABERSE lossy, o el modelo infiere que salió limpio.
+
+    Las primeras líneas salen EN VIVO para que un comando corto se vea igual que
+    antes y el humano tenga progreso; recién al pasar el techo se corta el chorro
+    y se pasa a resumen. `--verbose` restaura el comportamiento viejo completo.
+    """
+
+    ERROR_PATTERN = re.compile(
+        os.environ.get(
+            "QUIET_ERROR_PATTERN",
+            r"Error|ERROR|Traceback|Exception|FAILED|FAIL:|assert|panic:|"
+            r"fatal|Fatal|undefined reference|cannot find|not found|✗|✘|✖",
+        )
+    )
+
+    # Techo por LINEA, en bytes. Sin esto el acotador no acota nada en el peor
+    # caso, que además es común: una salida sin saltos de línea (un bundle
+    # minificado, un JSON de una línea) entra ENTERA porque cuenta como una
+    # sola línea y una sola línea siempre cabe en la cabeza. Medido antes del
+    # arreglo: 20 MB de salida en una línea viajaron íntegros al contexto, o
+    # sea el acotador reportando que acotó sin acotar, que es justo la clase de
+    # defecto que este harness persigue.
+    MAX_LINE = int(os.environ.get("QUIET_MAX_LINE_BYTES", "2000"))
+    # Y un techo por TOTAL, porque el techo por línea solo no alcanza: 10.000
+    # líneas recortadas a 2 KB siguen siendo 160 KB, o sea ~45k tokens que se
+    # re-leen en cada tool call posterior. El presupuesto se reparte mitad
+    # cabeza mitad cola: la cabeza da progreso, la cola dice cómo terminó.
+    MAX_TOTAL = int(os.environ.get("QUIET_MAX_TOTAL_BYTES", "16000"))
+
+    def __init__(self, verbose: bool = False) -> None:
+        self.verbose = verbose
+        self.head = int(os.environ.get("QUIET_HEAD", "40"))
+        self.tail = int(os.environ.get("QUIET_TAIL", "40"))
+        self.max_lines = int(os.environ.get("QUIET_MAX_LINES", "120"))
+        self.error_max = int(os.environ.get("QUIET_ERROR_MAX", "15"))
+        self._buf = b""
+        self._n = 0                       # líneas vistas
+        self._tail: list[bytes] = []      # ventana de cola
+        self._elided_errors: list[bytes] = []
+        self._truncated = 0               # líneas recortadas por largo
+        self._head_bytes = 0              # presupuesto de la cabeza, en bytes
+
+    def feed(self, chunk: bytes) -> None:
+        if self.verbose:
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+            return
+        self._buf += chunk
+        # `\r` también corta: las barras de progreso (vitest, jest, cargo,
+        # pytest) reescriben la misma línea con retorno de carro, así que sin
+        # esto una suite entera es UNA línea de megabytes. Se cortan los frames
+        # y la cola se queda con el último, que es el que dice cómo terminó.
+        while True:
+            i_n = self._buf.find(b"\n")
+            i_r = self._buf.find(b"\r")
+            cut = min(x for x in (i_n, i_r) if x >= 0) if (i_n >= 0 or i_r >= 0) else -1
+            if cut < 0:
+                break
+            line, self._buf = self._buf[:cut], self._buf[cut + 1:]
+            self._line(line)
+        # Y el corte duro: un buffer que crece sin separador se emite igual.
+        # Sin esto la memoria del proceso crece con la salida del comando.
+        while len(self._buf) > self.MAX_LINE:
+            self._line(self._buf[: self.MAX_LINE])
+            self._buf = self._buf[self.MAX_LINE:]
+
+    def _line(self, line: bytes) -> None:
+        if len(line) > self.MAX_LINE:
+            line = line[: self.MAX_LINE] + b" ...[linea recortada]"
+            self._truncated += 1
+        self._n += 1
+        # La cabeza se corta por LINEAS y por BYTES, lo que llegue primero: 40
+        # líneas de 2 KB serían 80 KB de contexto por la cabeza sola.
+        if self._n <= self.head and self._head_bytes < self.MAX_TOTAL // 2:
+            sys.stdout.buffer.write(line + b"\n")
+            sys.stdout.buffer.flush()
+            self._head_bytes += len(line) + 1
+            return
+        # Rescate del tramo omitido: se decide AL VUELO porque el tramo del
+        # medio no se guarda. Una línea que después caiga en la cola se
+        # imprimiría dos veces, y eso es preferible a perderla.
+        if (len(self._elided_errors) < self.error_max
+                and self.ERROR_PATTERN.search(line.decode("utf-8", "replace"))):
+            self._elided_errors.append(b"  L%d: %s" % (self._n, line))
+        self._tail.append(line)
+        if len(self._tail) > self.tail:
+            self._tail.pop(0)
+        # La cola también se acota por bytes, no solo por cantidad.
+        while len(self._tail) > 1 and sum(len(x) + 1 for x in self._tail) > self.MAX_TOTAL // 2:
+            self._tail.pop(0)
+
+    def close(self, log_path: Path) -> None:
+        """Cierra el resumen. Idempotente."""
+        if self.verbose:
+            return
+        if self._buf:                      # última línea sin \n
+            self._line(self._buf)
+            self._buf = b""
+        if self._n <= self.max_lines:
+            # Cabía entero: lo que faltaba imprimir es la cola no emitida.
+            for line in self._tail:
+                sys.stdout.buffer.write(line + b"\n")
+            if self._truncated:
+                sys.stdout.buffer.write(
+                    b"\xc2\xb7\xc2\xb7\xc2\xb7 [%d linea(s) recortada(s) por largo "
+                    b"\xe2\x80\x94 completas en %s] \xc2\xb7\xc2\xb7\xc2\xb7\n"
+                    % (self._truncated, str(log_path).encode()))
+            sys.stdout.buffer.flush()
+            return
+        elided = self._n - self.head - len(self._tail)
+        out = [b"\xc2\xb7\xc2\xb7\xc2\xb7 [%d de %d lineas omitidas \xe2\x80\x94 "
+               b"log completo: %s] \xc2\xb7\xc2\xb7\xc2\xb7"
+               % (max(elided, 0), self._n, str(log_path).encode())]
+        if self._elided_errors:
+            out.append(b"\xc2\xb7\xc2\xb7\xc2\xb7 [errores rescatados del tramo "
+                       b"omitido] \xc2\xb7\xc2\xb7\xc2\xb7")
+            out.extend(self._elided_errors)
+        out.extend(self._tail)
+        sys.stdout.buffer.write(b"\n".join(out) + b"\n")
+        sys.stdout.buffer.flush()
+
+
 class ContentionSampler:
     """Muestrea cada 15s en un daemon-thread: solo inicio/fin pierde el caso
     de campo (el docker build ajeno que arranca a mitad de una suite de 10
@@ -630,6 +771,7 @@ def command_run(args: argparse.Namespace) -> int:
 
     sampler = ContentionSampler()
     sampler.start()
+    echo = BoundedEcho(verbose=getattr(args, "verbose", False))
     with log_path.open("wb") as log:
         process = subprocess.Popen(
             command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -638,11 +780,14 @@ def command_run(args: argparse.Namespace) -> int:
         assert process.stdout is not None
         for chunk in iter(lambda: process.stdout.read(8192), b""):
             log.write(chunk)
-            sys.stdout.buffer.write(chunk)
-            sys.stdout.buffer.flush()
+            echo.feed(chunk)
         return_code = process.wait()
         log.flush()
         os.fsync(log.fileno())
+    # El resumen se cierra DESPUÉS de fsync: la ruta del log que imprime el
+    # marcador tiene que apuntar a un archivo ya completo en disco, o el agente
+    # que la siga leyendo se lleva un log a medias.
+    echo.close(log_path)
     contention = sampler.stop()
     if contention:
         contention["test_slots"] = test_slots
@@ -1026,6 +1171,11 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--no-slot", action="store_true",
                      help="no envolver el comando en build-slot.sh (para "
                           "llamadores que ya gestionan el semáforo)")
+    run.add_argument("--verbose", action="store_true",
+                     help="vuelca la salida COMPLETA al stdout en vez del "
+                          "resumen acotado. El log en disco es idéntico en "
+                          "ambos modos; esto solo cambia cuánto entra al "
+                          "contexto del agente. Para depurar a mano.")
     run.add_argument("command", nargs=argparse.REMAINDER)
     run.set_defaults(func=command_run)
     verify = sub.add_parser("verify", help="verifica evidencia citada por un veredicto")

@@ -7,6 +7,148 @@ contra una instalación real).
 ## [Sin publicar]
 
 ### Added
+- **La economía deja de vivir en prosa: una báscula, un freno y un canal.**
+  Auditoría sobre 663 transcripts con precios oficiales. Tres hechos que el
+  harness no podía observar sobre sí mismo: (1) el **87.4%** del gasto vive en
+  la sesión ORQUESTADORA, no en los subagentes, que son el 12.6% y tienen
+  mediana de 20 tool calls y 42k de contexto; (2) la mediana de una sesión son
+  **$12.52** y el 43% cuesta menos de $10, pero el **top 10% se lleva el
+  65.8%**, o sea que el problema nunca fue el precio promedio sino la cola; (3)
+  el acierto de caché va de **23% a 99%** entre sesiones y nadie lo miraba: la
+  peor dejó $1472 en reescrituras con 749 de sus 754 turnos a menos de un
+  minuto uno de otro, o sea invalidación de prefijo, no expiración de TTL.
+  El diagnóstico de fondo: la SEGURIDAD del harness está enforzada por gates
+  deterministas y su ECONOMÍA vivía casi entera en prosa. `POLICY-BUDGET-002`
+  ya existía y no frenaba nada porque dependía de que alguien corriera
+  `record-cost`, que **no tiene una sola llamada desde código** en todo el
+  repo: `spent_usd` se quedaba en 0.0 para siempre y el techo era decorativo.
+  Ahora: `scripts/harness-cost.py` atribuye costo por agente, rol y tarea
+  cruzando los transcripts con `.harness/session-task/` (cero tokens de
+  modelo, misma ley que harness-metrics), y `transition` corre su `check` en
+  cada avance de fase, negándose con `POLICY-BUDGET-005` cuando la tarea está
+  fuera de banda. Fail-OPEN sin datos y fail-CLOSED con datos malos: sin
+  transcripts no se puede afirmar nada y bloquear sería el "verde silencioso"
+  invertido. Umbrales derivados de la distribución medida, no de opinión.
+- **`scripts/finding.sh`: un hallazgo se descubre una vez y lo saben todos.**
+  No había canal de difusión entre agentes hermanos: el bus es telemetría para
+  el panel y nadie lo suscribe, `mem_save` opera al CERRAR la tarea, y los
+  beads son seguimiento post-review. El único difusor era el humano relayando a
+  mano, y el resultado medido fue tres repos escribiendo el MISMO guard roto en
+  la misma tarea. `publish` deduplica por texto normalizado y redacta secretos
+  con la misma ley que el bus; `read` devuelve una lista ACOTADA, que es lo que
+  separa esto del bus: su salida entra en la ventana de un agente y se re-lee
+  en cada tool call suya, así que un canal de difusión sin techo haría crecer
+  el contexto de todos los agentes a la vez.
+
+- **`plan-lint.sh` exige medir los supuestos de ENTORNO.** Una entrada del
+  ledger marcada `SUPUESTO-ENTORNO:` (el comportamiento de algo que NO
+  controlamos: un cliente de correo, un navegador, una librería en runtime) ya
+  no pasa sin un `EVIDENCE_ID` de `evidence.py run`, o sea sin una EJECUCIÓN.
+  La regla existía en prosa desde siempre en `architect.md` ("Runtime no se
+  cita: se ejecuta") y nada la hacía obligatoria: un plan entero construido
+  sobre "asumo que degrada limpio" pasaba este lint en verde. **Es el gate más
+  barato del pipeline evitando el ciclo más caro**: la pregunta que decidía una
+  tarea completa se contestaba en diez minutos midiendo, y en vez de eso corrió
+  architect, cuatro implementers y cuatro reviewers antes de que QA descubriera
+  que el diseño no servía. El marcador es explícito y no inferido: adivinar
+  cuáles supuestos son de entorno produce falsos positivos sobre el artefacto
+  que el humano audita primero, y un lint que grita de más termina apagado.
+- **Aviso de carril de MÁS.** `gate_lane` solo verificaba hacia arriba (que un
+  carril corto no tocara contratos); nada detectaba lo contrario, que es el
+  caso caro y silencioso. Ahora `plan-lint.sh` avisa (no bloquea) cuando un
+  plan de standard o full resulta trivial: todas las tareas `complexity: low`,
+  cero contratos, pocos archivos. Es aviso y no rojo por dos razones: el carril
+  no se BAJA (`POLICY-LANE-002`), y un plan trivial en standard no es
+  incorrecto, es caro; bloquear algo correcto es como se apagan los linters.
+- **`docs/harness/rationale.md`: el archivo de casos.** Cada regla del harness
+  nació de un incidente y la costumbre era dejar el incidente pegado a la regla
+  DENTRO del prompt. Eso hace prompts convincentes de leer y se paga por TURNO:
+  un prompt se re-lee en cada tool call del agente que lo carga, y el
+  orquestador hace cientos por corrida. Ahora en el prompt queda la regla con la
+  razón corta, y el caso completo vive acá. **Nada se borró de la ley.**
+  Medición honesta del resultado: la extracción mecánica ahorró ~770 bytes en
+  `smart.md` y ~270 en `reviewer.md`, o sea ~2%, no el 19% que sugería el conteo
+  de líneas. La causa es que las anécdotas están ENTRETEJIDAS con las reglas en
+  la misma oración, no en bloques separables. Una dieta de verdad es una
+  reescritura regla por regla, y ésa sí necesita los datos del medidor para
+  saber qué prosa se está releyendo sin cambiar ninguna decisión.
+
+### Fixed
+- **El acotador de salida no acotaba el peor caso, que además es común.**
+  `BoundedEcho` solo cortaba en `\n`, así que una salida SIN saltos de línea
+  contaba como una sola línea, y una sola línea siempre cabe en la cabeza:
+  entraba entera. Medido: 20 MB en una línea viajaron íntegros al contexto, o
+  sea el acotador reportando que acotó sin acotar nada, que es exactamente la
+  clase de defecto que este repo persigue. Se agregaron tres techos: corte en
+  `\r` (las barras de progreso de vitest, jest, cargo y pytest reescriben la
+  misma línea, así que sin esto una suite entera es UNA línea de megabytes),
+  techo por línea, y techo por TOTAL, porque el de línea solo no alcanza: 10.000
+  líneas recortadas a 2 KB siguen siendo 160 KB. Resultado medido: 20 MB en una
+  línea pasan de 20.000.035 a 14.164 bytes, y una barra de progreso de 5.000
+  frames a 855 bytes conservando el estado final.
+- **`finding.sh` era el único canal nuevo sin techo.** Un hallazgo largo entraba
+  entero, y esa salida va a la ventana de CADA implementer y se relee en cada
+  tool call suyo: medido, 15 hallazgos de 5.000 caracteres daban 60 KB (~17k
+  tokens). Ahora `publish` acota a 400 caracteres con marcador. Un hallazgo es un
+  puntero ("esto ya se descubrió"), no el informe; el detalle vive en el
+  veredicto del repo que lo encontró.
+- **`finding.sh read` se corría dos veces por implementer.** El orquestador lo
+  inyectaba en el arranque Y el contrato del implementer se lo pedía otra vez.
+  Queda solo el implementer: la misma lectura en la ventana del orquestador
+  cuesta 3,5 veces más, porque su contexto es el grande.
+- **La remediación de `POLICY-BUDGET-005` era FALSA.** El mensaje ofrecía subir
+  el techo con `init --budget-usd`, e `init` se niega sobre una tarea que ya
+  tiene estado (`POLICY-STATE-001`): la única salida escrita no existía y el gate
+  quedaba como callejón sin salida. **El gate que vino a arreglar el gasto
+  cometió el defecto que este harness persigue.** Ahora existe
+  `harness-policy.py budget tasks/<id> --to <n> --actor <quien> --reason "..."`,
+  que solo sube (bajarlo no deshace lo gastado, solo deja el estado mintiendo) y
+  queda en `history[]`. Para una emergencia de producción, `HARNESS_CTX_CEILING`
+  y `HARNESS_CACHE_HIT_FLOOR` mueven los umbrales de la corrida y `transition`
+  los propaga al medidor; no dejan rastro, así que son el último recurso.
+
+### Changed
+- **El carril se dimensiona por `max(blast radius, tamaño)`, no por número de
+  repos.** `express` exigía "1 solo repo", así que cualquier cambio cosmético
+  que tocara tres caía en `standard` y pagaba architect + RFC + reviewer + QA
+  por repo para mover veinte líneas de HTML: un cambio trivial en tres repos son
+  TRES cambios triviales, no uno complejo. Fue el segundo componente de costo de
+  una tarea de $367. Ningún gate se afloja: `quick` sigue siendo de un repo por
+  rechazo duro (`POLICY-LANE-005`, porque quick no genera DAG) y `gate_lane`
+  sigue frenando cualquier carril corto cuyo diff toque contratos, migraciones o
+  infra, tenga los repos que tenga.
+- **`/archive` retira los worktrees de la tarea.** El huérfano era el resultado
+  NORMAL del flujo: este comando no los tocaba, la limpieza vivía como paso
+  condicional de `/ship`, y el `worktree prune` del job janitor (que vive en el
+  repo aparte `harness-cronjobs`) solo borra METADATOS de directorios que
+  alguien ya borró a mano. Y no es cosmético: **ningún hook conoce el estado
+  "archivada"**, todos derivan la tarea de la RUTA, así que un worktree de tarea
+  muerta sigue reclamándose, bloqueando por claim hasta una hora, y emitiendo
+  eventos con un task-id que ya no existe. Caso de campo: ~15 disparos de un
+  hook de diseño sobre el worktree de una tarea archivada, cada uno un turno
+  completo del modelo. El doctor además los detecta, para quien archivó antes de
+  este arreglo o no corre los cronjobs.
+- **HARDENING.md citaba `harness-janitor.sh:22-23` como si viviera en este
+  repo.** Vive en `andresgarcia29/harness-cronjobs`, que es lo correcto por
+  diseño (su unidad de ejecución es "una vez", no "cada quien"). La cita por
+  número de línea desde acá hacía pensar lo contrario.
+- **`evidence.py run` deja de volcar la suite entera al contexto.** El runner
+  es OBLIGATORIO para todo comando que sustenta un pass, y hasta hoy streameaba
+  la salida completa a stdout. Un `vitest` de 2000 líneas son ~30k tokens que
+  entran a la ventana del agente y se **re-leen en cada tool call posterior**:
+  a 88 llamadas restantes, 2.6M de tokens de caché por un solo comando. Medido:
+  releer contexto es el 43% de la factura y reescribirlo otro 31%, y la salida
+  de comandos es de lo poco que el harness controla de los dos. Ahora sale un
+  resumen acotado con la misma lógica de `quiet.sh` (que ya existía y solo
+  estaba cableada para kubectl y gcloud): cabeza en vivo, errores rescatados
+  del tramo omitido, cola, y la ruta del dump. **El log en disco es idéntico**:
+  la evidencia no se degrada, se deja de pagar por mirarla. `--verbose`
+  restaura el volcado completo. El contrato de stdout (`EVIDENCE_ID=`) tiene
+  su propio test para que la economía no rompa la seguridad.
+- **`pricing.json` cobraba la caché de 1 hora a 1.25x en vez de 2x.** Medido:
+  504M de tokens escritos a TTL de 1h contra 305M a 5m, o sea que el tramo caro
+  es la mayoría, y la escritura es un tercio de la factura. El costo que
+  mostraba el panel venía optimista por ~38% en ese componente.
 - **Serena deja de ser una sugerencia: el incentivo invertido, arreglado, y un
   aviso con diente.** En campo Serena casi no se usaba y el grep ganaba
   siempre, pese a que la edición simbólica está pedida en DOS lugares (la

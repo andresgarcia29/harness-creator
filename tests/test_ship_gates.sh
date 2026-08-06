@@ -532,6 +532,47 @@ con_dur="$(grep 'emit gate "$CURRENT_GATE"' "$TMPL" 2>/dev/null | grep -c 'SECON
 assert_eq "$sin_dur" "$con_dur" "TODOS los cierres de gate del template pasan dur ($sin_dur sitios)"
 
 
+echo
+echo "── gate_rename: un renombre a ciegas deja rastro, y el gate lo nombra"
+# POR QUE: la constitucion pide edicion simbolica y eso vivia en prosa en DOS
+# lugares sin frenar a nadie. Caso de campo: un renombre con `sed -i` sobre
+# cuatro archivos en un repo con homonimos vivos; no se rompio nada, pero se
+# supo SOLO porque el operador se lo pidio al reviewer como punto de atencion.
+# El gate AVISA y no bloquea a proposito: decidir desde el texto si un
+# sobreviviente es legitimo es justo lo que el texto no puede hacer.
+RN="$WS/rn"; rm -rf "$RN"; mkdir -p "$RN"; ( cd "$RN"
+  git init -q -b main && git config user.email t@t && git config user.name t
+  printf 'func SubscribeMessages() {}\n' > a.go
+  printf 'x := SubscribeMessages\ny := SubscribeMessages\n' > b.go
+  printf 'legacy := SubscribeMessages\n' > c.go
+  git add . && git commit -qm base && git branch -f origin/main main
+  git checkout -qb w
+  sed -i.bak 's/SubscribeMessages/SubscribeWebhookFields/g' a.go b.go
+  rm -f ./*.bak && git commit -qam "renombre a medias" ) >/dev/null 2>&1
+
+cat > "$RN/probe.sh" <<'PEOF'
+set -uo pipefail
+BASE_REF=main; REPO=demo
+gate() { echo "── gate: $1 ──"; }
+emit() { :; }
+PEOF
+sed -n "/^gate_rename() {/,/^}/p" "$ROOT/templates/scripts/ship.sh.tmpl" >> "$RN/probe.sh"
+echo 'gate_rename; echo "RC=$?"' >> "$RN/probe.sh"
+
+out="$(cd "$RN" && bash probe.sh 2>&1)"
+assert_contains "$out" "TODAVÍA viven en el árbol" "el renombre incompleto se detecta"
+assert_contains "$out" "c.go" "y NOMBRA el archivo que quedo atras"
+assert_contains "$out" "SubscribeMessages" "con el identificador exacto"
+assert_contains "$out" "rename_symbol" "y dice cual es la herramienta que lo evitaba"
+assert_contains "$out" "RC=0" "AVISA, no bloquea: un gate que muerde sobre una heuristica es un gate que alguien apaga"
+
+# CONTRA-MITAD: un renombre COMPLETO no dice nada. Si avisara igual seria ruido
+# permanente sobre la operacion mas comun de un refactor.
+( cd "$RN" && sed -i.bak 's/SubscribeMessages/SubscribeWebhookFields/g' c.go && rm -f ./*.bak && git commit -qam "completo" ) >/dev/null 2>&1
+out="$(cd "$RN" && bash probe.sh 2>&1)"
+assert_contains "$out" "renombres completos" "un renombre completo no genera ruido"
+assert_not_contains "$out" "TODAVÍA viven" "y no inventa un sobreviviente"
+
 echo "── gate_tests_untouched v2: neto real, escape que declara"
 
 # delta_seccion viaja CON el gate: es quien lee el delta-spec, y sin ella

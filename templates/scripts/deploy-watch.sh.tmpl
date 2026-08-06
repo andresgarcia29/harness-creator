@@ -1177,7 +1177,18 @@ check_argocd_health() {  # → 0 sano · 1 no sano · 2 no concluyente · 3 revi
 say "── argocd: verificando $APP (timeout ${TIMEOUT}s) ──"
 check_argocd_health; health_rc=$?
 case "$health_rc" in
-  0) say "✅ $APP Healthy + Synced"; verified "health de argocd" cluster ;;
+  0) say "✅ $APP Healthy + Synced"
+     # ── ARGOCD PRUEBA EL MANIFIESTO, NO LA IMAGEN ──────────────────
+     # El nombre viejo era "health de argocd" y sobre-afirmaba: Synced
+     # significa que el cluster coincide con el MANIFIESTO de esa
+     # revision, y Healthy que los pods viven. Con promocion de imagen
+     # (Kargo) el tag lo bumpea un commit APARTE, asi que la revision
+     # puede descender de tu ship y el manifiesto de TU servicio seguir
+     # apuntando a la imagen anterior: Synced+Healthy verdaderos, pods
+     # corriendo lo viejo. La ancestria prueba que el REPO avanzo, no
+     # que TU CODIGO corre.
+     verified "argocd sincronizado al manifiesto" cluster
+     ARGOCD_VERIFICO=1 ;;
   1) red "$APP existe y NO está Healthy+Synced" ;;
   3) # Sano pero NUNCA en mi revisión, hasta el deadline: el cambio no
      # aterrizó. Es rojo (el deploy no pasó) pero SIN rollback: revertir un
@@ -1242,7 +1253,10 @@ if [ -x "$WS/scripts/smoke/$REPO.sh" ]; then
   run_bounded "$SMOKE_TIMEOUT" "$CALL_GRACE" "$WS/scripts/smoke/$REPO.sh" >>"$LOG" 2>&1
   smoke_rc=$?
   case "$smoke_rc" in
-    0) say "✅ smoke verde"; verified "smoke del canary" cluster ;;
+    0) say "✅ smoke verde"; verified "smoke del canary" cluster
+       # El smoke SI interroga al artefacto desplegado: cierra el hueco
+       # que ArgoCD deja abierto.
+       SMOKE_VERIFICO=1 ;;
     # Agotarse NO es un smoke rojo: no observamos nada malo, no observamos nada.
     # Mandarlo a red() propondría revertir por una sonda lenta.
     124) say "⏱️  el smoke de $REPO no terminó en ${SMOKE_TIMEOUT}s: lo corté."
@@ -1330,4 +1344,22 @@ elif [ "$DRIVER" = "gitops" ] && [ -z "$VERIFIED_CLUSTER" ]; then
 else
   emit deploy "$REPO verificado ($DRIVER): $VERIFIED_PARTS" true
   say "🟢 deploy de $REPO verificado por driver=$DRIVER: $VERIFIED_PARTS"
+  # ── EL MANIFIESTO ATERRIZO, PERO NADIE INTERROGO AL ARTEFACTO ────────
+  # Sigue siendo VERDE a proposito: degradarlo a ceguera se llevaria puesto
+  # todo repo gitops sin verify_cmd, y un aviso que muerde de mas es un aviso
+  # que alguien apaga. Lo que NO puede hacer es callarse, porque el verde es
+  # lo que se recuerda. Caso de campo: ArgoCD Synced+Healthy en una revision
+  # que contenia el ship, y los pods corriendo la imagen anterior porque el
+  # tag lo promueve Kargo despues. El unico tramo que prueba que TU CODIGO
+  # corre es el que interroga al artefacto: verify_cmd o el smoke.
+  if [ -n "${ARGOCD_VERIFICO:-}" ] && [ -z "$VERIFY_CMD" ] \
+     && [ -z "${SMOKE_VERIFICO:-}" ]; then
+    say "   ⚠️  pero NADIE interrogó al artefacto: lo de ArgoCD prueba que el"
+    say "      cluster coincide con el MANIFIESTO de esa revisión, no que el pod"
+    say "      corra TU imagen. Con promoción de tag (Kargo) las dos cosas se"
+    say "      separan: Synced+Healthy pueden ser ciertos con la imagen anterior."
+    say "      ↳ cerralo declarando verify_cmd de $REPO en harness-answers.yaml:"
+    say "        un curl a un marcador de build que SOLO exista en tu cambio."
+    emit assumption "deploy de $REPO: verde por manifiesto, sin interrogar al artefacto (sin verify_cmd ni smoke)"
+  fi
 fi

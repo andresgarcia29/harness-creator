@@ -37,6 +37,10 @@ fi
 # Sección acotada: nunca más de $2 líneas de la fuente $1 (economía de tokens).
 capped() { [ -f "$1" ] && sed -n "1,${2}p" "$1"; }
 
+# run_bounded: el grafo se consulta con reloj. Ver el bloque "## Quién consume".
+# shellcheck source=/dev/null
+[ -f "$WS/scripts/bounded.sh" ] && . "$WS/scripts/bounded.sh" 2>/dev/null
+
 {
   echo "<!-- brief @ $head_sha, generado por repo-brief.sh; NO editar -->"
   echo "# $REPO: brief"
@@ -76,6 +80,62 @@ capped() { [ -f "$1" ] && sed -n "1,${2}p" "$1"; }
       ! -path './.git*' ! -path './node_modules*' ! -path './vendor*' \
       | sort | head -10 | sed 's|^\./||; s|^|  |')
   (cd "$SRC" && find . -maxdepth 2 -name '*_test.go' -o -maxdepth 2 -name '*.test.ts' -o -maxdepth 2 -name 'test_*.py' 2>/dev/null | head -5 | sed 's|^\./||; s|^|  |')
+
+  # ── Homónimos: el mismo nombre, en otro repo ───────────────────────────
+  # POR QUE ACA Y NO EN EL PROMPT: los prompts llevaban meses diciendo "usá
+  # graphify, no grep masivo" y el reporte de campo fue el mismo tres veces: NO
+  # se usó. El motivo no es desobediencia, es aritmética: consultar el grafo son
+  # 2-3 tool calls a contexto completo, y el grep que el agente ya tiene a mano
+  # contesta *algo* en una. Cuando la herramienta correcta cuesta más que la
+  # chapucera, gana la chapucera, y ninguna cantidad de prosa da vuelta eso. Así
+  # que la respuesta viaja YA RESUELTA en el brief: no se elige, se lee.
+  #
+  # POR QUE ESTA PREGUNTA Y NO OTRA: hay que ser honesto sobre lo que el grafo
+  # de esta instancia sabe. `graph-refresh.sh` usa `graphify update`, que extrae
+  # SOLO AST (a propósito: la extracción semántica exigía API key). Eso da
+  # aristas `call` DENTRO de cada repo, pero `merge-graphs` no resuelve símbolos
+  # entre repos: las aristas cruzadas son CERO, medido. Así que "quién me
+  # consume desde otro repo" NO tiene respuesta acá y no se va a fingir una.
+  #
+  # Lo que sí sale de los nodos, sin necesitar una sola arista, es el homónimo:
+  # el mismo identificador definido en más de un repo. Y es justo el dato que el
+  # implementer no puede ver, porque su worktree es UN repo, y justo el que
+  # convierte un `sed -i` en un incidente. Es la mitad que `gate_rename` (en
+  # ship.sh) no alcanza a ver desde el diff: el gate mira lo que sobrevivió
+  # DESPUES; esto avisa ANTES.
+  _g="$WS/graphify-out/graph.json"
+  if [ -s "$_g" ]; then
+    _h="$(python3 - "$_g" "$REPO" <<'PYEOF' 2>/dev/null
+import collections, json, sys
+try:
+    g = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+repo = sys.argv[2]
+donde = collections.defaultdict(set)
+for n in g.get("nodes", []):
+    lab, r = n.get("label"), n.get("repo")
+    # Solo simbolos, no archivos: "auth.go" repetido en dos repos no es un
+    # riesgo de renombre, es el nombre de archivo mas comun del mundo.
+    if lab and r and lab.endswith(")"):
+        donde[lab].add(r)
+filas = sorted((l, sorted(rs - {repo})) for l, rs in donde.items()
+               if repo in rs and len(rs) > 1)
+for lab, otros in filas[:12]:
+    print("  %s  también en: %s" % (lab, ", ".join(otros[:4])))
+if len(filas) > 12:
+    print("  ...y %d más" % (len(filas) - 12))
+PYEOF
+)"
+    if [ -n "$_h" ]; then
+      echo
+      echo "## Homónimos en otros repos (cuidado al renombrar)"
+      echo "$_h"
+      echo "  Un reemplazo de texto sobre estos nombres toca código que no es tuyo."
+      echo "  Usá edición simbólica (Serena rename_symbol), no sed."
+    fi
+  fi
+
 # tmp + mv: cuando un HEAD se mueve, TODAS las sesiones que hacen prefetch
 # regeneran a la vez, y minion-probe.sh lo invoca desde workers EN PARALELO y
 # después hace cat. Sin esto, un lector recibía un brief truncado o con dos

@@ -11,7 +11,17 @@
 # directorio padre de un montón de repos git independientes puede terminar en
 # "No code files found - nothing to rebuild": un grafo de 0 nodos que ANTES
 # reportábamos como sano (issue #25). Por repo funciona siempre, y
-# `graphify merge-graphs` existe justo para unirlos en el grafo cross-repo.
+# `graphify merge-graphs` existe justo para unirlos en un solo grafo.
+#
+# QUE CONTESTA ESE GRAFO Y QUE NO, medido, para que nadie lo venda de mas:
+# `graphify update` extrae SOLO AST (la extraccion semantica exigia API key y
+# se saco a proposito). Eso da aristas `call` y `contains` DENTRO de cada repo,
+# que es lo que hace util `graphify query` para "quien llama a X aca". Pero
+# `merge-graphs` UNE conjuntos de nodos: no resuelve simbolos entre repos, asi
+# que las aristas cruzadas son CERO. "Quien me consume desde otro repo" NO
+# tiene respuesta en este grafo. Lo que si cruza el limite del repo son los
+# NODOS, y de ahi sale el unico dato cross-repo que el brief publica: el
+# homonimo (mismo identificador definido en dos repos). Ver repo-brief.sh.
 #
 # Y NO CONFÍA EN EL EXIT CODE: graphify sale 0 aunque no haya indexado nada,
 # así que aquí se cuentan NODOS. Cero nodos es un fallo ruidoso, no un ✓, y

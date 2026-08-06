@@ -144,7 +144,7 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
      ticket-close,ticket-pull,harness-bug,harness-version,skills-sync,
      pipeline-steps,py,fe,archived-repos,mark-read,verdict-beads,ship-wave,
      port-forwards,instance-ship,adr-new,finding}.sh,
-     scripts/{harness-policy,evidence,harness-metrics,harness-cost}.py, `harness-policy.json`,
+     scripts/{harness-policy,evidence,harness-metrics,harness-cost,task-note,harness-sink}.py, `harness-policy.json`,
      **los hooks Y el archivo que los cablea**, que van JUNTOS o el update
      entrega un hook que nunca corre:
      `.claude/hooks/{block-direct-push,guard-canonical,guard-worktree,

@@ -64,6 +64,74 @@ hallazgo archivado sin bead deja de existir (Ley 7).
    (task.md, plan.md, delta-spec.md, veredictos, ship.log) a
    `tasks/archive/YYYY-MM-DD-<id>/`. El archive es AUDIT TRAIL: nunca
    se edita ni borra.
+3b. **Escribí la nota que sobrevive a la tarea**:
+   `python3 scripts/task-note.py <id>` deja `docs/tareas/<id>.md`, versionado.
+
+   **Por qué acá y no en `tasks/`**: `tasks/` está gitignoreado, así que todo lo
+   que la tarea produjo (el ledger, el enrichment, los veredictos, `history[]`)
+   muere con esta máquina. Con N ingenieros son N máquinas y cero aprendizaje
+   compartido. El repo de la instancia ya está versionado y lo clonan todos: ES
+   el cerebro compartido, y lo único que faltaba era escribir ahí.
+
+   El script rellena TODO lo verificable (carril, repos, costo real, rondas,
+   ledger separando lo medido de lo asumido, veredictos con sus tardíos,
+   decisiones de `history[]`, hallazgos difundidos) y deja marcados con
+   `<!-- COMPLETAR: ... -->` los campos de JUICIO. Esos los escribís vos, ahora,
+   que sos el único momento en que alguien tiene el contexto entero en la
+   cabeza. Son cuatro:
+   - **qué se pidió**, en los términos del humano
+   - **qué resultó ser el problema real**, si fue otro. Este es el campo más
+     valioso de la nota y suele ser el que se pierde
+   - **sorpresas**: lo que contradijo la expectativa ("esperábamos X, medimos
+     Y"). Si no hubo, escribí "ninguna" y no inventes
+   - **enlaces**: ADRs que salieron de acá, el PR, y las tareas relacionadas
+     como `[[AUTO-...]]`. Sin enlaces esto es una carpeta de archivos sueltos;
+     con enlaces, el grafo contesta "qué otras tareas tocaron este repo" y "qué
+     tareas dependieron de este supuesto", que es justo lo que ni el tracker ni
+     la memoria del agente contestan
+
+   **NO copies tu razonamiento.** Una traza son cientos de miles de tokens cuyo
+   valor decae en días; un archivo que nadie relee es un diario, no una memoria.
+   Lo que compone es la sorpresa. Y si algo de la nota se volvió LEY, no se
+   queda ahí: sube a un ADR o a una regla en el paso siguiente. La nota guarda
+   el camino; git guarda el destino.
+
+3c. **Exportá las métricas de la tarea**:
+   `python3 scripts/harness-sink.py push <id>` deja `docs/metrics/<id>.jsonl`,
+   una línea por AGENTE con costo, tokens, contexto medio, acierto de caché,
+   carril, repos, rondas y el link al ticket.
+
+   **El grano es el agente, no la tarea**, y eso no es un detalle: el hallazgo
+   que originó toda esta capa fue que el 87% del gasto vive en el orquestador y
+   no en los subagentes, y eso SOLO se ve con ese grano. Agregar hacia arriba es
+   un `GROUP BY`; desagregar lo que se guardó agregado es imposible.
+
+   Un archivo por tarea y no uno global: con varias personas appendeando al
+   mismo archivo hay conflicto de merge en cada push. El glob los lee todos
+   igual, así que no se pierde nada:
+
+   ```
+   duckdb -c "SELECT carril, round(avg(costo_usd),2), round(avg(rondas_review),1)
+              FROM read_json_auto('docs/metrics/*.jsonl') GROUP BY 1"
+   ```
+
+   Si el workspace tiene Postgres configurado (`harness-sink.py setup`), la
+   misma corrida escribe ahí también. Si la base está caída, el archivo ya
+   quedó escrito y solo avisa: **perder el archivado por una base caída sería el
+   peor canje posible**.
+
+3d. **Cerrá el ticket con UN comentario, no con el expediente** (solo si
+   `origin: ticket`). `scripts/with-secrets.sh scripts/ticket-close.sh <id>`, o
+   el MCP de Linear si el workspace lo tiene montado.
+
+   **Un solo comentario, y con el resultado, no con el proceso.** Lo que va:
+   qué cambió, el veredicto y las rondas por repo, el costo, y el link a
+   `docs/tareas/<id>.md`. Lo que NO va: el plan, el enrichment ni el ledger. Son
+   miles de palabras de artefactos de TRABAJO, que importan mientras la tarea
+   corre y no después; pegarlos ahoga la conversación humana, que es para lo
+   único que sirve un ticket, y crea una tercera copia que se desvía de las
+   otras dos. Nadie grepea los comentarios de un ticket cerrado.
+
 4. **Propón como diff** la fusión de specs al humano si algún
    requirement MODIFIED/REMOVED toca una spec ratificada — la ley la
    cambian humanos. ADDED puros: aplica directo.

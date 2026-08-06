@@ -1855,6 +1855,87 @@ delta_seccion() {  # delta_seccion <archivo> <regex-extendida> → contenido
   ' "$1"
 }
 
+# ── gate_rename: un renombre a ciegas es un reemplazo de texto ─────────
+# POR QUE EXISTE: la constitucion pide edicion simbolica (Serena) y eso vivia
+# en prosa en DOS lugares sin frenar a nadie. Caso de campo reportado por un
+# operador: un renombre hecho con `sed -i` sobre cuatro archivos, en un repo
+# donde vivian homonimos legitimos que debian quedar intactos. No se rompio
+# nada, pero se supo SOLO porque el operador se lo pidio explicitamente al
+# reviewer como punto de atencion. Eso es suerte convertida en costo de review.
+#
+# Lo que este gate puede comprobar de forma mecanica no es "usaste Serena"
+# (indecidible desde el diff), sino la CONSECUENCIA observable: **el
+# identificador viejo sigue vivo en el arbol**. Ahi hay dos posibilidades y las
+# dos merecen una linea escrita:
+#   · el renombre quedo a medias, o
+#   · lo que sobrevive es el MISMO nombre en otro tipo o paquete, o sea un
+#     homonimo legitimo que no debia tocarse (y que un sed habria arrasado si
+#     el patron llegaba a el)
+#
+# LO QUE **NO** CUBRE, dicho de frente para no vender lo que no hace: un
+# identificador PARECIDO pero distinto (`SubscribeToMessages` frente a
+# `SubscribeMessages`) no aparece por ningun lado, porque un `sed` de substring
+# exacto tampoco lo toca. Ese riesgo no es observable desde el diff y su unica
+# proteccion real sigue siendo la edicion simbolica. Este gate cubre el caso
+# mecanicamente detectable; no lo presenta como si fuera todo.
+#
+# AVISA, NO BLOQUEA, y es deliberado: decidir desde el texto si un homonimo es
+# legitimo es justo lo que el texto no puede hacer, y un gate que bloquea sobre
+# una heuristica es un gate que alguien desactiva (guard-broad-add y
+# guard-symbol-grep aprendieron lo mismo). Lo que si hace es NOMBRAR los
+# sobrevivientes, que es lo que convierte "revisalo" en "mira estas tres lineas".
+gate_rename() {
+  gate "renombres a ciegas"
+  local diff pares
+  diff="$(git diff -M "origin/$BASE_REF...HEAD" -U0 2>/dev/null || true)"
+  [ -n "$diff" ] || { echo "  · sin diff que mirar"; return 0; }
+  # Un renombre en masa deja el MISMO identificador desaparecido de varias
+  # lineas borradas. Se piden 3+ ocurrencias en 2+ archivos: por debajo de eso
+  # es una edicion normal y avisar seria ruido.
+  pares="$(printf '%s\n' "$diff" | awk '
+    /^\+\+\+ b\// { file = substr($0, 7); next }
+    /^-/ && !/^---/ {
+      linea = substr($0, 2)
+      while (match(linea, /[A-Za-z_][A-Za-z0-9_]{5,}/)) {
+        id = substr(linea, RSTART, RLENGTH)
+        linea = substr(linea, RSTART + RLENGTH)
+        veces[id]++
+        if (!(id SUBSEP file in visto)) { visto[id SUBSEP file] = 1; archivos[id]++ }
+      }
+    }
+    END { for (id in veces) if (veces[id] >= 3 && archivos[id] >= 2) print id }
+  ' | sort -u)"
+  [ -n "$pares" ] || { echo "  · sin renombres en masa"; return 0; }
+
+  local sobrevivientes=""
+  local id
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    # Si el identificador desaparecio de varias lineas Y ya no aparece en el
+    # arbol, el renombre fue completo: nada que decir.
+    local quedan
+    quedan="$(git grep -n -w -- "$id" 2>/dev/null | head -4 || true)"
+    [ -n "$quedan" ] || continue
+    sobrevivientes="$sobrevivientes
+  · $id sigue en el árbol:
+$(printf '%s\n' "$quedan" | sed 's/^/      /')"
+  done <<RENAMEEOF
+$pares
+RENAMEEOF
+
+  if [ -n "$sobrevivientes" ]; then
+    echo "  ⚠️  identificador(es) reemplazados en masa que TODAVÍA viven en el árbol:$sobrevivientes"
+    echo "  ↳ o el renombre quedó a medias, o eso que sobrevive es un homónimo"
+    echo "    que no debía tocarse. Las dos merecen una línea en el veredicto."
+    echo "    Un \`rename_symbol\` de Serena distingue las dos gratis: entiende el"
+    echo "    símbolo, no el texto. Un sed no puede."
+    emit assumption "renombre en masa con identificador sobreviviente en $REPO: revisar homónimos"
+  else
+    echo "  · renombres completos: el identificador viejo no sobrevive"
+  fi
+  return 0
+}
+
 gate_tests_untouched() {
   gate "tests no debilitados"
   local pat="${TEST_PATH_PATTERN:-(test|spec|Test|_test\.|\.test\.|\.spec\.|/tests?/|/spec/)}"
@@ -3214,6 +3295,7 @@ gate_entry_precheck() {
   fi
   gate_trailer
   gate_lane
+  gate_rename
 }
 
 if [ "$PRECHECK" -eq 1 ]; then
@@ -3381,6 +3463,7 @@ while [ "$attempt" -lt "$PUSH_RETRY_BUDGET" ]; do
   fi
   gate_trailer
   gate_lane
+  gate_rename
   run_phase0_gates
   run_parallel_gates
   gate_fresh_evidence

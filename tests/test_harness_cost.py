@@ -211,6 +211,46 @@ class Umbrales(CostBase):
         self.assertEqual(r.returncode, 0, r.stdout)
 
 
+class Export(CostBase):
+    """El formato para una base de datos: grano de AGENTE, no de tarea.
+
+    El hallazgo que motivo todo esto fue que el 87% del gasto vive en el
+    orquestador y no en los subagentes, y eso SOLO se ve con grano de agente.
+    Agregar por tarea es un GROUP BY; desagregar lo agregado es imposible.
+    """
+
+    def test_una_linea_json_por_agente(self):
+        self.write([self.turn(read=1_000_000) for _ in range(5)])
+        subs = self.proj / self.sid / "subagents"
+        subs.mkdir(parents=True)
+        (subs / "agent-a.jsonl").write_text(self.turn(read=1_000_000) + "\n")
+        (subs / "agent-a.meta.json").write_text(json.dumps({"agentType": "qa"}))
+        r = self.run_cost("export")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        filas = [json.loads(l) for l in r.stdout.splitlines() if l.strip()]
+        self.assertEqual(len(filas), 2, "no salio una fila por agente")
+        roles = {f["rol"] for f in filas}
+        self.assertIn("orquestador", roles)
+        self.assertIn("qa", roles)
+
+    def test_la_fila_trae_lo_que_una_consulta_necesita(self):
+        self.write([self.turn(read=1_000_000, write=1_000) for _ in range(5)])
+        r = self.run_cost("export")
+        fila = json.loads(r.stdout.splitlines()[0])
+        for col in ("tarea", "sesion", "rol", "modelo", "turnos", "tool_calls",
+                    "ctx_medio", "acierto_cache", "costo_usd", "desde", "hasta"):
+            self.assertIn(col, fila, f"falta la columna {col}")
+        self.assertEqual(fila["tarea"], "T1", "no atribuyo la tarea")
+
+    def test_es_json_valido_linea_por_linea(self):
+        # JSONL o no sirve: DuckDB, jq y pandas leen linea a linea.
+        self.write([self.turn(read=1_000) for _ in range(3)])
+        r = self.run_cost("export")
+        for l in r.stdout.splitlines():
+            if l.strip():
+                json.loads(l)
+
+
 class Atribucion(CostBase):
     def test_solo_cuenta_la_tarea_pedida(self):
         # El filtro por tarea no es azucar: sin el, un check en una transicion

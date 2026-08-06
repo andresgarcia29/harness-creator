@@ -62,7 +62,16 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# WS no es constante: `--ws` la pisa. Sin eso, el script solo servia dentro de
+# una instancia generada por harness-creator, y el caso mas util es el
+# contrario: medir un workspace CUALQUIERA (o ninguno) porque los transcripts
+# son de Claude Code, no del harness.
 WS = os.environ.get("HARNESS_WS") or os.path.dirname(HERE)
+
+
+def set_ws(path: str) -> None:
+    global WS
+    WS = os.path.abspath(os.path.expanduser(path))
 
 # ── Umbrales de banda ────────────────────────────────────────────────────────
 # No son opinión: salen de la distribución medida. El acierto de caché sano
@@ -511,10 +520,63 @@ def cmd_check(args) -> int:
     return EXIT_BREACH
 
 
+def cmd_export(args) -> int:
+    """Una línea JSON por agente. El formato para una base de datos.
+
+    POR QUÉ JSONL Y NO UNA BASE DE VERDAD: una base es un servicio que hay que
+    correr, respaldar, migrar y darle acceso a diez personas. JSONL es un
+    archivo: se versiona, se grepea, se appendea, y DuckDB, BigQuery, pandas o
+    `jq` lo leen sin importarlo. Empezar por el archivo no cierra la puerta a la
+    base; empezar por la base sí cierra la puerta a la simplicidad.
+
+        duckdb -c "SELECT rol, sum(costo_usd) FROM read_json_auto('docs/metrics/*.jsonl') GROUP BY 1"
+
+    UNA LÍNEA POR AGENTE, no por tarea: el hallazgo que motivó todo esto fue que
+    el 87% del gasto vive en el orquestador y no en los subagentes, y eso solo
+    se ve si la fila tiene grano de AGENTE. Agregar por tarea es un GROUP BY;
+    desagregar lo que se guardó agregado es imposible.
+    """
+    pd = find_project_dir(WS)
+    if not pd:
+        print("no encontré transcripts de este workspace.", file=sys.stderr)
+        return EXIT_NODATA
+    rows = collect(pd, since_days=args.days)
+    if not rows:
+        return EXIT_OK
+    for r in rows:
+        u = r["usage"]
+        # Nombres en español y planos a propósito: quien consulte esto dentro de
+        # un año no debería tener que leer este script para entender la columna.
+        print(json.dumps({
+            "tarea": r["task"] or None,
+            "sesion": r["sid"],
+            "tipo": r["kind"],
+            "rol": r["role"],
+            "modelo": r["model"],
+            "turnos": r["turns"],
+            "tool_calls": r["tools"],
+            "ctx_medio": round(r["ctx_avg"]),
+            "ctx_max": r["ctx_max"],
+            "acierto_cache": round(r["cache_hit"], 4),
+            "tok_input": u.get("input", 0),
+            "tok_cache_read": u.get("cache_read", 0),
+            "tok_cache_write": u.get("cache_write_total", 0),
+            "tok_output": u.get("output", 0),
+            "costo_usd": round(r["cost"], 4) if r["cost"] is not None else None,
+            "desde": r["first"],
+            "hasta": r["last"],
+        }, ensure_ascii=False))
+    return EXIT_OK
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="harness-cost.py",
         description="Costo real por agente, rol y tarea. Cero tokens de modelo.")
+    ap.add_argument("--ws", default=None,
+                    help="el workspace a medir. Sin esto se usa HARNESS_WS o la "
+                         "ruta del script. Los transcripts son de Claude Code, "
+                         "asi que medir NO exige una instancia del harness.")
     sub = ap.add_subparsers(dest="cmd")
 
     t = sub.add_parser("task", help="costo por agente y rol de una tarea")
@@ -526,12 +588,20 @@ def main(argv=None) -> int:
     d.add_argument("--top", type=int, default=15)
     d.set_defaults(func=cmd_day)
 
+    e = sub.add_parser("export",
+                       help="una linea JSON por agente, para una base de datos")
+    e.add_argument("--days", type=int, default=None,
+                   help="solo lo tocado en los ultimos N dias")
+    e.set_defaults(func=cmd_export)
+
     c = sub.add_parser("check", help="gate: sale 3 si está fuera de banda")
     c.add_argument("task")
     c.add_argument("--budget", type=float, default=None)
     c.set_defaults(func=cmd_check)
 
     args = ap.parse_args(argv)
+    if getattr(args, "ws", None):
+        set_ws(args.ws)
     if not getattr(args, "func", None):
         ap.print_help()
         return EXIT_USAGE

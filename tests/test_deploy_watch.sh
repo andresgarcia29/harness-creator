@@ -745,10 +745,53 @@ chmod +x "$WS/bin/kubectl"
 : > "$WS/.harness/events.jsonl"
 out="$(run676)"; rc=$?
 assert_contains "$out" "🟢 deploy de apollo verificado" "cluster sano: el cierre es verde"
-assert_contains "$out" "actions + health de argocd" "y nombra los dos tramos observados"
+assert_contains "$out" "actions + argocd sincronizado al manifiesto" "y nombra lo que argocd PRUEBA: el manifiesto, no la imagen"
 assert_contains "$(bus)" '"ok":true' "con su deploy ok=true en el bus"
 assert_not_contains "$out" "SIN VERIFICAR" "no degrada a ceguera lo que si pudo mirar"
 assert_eq 0 "$rc" "y sale 0"
+
+echo
+echo "── argocd verde SIN interrogar al artefacto: sigue verde, pero lo DICE"
+# POR QUE: Synced significa que el cluster coincide con el MANIFIESTO de esa
+# revision, y Healthy que los pods viven. Con promocion de tag (Kargo) el bump
+# es un commit APARTE, asi que la revision puede descender de tu ship y el
+# manifiesto de TU servicio seguir apuntando a la imagen anterior: Synced y
+# Healthy verdaderos, pods corriendo lo viejo. La ancestria prueba que el REPO
+# avanzo, no que TU CODIGO corre. Caso de campo reportado por un operador.
+cat > "$WS/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"get applications"*) exit 1 ;;
+  *"get application "*) printf 'Synced Healthy ' ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "$WS/bin/kubectl"
+: > "$WS/.harness/events.jsonl"
+out="$(run676)"; rc=$?
+assert_eq 0 "$rc" "sigue saliendo 0: degradarlo a rojo se llevaria puesto todo repo gitops sin verify_cmd"
+assert_contains "$out" "🟢 deploy de apollo verificado" "y sigue siendo verde"
+assert_contains "$out" "NADIE interrogó al artefacto"   "pero avisa que nadie miro si el pod corre TU imagen"
+assert_contains "$out" "Kargo" "y nombra la causa concreta: la promocion de tag"
+assert_contains "$out" "verify_cmd" "con la remediacion exacta"
+assert_contains "$(bus)" "sin interrogar al artefacto"   "y viaja al bus: el verde es lo que se recuerda, asi que el asterisco tiene que verse en el panel"
+
+# CONTRA-MITAD 1: con verify_cmd declarado, el aviso NO sale. Si saliera igual
+# se volveria ruido permanente y alguien lo apagaria.
+printf 'deploy:\n  apollo:\n    driver: gitops\n    verify_cmd: "echo marcador-de-build"\n    verify_expect: "marcador-de-build"\n' >> "$WS/harness-answers.yaml"
+: > "$WS/.harness/events.jsonl"
+out="$(run676)"
+assert_not_contains "$out" "NADIE interrogó al artefacto" \
+  "con verify_cmd declarado el aviso se calla"
+# Se revierte el answers para no contaminar los casos de abajo.
+python3 - "$WS/harness-answers.yaml" <<'PYEOF'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1]); l = p.read_text().splitlines()
+while l and ("verify_" in l[-1] or "driver: gitops" in l[-1] or l[-1].strip() in ("apollo:", "deploy:")):
+    l.pop()
+p.write_text("\n".join(l) + "\n")
+PYEOF
+rm -f "$WS/bin/kubectl"
 
 # El smoke tambien es señal de cluster: interroga al artefacto desplegado.
 mkdir -p "$WS/scripts/smoke"
@@ -1102,7 +1145,7 @@ kubectl_rev "$SHA40"
 : > "$WS/.harness/events.jsonl"
 out="$(run676)"; rc=$?
 assert_contains "$out" "🟢 deploy de apollo verificado" "sano en la revision shippeada: verde legitimo"
-assert_contains "$out" "actions + health de argocd" "con los dos tramos observados"
+assert_contains "$out" "actions + argocd sincronizado al manifiesto" "con los dos tramos observados"
 assert_contains "$(bus)" '"ok":true' "y su deploy ok=true en el bus"
 assert_eq 0 "$rc" "y sale 0"
 rm -f "$WS/bin/kubectl"

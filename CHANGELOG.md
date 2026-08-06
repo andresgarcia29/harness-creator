@@ -4,6 +4,34 @@ Formato: [Keep a Changelog](https://keepachangelog.com/). Este archivo empieza
 en 0.47.0; la historia previa vive en el log de git (100+ commits iterando
 contra una instalación real).
 
+
+## No publicado
+
+### Añadido
+- **`repo-brief.sh` publica los homónimos cross-repo.** Si un identificador del
+  repo está definido también en otro, el brief lo dice, con el nombre del otro
+  repo, antes de que nadie edite. Sale de los nodos del grafo, cuesta $0 tokens
+  y se cachea por HEAD. Va en el brief y no en un prompt porque la prosa que
+  pedía consultar el grafo llevaba meses sin cumplirse, y no por desobediencia:
+  consultar el grafo son 2 o 3 tool calls a contexto completo contra un grep que
+  contesta en una. La respuesta viaja resuelta y el agente la lee.
+- **`gate_rename` en `ship.sh`.** Avisa (no bloquea) cuando un identificador que
+  el diff quitó de 3 o más lugares sigue vivo en el árbol: o el renombre quedó a
+  medias, o lo que sobrevive es un homónimo legítimo. Las dos cosas merecen una
+  línea escrita.
+
+### Corregido
+- **`deploy-watch.sh` ya no llama "health" a lo que es sincronía.** ArgoCD
+  Synced+Healthy prueba el manifiesto, no la imagen corriendo (Kargo promueve
+  tags aparte). Ahora dice "argocd sincronizado al manifiesto" y, si nadie
+  interrogó al artefacto (sin `verify_cmd` ni smoke), lo avisa y lo deja
+  asentado como supuesto en vez de reportar un verde entero.
+- **`graph-refresh.sh` deja de vender un grafo cruzado que no existe.** Medido:
+  `graphify update` extrae solo AST, así que hay aristas `call` dentro de cada
+  repo pero `merge-graphs` no resuelve símbolos entre repos y las aristas
+  cruzadas son cero. "Quién me consume desde otro repo" no tiene respuesta acá,
+  y ahora el comentario lo dice en vez de sugerir lo contrario.
+
 ## [Sin publicar]
 
 ### Added

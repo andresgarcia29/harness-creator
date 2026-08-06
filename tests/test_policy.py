@@ -1918,6 +1918,147 @@ class CostGateTest(unittest.TestCase):
         r = self.transition("implement")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    # ── El termino que NO se puede remediar tiene salida auditable ───────────
+    # Tres reportes del mismo callejon (#90, #91, #93): con un COST-CACHE de un
+    # agente ya cerrado, la tarea no podia volver a cambiar de fase NUNCA. La
+    # remediacion impresa (recortar el contexto de ARRANQUE) no aplica a una
+    # metrica historica, `budget --to` solo mueve COST-BUDGET, HARNESS_KNOWN_BUG
+    # solo lo honra ship.sh, y HARNESS_CACHE_HIT_FLOOR apaga el umbral sin
+    # rastro. Trabajo commiteado, precheck verde, tarea viva e INMOVIL.
+
+    def write_subagente(self, role, turns, cache_read, cache_write,
+                        name="agent-uno"):
+        subs = self.proj / self.sid / "subagents"
+        subs.mkdir(parents=True, exist_ok=True)
+        lines = []
+        for _ in range(turns):
+            lines.append(json.dumps({
+                "type": "assistant", "cwd": str(self.ws),
+                "timestamp": "2026-08-06T12:00:00.000Z",
+                "message": {"role": "assistant", "model": "claude-opus-5",
+                            "usage": {"input_tokens": 0,
+                                      "cache_read_input_tokens": cache_read,
+                                      "cache_creation_input_tokens": cache_write,
+                                      "output_tokens": 100},
+                            "content": [{"type": "tool_use", "id": "t",
+                                         "name": "Bash", "input": {}}]}}))
+        (subs / f"{name}.jsonl").write_text("\n".join(lines) + "\n")
+        (subs / f"{name}.meta.json").write_text(json.dumps({"agentType": role}))
+
+    def waive(self, band, agent, actor="humano", reason="subagente cerrado"):
+        env = os.environ.copy()
+        env.update(CLAUDE_CONFIG_DIR=str(self.cfg), HARNESS_WS=str(self.ws))
+        return subprocess.run(
+            ["python3", str(SCRIPT), "--policy", str(POLICY), "cost-waive",
+             str(self.task), "--band", band, "--agent", agent,
+             "--actor", actor, "--reason", reason],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            check=False, env=env)
+
+    def cache_historica(self):
+        """Orquestador sano y un subagente cerrado bajo el piso: el caso real."""
+        self.assertEqual(self.init(budget=500).returncode, 0)
+        self.write_transcript(turns=30, cache_read=40_000, cache_write=500)
+        self.write_subagente("architect", 33, 89_000, 11_000)   # 89%, piso 90%
+
+    def test_el_cost_cache_historico_TRABA_y_budget_no_lo_destraba(self):
+        # La mitad que justifica la otra: sin esto, el escape nuevo seria una
+        # solucion a un problema que nadie tiene.
+        self.cache_historica()
+        r = self.transition("implement")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("COST-CACHE", r.stderr)
+        subir = subprocess.run(
+            ["python3", str(SCRIPT), "--policy", str(POLICY), "budget",
+             str(self.task), "--to", "5000", "--actor", "humano",
+             "--reason", "gasto justificado"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        self.assertEqual(subir.returncode, 0, subir.stderr)
+        r2 = self.transition("implement")
+        self.assertEqual(r2.returncode, 3,
+                         "budget --to no puede destrabar un COST-CACHE, y el "
+                         "mensaje no puede ofrecerlo como si pudiera")
+        self.assertIn("cost-waive", r2.stderr,
+                      "el gate tiene que NOMBRAR la salida que si aplica")
+        self.assertIn("solo mueve el término COST-BUDGET", r2.stderr)
+
+    def test_el_eximido_destraba_y_queda_en_history(self):
+        self.cache_historica()
+        self.assertEqual(self.transition("implement").returncode, 3)
+        w = self.waive("cache", "architect")
+        self.assertEqual(w.returncode, 0, w.stdout + w.stderr)
+        state = json.loads((self.task / "state.json").read_text())
+        entrada = [h for h in state["history"] if h.get("kind") == "cost-waive"]
+        self.assertEqual(len(entrada), 1, state)
+        self.assertEqual(entrada[0]["actor"], "humano")
+        self.assertEqual(entrada[0]["agent"], "architect")
+        self.assertTrue(entrada[0]["reason"],
+                        "un eximido sin motivo es un gate apagado con mas pasos")
+        r = self.transition("implement")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_no_se_exime_lo_que_no_esta_frenando(self):
+        # El eximido se ancla al valor MEDIDO: eximir por adelantado seria
+        # declarar algo que nadie midio, y ahi si seria un boton de apagado.
+        self.cache_historica()
+        w = self.waive("cache", "implementer")
+        self.assertEqual(w.returncode, 3, w.stdout + w.stderr)
+        self.assertIn("POLICY-COST-002", w.stderr)
+        self.assertIn("COST-CACHE/architect", w.stderr,
+                      "y dice que SI esta frenando, que es la mitad util del rechazo")
+        self.assertNotIn("cost_waivers", (self.task / "state.json").read_text())
+
+    def test_el_gasto_en_dolares_no_se_exime_por_aca(self):
+        # COST-BUDGET ya tiene `budget --to`, que autoriza un NUMERO en vez de
+        # una excepcion. Dos escapes para el mismo termino es uno de mas.
+        self.cache_historica()
+        w = self.waive("budget", "orquestador")
+        self.assertEqual(w.returncode, 3, w.stdout + w.stderr)
+        self.assertIn("POLICY-COST-001", w.stderr)
+        # Y el rechazo es un PROMPT: nombra el comando que SI autoriza dolares.
+        # Con `choices` en argparse esto decia "invalid choice" y mandaba al --help.
+        self.assertIn("budget tasks/<id> --to", w.stderr)
+
+    def test_el_eximido_es_idempotente(self):
+        self.cache_historica()
+        self.assertEqual(self.transition("implement").returncode, 3)
+        self.assertEqual(self.waive("cache", "architect").returncode, 0)
+        w2 = self.waive("cache", "architect")
+        self.assertEqual(w2.returncode, 0, w2.stdout + w2.stderr)
+        self.assertIn("ya estaba eximido", w2.stdout)
+        state = json.loads((self.task / "state.json").read_text())
+        self.assertEqual(len(state["cost_waivers"]), 1, state)
+        self.assertEqual(
+            len([h for h in state["history"] if h.get("kind") == "cost-waive"]), 1,
+            "una autorizacion que no cambio nada no ensucia el history")
+
+    def test_la_salida_ofrecida_es_la_del_termino_que_FRENA(self):
+        # El check imprime tambien los terminos EXIMIDOS, asi que elegir la
+        # remediacion por substring mandaria a eximir algo ya eximido. Con el
+        # COST-CACHE aceptado y solo el presupuesto rojo, el mensaje tiene que
+        # ofrecer `budget --to` y NO repetir el discurso de cost-waive.
+        self.assertEqual(self.init(budget=0.01).returncode, 0)
+        self.write_transcript(turns=30, cache_read=40_000, cache_write=500)
+        self.write_subagente("architect", 33, 89_000, 11_000)
+        self.assertEqual(self.transition("implement").returncode, 3)
+        self.assertEqual(self.waive("cache", "architect").returncode, 0)
+        r = self.transition("implement")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("COST-BUDGET", r.stderr)
+        self.assertIn("EXIMIDO", r.stderr, "el eximido se sigue declarando")
+        self.assertNotIn("solo mueve el término COST-BUDGET", r.stderr,
+                         "no ofrece cost-waive cuando lo que frena son dólares")
+
+    def test_un_agente_corto_no_traba_la_tarea(self):
+        # El piso mide DERROCHE, no la ventana de cache: con 4 turnos el maximo
+        # alcanzable es 75%, o sea que el agente no podia aprobar el piso de 90%
+        # hiciera lo que hiciera. Los subagentes cortos eran los mas expuestos.
+        self.assertEqual(self.init(budget=500).returncode, 0)
+        self.write_transcript(turns=30, cache_read=40_000, cache_write=500)
+        self.write_subagente("implementer", 4, 10_000, 90_000)
+        r = self.transition("implement")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

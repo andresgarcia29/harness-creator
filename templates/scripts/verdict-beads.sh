@@ -51,6 +51,17 @@ WS="$(cd "$(dirname "$0")/.." && pwd)"
 V="$WS/tasks/$TASK/verdict-$REPO.json"
 [ -f "$V" ] || { echo "❌ no existe $V"
   echo "   ↳ remediación: /review $TASK $REPO produce el veredicto primero"; exit 1; }
+# EXISTIR NO ES SER LEGIBLE. Un veredicto de 0 bytes pasaba el `-f`, `jq length`
+# devolvía vacío, el `while [ "$i" -lt "$n" ]` moría con "integer expression
+# expected" (que set -e no atrapa en una condición), y este script reportaba
+# "0 bead(s) creados, 0 fallo(s)" con exit 0. O sea: el pipeline seguía como si
+# nada sobre el único artefacto que el ship exige, ya destruido.
+jq -e 'type == "object" and (.commit // "") != ""' "$V" >/dev/null 2>&1 || {
+  echo "❌ $V existe pero no es un veredicto legible (vacío, truncado o sin commit)"
+  echo "   ↳ esto es DATA LOSS, no 'nada que hacer': algo pisó el veredicto"
+  echo "   ↳ remediación: scripts/verdict-scaffold.sh $TASK $REPO para reconstruir"
+  echo "     el esqueleto, re-emitir el juicio, y recién ahí re-correr este comando"
+  exit 1; }
 
 if ! command -v bd >/dev/null 2>&1; then
   echo "ℹ️  bd no está en PATH: no toco nada."

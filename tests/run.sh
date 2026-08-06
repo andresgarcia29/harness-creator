@@ -73,6 +73,7 @@ pyrun "evidence v1" test_evidence.py
 pyrun "policy engine v1" test_policy.py
 pyrun "metricas del harness" test_metrics.py
 pyrun "bascula de costo" test_harness_cost.py
+pyrun "nota de tarea" test_task_note.py
 
 echo
 if [ "$failed" -eq 0 ]; then echo "════ SUITE COMPLETA EN VERDE ════"; else echo "════ HAY FALLAS ════"; exit 1; fi

@@ -93,10 +93,26 @@ if [ -d "$WS/repos" ]; then
 fi
 
 # 2 · Scripts de instancia ejecutables
-for s in ship.sh worktree-task.sh quiet.sh with-secrets.sh emit.sh bounded.sh harness-cost.py finding.sh          build-slot.sh gowork.sh py.sh fe.sh repo-brief.sh          stamp-models.sh graph-refresh.sh pull-all.sh skills-sync.sh          verdict-scaffold.sh minion-probe.sh pipeline-steps.sh plan-lint.sh          harness-bug.sh; do
+for s in ship.sh worktree-task.sh quiet.sh with-secrets.sh emit.sh bounded.sh finding.sh          build-slot.sh gowork.sh py.sh fe.sh repo-brief.sh          stamp-models.sh graph-refresh.sh pull-all.sh skills-sync.sh          verdict-scaffold.sh minion-probe.sh pipeline-steps.sh plan-lint.sh          harness-bug.sh; do
   if [ -f "$WS/scripts/$s" ]; then
     [ -x "$WS/scripts/$s" ] && ok "scripts/$s ejecutable" || fail "scripts/$s no ejecutable" "chmod +x scripts/$s"
     bash -n "$WS/scripts/$s" 2>/dev/null && ok "scripts/$s sintaxis válida" || fail "scripts/$s con error de sintaxis" "revisa el archivo (bash -n scripts/$s)"
+  else
+    fail "scripts/$s faltante" "corre /harness-init de nuevo"
+  fi
+done
+
+# Los scripts de PYTHON van aparte, y esta separación no es cosmética: la lista
+# de arriba valida con `bash -n`, que sobre un .py falla SIEMPRE. Meter un
+# script de Python ahí hace que el doctor lo reporte roto estando sano, que es
+# la peor clase de observador: el que grita en verde. Se comprueba con el
+# compilador de Python, que es el equivalente exacto.
+for s in harness-policy.py evidence.py harness-metrics.py harness-cost.py task-note.py; do
+  if [ -f "$WS/scripts/$s" ]; then
+    [ -x "$WS/scripts/$s" ] && ok "scripts/$s ejecutable" || fail "scripts/$s no ejecutable" "chmod +x scripts/$s"
+    python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$WS/scripts/$s" 2>/dev/null \
+      && ok "scripts/$s sintaxis válida" \
+      || fail "scripts/$s con error de sintaxis" "revisa el archivo (python3 -m py_compile scripts/$s)"
   else
     fail "scripts/$s faltante" "corre /harness-init de nuevo"
   fi
@@ -358,13 +374,11 @@ done
 drafts=$(grep -l "status: DRAFT" "$WS"/.claude/agents/*.md "$WS"/docs/constitution.md "$WS"/specs/*/spec.md 2>/dev/null | wc -l | tr -d ' ')
 [ "$drafts" -gt 0 ] && warn "$drafts documentos en DRAFT (constituciones/constitution/specs) — ratificar antes del primer RFC"
 
-for p in harness-policy.py evidence.py; do
-  if [ -f "$WS/scripts/$p" ]; then
-    python3 -m py_compile "$WS/scripts/$p" 2>/dev/null && ok "scripts/$p compila" || fail "scripts/$p con error de sintaxis" "revisa el archivo (python3 -m py_compile scripts/$p)"
-  else
-    fail "scripts/$p faltante" "corre el update de la instancia (harness update o /harness-init .)"
-  fi
-done
+# (La validación de los scripts de Python vive con los demás scripts, en §2.
+# Estaba acá y solo cubría harness-policy.py y evidence.py: harness-metrics,
+# harness-cost y task-note quedaban sin verificar, y además el chequeo de
+# ejecutable estaba en otra lista. Un doctor con dos listas de scripts es un
+# doctor que va a olvidarse de una.)
 
 # Frescura de clones: explorar un clon podrido fue el error más caro medido
 # en campo (27 commits atrás = inventarios de endpoints inexistentes).

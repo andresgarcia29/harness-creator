@@ -115,6 +115,24 @@ assert_contains "$out" "no pude extraer el id" "nombra la causa"
 echo "── entradas hostiles"
 
 bash "$WS/scripts/verdict-beads.sh" "../evil" atlas >/dev/null 2>&1 && fail "task traversal pasó" || pass "task-id inválido: rechazado"
+
+# EXISTIR NO ES SER LEGIBLE, y este es el eslabón que volvía SILENCIOSA la
+# cascada de un data-loss: con el veredicto en 0 bytes (lo que dejaba
+# verdict-scaffold --merge-qa antes del arreglo), `jq length` devolvía vacío, el
+# `while [ "$i" -lt "$n" ]` moría con "integer expression expected" (que set -e
+# no atrapa en una condición) y este script reportaba "0 bead(s) creados, 0
+# fallo(s)" con EXIT 0: el pipeline seguía como si nada sobre el único artefacto
+# que el ship exige, ya destruido.
+mk_bd
+: > "$V"
+out="$(run_beads)"; rc=$?
+assert_eq 1 "$rc" "veredicto de 0 bytes: exit 1 (antes: '0 bead(s) creados' con exit 0)"
+assert_contains "$out" "DATA LOSS" "y lo NOMBRA en vez de reportar 'nada que hacer'"
+assert_contains "$out" "verdict-scaffold.sh T1 atlas" "con la remediación exacta"
+printf '{"schema":1,"task_id":"T1"}\n' > "$V"     # JSON válido, pero sin commit
+out="$(run_beads)"; rc=$?
+assert_eq 1 "$rc" "veredicto truncado (sin commit): exit 1"
+
 rm -f "$V"
 out="$(run_beads)"; rc=$?
 assert_eq 1 "$rc" "sin veredicto: exit 1"

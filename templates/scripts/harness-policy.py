@@ -889,6 +889,145 @@ def cmd_budget(args: argparse.Namespace) -> int:
     return 0
 
 
+COST_BANDS = {"cache": "COST-CACHE", "ctx": "COST-CTX"}
+
+
+def cost_check(task_dir: Path, as_json: bool = False):
+    """Corre la báscula sobre la tarea. Devuelve el CompletedProcess, o None.
+
+    UN SOLO llamador para las dos bocas (el gate de `transition` y `cost-waive`):
+    si cada uno armara su entorno, uno mediría un workspace y el otro otro, y el
+    eximido no correspondería al breach que frenó."""
+    tool = Path(__file__).resolve().parent / "harness-cost.py"
+    if not tool.is_file():
+        return None
+    env = os.environ.copy()
+    # El workspace se pasa explícito: harness-cost.py lo deriva de su propia
+    # ruta, y eso es correcto en una instancia instalada pero no cuando el
+    # script se invoca desde el árbol del generador o desde un worktree.
+    env.setdefault("HARNESS_WS", str(task_dir.resolve().parent.parent))
+    cmd = [sys.executable, str(tool), "check", task_dir.name]
+    if as_json:
+        cmd.append("--json")
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=60, env=env)
+    except Exception:
+        return None                      # medir no puede tumbar la corrida
+
+
+def cmd_cost_waive(args: argparse.Namespace) -> int:
+    """Acepta un término de banda del costo con actor y motivo, en history[].
+
+    POR QUÉ EXISTE: `POLICY-BUDGET-005` agrega tres términos y hasta acá solo
+    UNO tenía escape auditable. `budget --to` mueve el techo en dólares y por
+    eso destraba `COST-BUDGET`, pero `COST-CACHE` y `COST-CTX` se evaluaban
+    igual pasara lo que pasara con el presupuesto.
+
+    Y esos dos términos son HISTÓRICOS: salen de los transcripts de un agente
+    que ya cerró, así que la remediación que el gate imprime (recortar el
+    contexto de ARRANQUE del agente) no se puede aplicar en retroactivo. Con la
+    remediación inaplicable y sin override, la única salida que quedaba era
+    `HARNESS_CACHE_HIT_FLOOR`: apagar el umbral de la corrida, sin rastro. Una
+    tarea con el trabajo commiteado y el precheck verde quedaba viva e INMÓVIL,
+    y el escape que existía era justo el que nadie puede auditar.
+
+    LO QUE NO ES: un modo de apagar el gate.
+      · El término tiene que EXISTIR: no se puede eximir por adelantado, porque
+        el eximido se ancla al valor MEDIDO en el momento de autorizarlo.
+      · Cubre ese valor, no la banda: algo peor vuelve a frenar (`covered_by` en
+        harness-cost.py).
+      · No se puede eximir `COST-BUDGET`: ese ya tiene `budget --to`, que dice
+        con un número cuánto se autoriza.
+      · Cada `cost-check` posterior lo IMPRIME con quién lo autorizó y por qué.
+    """
+    task_dir = Path(args.task_dir).resolve()
+    path = state_path(task_dir)
+    code = COST_BANDS.get(args.band)
+    if not code:
+        fail("POLICY-COST-001",
+             f"banda desconocida: {args.band} (eximibles: "
+             f"{', '.join(sorted(COST_BANDS))}). El gasto en dólares NO se exime "
+             "acá: para eso está `harness-policy.py budget tasks/<id> --to <n>`, "
+             "que autoriza un número y no una excepción")
+    if not (args.reason or "").strip():
+        fail("POLICY-COST-004",
+             "un eximido sin motivo es un gate apagado con más pasos: "
+             "--reason \"<por qué este término se acepta>\"")
+    proc = cost_check(task_dir, as_json=True)
+    if proc is None or not (proc.stdout or "").strip():
+        fail("POLICY-COST-003",
+             "no pude medir el costo de esta tarea, así que no hay término que "
+             "eximir: un eximido a ciegas declara algo que nadie midió. "
+             "Corré `scripts/harness-cost.py check " + task_dir.name + "` y "
+             "mirá por qué no mide (¿CLAUDE_CONFIG_DIR, transcripts de otro "
+             "cliente?)")
+    try:
+        report = json.loads(proc.stdout.strip().splitlines()[-1])
+    except Exception:
+        # El caso más común no es un JSON roto: es la báscula fallando ABIERTO
+        # (sin transcripts no se puede afirmar nada). Se muestra su salida tal
+        # cual, porque ahí está el motivo y esconderlo mandaría a depurar jq.
+        fail("POLICY-COST-003",
+             "la báscula no midió esta tarea, así que no hay término que "
+             "eximir: un eximido a ciegas declara algo que nadie midió. Dijo:\n"
+             + (proc.stdout or proc.stderr or "").strip()[:500])
+    breach = next((b for b in report.get("breaches") or []
+                   if b.get("code") == code and b.get("agent") == args.agent), None)
+    if breach is None:
+        ya = next((w for w in report.get("waived") or []
+                   if w.get("code") == code and w.get("agent") == args.agent), None)
+        if ya:
+            print(f"✅ {task_dir.name}: {code} de {args.agent} ya estaba eximido "
+                  f"por {(ya.get('waiver') or {}).get('actor', '?')} "
+                  f"({(ya.get('waiver') or {}).get('reason', '')}). Nada que hacer")
+            return 0
+        corto = next((u for u in report.get("unmeasurable") or []
+                      if u.get("code") == code and u.get("agent") == args.agent), None)
+        if corto:
+            fail("POLICY-COST-002",
+                 f"{code} de {args.agent} NO frena esta tarea: {corto.get('text')}. "
+                 "No hay nada que eximir")
+        vivos = ", ".join(
+            f"{b.get('code')}/{b.get('agent')}" for b in report.get("breaches") or [])
+        fail("POLICY-COST-002",
+             f"esta tarea no tiene un {code} de '{args.agent}' frenándola, y un "
+             "eximido se ancla al valor MEDIDO: eximir por adelantado sería "
+             "declarar algo que nadie midió. Lo que hay ahora es: "
+             + (vivos or "nada fuera de banda"))
+    lock_state(task_dir)
+    state = load(path, "estado")
+    waivers = state.get("cost_waivers")
+    if not isinstance(waivers, list):
+        waivers = []
+    # Uno por (banda, rol): re-autorizar un valor PEOR reemplaza el anterior, y
+    # la traza de las dos autorizaciones queda igual en history[], que es donde
+    # se audita. Dos eximidos del mismo par solo servirían para que el más laxo
+    # tape al otro sin que nadie lo vea.
+    waivers = [w for w in waivers
+               if not (isinstance(w, dict) and w.get("band") == args.band
+                       and w.get("agent") == args.agent)]
+    entry = {
+        "band": args.band, "agent": args.agent, "value": breach.get("value"),
+        "actor": args.actor, "reason": args.reason,
+        "at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    waivers.append(entry)
+    state["cost_waivers"] = waivers
+    # kind=cost-waive: no es un movimiento de fase (phase_is_declared lo saltea
+    # como delivery y budget). Lo que registra es QUIÉN aceptó el término.
+    state.setdefault("history", []).append({
+        "kind": "cost-waive", "band": args.band, "agent": args.agent,
+        "value": breach.get("value"), "actor": args.actor, "reason": args.reason,
+    })
+    atomic(path, state)
+    emit_bus(task_dir, "decision",
+             f"{code} de {args.agent} aceptado (autoriza {args.actor}): {args.reason}")
+    print(f"🧾 {task_dir.name}: {code} de {args.agent} aceptado "
+          f"(autoriza {args.actor}). Queda en history[] y cada cost-check lo dice")
+    return 0
+
+
 def cmd_delivery_mode(args: argparse.Namespace) -> int:
     """El modo EFECTIVO de entrega en una línea, para que nadie parsee state.json.
 
@@ -1245,36 +1384,55 @@ def cmd_transition(args: argparse.Namespace) -> int:
     # Fail-OPEN ante ausencia de datos y fail-CLOSED ante datos malos: sin
     # transcripts no se puede afirmar nada y bloquear sería mentir al revés;
     # con transcripts fuera de banda se bloquea con el número delante.
-    cost_gate = Path(__file__).resolve().parent / "harness-cost.py"
-    if cost_gate.is_file():
-        env = os.environ.copy()
-        # El workspace se pasa explícito: harness-cost.py lo deriva de su propia
-        # ruta, y eso es correcto en una instancia instalada pero no cuando el
-        # script se invoca desde el árbol del generador o desde un worktree.
-        env.setdefault("HARNESS_WS", str(task_dir.resolve().parent.parent))
-        try:
-            proc = subprocess.run(
-                [sys.executable, str(cost_gate), "check", task_dir.name],
-                capture_output=True, text=True, timeout=60, env=env,
+    proc = cost_check(task_dir)
+    if proc is not None and proc.returncode == 3:
+        # CADA TÉRMINO CON SU SALIDA, y no una lista donde el lector elige mal.
+        # Caso de campo: el mensaje ofrecía `budget --to` como la salida
+        # auditable, el humano la corría, y la transición seguía en exit 3
+        # porque el término que frenaba era COST-CACHE, que el presupuesto no
+        # toca. Tres reportes distintos del mismo callejón (#90, #91, #93).
+        salida = (
+            "(3) si el gasto está justificado, subir el techo con "
+            "`harness-policy.py budget tasks/<id> --to <n> --actor <quien> "
+            "--reason \"<por qué>\"`, que queda en history[] y es auditable."
+        )
+        # QUÉ FRENA, no qué aparece impreso: la salida del check también nombra
+        # los términos EXIMIDOS y los no medibles, y elegir la remediación por
+        # substring mandaría a eximir algo que ya está eximido. El JSON se pide
+        # solo en este camino (el gate ya se negó), así que no toca la latencia
+        # de una transición sana. Si no se puede leer, se cae al texto.
+        codigos = set()
+        detalle = cost_check(task_dir, as_json=True)
+        if detalle is not None and (detalle.stdout or "").strip():
+            try:
+                data = json.loads(detalle.stdout.strip().splitlines()[-1])
+                codigos = {b.get("code") for b in data.get("breaches") or []}
+            except Exception:
+                codigos = set()
+        if not codigos:
+            codigos = {c for c in ("COST-CACHE", "COST-CTX")
+                       if c in (proc.stdout or "")}
+        if codigos & {"COST-CACHE", "COST-CTX"}:
+            salida += (
+                " OJO: `budget --to` solo mueve el término COST-BUDGET. Para "
+                "COST-CACHE y COST-CTX, que salen de transcripts de un agente "
+                "que YA CERRÓ y no se pueden remediar en retroactivo, la salida "
+                "auditable es `harness-policy.py cost-waive tasks/<id> --band "
+                "cache|ctx --agent <rol> --actor <quien> --reason \"<por qué>\"`: "
+                "queda en history[] y cada cost-check lo declara."
             )
-        except Exception:
-            proc = None          # medir no puede tumbar la corrida
-        if proc is not None and proc.returncode == 3:
-            fail("POLICY-BUDGET-005",
-                 (proc.stdout or "").strip() + "\n\n"
-                 "El gasto de esta tarea está fuera de banda y la transición se "
-                 "frena acá, no cuando alguien mire la factura. Salidas, en "
-                 "orden de preferencia: (1) recortar el contexto de arranque de "
-                 "los agentes (brief destilado en vez de punteros a documentos) "
-                 "y acotar la salida de comandos, que es de lo poco que el "
-                 "harness controla de los dos términos que dominan el costo; "
-                 "(2) partir la tarea; (3) si el gasto está justificado, subir "
-                 "el techo con `harness-policy.py budget tasks/<id> --to <n> "
-                 "--actor <quien> --reason \"<por qué>\"`, que queda en "
-                 "history[] y es auditable. Para una emergencia de producción, "
-                 "`HARNESS_CTX_CEILING` y `HARNESS_CACHE_HIT_FLOOR` mueven los "
-                 "umbrales de la corrida, pero NO dejan rastro: son el último "
-                 "recurso, no el primero.")
+        fail("POLICY-BUDGET-005",
+             (proc.stdout or "").strip() + "\n\n"
+             "El gasto de esta tarea está fuera de banda y la transición se "
+             "frena acá, no cuando alguien mire la factura. Salidas, en "
+             "orden de preferencia: (1) recortar el contexto de arranque de "
+             "los agentes (brief destilado en vez de punteros a documentos) "
+             "y acotar la salida de comandos, que es de lo poco que el "
+             "harness controla de los dos términos que dominan el costo; "
+             "(2) partir la tarea; " + salida + " Para una emergencia de "
+             "producción, `HARNESS_CTX_CEILING` y `HARNESS_CACHE_HIT_FLOOR` "
+             "mueven los umbrales de la corrida, pero NO dejan rastro: son el "
+             "último recurso, no el primero.")
 
     rounds_by_repo = state.get("review_rounds_by_repo")
     if not isinstance(rounds_by_repo, dict):
@@ -1851,6 +2009,24 @@ def build_parser() -> argparse.ArgumentParser:
     budg.add_argument("--actor", required=True)
     budg.add_argument("--reason", default="")
     budg.set_defaults(func=cmd_budget)
+    waive = sub.add_parser("cost-waive",
+                           help="acepta un término de banda del costo "
+                                "(cache|ctx) de un agente que ya cerró, con "
+                                "actor y motivo, en history[]")
+    waive.add_argument("task_dir")
+    # Sin `choices`: la banda la valida cmd_cost_waive para poder CONTESTAR con
+    # la remediación. Un `--band budget` rebotado por argparse dice "invalid
+    # choice" y manda a leer el --help; POLICY-COST-001 dice que ese término se
+    # autoriza con `budget --to`, que es lo que el humano vino a buscar.
+    waive.add_argument("--band", required=True,
+                       help="cache|ctx (el gasto en dólares se autoriza con "
+                            "`budget --to`, no acá)")
+    waive.add_argument("--agent", required=True,
+                       help="el rol tal como lo nombra el cost-check "
+                            "(orquestador, architect, implementer, qa...)")
+    waive.add_argument("--actor", required=True)
+    waive.add_argument("--reason", required=True)
+    waive.set_defaults(func=cmd_cost_waive)
     dmode = sub.add_parser("delivery-mode",
                            help="entrega efectiva en una línea: review|prs|trunk, "
                                 "o 'flow' si la tarea no declara ninguna")

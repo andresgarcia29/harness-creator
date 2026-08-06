@@ -485,6 +485,16 @@ cortar esa cola, no para molestar a una corrida sana. `record-cost --total-usd`
 sigue siendo válido para el total de `ccusage`, pero ya no es lo único que mira.
 Para ver el desglose por rol: `scripts/harness-cost.py task <id>`.
 
+**Cada término tiene SU salida, y elegir la que no es te deja donde estabas.**
+`harness-policy.py budget tasks/<id> --to <n>` sube el techo en dólares y por
+eso destraba `COST-BUDGET`, y SOLO ese. `COST-CACHE` y `COST-CTX` salen de los
+transcripts de un agente que ya cerró: son historia inmutable, así que recortar
+su contexto de arranque ya no los puede mover. Para esos la salida es
+`harness-policy.py cost-waive tasks/<id> --band cache|ctx --agent <rol>
+--actor <vos> --reason "<por qué>"`, que exige que el término esté frenando de
+verdad, queda en `history[]` y se declara en cada `cost-check`. Mover
+`HARNESS_CACHE_HIT_FLOOR` NO es la salida: apaga el umbral sin dejar rastro.
+
 - **PEDIR AUTORIZACIÓN PARA COMMITEAR, SHIPPEAR O PUBLICAR NO ES UNA PARADA
   VÁLIDA**, y por eso entra en esta lista: para quedar fuera por escrito. La
   entrega ya la declaró el comando que te lanzó y está REGISTRADA en el campo

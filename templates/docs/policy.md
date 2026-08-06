@@ -76,6 +76,40 @@ grafo sin ciclos. `record-cost` conserva un total monotónico y bloquea cuando
 supera el presupuesto inicial. `pause` sólo acepta los motivos cerrados de
 `harness-policy.json`; `resume` devuelve la tarea a la fase que fue pausada.
 
+## Costo fuera de banda (`POLICY-BUDGET-005`)
+
+`transition` corre `scripts/harness-cost.py check` y se niega con
+`POLICY-BUDGET-005` si la tarea está fuera de banda. El gate agrega tres
+términos y **cada uno tiene su propia salida**, que es lo que hay que mirar
+antes de elegir remediación:
+
+| Término | Qué mide | Salida auditable |
+|---|---|---|
+| `COST-BUDGET` | gasto total contra `budget_usd` | `harness-policy.py budget tasks/<id> --to <n> --actor <quien> --reason "<por qué>"` |
+| `COST-CACHE` | acierto de caché de un rol bajo el piso | `harness-policy.py cost-waive tasks/<id> --band cache --agent <rol> --actor <quien> --reason "<por qué>"` |
+| `COST-CTX` | contexto medio de un rol sobre el techo | `... --band ctx --agent <rol> ...` |
+
+`budget --to` **solo** mueve `COST-BUDGET`. Los otros dos salen de los
+transcripts de un agente que ya cerró, o sea que son históricos e inmutables:
+la remediación que el gate imprime (recortar el contexto de arranque) no se
+puede aplicar en retroactivo, y sin `cost-waive` la tarea quedaba trabada para
+siempre en su fase, con el trabajo commiteado y el precheck verde.
+
+`cost-waive` no apaga nada:
+
+- el término tiene que **existir** (`POLICY-COST-002` si no está frenando): se
+  ancla al valor MEDIDO, así que no se puede eximir por adelantado
+- cubre ese valor, no la banda: algo **peor** vuelve a frenar
+- exige `--reason` (`POLICY-COST-004`) y queda en `history[]` con
+  `kind: cost-waive`
+- cada `cost-check` posterior lo **imprime** con quién lo autorizó y por qué
+
+El piso de caché además no se le cobra a un agente demasiado **corto**: el
+mejor caso posible con T turnos es escribir el contexto una vez y leerlo T-1
+veces (`(T-1)/T`), así que por debajo de `1/(1-piso)` turnos (10 con el piso de
+fábrica) el umbral mediría la ventana de caché y no el derroche. Ese término se
+declara en la salida y no bloquea.
+
 ## Entrega (`delivery`)
 
 El comando de entrada declara QUÉ se publica, y el motor lo guarda en

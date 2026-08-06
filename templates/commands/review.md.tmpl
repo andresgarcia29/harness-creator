@@ -61,7 +61,13 @@ reporta el código de error.
    un checkout desacoplado del commit que el veredicto sella. Es la ruta que le
    pasás al reviewer en el paso 2. Si el scaffold avisa que NO pudo clavarlo, no
    se cae nada (el pin es protección extra, no un gate), pero ese supuesto viaja
-   al veredicto: se revisó un árbol que podía moverse.
+   al veredicto: se revisó un árbol que podía moverse. El aviso es de fiar
+   porque el scaffold VERIFICA el pin después de crearlo (que el directorio
+   exista, que sea un worktree y que esté en el commit sellado) en vez de
+   creerle al código de retorno de `git worktree add`: hubo dos veredictos
+   sellados sin pin y sin una sola señal, y el reviewer se enteró al no
+   encontrarlo. Regla operativa: si NO viste la línea `📌 árbol clavado`, la
+   ruta del reviewer es el worktree vivo y el supuesto ya está en el bus.
    **Si el veredicto trae `evidence_under_contention`, NÓMBRALO en tu juicio**,
    igual que con el `known_bug` del sello. Ese campo lista los EV que se
    sellaron con la máquina cargada. NO son evidencia inválida y por eso entran:

@@ -710,6 +710,108 @@ class EvidenceTest(unittest.TestCase):
         self.assertNotIn("inventado_test.py", self._log_lines(),
                          "apuntó como leído un archivo que no existe")
 
+    # ── Economía de contexto: el runner acota lo que entra a la ventana ──────
+    # POR QUE: este runner es OBLIGATORIO para todo comando que sustenta un
+    # pass, y volcaba la salida completa al contexto del agente. Medido sobre
+    # 663 transcripts: releer contexto es el 43% de la factura. Un vitest de
+    # 2000 lineas son ~30k tokens que se re-leen en cada tool call posterior.
+    # El log en disco es la evidencia y no se toca; lo que se acota es el eco.
+
+    def _run_ruidoso(self, script, extra=()):
+        result = subprocess.run(
+            ["python3", str(SCRIPT), "run", "--task-dir", str(self.task),
+             "--repo", "atlas", "--runner", "qa-atlas", "--kind", "test",
+             "--cwd", str(self.repo), *extra, "--", "sh", "-c", script],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        evidence_id = next(line.split("=", 1)[1] for line in result.stdout.splitlines()
+                           if line.startswith("EVIDENCE_ID="))
+        log = (self.task / f"evidence/{evidence_id}.log").read_text()
+        return result.stdout, log
+
+    def test_salida_corta_pasa_entera(self):
+        # Un comando corto tiene que verse EXACTAMENTE igual que antes: la
+        # economia no puede costarle progreso al humano en el caso comun.
+        out, log = self._run_ruidoso("for i in $(seq 1 30); do echo linea-$i; done")
+        for n in (1, 15, 30):
+            self.assertIn(f"linea-{n}\n", out, f"perdio la linea {n} de 30")
+        self.assertNotIn("omitidas", out, "resumio una salida que cabia entera")
+        self.assertIn("linea-30", log)
+
+    def test_salida_larga_se_acota_pero_el_log_queda_entero(self):
+        out, log = self._run_ruidoso("for i in $(seq 1 4000); do echo linea-$i; done")
+        self.assertIn("linea-1\n", out, "perdio la cabeza")
+        self.assertIn("linea-4000\n", out, "perdio la cola, que es donde vive el veredicto")
+        self.assertIn("omitidas", out, "no acoto una salida de 4000 lineas")
+        self.assertNotIn("linea-2000\n", out, "el medio entro al contexto igual")
+        # Lo que importa: la evidencia NO se degrada. El log es el artefacto
+        # que sella el gate y tiene que estar completo.
+        self.assertIn("linea-2000\n", log, "acoto el LOG, que es la evidencia")
+        self.assertEqual(len(log.splitlines()), 4000, "el log perdio lineas")
+        self.assertLess(len(out.splitlines()), 200,
+                        "el resumen sigue siendo enorme")
+
+    def test_el_error_del_medio_se_rescata(self):
+        # La regla de oro heredada de quiet.sh: truncar es economia, truncar EL
+        # ERROR es autolesion. Un stack trace en el minuto 3 de un log de 4000
+        # lineas no puede desaparecer, o el agente "arregla" a ciegas.
+        out, _ = self._run_ruidoso(
+            "for i in $(seq 1 2000); do echo linea-$i; done; "
+            "echo 'FAILED: el assert del medio'; "
+            "for i in $(seq 2001 4000); do echo linea-$i; done")
+        self.assertIn("FAILED: el assert del medio", out,
+                      "se comio el unico error del tramo omitido")
+        self.assertIn("rescatados", out,
+                      "no marco que el rescate ocurrio: un contexto lossy "
+                      "debe saberse lossy")
+
+    def test_verbose_restaura_el_volcado_completo(self):
+        out, _ = self._run_ruidoso(
+            "for i in $(seq 1 4000); do echo linea-$i; done", extra=("--verbose",))
+        self.assertIn("linea-2000\n", out, "--verbose no volco todo")
+        self.assertNotIn("omitidas", out, "--verbose resumio igual")
+
+    def test_una_salida_sin_saltos_de_linea_igual_se_acota(self):
+        # EL BUG QUE ESTA SUITE CONGELA. El acotador solo cortaba en \n, asi
+        # que una salida sin saltos contaba como UNA linea, y una sola linea
+        # siempre cabe en la cabeza: entraba ENTERA. Medido antes del arreglo:
+        # 20 MB de una sola linea viajaron integros al contexto, o sea el
+        # acotador reportando que acoto sin acotar nada.
+        out, log = self._run_ruidoso(
+            "python3 -c 'import sys;sys.stdout.write(\"A\"*3000000)'")
+        self.assertLess(len(out), 40_000,
+                        f"3 MB en una linea entraron casi enteros: {len(out)} bytes")
+        self.assertEqual(len(log), 3_000_000, "el log perdio la salida completa")
+
+    def test_una_barra_de_progreso_con_retorno_de_carro_no_es_una_sola_linea(self):
+        # vitest, jest, cargo y pytest reescriben la misma linea con \r. Sin
+        # cortar ahi, una suite entera es UNA linea de megabytes.
+        out, _ = self._run_ruidoso(
+            "python3 -c 'import sys\n"
+            "for i in range(5000): sys.stdout.write(f\"\\rprogreso {i}/5000\")\n"
+            "sys.stdout.write(\"\\nSUITE OK\\n\")'")
+        self.assertLess(len(out), 20_000,
+                        f"la barra de progreso entro entera: {len(out)} bytes")
+        self.assertIn("SUITE OK", out,
+                      "se comio el final, que es lo unico que importaba")
+
+    def test_muchas_lineas_largas_tienen_techo_total(self):
+        # El techo por LINEA solo no alcanza: 10.000 lineas recortadas a 2 KB
+        # siguen siendo 160 KB. Por eso hay presupuesto TOTAL.
+        out, _ = self._run_ruidoso(
+            "python3 -c 'print(\"\\n\".join(\"X\"*3000 for _ in range(500)))'")
+        self.assertLess(len(out), 40_000,
+                        f"500 lineas de 3 KB dieron {len(out)} bytes de contexto")
+
+    def test_el_contrato_de_stdout_sobrevive_al_resumen(self):
+        # EVIDENCE_ID= es lo UNICO que alguien parsea de este stdout. Si el
+        # resumen se lo comiera, el gate se quedaria sin evidencia y la
+        # economia habria roto la seguridad, que es exactamente el intercambio
+        # que este harness no acepta.
+        out, _ = self._run_ruidoso("for i in $(seq 1 4000); do echo linea-$i; done")
+        ids = [l for l in out.splitlines() if l.startswith("EVIDENCE_ID=")]
+        self.assertEqual(len(ids), 1, f"EVIDENCE_ID= no sobrevivio intacto: {ids}")
+
 
 if __name__ == "__main__":
     unittest.main()

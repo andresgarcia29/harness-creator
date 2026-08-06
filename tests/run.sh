@@ -52,7 +52,7 @@ grep -q "harness-init-wizard" ../templates/ui/dist/assets/*.js || { echo "dist d
 echo "── frontend: dist del panel vendoreado al día (source + estructura en harness-ui) ✓"
 
 failed=0
-for t in test_emit.sh test_bounded.sh test_track_read.sh test_docs.sh test_catalog.sh test_build_slot.sh test_guard_build_slot.sh test_guard_ws_scripts.sh test_guard_broad_add.sh test_gowork_shims.sh test_py_shims.sh test_ship_gates.sh test_stamp_models.sh test_graph_refresh.sh test_pull_all.sh test_skills_sync.sh test_custom_skill.sh test_custom_rule.sh test_verdict_scaffold.sh test_minion_probe.sh test_pipeline_steps.sh test_secrets.sh test_plan_lint.sh test_precheck.sh test_verdict_beads.sh test_ship_wave.sh test_port_forwards.sh test_instance_ship.sh test_harness_bug.sh test_discover.sh test_doctor.sh test_session_summary.sh test_guard_worktree.sh test_guard_canonical.sh \
+for t in test_emit.sh test_finding.sh test_bounded.sh test_track_read.sh test_docs.sh test_catalog.sh test_build_slot.sh test_guard_build_slot.sh test_guard_ws_scripts.sh test_guard_broad_add.sh test_gowork_shims.sh test_py_shims.sh test_ship_gates.sh test_stamp_models.sh test_graph_refresh.sh test_pull_all.sh test_skills_sync.sh test_custom_skill.sh test_custom_rule.sh test_verdict_scaffold.sh test_minion_probe.sh test_pipeline_steps.sh test_secrets.sh test_plan_lint.sh test_precheck.sh test_verdict_beads.sh test_ship_wave.sh test_port_forwards.sh test_instance_ship.sh test_harness_bug.sh test_discover.sh test_doctor.sh test_session_summary.sh test_guard_worktree.sh test_guard_canonical.sh \
           test_deploy_watch.sh test_ui_emit.sh test_vendor_neutrality.sh test_worktree_task.sh test_silent_green.sh test_prompt_gate_contract.sh test_dead_knobs.sh test_concurrency.sh test_base_branch.sh test_forge_tickets.sh test_harness_version.sh test_rebase_survival.sh test_archived_repos.sh test_ci_gates.sh test_update_migrate.sh test_adr_new.sh test_version.sh; do
   echo; bash "$t" || failed=1
 done
@@ -72,6 +72,7 @@ pyrun "server.py (HTTP end-to-end)" test_op_http.py
 pyrun "evidence v1" test_evidence.py
 pyrun "policy engine v1" test_policy.py
 pyrun "metricas del harness" test_metrics.py
+pyrun "bascula de costo" test_harness_cost.py
 
 echo
 if [ "$failed" -eq 0 ]; then echo "════ SUITE COMPLETA EN VERDE ════"; else echo "════ HAY FALLAS ════"; exit 1; fi

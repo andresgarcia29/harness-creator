@@ -838,6 +838,57 @@ def cmd_delivery(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_budget(args: argparse.Namespace) -> int:
+    """Sube el techo de gasto de una tarea VIVA, con actor y motivo.
+
+    POR QUÉ EXISTE: `POLICY-BUDGET-005` frena una transición cuando la tarea se
+    fue de banda, y su primer mensaje ofrecía como salida "subilo con
+    `init --budget-usd`". Eso era FALSO: `init` se niega sobre una tarea que ya
+    tiene estado (`POLICY-STATE-001`), así que la única remediación escrita no
+    existía y el gate era un callejón sin salida. Es exactamente el defecto que
+    este harness persigue en todos lados (prosa que promete lo que el código no
+    hace), cometido por el gate que vino a arreglar el gasto.
+
+    SOLO SUBE, por la misma razón que `delivery`: bajar el techo de una tarea en
+    vuelo no deshace lo gastado, solo deja el estado mintiendo sobre lo que ya
+    ocurrió. Y queda en `history[]`, que es lo que lo vuelve auditable: un techo
+    que se mueve sin dejar quién ni por qué es un techo decorativo.
+
+    Lo que NO es: un modo de apagar el gate. Para una emergencia de producción
+    están `HARNESS_CTX_CEILING` y `HARNESS_CACHE_HIT_FLOOR`, que `transition`
+    propaga al medidor; eso es una perilla de operación y no deja rastro, así
+    que es el último recurso y no el primero.
+    """
+    task_dir = Path(args.task_dir).resolve()
+    path = state_path(task_dir)
+    if not (isinstance(args.to, (int, float)) and math.isfinite(args.to)
+            and args.to > 0):
+        fail("POLICY-BUDGET-006",
+             f"presupuesto inválido: {args.to} (debe ser finito y mayor que cero)")
+    lock_state(task_dir)
+    state = load(path, "estado")
+    current = state.get("budget_usd")
+    if isinstance(current, (int, float)) and args.to <= current:
+        fail("POLICY-BUDGET-007",
+             f"el presupuesto no se baja: esta tarea tiene ${current:.2f} y "
+             f"pediste ${args.to:.2f}. Bajarlo no deshace lo gastado, solo deja "
+             "el estado mintiendo sobre lo que ya ocurrió. Si querés que la "
+             "tarea no siga, no la sigas: dejala donde está y reportala")
+    state["budget_usd"] = float(args.to)
+    state.setdefault("history", []).append({
+        "kind": "budget",
+        "budget_usd": f"{current}→{args.to}",
+        "actor": args.actor, "reason": args.reason,
+    })
+    atomic(path, state)
+    emit_bus(task_dir, "decision",
+             f"presupuesto {current} → ${args.to:.2f} (autoriza {args.actor})"
+             + (f": {args.reason}" if args.reason else ""))
+    print(f"💰 {task_dir.name}: presupuesto → ${args.to:.2f} "
+          f"(autoriza {args.actor})")
+    return 0
+
+
 def cmd_delivery_mode(args: argparse.Namespace) -> int:
     """El modo EFECTIVO de entrega en una línea, para que nadie parsee state.json.
 
@@ -1179,6 +1230,52 @@ def cmd_transition(args: argparse.Namespace) -> int:
                 print("⚠️  hay non_blocking sin bead y bd NO está en PATH: no "
                       "se exige lo que la máquina no puede dar; esos hallazgos "
                       "quedarán solo en el veredicto (gitignoreado)")
+    # ── EL PRESUPUESTO SE MIDE SOLO, NO CUANDO EL MODELO SE ACUERDA ──────────
+    # POLICY-BUDGET-002 existía y no frenaba nada: dependía de que alguien
+    # corriera `record-cost` con un total de ccusage, y `record-cost` no tiene
+    # UNA sola llamada desde código en todo el repo. `spent_usd` se quedaba en
+    # 0.0 para siempre y el techo era decorativo. Medido: la mediana de una
+    # sesión son $12.52 y el top 10% se lleva el 65.8% del gasto, o sea que lo
+    # que falta no es un precio más bajo, es un disyuntor para la cola.
+    #
+    # La transición es el punto correcto: es rara (no está en el camino
+    # caliente), es donde el gasto de una fase ya se consumó, y es lo único
+    # que el orquestador NO puede saltear por olvido.
+    #
+    # Fail-OPEN ante ausencia de datos y fail-CLOSED ante datos malos: sin
+    # transcripts no se puede afirmar nada y bloquear sería mentir al revés;
+    # con transcripts fuera de banda se bloquea con el número delante.
+    cost_gate = Path(__file__).resolve().parent / "harness-cost.py"
+    if cost_gate.is_file():
+        env = os.environ.copy()
+        # El workspace se pasa explícito: harness-cost.py lo deriva de su propia
+        # ruta, y eso es correcto en una instancia instalada pero no cuando el
+        # script se invoca desde el árbol del generador o desde un worktree.
+        env.setdefault("HARNESS_WS", str(task_dir.resolve().parent.parent))
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(cost_gate), "check", task_dir.name],
+                capture_output=True, text=True, timeout=60, env=env,
+            )
+        except Exception:
+            proc = None          # medir no puede tumbar la corrida
+        if proc is not None and proc.returncode == 3:
+            fail("POLICY-BUDGET-005",
+                 (proc.stdout or "").strip() + "\n\n"
+                 "El gasto de esta tarea está fuera de banda y la transición se "
+                 "frena acá, no cuando alguien mire la factura. Salidas, en "
+                 "orden de preferencia: (1) recortar el contexto de arranque de "
+                 "los agentes (brief destilado en vez de punteros a documentos) "
+                 "y acotar la salida de comandos, que es de lo poco que el "
+                 "harness controla de los dos términos que dominan el costo; "
+                 "(2) partir la tarea; (3) si el gasto está justificado, subir "
+                 "el techo con `harness-policy.py budget tasks/<id> --to <n> "
+                 "--actor <quien> --reason \"<por qué>\"`, que queda en "
+                 "history[] y es auditable. Para una emergencia de producción, "
+                 "`HARNESS_CTX_CEILING` y `HARNESS_CACHE_HIT_FLOOR` mueven los "
+                 "umbrales de la corrida, pero NO dejan rastro: son el último "
+                 "recurso, no el primero.")
+
     rounds_by_repo = state.get("review_rounds_by_repo")
     if not isinstance(rounds_by_repo, dict):
         rounds_by_repo = {}
@@ -1747,6 +1844,13 @@ def build_parser() -> argparse.ArgumentParser:
     deliv.add_argument("--actor", required=True)
     deliv.add_argument("--reason", default="")
     deliv.set_defaults(func=cmd_delivery)
+    budg = sub.add_parser("budget",
+                          help="sube el techo de gasto de una tarea viva")
+    budg.add_argument("task_dir")
+    budg.add_argument("--to", type=float, required=True)
+    budg.add_argument("--actor", required=True)
+    budg.add_argument("--reason", default="")
+    budg.set_defaults(func=cmd_budget)
     dmode = sub.add_parser("delivery-mode",
                            help="entrega efectiva en una línea: review|prs|trunk, "
                                 "o 'flow' si la tarea no declara ninguna")

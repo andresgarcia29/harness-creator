@@ -205,8 +205,10 @@ falta de conocimiento: es que la regla estaba en prosa y no en un test.
 - [x] **El reclamo de locks huérfanos confunde "no pude mirar" con "el dueño
   murió".** `kill -0` también falla con pid vacío y con EPERM (proceso de otro
   usuario); el `2>/dev/null` borra la diferencia y se libera un lock vivo, o sea
-  dos ships concurrentes del mismo repo. `ship.sh.tmpl:108-110`,
-  `harness-janitor.sh:22-23`.
+  dos ships concurrentes del mismo repo. `ship.sh.tmpl:108-110`, y el mismo
+  patrón en el job `harness-janitor.sh` del repo **aparte**
+  `andresgarcia29/harness-cronjobs` (no vive en este repo: citarlo por
+  número de línea desde acá hacía pensar que sí).
 - [x] **`gh run list --limit 1` puede vigilar el run anterior.** En la ventana
   entre el push y la creación del run, devuelve el run previo; si ese estaba
   rojo, `red()` declara rojo un deploy que ni siquiera arrancó y propone

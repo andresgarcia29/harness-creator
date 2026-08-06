@@ -67,5 +67,27 @@ hallazgo archivado sin bead deja de existir (Ley 7).
 4. **Propón como diff** la fusión de specs al humano si algún
    requirement MODIFIED/REMOVED toca una spec ratificada — la ley la
    cambian humanos. ADDED puros: aplica directo.
-5. Cierra: `mem_save` del ciclo (qué cambió en las specs, costo total
+5. **Retirá los worktrees de la tarea.** Por cada repo de `state.repos`:
+   `bash scripts/worktree-task.sh --rm <id> <repo>`.
+
+   **El huérfano era el resultado NORMAL del flujo, no un accidente**: este
+   comando no tocaba worktrees, la limpieza vivía como paso condicional de
+   `/ship` ("si ya no quedan tareas del repo"), y el `worktree prune` del
+   cronjob janitor solo borra METADATOS de directorios que alguien ya borró a
+   mano. O sea que nada retiraba el directorio de una tarea archivada.
+
+   Y no es cosmético: ningún hook conoce el estado "archivada". Todos derivan
+   la tarea de la RUTA, así que un worktree de tarea muerta sigue reclamándose,
+   sigue bloqueando hasta una hora por el claim, y sigue emitiendo eventos con
+   un task-id que ya no existe. Caso de campo: ~15 disparos de un hook de
+   diseño sobre el worktree de una tarea ya archivada, cada uno costando un
+   turno completo del modelo.
+
+   `worktree-task.sh --rm` es fail-closed a propósito y se NIEGA si el árbol
+   tiene cambios sin commitear o commits sin publicar. Esa negativa es
+   información, no un obstáculo: significa que estás por archivar una tarea con
+   trabajo que nadie recibió. Resolvelo (publicá o descartá explícitamente)
+   antes de seguir; no lo fuerces.
+
+6. Cierra: `mem_save` del ciclo (qué cambió en las specs, costo total
    del ticket) y verifica que docs/quality.md refleje el nuevo estado.

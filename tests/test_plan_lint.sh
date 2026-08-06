@@ -177,4 +177,85 @@ pat_ship="$(sed -n 's/.*LANE_GUARD_PATTERN:-\(.*\)}"$/\1/p' "$ROOT/templates/scr
 [ -n "$pat_lint" ] && [ -n "$pat_ship" ] || fail "no pude extraer los dos patrones"
 assert_eq "$pat_ship" "$pat_lint" "el patrón de plan-lint es EL MISMO que el de gate_lane (normalizado el escape del template)"
 
+echo
+echo "── supuestos de ENTORNO: medidos o no son supuestos"
+# POR QUÉ: el ciclo más caro del pipeline no es una ronda de review, es un plan
+# entero construido sobre una creencia falsa sobre algo que no controlamos.
+# Caso de campo: "¿un <img> degrada limpio con imágenes bloqueadas?" se
+# contestaba midiendo en diez minutos; en vez de eso corrió architect + 4
+# implementers + 4 reviewers y recién ahí QA descubrió que el diseño no servía.
+# La regla existía en prosa (architect.md, "Runtime no se cita: se ejecuta") y
+# nada la hacía obligatoria.
+delta_ok; plan_ok
+
+cat > "$WS/tasks/T1/assumptions.md" <<'EOF'
+- SUPUESTO-ENTORNO: un <img> degrada limpio con imagenes bloqueadas · PORQUE: es lo habitual · SI ES FALSO: hay que usar texto
+EOF
+out="$(run T1)"; rc=$?
+assert_eq 3 "$rc" "supuesto de entorno SIN medición: rojo"
+assert_contains "$out" "ENTORNO sin medición" "y dice cuál es el problema"
+assert_contains "$out" "evidence.py run" "con el comando exacto que lo mide"
+
+cat > "$WS/tasks/T1/assumptions.md" <<'EOF'
+- SUPUESTO-ENTORNO: un <img> degrada limpio con imagenes bloqueadas · PORQUE: medido, EV-TEST-9a1b2c3d4e5f · SI ES FALSO: hay que usar texto
+EOF
+out="$(run T1)"; rc=$?
+assert_eq 0 "$rc" "con EVIDENCE_ID: verde (medir es la salida, no el rodeo)"
+
+# CONTRA-MITAD: un supuesto NORMAL sin evidencia no es asunto de este gate. El
+# ledger entero exige evidencia documental (spec > ADR > convención), que no es
+# una ejecución. Si este gate mordiera ahí, gritaría sobre el artefacto que el
+# humano audita primero y alguien lo apagaría.
+cat > "$WS/tasks/T1/assumptions.md" <<'EOF'
+- SUPUESTO: el umbral es 100 req/min · PORQUE: la spec GW-4 lo fija · SI ES FALSO: una constante
+EOF
+out="$(run T1)"; rc=$?
+assert_eq 0 "$rc" "un SUPUESTO normal sin EV- no lo toca este gate"
+
+# Sin assumptions.md tampoco inventa rojos: no todo carril escribe ledger.
+rm -f "$WS/tasks/T1/assumptions.md"
+out="$(run T1)"; rc=$?
+assert_eq 0 "$rc" "sin assumptions.md: verde (no todo carril escribe ledger)"
+
+echo
+echo "── el carril de MÁS: se avisa, no se bloquea"
+# gate_lane solo verifica hacia arriba (que un carril corto no toque contratos).
+# Nada detectaba lo contrario, que es el caso caro y silencioso: un standard
+# cuyo plan resultó trivial paga architect + RFC + reviewer + QA por repo para
+# mover veinte líneas. Fue el segundo componente de costo de una tarea de $367.
+mkdir -p "$WS/tasks/TRIV"
+cat > "$WS/tasks/TRIV/plan.md" <<'EOF'
+### T1 · atlas · logo
+- repo: atlas
+- req: EM-1
+- archivos: src/email/tpl.ts
+- criterios: se ve el logo
+- complexity: low
+- deps: ninguna
+### T2 · hermes · logo
+- repo: hermes
+- req: EM-1
+- archivos: src/mail/tpl.ts
+- criterios: se ve el logo
+- complexity: low
+- deps: ninguna
+EOF
+printf '## ADDED Requirements\n- EM-1: el correo DEBE mostrar el logo.\n' > "$WS/tasks/TRIV/delta-spec.md"
+printf '{"lane":"standard"}\n' > "$WS/tasks/TRIV/state.json"
+out="$(bash "$WS/scripts/plan-lint.sh" TRIV 2>&1)"; rc=$?
+assert_eq 0 "$rc" "el aviso de carril de más NO bloquea (un plan trivial no es incorrecto, es caro)"
+assert_contains "$out" "parece trivial" "pero lo dice"
+assert_contains "$out" "POLICY-LANE-002" "y explica por qué no se puede bajar el carril solo"
+
+# CONTRA-MITAD 1: un plan con algo complejo NO es un carril de más.
+sed -i.bak 's/- complexity: low/- complexity: high/' "$WS/tasks/TRIV/plan.md"
+out="$(bash "$WS/scripts/plan-lint.sh" TRIV 2>&1)"
+assert_not_contains "$out" "parece trivial" "con una tarea complexity high no avisa"
+mv "$WS/tasks/TRIV/plan.md.bak" "$WS/tasks/TRIV/plan.md"
+
+# CONTRA-MITAD 2: express no recibe este aviso; para express el freno es el otro.
+printf '{"lane":"express"}\n' > "$WS/tasks/TRIV/state.json"
+out="$(bash "$WS/scripts/plan-lint.sh" TRIV 2>&1)"
+assert_not_contains "$out" "parece trivial" "en express no aplica (ya es el carril corto)"
+
 t_done

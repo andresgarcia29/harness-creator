@@ -191,6 +191,21 @@ fi
 # el mismo criterio, aplicado donde todavía no cuesta nada equivocarse.
 LANE=""
 [ -f "$DIR/state.json" ] && LANE="$(sed -n 's/.*"lane"[[:space:]]*:[[:space:]]*"\([a-z]*\)".*/\1/p' "$DIR/state.json" | head -1)"
+
+# Los archivos que el plan declara: los usan DOS comprobaciones (el freno de
+# carril corto de abajo y el aviso de carril de más), así que se calcula una
+# vez. Se extrae acá y no dentro del `if` porque duplicar el awk fue como
+# divergieron antes el patrón de este script y el de gate_lane.
+planned_all="$(awk '
+  /^[ \t]*[-*][ \t]+[Aa]rchivos[ \t]*:/ {
+    line = $0; sub(/^[^:]*:[ \t]*/, "", line)
+    n = split(line, arr, /[,;]/)
+    for (i = 1; i <= n; i++) { f = arr[i]; gsub(/^[ \t]+|[ \t]+$/, "", f); if (f != "") print f }
+  }' "$PLAN")"
+
+# El patron de contrato/migracion/infra: mismo criterio que gate_lane, y hay
+# un test que compara las dos lineas literalmente. No lo edites de un lado solo.
+pat="${LANE_GUARD_PATTERN:-(\.proto$|(^|/)proto/|(^|/)migrations?/|\.sql$|(^|/)helm/|(^|/)charts?/|(^|/)Chart\.yaml$|(^|/)terraform/|\.tf$|\.tfvars$|(^|/)openapi\.|(^|/)swagger\.)}"
 if [ "$LANE" = "express" ]; then
   # `\.tf$|\.tfvars$` van ademas de `(^|/)terraform/`: un infra-module lleva los
   # .tf en la RAIZ, sin directorio terraform/. Se agrego al pasar POLICY-LANE-004
@@ -198,14 +213,7 @@ if [ "$LANE" = "express" ]; then
   # `charts?/` y `Chart.yaml` cubren las tres grafias de un chart de Helm (#83):
   # el `charts/` plural es el directorio de subcharts vendoreados, no el del
   # chart propio, que en la practica se llama `chart/` o vive en la raiz.
-  pat="${LANE_GUARD_PATTERN:-(\.proto$|(^|/)proto/|(^|/)migrations?/|\.sql$|(^|/)helm/|(^|/)charts?/|(^|/)Chart\.yaml$|(^|/)terraform/|\.tf$|\.tfvars$|(^|/)openapi\.|(^|/)swagger\.)}"
-  planned="$(awk '
-    /^[ \t]*[-*][ \t]+[Aa]rchivos[ \t]*:/ {
-      line = $0; sub(/^[^:]*:[ \t]*/, "", line)
-      n = split(line, arr, /[,;]/)
-      for (i = 1; i <= n; i++) { f = arr[i]; gsub(/^[ \t]+|[ \t]+$/, "", f); if (f != "") print f }
-    }' "$PLAN")"
-  hits="$(printf '%s\n' "$planned" | grep -E "$pat" || true)"
+  hits="$(printf '%s\n' "$planned_all" | grep -E "$pat" || true)"
   if [ -n "$hits" ]; then
     echo "❌ carril express, pero el plan ya declara archivos de contrato/migración/infra:"
     printf '%s\n' "$hits" | while IFS= read -r l; do [ -n "$l" ] && say "$l"; done
@@ -213,6 +221,89 @@ if [ "$LANE" = "express" ]; then
     echo "     es cuando sale barato (después de implementar cuesta re-planear entero):"
     echo "     python3 scripts/harness-policy.py escalate tasks/$TASK --to standard --actor orchestrator"
     red=1
+  fi
+fi
+
+# ── 6. Un supuesto de ENTORNO sin medición es una apuesta, no un supuesto ──
+#
+# POR QUÉ EXISTE: el ciclo más caro del pipeline no es una ronda de review, es
+# un plan entero construido sobre una creencia falsa sobre cómo se comporta
+# algo que no controlamos. Caso de campo: la pregunta que decidió una tarea de
+# $367 fue "¿un <img> degrada limpio en un cliente de correo con imágenes
+# bloqueadas?". Se contestaba midiendo, en diez minutos. En vez de eso corrió
+# architect → 4 implementers → 4 reviewers, y recién ahí QA descubrió que el
+# diseño no servía. Ese ciclo completo, tirado.
+#
+# La regla YA existía en prosa (architect.md, "Runtime no se cita: se
+# ejecuta") y nada la hacía obligatoria: un plan construido sobre "asumo que
+# degrada limpio" pasaba este lint en verde. Ahora no.
+#
+# El marcador es EXPLÍCITO y lo pone quien escribe el ledger: `SUPUESTO-ENTORNO:`
+# en vez de `SUPUESTO:`. Se eligió así en vez de adivinar cuáles supuestos son
+# de entorno porque adivinar produce falsos positivos sobre el artefacto que el
+# humano audita primero, y un lint que grita de más termina apagado. Lo que el
+# gate garantiza es que quien SÍ lo declaró de entorno haya medido.
+#
+# La evidencia admisible es un ID de `evidence.py run`, o sea una EJECUCIÓN.
+# Citar un doc no vale: el doc puede estar desactualizado y el entorno no.
+ASSUMP="$DIR/assumptions.md"
+if [ -f "$ASSUMP" ]; then
+  unproven="$(awk '
+    /^[ \t]*[-*][ \t]*SUPUESTO-ENTORNO[ \t]*:/ {
+      if ($0 !~ /EV-[A-Za-z0-9-]+/) {
+        line = $0; sub(/^[ \t]*[-*][ \t]*/, "", line); print line
+      }
+    }' "$ASSUMP")"
+  if [ -n "$unproven" ]; then
+    echo "❌ supuesto(s) de ENTORNO sin medición:"
+    printf '%s\n' "$unproven" | while IFS= read -r l; do
+      [ -n "$l" ] && say "$(printf '%s' "$l" | cut -c1-140)"
+    done
+    echo "   ↳ remediación: medí AHORA, que es cuando cuesta diez minutos. Después"
+    echo "     de lanzar implementers cuesta el pipeline entero:"
+    echo "     python3 scripts/evidence.py run --task-dir tasks/$TASK --repo <repo> \\"
+    echo "       --runner architect --kind test --cwd <donde> -- <el comando que MIDE>"
+    echo "     y pegá el EVIDENCE_ID en la entrada del ledger. Si de verdad no se"
+    echo "     puede medir, no es un supuesto de entorno con evidencia: bajalo a"
+    echo "     'SUPUESTO:' normal y declará el costo de que sea falso, que es lo"
+    echo "     que el humano audita al volver."
+    red=1
+  fi
+fi
+
+# ── 7. El carril de más: se AVISA, no se bloquea ──────────────────────
+#
+# POR QUÉ EXISTE: `gate_lane` solo verifica hacia ARRIBA (que un carril corto no
+# toque contratos). Nada detectaba lo contrario, que es el caso caro y silencioso:
+# una tarea clasificada standard cuyo plan resultó trivial paga architect + RFC +
+# reviewer + QA por repo para mover veinte líneas. Medido en campo, eso fue el
+# segundo componente de costo de una tarea de $367.
+#
+# AVISO y no rojo, por dos razones: el carril no se BAJA (POLICY-LANE-002: solo
+# se escala hacia arriba, porque bajar saltearía deliberación ya registrada), y
+# un plan trivial en standard no es incorrecto, es caro. Bloquear algo correcto
+# es como se apagan los linters.
+#
+# La señal es la que el plan YA declara: todas las tareas `complexity: low`, sin
+# archivos de contrato/migración/infra, y pocos archivos por tarea.
+if [ "$LANE" = "standard" ] || [ "$LANE" = "full" ]; then
+  # `head -1` por tarea no sirve: hace falta saber si TODAS son low.
+  high_n="$(grep -cE '^[ \t]*[-*][ \t]+complexity[ \t]*:[ \t]*high' "$PLAN" || true)"
+  files_n="$(awk '
+    /^[ \t]*[-*][ \t]+[Aa]rchivos[ \t]*:/ {
+      line = $0; sub(/^[^:]*:[ \t]*/, "", line)
+      n = split(line, arr, /[,;]/)
+      for (i = 1; i <= n; i++) { f = arr[i]; gsub(/^[ \t]+|[ \t]+$/, "", f); if (f != "") c++ }
+    } END { print c + 0 }' "$PLAN")"
+  contract_n="$(printf '%s\n' "$planned_all" | grep -cE "$pat" 2>/dev/null || true)"
+  if [ "${high_n:-0}" -eq 0 ] && [ "${contract_n:-0}" -eq 0 ] && [ "${files_n:-99}" -le 8 ]; then
+    echo "ℹ️  carril $LANE con un plan que parece trivial: $tasks_n tarea(s), todas"
+    echo "   complexity low, $files_n archivo(s), cero contratos/migraciones/infra."
+    echo "   El carril no se BAJA (POLICY-LANE-002: solo se escala hacia arriba), así"
+    echo "   que esto es información, no un rojo. Vale la pena mirarlo porque un plan"
+    echo "   así en standard paga architect + RFC + reviewer + QA por repo para un"
+    echo "   cambio mecánico. Si todavía no lanzaste a nadie, cancelar y re-entrar"
+    echo "   como express es más barato que seguir; si ya gastaste el RFC, seguí."
   fi
 fi
 

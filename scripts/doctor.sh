@@ -93,7 +93,7 @@ if [ -d "$WS/repos" ]; then
 fi
 
 # 2 · Scripts de instancia ejecutables
-for s in ship.sh worktree-task.sh quiet.sh with-secrets.sh emit.sh bounded.sh          build-slot.sh gowork.sh py.sh fe.sh repo-brief.sh          stamp-models.sh graph-refresh.sh pull-all.sh skills-sync.sh          verdict-scaffold.sh minion-probe.sh pipeline-steps.sh plan-lint.sh          harness-bug.sh; do
+for s in ship.sh worktree-task.sh quiet.sh with-secrets.sh emit.sh bounded.sh harness-cost.py finding.sh          build-slot.sh gowork.sh py.sh fe.sh repo-brief.sh          stamp-models.sh graph-refresh.sh pull-all.sh skills-sync.sh          verdict-scaffold.sh minion-probe.sh pipeline-steps.sh plan-lint.sh          harness-bug.sh; do
   if [ -f "$WS/scripts/$s" ]; then
     [ -x "$WS/scripts/$s" ] && ok "scripts/$s ejecutable" || fail "scripts/$s no ejecutable" "chmod +x scripts/$s"
     bash -n "$WS/scripts/$s" 2>/dev/null && ok "scripts/$s sintaxis válida" || fail "scripts/$s con error de sintaxis" "revisa el archivo (bash -n scripts/$s)"
@@ -844,6 +844,35 @@ case "${_libre_kb:-x}" in
       ok "espacio en disco: ${_libre_gb}G libres"
     fi ;;
 esac
+
+# ── Worktrees de tareas ya archivadas ────────────────────────────────────
+# POR QUÉ: ningún hook conoce el estado "archivada". Todos derivan la tarea de
+# la RUTA, así que un worktree cuya tarea ya se archivó sigue reclamándose,
+# sigue bloqueando por el claim, y sigue emitiendo eventos con un task-id que
+# ya no existe. Caso de campo: ~15 disparos de un hook de diseño sobre el
+# worktree de una tarea archivada, cada uno un turno completo del modelo.
+#
+# `/archive` ahora los retira, y el job harness-janitor (repo aparte) hace
+# `worktree prune`, que solo limpia METADATOS de directorios ya borrados. Este
+# chequeo es para el que no corre los cronjobs y archivó antes del arreglo: el
+# huérfano no se ve solo, se ve como ruido que nadie asocia a su causa.
+if [ -d "$WS/worktrees" ] && [ -d "$WS/tasks/archive" ]; then
+  _huerfanos=""
+  for _wt in "$WS/worktrees"/*/; do
+    [ -d "$_wt" ] || continue
+    _tid="$(basename "$_wt")"
+    # Viva si tasks/<id> existe; huérfana si además figura bajo tasks/archive/.
+    [ -d "$WS/tasks/$_tid" ] && continue
+    if ls -d "$WS/tasks/archive/"*"$_tid" >/dev/null 2>&1; then
+      _huerfanos="$_huerfanos $_tid"
+    fi
+  done
+  if [ -n "$_huerfanos" ]; then
+    warn "worktrees de tareas YA ARCHIVADAS:$_huerfanos. Los hooks derivan la tarea de la ruta, así que siguen reclamando, bloqueando por claim y emitiendo eventos de un task-id muerto. Retiralos con: scripts/worktree-task.sh --rm <task-id> <repo> (se niega si hay trabajo sin publicar, que es lo que querés saber)"
+  else
+    ok "sin worktrees de tareas archivadas"
+  fi
+fi
 
 echo "── resultado: $FAIL fallos, $WARN advertencias ──"
 [ "$FAIL" -eq 0 ]

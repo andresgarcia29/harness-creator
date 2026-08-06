@@ -76,6 +76,16 @@ Cómo aterriza en el pack de probes:
   o credencial), eso es un hueco declarado: SUPUESTO con su costo, o
   parada de diseño. No se asciende a verificado por haber leído código.
 
+**Y esta regla dejó de ser prosa.** Cuando midas, sellá la medición con
+`scripts/evidence.py run` y escribí la entrada del ledger con el marcador
+`SUPUESTO-ENTORNO:` llevando ese `EVIDENCE_ID` en su PORQUE. `plan-lint.sh`
+se pone rojo ante un `SUPUESTO-ENTORNO:` sin ID, así que el plan no llega a
+implement apoyado en una creencia. El caso que lo motivó fue peor que el de
+TanStack: la pregunta que decidía toda una tarea era si un `<img>` degradaba
+limpio en un cliente de correo con imágenes bloqueadas, se contestaba en diez
+minutos midiendo, y se descubrió en QA después de gastar cuatro implementers y
+cuatro reviewers.
+
 ## Protocolo RFC (1 ronda, máx 2)
 1. Publica la propuesta: scope, repos afectados, cambios de contrato
    (diffs de proto), riesgos.

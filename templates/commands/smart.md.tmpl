@@ -22,9 +22,7 @@ En una tarea NUEVA, `/smart` registra `delivery: review` en `state.json`
 acá escalando desde `/quick`, esa tarea nació para publicar por el `flow` del
 workspace y `escalate` deja la entrega MATERIALIZADA en el estado (`delivery:
 prs` o `trunk`): respetala, no la pises. Escalar sube el carril, no cambia el
-destino. Antes esto no estaba escrito y el resultado fue un pipeline completo
-(RFC, 5 implementers, 4 reviewers, QA, cuatro veredictos pass) con CERO commits
-publicados, porque este párrafo se leía como incondicional.
+destino. (Qué costó no tenerlo escrito: docs/harness/rationale.md.)
 
 Con `delivery: review`: Commits locales en el worktree SÍ, y son
 obligatorios: sin ellos no hay precheck, ni evidencia sellada, ni review. Push,
@@ -59,11 +57,9 @@ del trabajo y no habrá aclaraciones. Entonces:
    El prefijo `AUTO-` se conserva por compatibilidad aunque el comando se
    llame `/smart`: el panel lo genera y los ledgers viejos lo contienen; el
    id es un string, no el nombre del comando.
-   **El sufijo de identidad no es adorno.** El chequeo de colisión solo ve el
-   `tasks/` de ESTA máquina, y el trailer `Task: <id>` viaja al main que
-   comparten todos los workspaces: dos personas con prompts parecidos el mismo
-   día producían el mismo id, y la trazabilidad (y `/archive`) mezclaba dos
-   trabajos distintos bajo una sola clave, para siempre.
+   **El sufijo de identidad no es adorno**: el chequeo de colisión solo ve
+   esta máquina y el trailer `Task: <id>` viaja al main compartido
+   (docs/harness/rationale.md).
 2. Escribe `tasks/<id>/task.md` con el formato de `docs/harness/intake.md`
    y `origin: prompt` en el frontmatter, **incluyendo `title:`** (verbo +
    resultado observable, el mismo del heading): el panel lee ese campo y
@@ -78,8 +74,7 @@ del trabajo y no habrá aclaraciones. Entonces:
      prompt. Ante duda de alcance, siempre la menor.
    - **Briefs de explorador** (si lanzas agentes a investigar): preguntas
      NUMERADAS y específicas, jamás "explora X"; y exige "marca
-     explícitamente lo que NO existe". Medido en campo: así vienen densos
-     y accionables; genéricos vienen difusos.
+     explícitamente lo que NO existe": medido, así vuelven accionables.
    - **Repos afectados**: `inventory.json` y el grafo (`graphify
      query`). No grepees a mano.
 3. Tareas `origin: prompt` NO crean ticket en el tracker: viven en
@@ -95,9 +90,21 @@ al blast radius, no al revés. Clasifica con señales DETERMINISTAS
 
 | Carril | Señales (todas deben cumplirse) | Pipeline |
 |---|---|---|
-| **express** | 1 solo repo · 1 solo dominio de ownership · sin proto/migraciones/infra · sin decisión de arquitectura | Salta RFC: TÚ escribes el mini-plan y el delta-spec (abajo) → 1 implementer → review → ship |
-| **standard** | 2-3 repos · un solo dominio, o dominios NO cruzados · sin breaking | RFC con architect, SIN abogados (no hay frontera que defender) |
+| **express** | 1 dominio de ownership · sin proto/migraciones/infra · sin decisión de arquitectura · **y el delta de CADA repo es chico** (orden de un archivo o dos, cambio mecánico) | Salta RFC: TÚ escribes el mini-plan y el delta-spec (abajo) → 1 implementer por repo → review → ship |
+| **standard** | un solo dominio, o dominios NO cruzados · sin breaking · **y hay algo que decidir de verdad en al menos un repo** | RFC con architect, SIN abogados (no hay frontera que defender) |
 | **full** | cruza ownership · contrato breaking · servicio nuevo · migración de datos | El pipeline completo con abogados |
+
+**El carril lo fija `max(blast radius, tamaño)`, y el número de repos no es
+ninguno de los dos.** Antes express exigía "1 solo repo" y eso mandaba a
+standard cualquier cambio cosmético que tocara tres: un cambio trivial en tres
+repos son TRES cambios triviales, no uno complejo, y pagaba architect + RFC +
+reviewer + QA por repo para mover veinte líneas de HTML (docs/harness/rationale.md).
+
+Lo que NO cambia: `quick` sigue siendo de UN repo, y eso es rechazo duro
+(`POLICY-LANE-005`), porque quick no genera DAG y nada ordenaría el ship entre
+repos. Y `gate_lane` sigue verificando hacia arriba: un express cuyo diff toque
+contratos, migraciones o infra no pasa, tenga los repos que tenga. La señal de
+tamaño ABRE express a multi-repo trivial; no afloja ni un gate.
 
 - **`quick` existe y /smart NO lo elige por su cuenta.** Es el carril más
   corto de la escalera (quick → express → standard → full) y su entrada es
@@ -170,10 +177,7 @@ con ellos `init` **avisa** (no rechaza) si un carril corto incluye un repo de
 infra (`POLICY-LANE-004`, kind `infra-module`/`infra-live` en manifest.yaml).
 Es un aviso y no un freno a propósito: lo que decide si un cambio es de infra es
 lo que el diff TOCA, no en qué repo vive, y quien lo verifica con ese criterio
-es `gate_lane` en el precheck, antes de gastar reviewer. Medido: 20 de 31 repos
-del workspace son infra-* por llevar su `terraform/` al lado del código, así que
-rechazar por el kind dejaba un `.gitignore` de dos líneas sin ningún carril
-rápido.
+es `gate_lane` en el precheck, antes de gastar reviewer (docs/harness/rationale.md).
 Si el enrichment descubre CON EVIDENCIA que la tarea toca un repo que el init
 no declaró, se registra con `scripts/harness-policy.py repos tasks/<id> --add
 <repo> --actor orchestrator --reason "<evidencia>"`: jamás re-corras `init` (se
@@ -241,6 +245,25 @@ en `tasks/<id>/assumptions.md` una línea:
   · SI ES FALSO: <qué cambia y qué cuesta deshacerlo>
 ```
 
+**Y hay una segunda forma, para lo que el repo NO puede responder.** Cuando el
+supuesto es sobre el COMPORTAMIENTO de algo que no controlás (un cliente de
+correo, un navegador, una librería en runtime, un servicio externo), la
+evidencia documental no sirve: el doc envejece y el entorno no te avisa. Esos
+van con el marcador `SUPUESTO-ENTORNO:` y su PORQUE tiene que ser un
+`EVIDENCE_ID` de `evidence.py run`, o sea una EJECUCIÓN:
+
+```
+- SUPUESTO-ENTORNO: <cómo se comporta lo que no controlás> · PORQUE: EV-TEST-<id>
+  · SI ES FALSO: <qué cambia y qué cuesta deshacerlo>
+```
+
+`plan-lint.sh` lo verifica y se pone rojo sin el ID. **Es el gate más barato
+del pipeline evitando el ciclo más caro**: un plan entero construido sobre una
+creencia falsa sobre el entorno se descubre recién en QA, cuando ya se pagó
+architect, implementers y reviewers. Medir cuesta diez minutos; descubrirlo
+tarde cuesta la corrida. Si de verdad no se puede medir, no lo declares de
+entorno: bajalo a `SUPUESTO:` normal con su costo de reversión declarado.
+
 Reglas del ledger, en orden de precedencia:
 1. **La evidencia manda**: spec maestra > ADR vigente > convención del
    repo (su CLAUDE.md) > patrón del código. Un supuesto sin ninguna de
@@ -257,8 +280,8 @@ Reglas del ledger, en orden de precedencia:
 
 0. **Prefetch (en cuanto sepas los repos — $0 tokens)**:
    PRIMERO y antes de cualquier exploración: `scripts/pull-all.sh`
-   (clones frescos; explorar un clon 27 commits atrás fue el error más
-   caro medido en campo: inventarios de endpoints que ya no existían).
+   (clones frescos; explorar un clon viejo fue el error más caro medido en
+   campo: docs/harness/rationale.md).
    Luego, en paralelo y en background: `scripts/worktree-task.sh <id>
    <repos>`, `scripts/repo-brief.sh <repo>` por repo afectado,
    `scripts/graph-refresh.sh` (grafo al día para `graphify query`), el warmup de
@@ -345,8 +368,15 @@ Reglas del ledger, en orden de precedencia:
    comparten árbol, rama e index (`POLICY-DAG-010`). El paralelo que da
    ganancia de reloj es el de repos distintos.
    **Contexto de arranque, completo y mínimo**: su entrada del plan, sus
-   criterios, y el brief de `.cache/briefs/<repo>.md` — el implementer
+   criterios, y el brief de `.cache/briefs/<repo>.md`. El implementer
    NO explora el repo desde cero; Serena cubre el nivel símbolo.
+   Los hallazgos de sus hermanos NO se los inyectás vos: los lee él con
+   `scripts/finding.sh read`, que está en su contrato. Correrlo vos sería pagar
+   la misma lectura en TU ventana, que es la grande.
+   **Lo tuyo es PUBLICAR**: en cuanto un reviewer te devuelva un `blocking` que
+   NO sea específico de su repo, `scripts/finding.sh publish <id> <repo>
+   "<texto>"`. Deduplica, redacta secretos y acota el largo, todo solo; el
+   próximo implementer lo lee al arrancar (docs/harness/rationale.md).
    **El test se escribe para que FALLE sin el fix (rojo primero), y eso va en
    su contexto**: el precheck lo comprueba con `gate_test_muerde` corriendo
    cada test nuevo contra el árbol base, y un test que pasa en los dos árboles
@@ -443,8 +473,17 @@ razón para parar no está en esta lista, no es una razón: decide.
 Una parada se registra antes de emitirse con `scripts/harness-policy.py pause
 tasks/<id> --reason <código> --detail "<por qué>" --actor orchestrator`. Los
 códigos permitidos viven en `harness-policy.json`; al continuar usa `resume`,
-no edites el estado. Al cerrar cada fase registra el total monotónico de
-`ccusage` con `record-cost --total-usd <n>`; exceder presupuesto es un gate.
+no edites el estado.
+
+**El presupuesto ya no depende de que te acuerdes.** `transition` corre
+`scripts/harness-cost.py check` en cada avance de fase y se niega con
+`POLICY-BUDGET-005` si la tarea está fuera de banda: presupuesto excedido,
+contexto medio por encima del techo, o acierto de caché por debajo del piso.
+Medido sobre 663 transcripts, el 87% del gasto vive en TU sesión (no en los
+subagentes) y el top 10% de las sesiones se lleva el 66%: el gate existe para
+cortar esa cola, no para molestar a una corrida sana. `record-cost --total-usd`
+sigue siendo válido para el total de `ccusage`, pero ya no es lo único que mira.
+Para ver el desglose por rol: `scripts/harness-cost.py task <id>`.
 
 - **PEDIR AUTORIZACIÓN PARA COMMITEAR, SHIPPEAR O PUBLICAR NO ES UNA PARADA
   VÁLIDA**, y por eso entra en esta lista: para quedar fuera por escrito. La
@@ -551,7 +590,7 @@ definición, no produce eventos mientras corre. El bus ahora emite
 trabajando, no atascado: dejalo, y contá el reloj desde el `tool-start`,
 no desde el último evento. Matar a un agente sano cuesta doble: pierde su
 trabajo en vuelo y lo relanza con el modelo de escalación, que es el
-caro. Pasó en campo con un QA que corría un gate de WebKit.
+caro (docs/harness/rationale.md).
 
 ## Cuenta lo que decides (el bus)
 

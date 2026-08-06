@@ -172,6 +172,30 @@ declara_contencion() {  # declara_contencion <verdict.json>
   echo "     dice en su juicio si eso le cambia el veredicto."
 }
 
+# ── Un veredicto solo se pisa con algo que SIGUE siendo un veredicto ──
+# `jq ... > tmp && mv tmp destino` confía en el exit code de jq, y jq SALE 0
+# cuando su programa no produce ninguna salida: el tmp queda en 0 bytes, el mv
+# destruye el original y el mensaje de éxito se imprime igual. No es teórico:
+# pasó en el camino feliz de /review paso 5.4 y el veredicto (el único artefacto
+# que el ship exige) desapareció con exit 0 de punta a punta.
+#
+# El exit code de jq NO es la post-condición. La post-condición es que lo
+# escrito siga siendo un objeto JSON con el commit que sella, y se verifica
+# ANTES de pisar nada. Si no lo es, el original queda intacto y esto muere: acá
+# fallar es correcto, porque el destino de la alternativa es perder el juicio.
+pisa_json() {  # pisa_json <tmp> <destino> <qué se estaba haciendo>
+  if [ -s "$1" ] && jq -e 'type == "object" and (.commit // "") != ""' "$1" >/dev/null 2>&1; then
+    mv "$1" "$2"
+    return 0
+  fi
+  rm -f "$1"
+  echo "❌ $3: el resultado quedó vacío o dejó de ser un veredicto"
+  echo "   ↳ el archivo original NO se tocó: $2"
+  echo "   ↳ esto es un bug del harness (una transformación que sale 0 y no"
+  echo "     produce nada): reportalo con scripts/harness-bug.sh"
+  exit 3
+}
+
 merge_qa() {
   # Fusión MECANICA de qa-<repo>.json al veredicto. Caso de campo: el paso 3
   # de /review era prosa ("copia qa, evidence y notes si su commit coincide"),
@@ -285,10 +309,18 @@ merge_qa() {
   susp_json="$(printf '%s\n' $susp_ids | jq -Rnc '[inputs | select(length > 0)]')"
   notes="$(jq -r '.notes // ""' "$q")"
   tmp="$(mktemp "$WS/tasks/$TASK/.verdict-$REPO.XXXXXX")"
-  jq -S --arg qa "$qa_state" --argjson ids "$ids_json" \
+  if ! jq -S --arg qa "$qa_state" --argjson ids "$ids_json" \
         --argjson bids "$base_json" --argjson sids "$susp_json" --arg notes "$notes" '
     .qa = $qa
-    | .qa_notes = (if $notes == "" then (.qa_notes // empty) else $notes end)
+    # SIN notes, el veredicto queda COMO ESTABA, y eso se dice a nivel de
+    # pipeline. Acá vivía un data-loss determinista del camino feliz: era
+    # `.qa_notes = (if $notes == "" then (.qa_notes // empty) else $notes end)`,
+    # y en jq una ASIGNACIÓN con RHS `empty` no borra el campo: mata TODAS las
+    # salidas del programa. Con un qa.json sin `notes` (campo opcional que
+    # ningún schema exige) y un veredicto sin `.qa_notes` previo (el scaffold no
+    # lo crea), el archivo temporal salía en 0 BYTES, jq salía 0, el mv pisaba
+    # el veredicto válido y el mensaje de éxito se imprimía igual.
+    | (if $notes == "" then . else .qa_notes = $notes end)
     | .evidence = ((.evidence + $ids) | unique)
     | (if ($bids | length) > 0
        then .evidence_baseline = (((.evidence_baseline // []) + $bids) | unique)
@@ -298,7 +330,13 @@ merge_qa() {
     | (if ($sids | length) > 0
        then .evidence_under_contention =
               (((.evidence_under_contention // []) + $sids) | unique)
-       else . end)' "$v" > "$tmp" && mv "$tmp" "$v"
+       else . end)' "$v" > "$tmp"; then
+    rm -f "$tmp"
+    echo "❌ merge-qa: la fusión falló y el veredicto NO se tocó"
+    echo "   ↳ revisá que tasks/$TASK/verdict-$REPO.json sea JSON válido"
+    exit 3
+  fi
+  pisa_json "$tmp" "$v" "merge-qa"
   echo "✅ merge-qa: qa=$qa_state fusionado al veredicto ($(printf '%s' "$ids_json" | jq 'length') EVs de QA)"
   declara_contencion "$v"
 }
@@ -614,7 +652,8 @@ elif [ "$REBASE" -eq 1 ]; then
       if [ "$(printf '%s' "$qa_touched" | jq 'length')" -eq 0 ]; then
         jq --arg from "$PREV_COMMIT" \
            '.qa = "pass" | .qa_carried_from = $from
-            | .evidence_qa_stale = true' "$tmp" > "$tmp.qa" && mv "$tmp.qa" "$tmp"
+            | .evidence_qa_stale = true' "$tmp" > "$tmp.qa"
+        pisa_json "$tmp.qa" "$tmp" "arrastre del qa"
         echo "  qa: pass ARRASTRADO desde ${PREV_COMMIT:0:12} (el delta no tocó su surface declarada)"
       else
         echo "  qa: se re-corre — el delta tocó su superficie: $(printf '%s' "$qa_touched" | jq -r 'join(", ")')"
@@ -681,6 +720,45 @@ pin_review_tree() {  # pin_review_tree <commit> → 0 clavado; 1 no, con el moti
   return 1
 }
 
+# ── El pin se VERIFICA donde se USA, no se cree su código de retorno ──
+# CASO DE CAMPO MEDIDO: dos veredictos sellados sin `.review-<repo>` y sin UNA
+# sola señal, ni warning en stdout ni evento assumption en el bus. El reviewer
+# de uno entró al pin 43 segundos después, no lo encontró, y se armó un worktree
+# descartable en /tmp por su cuenta. Esporádico (2 de ~130 sellos recientes, en
+# repos y días distintos) y NO reproducible: el camino feliz de pin_review_tree
+# es correcto, corrido dos veces contra repos de juguete.
+#
+# Por eso el arreglo no persigue la causa: la vuelve irrelevante. `git worktree
+# add` saliendo 0 no es la afirmación que importa; la afirmación que importa es
+# que EXISTE un árbol usable, en el commit sellado, cuando el reviewer va a
+# leerlo. Cualquier cosa que se lleve el pin entremedio (concurrencia sobre el
+# mismo repo, un prune ajeno, la limpieza de otro agente) cae en el mismo camino
+# que ya existía: warning y supuesto en el bus. Sigue sin ser un gate.
+pin_clavado() {  # pin_clavado <commit> → 0 si el pin existe, es worktree y sella
+  local head_pin top fisica logica
+  [ -d "$PIN" ] || { PIN_WHY="el directorio no quedó después de clavarlo"; return 1; }
+  if ! head_pin="$(git -C "$PIN" rev-parse HEAD 2>&1)"; then
+    PIN_WHY="el directorio quedó pero git no lo reconoce: $(one_line "$head_pin")"
+    return 1
+  fi
+  # Que `rev-parse` funcione no alcanza: desde un directorio suelto, git sube
+  # hasta el repo que lo contenga y contestaría por OTRO árbol. La raíz tiene
+  # que ser el pin mismo. Las dos formas de la ruta (física y lógica) valen: en
+  # macOS /var es symlink de /private/var y comparar una sola daría un falso
+  # negativo que inventaría un supuesto inexistente.
+  top="$(git -C "$PIN" rev-parse --show-toplevel 2>/dev/null)"
+  fisica="$(cd "$PIN" 2>/dev/null && pwd -P)"
+  logica="$(cd "$PIN" 2>/dev/null && pwd)"
+  if [ -z "$top" ] || { [ "$top" != "$fisica" ] && [ "$top" != "$logica" ]; }; then
+    PIN_WHY="$PIN no es la raíz de un worktree (git resolvió '${top:-nada}')"
+    return 1
+  fi
+  [ "$head_pin" = "$1" ] || {
+    PIN_WHY="quedó en ${head_pin:0:12} y el veredicto sella ${1:0:12}"
+    return 1; }
+  return 0
+}
+
 # ── El loop nativo del reviewer no le pisa el del QA ──────────────────
 # El go.work de la tarea es UNO SOLO y no puede nombrar el pin: el árbol clavado
 # tiene los MISMOS module-paths que el worktree vivo y go.work prohíbe el módulo
@@ -744,7 +822,7 @@ if [ -n "$kb" ]; then
   fi
 fi
 
-mv "$tmp" "$OUT"
+pisa_json "$tmp" "$OUT" "scaffold"
 echo "✅ scaffold: tasks/$TASK/verdict-$REPO.json ($(jq '.evidence|length' "$OUT") evidencias, agents=$(jq -c '.implementation_agents' "$OUT"), commit ${HEAD:0:12})"
 declara_contencion "$OUT"
 
@@ -752,7 +830,7 @@ declara_contencion "$OUT"
 # stale, roles, juicio incorrupto), no queda un pin apuntando a un commit que
 # ningún veredicto sella.
 REVIEW_DIR="worktrees/$TASK/$REPO"
-if pin_review_tree "$HEAD"; then
+if pin_review_tree "$HEAD" && pin_clavado "$HEAD"; then
   REVIEW_DIR="worktrees/$TASK/.review-$REPO"
   echo "📌 árbol clavado al commit sellado: $REVIEW_DIR (${HEAD:0:12}, detached)"
   echo "   el reviewer LEE y difea AHÍ, no en el worktree vivo: el vivo es del"

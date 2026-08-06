@@ -283,5 +283,161 @@ class Atribucion(CostBase):
         self.assertIn("sin-rol", r.stdout, r.stdout)
 
 
+class BandaConSalida(CostBase):
+    """El termino que NO se puede remediar tiene que tener salida AUDITABLE.
+
+    POR QUE ESTA SUITE (3 reportes del mismo callejon: #90, #91, #93):
+    `cache_hit` y `ctx_avg` salen de transcripts de un agente que YA CERRO, o
+    sea metrica historica e inmutable. La remediacion que el gate imprime
+    (recortar el contexto de ARRANQUE del agente) no se puede aplicar en
+    retroactivo, `budget --to` solo mueve el termino COST-BUDGET, y la unica
+    salida que quedaba era HARNESS_CACHE_HIT_FLOOR: apagar el umbral sin dejar
+    rastro. Una tarea con el trabajo commiteado quedaba viva e INMOVIL.
+
+    Lo que se protege: que el eximido destrabe, que NO sea un cheque en blanco
+    (algo peor vuelve a frenar), y que NUNCA sea silencioso.
+    """
+
+    def sano(self, turns=30):
+        """Un orquestador dentro de banda: el breach tiene que venir del subagente."""
+        self.write([self.turn(read=40_000, write=500) for _ in range(turns)])
+
+    def subagente(self, role, turns, read, write, name="agent-uno"):
+        subs = self.proj / self.sid / "subagents"
+        subs.mkdir(parents=True, exist_ok=True)
+        (subs / f"{name}.jsonl").write_text(
+            "\n".join(self.turn(read=read, write=write) for _ in range(turns)) + "\n")
+        (subs / f"{name}.meta.json").write_text(json.dumps({"agentType": role}))
+
+    def waivers(self, *entries):
+        (self.task / "state.json").write_text(json.dumps({"cost_waivers": list(entries)}))
+
+    def test_sin_eximido_el_termino_historico_TRABA(self):
+        # La mitad que justifica todo lo demas: sin salida, esto es permanente.
+        self.sano()
+        self.subagente("architect", 33, 89_000, 11_000)     # 89%, piso 90%
+        r = self.run_cost("check", "T1")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn("COST-CACHE", r.stdout)
+
+    def test_el_eximido_destraba_Y_SE_DICE(self):
+        self.sano()
+        self.subagente("architect", 33, 89_000, 11_000)
+        self.waivers({"band": "cache", "agent": "architect", "value": 0.89,
+                      "actor": "humano", "reason": "subagente cerrado"})
+        r = self.run_cost("check", "T1")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        # Un termino que deja de frenar y deja de VERSE es el mismo silencio que
+        # el gate vino a matar: tiene que seguir imprimiendose con quien y por que.
+        self.assertIn("EXIMIDO por humano", r.stdout, r.stdout)
+        self.assertIn("subagente cerrado", r.stdout, r.stdout)
+        self.assertIn("COST-CACHE", r.stdout, r.stdout)
+
+    def test_el_eximido_se_ancla_al_valor_MEDIDO(self):
+        # No es un cheque en blanco sobre la banda: cubre lo que se acepto. El
+        # mismo rol cayendo mas abajo vuelve a frenar, que es lo que separa
+        # "acepto este 89%" de "no me midas mas la cache de esta tarea".
+        self.sano()
+        self.subagente("architect", 33, 40_000, 60_000)      # 40%, mucho peor
+        self.waivers({"band": "cache", "agent": "architect", "value": 0.89,
+                      "actor": "humano", "reason": "subagente cerrado"})
+        r = self.run_cost("check", "T1")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertNotIn("EXIMIDO", r.stdout, r.stdout)
+
+    def test_el_eximido_es_de_UN_rol(self):
+        self.sano()
+        self.subagente("implementer", 33, 89_000, 11_000)
+        self.waivers({"band": "cache", "agent": "architect", "value": 0.5,
+                      "actor": "humano", "reason": "otro rol"})
+        r = self.run_cost("check", "T1")
+        self.assertEqual(r.returncode, 3, r.stdout)
+
+    def test_el_ctx_tiene_la_misma_salida_y_la_misma_ancla(self):
+        # Simetria: los dos terminos que no se pueden remediar en retroactivo
+        # se eximen igual. Y en ctx el "peor" es al reves (mas contexto).
+        self.write([self.turn(read=400_000, write=1_000) for _ in range(20)])
+        r = self.run_cost("check", "T1")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        ctx = json.loads(self.run_cost("check", "T1", "--json").stdout)
+        valor = next(b["value"] for b in ctx["breaches"] if b["code"] == "COST-CTX")
+        self.waivers({"band": "ctx", "agent": "orquestador", "value": valor,
+                      "actor": "humano", "reason": "sesion larga declarada"})
+        self.assertEqual(self.run_cost("check", "T1").returncode, 0)
+        self.waivers({"band": "ctx", "agent": "orquestador", "value": valor - 1,
+                      "actor": "humano", "reason": "aceptado mas chico"})
+        self.assertEqual(self.run_cost("check", "T1").returncode, 3,
+                         "un contexto MAYOR que el aceptado tiene que volver a frenar")
+
+    def test_json_para_la_maquina(self):
+        # harness-policy.py cost-waive lo consume para exigir que el termino
+        # EXISTA antes de dejar eximirlo: sin esto, el eximido seria una
+        # declaracion sobre algo que nadie midio.
+        self.sano()
+        self.subagente("architect", 33, 89_000, 11_000)
+        r = self.run_cost("check", "T1", "--json")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        data = json.loads(r.stdout)
+        b = [x for x in data["breaches"] if x["code"] == "COST-CACHE"]
+        self.assertEqual(len(b), 1, data)
+        self.assertEqual(b[0]["agent"], "architect")
+        self.assertEqual(b[0]["turns"], 33)
+        self.assertAlmostEqual(b[0]["value"], 0.89, places=2)
+        self.assertEqual(data["min_turns_for_cache_floor"], 10)
+
+
+class PisoAlcanzable(CostBase):
+    """El piso de cache no se le puede cobrar a un agente CORTO.
+
+    El mejor caso posible para un agente de T turnos es escribir su contexto UNA
+    vez y leerlo en los T-1 restantes: hit_max = (T-1)/T. Si esa COTA SUPERIOR
+    ya esta por debajo del piso, el agente no podia aprobarlo hiciera lo que
+    hiciera, y el breach no dice nada de su conducta: mide la ventana de cache.
+    """
+
+    def subagente(self, role, turns, read, write):
+        subs = self.proj / self.sid / "subagents"
+        subs.mkdir(parents=True, exist_ok=True)
+        (subs / "agent-corto.jsonl").write_text(
+            "\n".join(self.turn(read=read, write=write) for _ in range(turns)) + "\n")
+        (subs / "agent-corto.meta.json").write_text(json.dumps({"agentType": role}))
+
+    def test_agente_corto_NO_frena_pero_se_DECLARA(self):
+        self.write([self.turn(read=40_000, write=500) for _ in range(30)])
+        self.subagente("implementer", 4, 10_000, 90_000)     # 10% en 4 turnos
+        r = self.run_cost("check", "T1")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("NO se evalúa", r.stdout, r.stdout)
+        self.assertIn("máximo alcanzable", r.stdout, r.stdout)
+
+    def test_un_agente_LARGO_bajo_el_piso_sigue_frenando(self):
+        # CONTRA-MITAD: el arreglo del falso positivo no puede apagar el gate.
+        # 33 turnos admiten hasta 97%, asi que 89% SI es una afirmacion sobre
+        # como corrio ese agente.
+        self.write([self.turn(read=40_000, write=500) for _ in range(30)])
+        self.subagente("implementer", 33, 89_000, 11_000)
+        r = self.run_cost("check", "T1")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertNotIn("NO se evalúa", r.stdout, r.stdout)
+
+    def test_el_minimo_SALE_del_piso_no_es_un_numero_elegido(self):
+        # Con el piso en 95% hacen falta 20 turnos; el mismo agente de 15 turnos
+        # se evalua con el piso de fabrica (10) y no con el de 95%.
+        self.write([self.turn(read=40_000, write=500) for _ in range(30)])
+        self.subagente("implementer", 15, 80_000, 20_000)    # 80% en 15 turnos
+        self.assertEqual(self.run_cost("check", "T1").returncode, 3,
+                         "piso 90%: 15 turnos admiten 93%, o sea que 80% es real")
+        env = os.environ.copy()
+        env.update(CLAUDE_CONFIG_DIR=str(self.cfg), HARNESS_WS=str(self.ws),
+                   HARNESS_CACHE_HIT_FLOOR="0.95")
+        r = subprocess.run(["python3", str(SCRIPT), "check", "T1", "--json"],
+                           text=True, stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE, check=False, env=env)
+        data = json.loads(r.stdout)
+        self.assertEqual(data["min_turns_for_cache_floor"], 20, data)
+        self.assertTrue(any(u["agent"] == "implementer"
+                            for u in data["unmeasurable"]), data)
+
+
 if __name__ == "__main__":
     unittest.main()

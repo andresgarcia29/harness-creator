@@ -401,6 +401,36 @@ assert_not_contains "$out" "CONTENCIÓN" "ni una carga que el sello dice que no 
 rm -f "$WS/tasks/T1/evidence/EV-TEST-qarojolimp1.json" "$WS/tasks/T1/qa-atlas.json"
 
 echo
+echo "── un qa.json SIN notes no puede DESTRUIR el veredicto"
+# DATA-LOSS DETERMINISTA EN EL CAMINO FELIZ, medido en campo: `notes` es
+# opcional y ningún schema lo exige, y la fusión hacía
+# `.qa_notes = (if $notes == "" then (.qa_notes // empty) else $notes end)`.
+# En jq una ASIGNACIÓN con RHS `empty` no borra el campo: mata TODAS las salidas
+# del programa. Con qa.json sin notes y un veredicto sin .qa_notes previo (el
+# scaffold no lo crea), el tmp salía en 0 BYTES, jq salía 0, el mv pisaba el
+# veredicto y el ✅ se imprimía igual. Después verdict-beads.sh reportaba
+# "0 bead(s) creados" con exit 0: la cascada era silenciosa de punta a punta.
+bash "$WS/scripts/verdict-scaffold.sh" --force T1 atlas revisor-1 >/dev/null 2>&1
+HEADN="$(git -C "$WT1" rev-parse HEAD)"
+mk_ev EV-TEST-qanotes0001 qa test "$HEADN"
+jq -n --arg c "$HEADN" '{schema:1, task_id:"T1", repo:"atlas", qa:"pass",
+  commit:$c, evidence:["EV-TEST-qanotes0001"]}' > "$WS/tasks/T1/qa-atlas.json"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --merge-qa T1 atlas 2>&1)"; rc=$?
+assert_eq 0 "$rc" "qa.json sin notes: exit 0"
+[ -s "$V" ] && pass "el veredicto SIGUE EXISTIENDO (antes: 0 bytes con exit 0 y ✅)" \
+  || fail "el veredicto quedó vacío: volvió el data-loss de la fusión"
+assert_eq "pass" "$(jq -r .qa "$V")" "y el qa se fusionó igual"
+assert_eq "PENDING_REVIEWER" "$(jq -r .verdict "$V")" "con el juicio intacto"
+assert_eq "false" "$(jq 'has("qa_notes")' "$V")" "sin notes NO se inventa qa_notes"
+# La otra mitad del contrato original: si el veredicto YA tenía qa_notes y el
+# qa.json nuevo no trae notes, la nota vieja se CONSERVA (era la intención del
+# código roto, y perderla sería cambiar el comportamiento por la ventana).
+jq '.qa_notes = "nota previa"' "$V" > "$V.tmp" && mv "$V.tmp" "$V"
+bash "$WS/scripts/verdict-scaffold.sh" --merge-qa T1 atlas >/dev/null 2>&1
+assert_eq "nota previa" "$(jq -r .qa_notes "$V")" "y una qa_notes previa se conserva"
+rm -f "$WS/tasks/T1/qa-atlas.json"
+
+echo
 echo "── el ÁRBOL CLAVADO: el reviewer juzga el commit sellado, no el árbol vivo"
 # P1 de campo: el reviewer leía worktrees/<task>/<repo> mientras el implementer
 # (dueño del claim) seguía editándolo sin commitear. El veredicto sellaba X y el
@@ -520,6 +550,64 @@ mk_ev5 EV-TEST-pin000000004 "$H5D"
 bash "$WS/scripts/verdict-scaffold.sh" --rebase T5 beta revisor-5 >/dev/null 2>&1
 assert_eq "$H5D" "$(git -C "$PIN5" rev-parse HEAD)" \
   "un pin roto ('missing but already registered') se rehace en el scaffold siguiente"
+
+# (d) EL PIN SE VERIFICA DONDE SE USA, no se cree el exit code de `worktree add`.
+# CASO DE CAMPO MEDIDO: dos veredictos sellados sin `.review-<repo>` y sin UNA
+# sola señal (ni warning ni assumption en el bus, y el bus funcionaba: tenía
+# assumptions de otros actores en la misma ventana). El reviewer entró al pin 43
+# segundos después, no estaba, y se armó un worktree descartable en /tmp por su
+# cuenta. Esporádico, ~2 de ~130 sellos, y NO reproducible por el camino de
+# código: el camino feliz de pin_review_tree es correcto.
+#
+# Por eso lo que se prueba acá no es la causa (desconocida: concurrencia sobre
+# el mismo repo, un prune ajeno, la limpieza de otro agente), sino la
+# POST-CONDICIÓN: el shim deja que `worktree add` salga 0 de verdad y después se
+# lleva el directorio, que es exactamente la forma del caso de campo.
+mkdir -p "$WS/.shim2"
+cat > "$WS/.shim2/git" <<SHIM
+#!/usr/bin/env bash
+prev=""; add=0
+for a in "\$@"; do
+  [ "\$prev" = "worktree" ] && [ "\$a" = "add" ] && add=1
+  prev="\$a"
+done
+if [ "\$add" = 1 ]; then
+  "$REAL_GIT" "\$@" || exit \$?
+  for a in "\$@"; do case "\$a" in */.review-*) rm -rf "\$a" ;; esac; done
+  exit 0
+fi
+exec "$REAL_GIT" "\$@"
+SHIM
+chmod +x "$WS/.shim2/git"
+rm -rf "$PIN5"
+: > "$WS/.harness/events.jsonl"
+printf 'v5\n' > "$WT5/app.txt"; g5 add -A; g5 commit -q -m v5
+H5F2="$(g5 rev-parse HEAD)"
+mk_ev5 EV-TEST-pin000000005 "$H5F2"
+out="$(PATH="$WS/.shim2:$PATH" CLAUDE_PROJECT_DIR="$WS" \
+  bash "$WS/scripts/verdict-scaffold.sh" --rebase T5 beta revisor-5 2>&1)"; rc=$?
+assert_eq 0 "$rc" "pin perdido DESPUÉS del add: el scaffold no muere (sigue sin ser un gate)"
+assert_eq "$H5F2" "$(jq -r .commit "$V5")" "y el veredicto se sella igual"
+assert_no_file "$PIN5" "el pin efectivamente no quedó"
+assert_contains "$out" "no pude clavar" "y NO se anuncia un pin que no existe"
+assert_not_contains "$out" "📌" "ni se imprime la línea del árbol clavado"
+assert_contains "$out" "SUPUESTO" "declara el supuesto abierto"
+assert_contains "$(cat "$WS/.harness/events.jsonl" 2>&1)" "assumption" \
+  "y lo deja en el bus (el silencio era el bug: 2 de ~130 sellos, cero señales)"
+assert_contains "$out" "worktrees/T5/beta diff" "el delta cae al worktree vivo, sin mentir la ruta"
+
+# CONTRA-MITAD: la post-condición no puede inventar supuestos cuando el pin SÍ
+# está. Un falso positivo acá mandaría al reviewer a leer el árbol vivo teniendo
+# uno clavado, que es el daño que este bloque existe para impedir.
+printf 'v6\n' > "$WT5/app.txt"; g5 add -A; g5 commit -q -m v6
+H5G2="$(g5 rev-parse HEAD)"
+mk_ev5 EV-TEST-pin000000006 "$H5G2"
+: > "$WS/.harness/events.jsonl"
+out="$(CLAUDE_PROJECT_DIR="$WS" bash "$WS/scripts/verdict-scaffold.sh" --rebase T5 beta revisor-5 2>&1)"
+assert_contains "$out" "📌 árbol clavado" "pin sano: se anuncia"
+assert_eq "$H5G2" "$(git -C "$PIN5" rev-parse HEAD)" "y está en el commit sellado"
+assert_not_contains "$out" "SUPUESTO" "sin supuesto inventado (la post-condición no da falsos positivos)"
+assert_not_contains "$(cat "$WS/.harness/events.jsonl" 2>&1)" "assumption" "ni evento en el bus"
 
 echo
 echo "── --rm limpia el pin (un huérfano deja la metadata del repo rota)"

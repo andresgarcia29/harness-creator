@@ -48,6 +48,7 @@ Uso:
   harness-cost.py day [--days N]         top de sesiones y totales
   harness-cost.py check <id>             gate: sale 3 si algo está fuera de banda
   harness-cost.py check <id> --budget N  ídem, con techo explícito en dólares
+  harness-cost.py check <id> --json      el mismo veredicto, legible por máquina
 """
 from __future__ import annotations
 
@@ -55,6 +56,7 @@ import argparse
 import collections
 import glob
 import json
+import math
 import os
 import re
 import statistics
@@ -81,6 +83,37 @@ CACHE_HIT_FLOOR = float(os.environ.get("HARNESS_CACHE_HIT_FLOOR", "0.90"))
 CTX_CEILING = int(os.environ.get("HARNESS_CTX_CEILING", "150000"))
 
 EXIT_OK, EXIT_USAGE, EXIT_BREACH, EXIT_NODATA = 0, 2, 3, 4
+
+
+# ── El piso de caché no se le puede cobrar a un agente CORTO ─────────────────
+# CASO DE CAMPO: un implementer que hizo bien su trabajo cerró en 89% con 33
+# turnos y dejó la tarea trabada para siempre, porque `cache_hit` es histórico
+# (sale de transcripts inmutables) y ninguna remediación futura lo mueve.
+#
+# Y hay un tramo donde el piso no mide derroche sino ARITMÉTICA. El mejor caso
+# posible para un agente de T turnos es escribir su contexto UNA vez y leerlo en
+# los T-1 turnos restantes, o sea `hit_max = (T-1)/T`. Cualquier agente real
+# escribe más (el contexto crece), así que esa fracción es una COTA SUPERIOR: si
+# `(T-1)/T` ya está por debajo del piso, el agente no podía aprobarlo hiciera lo
+# que hiciera, y el breach no informa nada sobre su conducta.
+#
+# De ahí sale el mínimo, que no es un número elegido: `T >= 1/(1-piso)` (10
+# turnos con el piso en 90%). Por debajo, el término se DECLARA y no bloquea;
+# nunca se calla, que sería el verde silencioso al revés.
+def min_turns_for_cache_floor() -> int:
+    if CACHE_HIT_FLOOR <= 0:
+        return 0
+    if CACHE_HIT_FLOOR >= 1:
+        return 1 << 30          # un piso de 100% es inalcanzable con cualquier T
+    # La tolerancia no es cosmética: 1-0.9 da 0.09999999999999998 en binario y
+    # el ceil crudo devolvía 11 turnos para un piso que se alcanza con 10, o sea
+    # que el gate dejaba de mirar a un agente que SÍ podía aprobarlo.
+    return int(math.ceil(1.0 / (1.0 - CACHE_HIT_FLOOR) - 1e-9))
+
+
+def max_cache_hit(turns: int) -> float:
+    """La cota superior de acierto alcanzable con `turns` turnos."""
+    return (turns - 1) / turns if turns > 0 else 0.0
 
 
 # ── Precios ──────────────────────────────────────────────────────────────────
@@ -364,10 +397,15 @@ def usd(v):
 
 
 def band(r) -> str:
-    """La etiqueta que hace escaneable el reporte: qué está fuera de banda."""
+    """La etiqueta que hace escaneable el reporte: qué está fuera de banda.
+
+    El sufijo `(corto)` marca el agente cuyo piso de caché no es alcanzable por
+    aritmética: el dato se muestra igual (es real), pero decir que está fuera de
+    banda sin decir que no podía estar dentro sería un reporte que miente."""
     flags = []
     if r["cache_hit"] < CACHE_HIT_FLOOR:
-        flags.append(f"cache {r['cache_hit']*100:.0f}%")
+        corto = "" if r["turns"] >= min_turns_for_cache_floor() else " (corto)"
+        flags.append(f"cache {r['cache_hit']*100:.0f}%{corto}")
     if r["ctx_avg"] > CTX_CEILING:
         flags.append(f"ctx {r['ctx_avg']/1000:.0f}k")
     return " ".join(flags)
@@ -461,12 +499,127 @@ def cmd_day(args) -> int:
     return EXIT_OK
 
 
+def task_state(task: str) -> dict:
+    """El state.json de la tarea, o {} si no hay. Fail-open a propósito: la
+    báscula mide transcripts, y una tarea sin estado sigue siendo medible."""
+    try:
+        with open(os.path.join(WS, "tasks", task, "state.json")) as fh:
+            value = json.load(fh)
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
+def load_waivers(state: dict) -> list:
+    """Los términos EXIMIDOS con actor y motivo, que escribe harness-policy.py.
+
+    POR QUÉ EXISTE: `COST-BUDGET` tenía un escape auditable (`budget --to`, que
+    queda en `history[]`) y los otros dos términos NO tenían ninguno. El
+    resultado medido en campo: un subagente que ya cerró bajo el piso trababa la
+    tarea para siempre, porque su métrica es histórica e inmutable y la única
+    salida que quedaba era `HARNESS_CACHE_HIT_FLOOR`, que apaga el gate SIN
+    dejar rastro. Un gate cuyo único escape es invisible es un gate que alguien
+    va a apagar y nadie va a poder auditar.
+
+    El eximido NO apaga nada: se declara en cada corrida del check con quién lo
+    autorizó y por qué, y cubre solo hasta lo que se aceptó (ver `covered_by`)."""
+    value = state.get("cost_waivers")
+    if not isinstance(value, list):
+        return []
+    return [w for w in value if isinstance(w, dict)]
+
+
+def covered_by(waivers: list, band_code: str, role: str, value: float):
+    """El eximido que cubre este término, o None.
+
+    UN EXIMIDO NO ES UN CHEQUE EN BLANCO: declara la banda, el rol y el valor
+    MEDIDO cuando se autorizó. Algo PEOR que lo aceptado vuelve a frenar, que es
+    lo que separa "acepto este 89% del architect que ya cerró" de "no me midas
+    más la caché de esta tarea"."""
+    for w in waivers:
+        if w.get("band") != band_code or w.get("agent") != role:
+            continue
+        at = w.get("value")
+        if not isinstance(at, (int, float)):
+            return w                     # sin valor declarado: cubre la banda entera
+        if band_code == "cache" and value >= float(at) - 1e-9:
+            return w
+        if band_code == "ctx" and value <= float(at) + 1e-9:
+            return w
+    return None
+
+
+def waiver_note(w: dict) -> str:
+    return (f"EXIMIDO por {w.get('actor') or '?'}"
+            + (f": {w.get('reason')}" if w.get("reason") else ""))
+
+
+def evaluate(rows, task: str, budget):
+    """Los tres términos, partidos en lo que FRENA, lo eximido y lo no medible.
+
+    Devuelve (breaches, waived, unmeasurable), cada uno con entradas
+    autodescriptivas: el mismo cálculo alimenta el texto del gate y el `--json`
+    que consume `harness-policy.py cost-waive`. Dos evaluadores del mismo umbral
+    es una oportunidad de divergir."""
+    waivers = load_waivers(task_state(task))
+    breaches, waived, unmeasurable = [], [], []
+
+    def entry(code, role, value, r=None, text=""):
+        return {"code": code, "agent": role, "value": value, "text": text,
+                "cost": (r or {}).get("cost"), "turns": (r or {}).get("turns")}
+
+    _, cost, _ = totals(rows)
+    if budget and cost > float(budget):
+        breaches.append(entry(
+            "COST-BUDGET", None, round(cost, 4), None,
+            f"COST-BUDGET: gastado ${cost:,.2f} sobre un presupuesto de "
+            f"${float(budget):,.2f}"))
+    min_turns = min_turns_for_cache_floor()
+    for r in sorted(rows, key=lambda r: -(r["cost"] or 0)):
+        if r["cache_hit"] < CACHE_HIT_FLOOR:
+            e = entry("COST-CACHE", r["role"], round(r["cache_hit"], 6), r,
+                      f"COST-CACHE: {r['role']} con {r['cache_hit']*100:.0f}% de "
+                      f"acierto de caché (piso {CACHE_HIT_FLOOR*100:.0f}%), "
+                      f"${r['cost'] or 0:,.2f} de los cuales la reescritura es "
+                      "la mayoría")
+            w = covered_by(waivers, "cache", r["role"], r["cache_hit"])
+            if r["turns"] < min_turns:
+                e["text"] += (
+                    f". NO se evalúa: con {r['turns']} turno(s) el máximo "
+                    f"alcanzable es {max_cache_hit(r['turns'])*100:.0f}%, así que "
+                    f"acá el piso mide la ventana de caché y no el derroche "
+                    f"(hacen falta {min_turns} turnos)")
+                unmeasurable.append(e)
+            elif w:
+                e["waiver"] = w
+                e["text"] += f". {waiver_note(w)}"
+                waived.append(e)
+            else:
+                breaches.append(e)
+        if r["ctx_avg"] > CTX_CEILING:
+            e = entry("COST-CTX", r["role"], round(r["ctx_avg"], 2), r,
+                      f"COST-CTX: {r['role']} arrastra {r['ctx_avg']/1000:.0f}k de "
+                      f"contexto medio (techo {CTX_CEILING/1000:.0f}k) sobre "
+                      f"{r['tools']} tool calls")
+            w = covered_by(waivers, "ctx", r["role"], r["ctx_avg"])
+            if w:
+                e["waiver"] = w
+                e["text"] += f". {waiver_note(w)}"
+                waived.append(e)
+            else:
+                breaches.append(e)
+    return breaches, waived, unmeasurable
+
+
 def cmd_check(args) -> int:
     """El gate. Sale 3 si la tarea está fuera de banda o excedió presupuesto.
 
     Fail-OPEN ante ausencia de datos y fail-CLOSED ante datos malos: si no hay
     transcripts no se puede afirmar nada y bloquear sería mentir al revés; si
     los hay y están fuera de banda, se bloquea con el número delante.
+
+    Lo eximido y lo no medible se IMPRIMEN igual: un término que deja de frenar
+    y deja de verse es la misma clase de silencio que el gate vino a matar.
     """
     pd = find_project_dir(WS)
     if not pd:
@@ -480,43 +633,48 @@ def cmd_check(args) -> int:
     _, cost, _ = totals(rows)
     budget = args.budget
     if budget is None:
-        try:
-            with open(os.path.join(WS, "tasks", args.task, "state.json")) as fh:
-                budget = (json.load(fh) or {}).get("budget_usd")
-        except Exception:
-            budget = None
+        budget = task_state(args.task).get("budget_usd")
 
-    breaches = []
-    if budget and cost > float(budget):
-        breaches.append(
-            f"COST-BUDGET: gastado ${cost:,.2f} sobre un presupuesto de "
-            f"${float(budget):,.2f}")
-    for r in sorted(rows, key=lambda r: -(r["cost"] or 0)):
-        if r["cache_hit"] < CACHE_HIT_FLOOR:
-            breaches.append(
-                f"COST-CACHE: {r['role']} con {r['cache_hit']*100:.0f}% de acierto "
-                f"de caché (piso {CACHE_HIT_FLOOR*100:.0f}%), "
-                f"${r['cost'] or 0:,.2f} de los cuales la reescritura es la mayoría")
-        if r["ctx_avg"] > CTX_CEILING:
-            breaches.append(
-                f"COST-CTX: {r['role']} arrastra {r['ctx_avg']/1000:.0f}k de "
-                f"contexto medio (techo {CTX_CEILING/1000:.0f}k) sobre "
-                f"{r['tools']} tool calls")
+    breaches, waived, unmeasurable = evaluate(rows, args.task, budget)
+
+    if getattr(args, "json", False):
+        print(json.dumps({
+            "task": args.task,
+            "cost": round(cost, 4),
+            "budget": float(budget) if budget else None,
+            "cache_hit_floor": CACHE_HIT_FLOOR,
+            "ctx_ceiling": CTX_CEILING,
+            "min_turns_for_cache_floor": min_turns_for_cache_floor(),
+            "breaches": breaches,
+            "waived": waived,
+            "unmeasurable": unmeasurable,
+        }, ensure_ascii=False))
+        return EXIT_BREACH if breaches else EXIT_OK
 
     print(f"cost-check {args.task}: ${cost:,.2f}"
           + (f" / ${float(budget):,.2f}" if budget else ""))
+    for e in waived + unmeasurable:
+        print(f"  {e['text']}")
     if not breaches:
         print("dentro de banda.")
         return EXIT_OK
     print()
     for b in breaches[:8]:
-        print(f"  {b}")
+        print(f"  {b['text']}")
     if len(breaches) > 8:
         print(f"  ... y {len(breaches)-8} más")
     print()
     print("Remediación: el contexto se recorta en el ARRANQUE del agente "
           "(brief destilado, no punteros a documentos), y la salida de comandos "
           "se acota con scripts/quiet.sh o evidence.py run, que ya lo hace.")
+    if any(b["code"] != "COST-BUDGET" for b in breaches):
+        print()
+        print("Si el agente que lo disparó YA CERRÓ, esa remediación no aplica: su "
+              "métrica sale de transcripts inmutables. La salida auditable es "
+              "`harness-policy.py cost-waive tasks/<id> --band cache|ctx "
+              "--agent <rol> --actor <quien> --reason \"<por qué>\"`, que queda en "
+              "history[] y se declara en cada cost-check. `budget --to` NO sirve "
+              "acá: solo mueve el término COST-BUDGET.")
     return EXIT_BREACH
 
 
@@ -597,6 +755,11 @@ def main(argv=None) -> int:
     c = sub.add_parser("check", help="gate: sale 3 si está fuera de banda")
     c.add_argument("task")
     c.add_argument("--budget", type=float, default=None)
+    c.add_argument("--json", action="store_true",
+                   help="el mismo veredicto legible por máquina (breaches, "
+                        "eximidos y no medibles). Lo consume "
+                        "harness-policy.py cost-waive, que exige que el "
+                        "término EXISTA antes de dejar eximirlo")
     c.set_defaults(func=cmd_check)
 
     args = ap.parse_args(argv)

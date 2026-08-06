@@ -187,3 +187,26 @@ código. `spent_usd` se quedaba en 0.0 para siempre. Medido sobre 663
 transcripts: el 87% del gasto vive en la sesión orquestadora, la mediana por
 sesión son $12.52, y el top 10% de las sesiones se lleva el 66% de la factura.
 Lo que faltaba nunca fue un precio más bajo: era un disyuntor para la cola.
+
+---
+
+## Por qué un disyuntor necesita una llave, y con nombre
+
+**Regla**: todo término del gate de costo tiene una salida AUDITABLE, y la
+salida es distinta según el término: `budget --to` para `COST-BUDGET`,
+`cost-waive --band cache|ctx --agent <rol>` para los otros dos.
+
+**El caso**: `COST-BUDGET` tenía escape con rastro desde el día uno y los otros
+dos no tenían ninguno. Y son justo los que NO se pueden remediar: `cache_hit` y
+`ctx_avg` salen de los transcripts de un agente que ya cerró, así que la
+remediación que el propio gate imprime (recortar el contexto de arranque) no
+aplica en retroactivo. Una tarea con el trabajo commiteado y el precheck verde
+quedaba viva e INMÓVIL, y la única salida que quedaba era mover
+`HARNESS_CACHE_HIT_FLOOR`: apagar el umbral en silencio, que es lo que la Ley 12
+prohíbe. Un gate cuyo único escape es invisible es un gate que alguien va a
+apagar y nadie va a poder auditar.
+
+La segunda mitad es que el piso de caché medía mal a los agentes cortos: con T
+turnos el máximo alcanzable es `(T-1)/T`, así que por debajo de `1/(1-piso)`
+turnos el breach no dice nada sobre la conducta del agente, solo sobre el
+tamaño de su ventana. Ahora ese término se declara y no bloquea.

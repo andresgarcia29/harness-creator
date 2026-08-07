@@ -566,6 +566,39 @@ assert_contains "$out" "SubscribeMessages" "con el identificador exacto"
 assert_contains "$out" "rename_symbol" "y dice cual es la herramienta que lo evitaba"
 assert_contains "$out" "RC=0" "AVISA, no bloquea: un gate que muerde sobre una heuristica es un gate que alguien apaga"
 
+# ── issue #98: el gate se apagaba en SILENCIO con el awk de fabrica de Ubuntu
+# mawk (Debian, Ubuntu y cualquier contenedor minimo) no soporta intervalos ERE,
+# asi que `{5,}` partia los identificadores en trozos de seis, ningun par
+# llegaba al umbral y el gate salia por "sin renombres en masa": exit 0, sin una
+# palabra, indistinguible de un renombre completo. El CI no lo veia porque los
+# runners de GitHub traen gawk. Dos redes, y las dos hacen falta:
+#   1. ESTATICA, y muerde en cualquier maquina: el awk del gate no puede volver
+#      a usar un intervalo. Es la unica que corre en macOS y en el CI actual.
+#   2. DE CONDUCTA, cuando mawk existe: se corre el mismo probe con mawk
+#      resolviendo `awk` y se exige el MISMO aviso (igual que test_emit.sh
+#      ejercita dash cuando esta).
+# Sin los comentarios: el que explica POR QUE no se usa `{5,}` tiene que poder
+# escribir `{5,}`. Lo que no puede volver es el intervalo en el CODIGO.
+rn_awk="$(sed -n "/^gate_rename() {/,/^}/p" "$ROOT/templates/scripts/ship.sh.tmpl" \
+  | grep -v '^[[:space:]]*#')"
+case "$rn_awk" in
+  *"{"[0-9]*)
+    fail "gate_rename volvio a usar un intervalo ERE en su awk: mawk no los soporta y el gate se apaga en silencio (#98)" ;;
+  *) pass "gate_rename no usa intervalos ERE (mawk los ignora y el gate quedaria mudo)" ;;
+esac
+
+if command -v mawk >/dev/null 2>&1; then
+  MAWKBIN="$RN/mawkbin"; mkdir -p "$MAWKBIN"
+  printf '#!/bin/sh\nexec mawk "$@"\n' > "$MAWKBIN/awk"; chmod +x "$MAWKBIN/awk"
+  out="$(cd "$RN" && PATH="$MAWKBIN:$PATH" bash probe.sh 2>&1)"
+  assert_contains "$out" "TODAVÍA viven en el árbol" "bajo mawk el gate sigue avisando"
+  assert_contains "$out" "SubscribeMessages" "y bajo mawk nombra el identificador entero, no un trozo"
+  assert_not_contains "$out" "sin renombres en masa" \
+    "bajo mawk NO se degrada al silencio (que se lee igual que un renombre completo)"
+else
+  echo "  · mawk no esta instalado: la pata de conducta no corre (la estatica ya mordio)"
+fi
+
 # CONTRA-MITAD: un renombre COMPLETO no dice nada. Si avisara igual seria ruido
 # permanente sobre la operacion mas comun de un refactor.
 ( cd "$RN" && sed -i.bak 's/SubscribeMessages/SubscribeWebhookFields/g' c.go && rm -f ./*.bak && git commit -qam "completo" ) >/dev/null 2>&1

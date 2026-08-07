@@ -891,6 +891,99 @@ assert_eq 0 "$rc" "y sale 0"
 rm -f "$WS/harness-answers.yaml"
 
 echo
+echo "── issue #96: un skipped CONDICIONAL no puede dar el mismo rojo que el build"
+# El arreglo de #66 sobre-matcheaba: declaraba rojo ante CUALQUIER job saltado.
+# Caso medido en campo, un run REAL y sano de un infra-live: el unico saltado
+# era un docs-dry-run condicional, con build, notify-kargo y deploy-portal en
+# success. El artefacto se construyo y se desplego, y el watcher dijo "no se
+# construyo artefacto y NO hay nada que desplegar". Un verificador que grita
+# lobo es peor que no tenerlo: el dia que el build de verdad se saltee, ese
+# rojo tambien se ignora.
+CAMPO='{"jobs":[{"name":"test / test","conclusion":"success"},
+{"name":"tag / Semver Tag","conclusion":"success"},
+{"name":"docs-dry-run","conclusion":"skipped"},
+{"name":"build","conclusion":"success"},
+{"name":"notify-kargo","conclusion":"success"},
+{"name":"publish-api-docs","conclusion":"success"},
+{"name":"deploy-portal","conclusion":"success"}]}'
+printf 'project: demo\ndeploy:\n  apollo:\n    driver: actions\n' > "$WS/harness-answers.yaml"
+: > "$WS/.harness/events.jsonl"
+gh_con_jobs "$CAMPO"
+out="$(run676)"; rc=$?
+assert_eq 0 "$rc" "el run de campo cierra verde: el build corrio y el deploy es sano"
+assert_contains "$out" "✅ actions verde" "y actions se declara verde"
+assert_not_contains "$out" "🔴" "un docs-dry-run condicional NO es un rojo"
+assert_not_contains "$out" "NO hay nada que desplegar" \
+  "y no afirma lo contrario de lo que paso"
+# Pero NO se calla: un tramo que no corrio tiene que verse en el log.
+assert_contains "$out" "docs-dry-run" "el skipped se nombra igual, sin frenar"
+assert_contains "$(bus)" '"ok":true' "y el bus lo cuenta como desplegado"
+
+# CONTRA-MITAD, la que justifica que el chequeo siga existiendo (#66): el
+# build saltado sigue siendo rojo aunque haya otros skipped al lado.
+: > "$WS/.harness/events.jsonl"
+gh_con_jobs '{"jobs":[{"name":"docs-dry-run","conclusion":"skipped"},{"name":"build","conclusion":"skipped"},{"name":"tag","conclusion":"success"}]}'
+out="$(run676)"; rc=$?
+[ "$rc" -ne 0 ] && pass "build skipped sigue en rojo (con otro skipped al lado)" \
+  || fail "el arreglo de #96 apago el gate de #66"
+assert_contains "$out" "SKIPPED: build" "y nombra al CRITICO, no a la lista entera"
+assert_not_contains "$out" "SKIPPED: docs-dry-run, build" \
+  "el condicional no se cuela en el rojo: el rojo es del que construye"
+
+echo
+echo "── el token, no la subcadena: build-and-push construye, rebuild-cache no"
+: > "$WS/.harness/events.jsonl"
+gh_con_jobs '{"jobs":[{"name":"build-and-push","conclusion":"skipped"},{"name":"tag","conclusion":"success"}]}'
+out="$(run676)"; rc=$?
+[ "$rc" -ne 0 ] && pass "build-and-push saltado es rojo: ES el build de ese pipeline" \
+  || fail "build-and-push skipped salio 0"
+: > "$WS/.harness/events.jsonl"
+gh_con_jobs '{"jobs":[{"name":"build","conclusion":"success"},{"name":"rebuild-cache","conclusion":"skipped"}]}'
+out="$(run676)"; rc=$?
+assert_eq 0 "$rc" "rebuild-cache saltado no frena: no construye el artefacto"
+assert_contains "$out" "✅ actions verde" "y el run cierra verde"
+
+echo
+echo "── si NO reconozco quien construye, es ceguera declarada (ni verde ni rojo)"
+# El default cubre el nombre mayoritario, no todos. Cuando hay skipped y
+# NINGUN job del run se llama como un critico, el watcher no puede afirmar que
+# el artefacto se construyo: lo DICE y dice como declararlo, en vez de inventar
+# un verde (el falso verde de #66) o un rojo (el falso rojo de #96).
+: > "$WS/.harness/events.jsonl"
+gh_con_jobs '{"jobs":[{"name":"compile","conclusion":"success"},{"name":"docs","conclusion":"skipped"}]}'
+out="$(run676)"; rc=$?
+assert_not_contains "$out" "✅ actions verde" "sin job critico reconocible no se canta verde"
+assert_not_contains "$out" "🔴" "y tampoco es rojo: no se observo nada roto"
+assert_contains "$out" "CEGUERA" "se declara ceguera, con todas las letras"
+assert_contains "$out" "critical_jobs" "y dice como declararlo para volver a medir"
+assert_not_contains "$(bus)" '"ok":true' "el bus no lo da por desplegado"
+
+echo
+echo "── y declarar critical_jobs devuelve la medicion (la perilla del eje)"
+printf 'project: demo\ndeploy:\n  apollo:\n    driver: actions\n    critical_jobs: "compile, deploy-portal"\n' \
+  > "$WS/harness-answers.yaml"
+: > "$WS/.harness/events.jsonl"
+gh_con_jobs '{"jobs":[{"name":"compile","conclusion":"skipped"},{"name":"docs","conclusion":"skipped"}]}'
+out="$(run676)"; rc=$?
+[ "$rc" -ne 0 ] && pass "con critical_jobs declarado, compile saltado ES rojo" \
+  || fail "critical_jobs declarado no frena: la perilla no llega al chequeo"
+assert_contains "$out" "SKIPPED: compile" "y nombra al job que el humano declaro critico"
+: > "$WS/.harness/events.jsonl"
+gh_con_jobs '{"jobs":[{"name":"compile","conclusion":"success"},{"name":"docs","conclusion":"skipped"}]}'
+out="$(run676)"; rc=$?
+assert_eq 0 "$rc" "y con el critico en success, el docs saltado no frena"
+assert_contains "$out" "✅ actions verde" "cierra verde"
+printf 'project: demo\ndeploy:\n  apollo:\n    driver: actions\n' > "$WS/harness-answers.yaml"
+: > "$WS/.harness/events.jsonl"
+gh_con_jobs '{"jobs":[{"name":"compile","conclusion":"skipped"},{"name":"docs","conclusion":"skipped"}]}'
+export DEPLOY_CRITICAL_JOBS="compile"
+out="$(run676)"; rc=$?
+unset DEPLOY_CRITICAL_JOBS
+[ "$rc" -ne 0 ] && pass "DEPLOY_CRITICAL_JOBS pisa la lista por corrida" \
+  || fail "la perilla de entorno no llega al chequeo"
+rm -f "$WS/harness-answers.yaml"
+
+echo
 echo "── un run que NUNCA termina no cuelga al watcher (y no es rojo)"
 # ESTE es el tramo que no tenia cobertura de cuelgue, y es el que colgaba en
 # campo. `gh run watch` se cuelga POR DISENO: su loop es `for run.Status !=

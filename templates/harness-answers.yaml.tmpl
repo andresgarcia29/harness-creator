@@ -161,12 +161,22 @@ secrets:
 #   post_ship       comando que ship-wave corre tras aterrizar el repo
 #                   (publish/bump del consumidor); con flow: prs se difiere
 #                   hasta el merge
+#   critical_jobs   qué jobs del run de Actions PRODUCEN o DESPLIEGAN el
+#                   artefacto, separados por coma (default: "build"). Un job
+#                   crítico en SKIPPED es rojo: el run cierra success igual y
+#                   no hay nada desplegado. Un skipped en cualquier OTRO job
+#                   (un docs-dry-run condicional) se dice y no frena: tratar a
+#                   todos por igual hacía que el watcher gritara lobo, y un
+#                   verificador que grita lobo se ignora justo el día que
+#                   acierta. Se compara por token, así que "build" cubre
+#                   "build-and-push" pero no "rebuild-cache".
 deploy:
 {{DEPLOY_LIST}}
 #  atlas:
 #    driver: gitops
 #    verify_cmd: "curl -sS --compressed https://cdn.example.com/app.js"
 #    verify_expect: "data-testid=checkout"
+#    critical_jobs: "build, deploy-portal"
 #  terraform-core:
 #    driver: actions
 #  design-system:

@@ -83,17 +83,34 @@ supera el presupuesto inicial. `pause` sólo acepta los motivos cerrados de
 términos y **cada uno tiene su propia salida**, que es lo que hay que mirar
 antes de elegir remediación:
 
-| Término | Qué mide | Salida auditable |
-|---|---|---|
-| `COST-BUDGET` | gasto total contra `budget_usd` | `harness-policy.py budget tasks/<id> --to <n> --actor <quien> --reason "<por qué>"` |
-| `COST-CACHE` | acierto de caché de un rol bajo el piso | `harness-policy.py cost-waive tasks/<id> --band cache --agent <rol> --actor <quien> --reason "<por qué>"` |
-| `COST-CTX` | contexto medio de un rol sobre el techo | `... --band ctx --agent <rol> ...` |
+| Término | Qué mide | Ventana | Salida auditable |
+|---|---|---|---|
+| `COST-BUDGET` | gasto total contra `budget_usd` | toda la tarea | `harness-policy.py budget tasks/<id> --to <n> --actor <quien> --reason "<por qué>"` |
+| `COST-CACHE` | acierto de caché de un rol bajo el piso | la fase en curso | `harness-policy.py cost-waive tasks/<id> --band cache --agent <rol> --actor <quien> --reason "<por qué>"` |
+| `COST-CTX` | contexto medio de un rol sobre el techo | la fase en curso | `... --band ctx --agent <rol> ...` |
 
 `budget --to` **solo** mueve `COST-BUDGET`. Los otros dos salen de los
 transcripts de un agente que ya cerró, o sea que son históricos e inmutables:
 la remediación que el gate imprime (recortar el contexto de arranque) no se
 puede aplicar en retroactivo, y sin `cost-waive` la tarea quedaba trabada para
 siempre en su fase, con el trabajo commiteado y el precheck verde.
+
+### La ventana: los dos términos de tasa miran la fase EN CURSO
+
+El gasto es acumulativo y se mide sobre toda la tarea. El acierto de caché y el
+contexto medio **no**: son promedios sobre transcripts inmutables, así que un
+umbral sobre toda la historia es un trinquete de un solo sentido y el primer
+agente que cierra bajo el piso cobra su peaje en **toda** transición futura.
+Caso de campo: dos abogados de RFC de una sola respuesta congelaron una tarea
+que globalmente estaba en 94.4% de acierto.
+
+Por eso `transition` estampa `phase_since` en `state.json` en cada movimiento
+de fase, y `harness-cost.py check` evalúa `COST-CACHE` y `COST-CTX` solo sobre
+los turnos posteriores a ese instante, que es la única ventana sobre la que la
+remediación impresa puede actuar. Lo que queda afuera **se declara** en cada
+corrida (nunca se calla), el mínimo de turnos se cuenta sobre la ventana, y un
+`--since <iso>` explícito la pisa. Una tarea sin `phase_since` (creada antes de
+esto) se mide entera, y el check lo dice.
 
 `cost-waive` no apaga nada:
 

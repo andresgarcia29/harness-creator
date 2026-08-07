@@ -1892,11 +1892,20 @@ gate_rename() {
   # Un renombre en masa deja el MISMO identificador desaparecido de varias
   # lineas borradas. Se piden 3+ ocurrencias en 2+ archivos: por debajo de eso
   # es una edicion normal y avisar seria ruido.
+  #
+  # SEIS CLASES EXPLICITAS Y NO {5,}: mawk (el awk de fabrica de Debian y
+  # Ubuntu, y el de cualquier contenedor minimo) NO soporta intervalos ERE. Con
+  # {5,} el match partia los identificadores en trozos de seis letras, ningun
+  # par llegaba al umbral, y el gate salia por "sin renombres en masa": exit 0 y
+  # ni una palabra. Un verificador degradado a fail-open dice lo mismo que uno
+  # que no encontro nada, y el CI no lo veia porque los runners de GitHub traen
+  # gawk (issue #98). Es la misma leccion que ya estaba escrita en ship-wave.sh
+  # y deploy-watch.sh para el awk BSD, cometida de nuevo en otro archivo.
   pares="$(printf '%s\n' "$diff" | awk '
     /^\+\+\+ b\// { file = substr($0, 7); next }
     /^-/ && !/^---/ {
       linea = substr($0, 2)
-      while (match(linea, /[A-Za-z_][A-Za-z0-9_]{5,}/)) {
+      while (match(linea, /[A-Za-z_][A-Za-z0-9_][A-Za-z0-9_][A-Za-z0-9_][A-Za-z0-9_][A-Za-z0-9_][A-Za-z0-9_]*/)) {
         id = substr(linea, RSTART, RLENGTH)
         linea = substr(linea, RSTART + RLENGTH)
         veces[id]++

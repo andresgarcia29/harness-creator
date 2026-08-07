@@ -210,3 +210,50 @@ La segunda mitad es que el piso de caché medía mal a los agentes cortos: con T
 turnos el máximo alcanzable es `(T-1)/T`, así que por debajo de `1/(1-piso)`
 turnos el breach no dice nada sobre la conducta del agente, solo sobre el
 tamaño de su ventana. Ahora ese término se declara y no bloquea.
+
+---
+
+## Por qué un umbral sobre un promedio necesita una ventana
+
+**Regla**: un gate que mide un PROMEDIO histórico tiene que acotarse a la
+ventana sobre la que la remediación que imprime puede actuar. Si no, no es un
+umbral: es un trinquete de un solo sentido.
+
+**El caso**: `cache_hit` y `ctx_avg` salen de transcripts inmutables, y se
+evaluaban sobre toda la historia de la tarea. Dos abogados de RFC de una sola
+respuesta cerraron en 76% y 65%, y a partir de ahí TODA transición de esa tarea
+salió en rojo, una por una, para siempre. La tarea global estaba en 94.4% de
+acierto y sin presupuesto excedido: no había derroche en curso, había dos filas
+de historia. Y el gate imprimía "recortá el contexto de arranque de los
+agentes", que solo puede afectar a agentes que todavía no corrieron.
+
+El eximido auditable resolvía el caso ("acepto este 89%") pero no la clase: el
+peaje se volvía a cobrar en cada fase. La causa era la ventana, así que ahora
+`transition` estampa `phase_since` y el check mide esos dos términos desde ahí.
+El gasto en dólares sigue midiéndose sobre toda la tarea: es acumulativo y mide
+el bolsillo, no una tasa que alguien pueda mejorar. Lo que queda fuera de la
+ventana se imprime igual: un término que deja de frenar y deja de verse es el
+mismo silencio que el gate vino a matar.
+
+---
+
+## Por qué un verificador que grita lobo es peor que no tenerlo
+
+**Regla**: un chequeo mide lo que dice medir, no un proxy más ancho. Si el
+enunciado es "¿se construyó y se desplegó?", se miran los jobs que construyen y
+despliegan, no todos.
+
+**El caso**: `deploy-watch` declaraba rojo un deploy sano cuando el run de
+Actions tenía CUALQUIER job `skipped`. El chequeo nació de un fallo real y caro
+(un `build` saltado deja el run en success y producción con el binario viejo),
+pero sobre-matcheaba: en un run medido en campo el único saltado era un
+`docs-dry-run` condicional, con `build`, `notify-kargo` y `deploy-portal` en
+success, y el watcher dijo "no se construyó artefacto y NO hay nada que
+desplegar". Falso.
+
+El costo de un falso rojo no es el falso rojo: es que se empieza a ignorar el
+verificador, y el día que el `build` de verdad se saltee, ese rojo también se
+ignora. Ahora la lista de jobs críticos es un eje declarado (`critical_jobs` por
+repo, `DEPLOY_CRITICAL_JOBS` por corrida, `build` por default), un skipped no
+crítico se dice sin frenar, y si no hay NINGÚN job crítico reconocible el
+watcher declara ceguera en vez de inventar un verde o un rojo.

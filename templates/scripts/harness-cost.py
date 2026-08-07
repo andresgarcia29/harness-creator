@@ -48,12 +48,19 @@ Uso:
   harness-cost.py day [--days N]         top de sesiones y totales
   harness-cost.py check <id>             gate: sale 3 si algo está fuera de banda
   harness-cost.py check <id> --budget N  ídem, con techo explícito en dólares
+  harness-cost.py check <id> --since T   ídem, con la ventana de banda explícita
   harness-cost.py check <id> --json      el mismo veredicto, legible por máquina
+
+LA VENTANA: `check` mide el GASTO sobre toda la tarea y las dos bandas de tasa
+(acierto de caché y contexto medio) sobre la FASE EN CURSO, que es la única
+ventana donde la remediación que imprime todavía puede cambiar algo. Ver el
+bloque "LA VENTANA" más abajo.
 """
 from __future__ import annotations
 
 import argparse
 import collections
+import datetime as dt
 import glob
 import json
 import math
@@ -114,6 +121,52 @@ def min_turns_for_cache_floor() -> int:
 def max_cache_hit(turns: int) -> float:
     """La cota superior de acierto alcanzable con `turns` turnos."""
     return (turns - 1) / turns if turns > 0 else 0.0
+
+
+# ── LA VENTANA: LAS BANDAS MIDEN LA FASE EN CURSO, NO TODA LA HISTORIA ───────
+# CASO DE CAMPO (issue #95, tres caras del mismo hueco): dos abogados de RFC de
+# una sola respuesta cerraron con 76% y 65% de acierto, y a partir de ahí TODA
+# transición de esa tarea salió en exit 3, para siempre. La tarea global estaba
+# en 94.4% y sin presupuesto excedido: no había derroche en curso, había dos
+# filas históricas. Y el gate imprimía como remediación "recortar el contexto de
+# ARRANQUE de los agentes", que solo puede afectar a agentes que TODAVÍA NO
+# corrieron: la remediación no podía tocar lo que la disparaba.
+#
+# `cache_hit` y `ctx_avg` son PROMEDIOS sobre transcripts inmutables. Un
+# promedio que ya creció no baja porque el operador haga bien las cosas de acá
+# en adelante, así que un umbral sobre toda la historia es un trinquete de un
+# solo sentido: el primer agente malo congela la tarea.
+#
+# El arreglo es medir la ventana sobre la que la remediación PUEDE actuar: la
+# fase en curso. `harness-policy.py` estampa `phase_since` en cada movimiento de
+# fase, y acá cada agente se re-agrega contando solo los turnos posteriores a
+# ese instante. Consecuencias, todas buscadas:
+#   · un agente que cerró en una fase anterior deja de tener turnos en la
+#     ventana y sale del cálculo (se DECLARA, no se calla)
+#   · un agente que sigue vivo se mide por lo que hizo en ESTA fase
+#   · el gasto en dólares (COST-BUDGET) NO se ventana: es acumulativo y lo que
+#     mide es el bolsillo, no una tasa que alguien pueda mejorar
+#   · el mínimo de turnos (min_turns_for_cache_floor) se cobra sobre los turnos
+#     DE LA VENTANA, así que una ventana corta no inventa un breach de caché
+def iso_epoch(value):
+    """El instante de un ISO-8601, o None si no lo es.
+
+    Se compara por epoch y no por string: los transcripts traen fracciones de
+    segundo (`...:11.123Z`) y `phase_since` no, y en orden lexicográfico
+    `.123Z` cae ANTES que `Z`, o sea que el turno del segundo de la transición
+    quedaría del lado equivocado de la ventana."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    txt = value.strip()
+    if txt.endswith(("Z", "z")):
+        txt = txt[:-1] + "+00:00"
+    try:
+        stamp = dt.datetime.fromisoformat(txt)
+    except Exception:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=dt.timezone.utc)
+    return stamp.timestamp()
 
 
 # ── Precios ──────────────────────────────────────────────────────────────────
@@ -231,14 +284,77 @@ def find_project_dir(workspace: str):
 
 
 # ── Lectura de un transcript ─────────────────────────────────────────────────
-def scan(path: str):
+def _acc() -> dict:
+    """Un acumulador de usage.
+
+    Existe para que el TOTAL y la VENTANA se agreguen con el mismo código: dos
+    aritméticas del mismo número es una oportunidad de divergir, y acá el número
+    es el que decide si una transición pasa."""
+    return {"t": collections.Counter(), "models": collections.Counter(),
+            "turns": 0, "tools": 0, "ctx": [], "first": None, "last": None}
+
+
+def _add(a: dict, model: str, u: dict, tools: int, ts) -> None:
+    a["turns"] += 1
+    a["models"][model] += 1
+    i = u.get("input_tokens", 0) or 0
+    cr = u.get("cache_read_input_tokens", 0) or 0
+    cwt = u.get("cache_creation_input_tokens", 0) or 0
+    o = u.get("output_tokens", 0) or 0
+    t = a["t"]
+    t["input"] += i
+    t["cache_read"] += cr
+    t["output"] += o
+    # Desglose por TTL cuando existe: 1h se cobra al doble.
+    cc = u.get("cache_creation") or {}
+    w1h = cc.get("ephemeral_1h_input_tokens", 0) or 0
+    w5 = cc.get("ephemeral_5m_input_tokens", 0) or 0
+    if w1h or w5:
+        t["cache_write_1h"] += w1h
+        t["cache_write_5m"] += w5
+    else:
+        t["cache_write_flat"] += cwt
+    t["cache_write_total"] += cwt
+    ctx = i + cr + cwt
+    if ctx:
+        a["ctx"].append(ctx)
+    a["tools"] += tools
+    if ts:
+        a["first"] = a["first"] or ts
+        a["last"] = ts
+
+
+def _finish(a: dict, path: str):
+    if not a["turns"]:
+        return None
+    t = a["t"]
+    model = a["models"].most_common(1)[0][0]
+    return {
+        "path": path,
+        "model": model,
+        "turns": a["turns"],
+        "tools": a["tools"],
+        "usage": dict(t),
+        "cost": cost_of(model, t),
+        "ctx_avg": statistics.mean(a["ctx"]) if a["ctx"] else 0,
+        "ctx_max": max(a["ctx"]) if a["ctx"] else 0,
+        "cache_hit": (t["cache_read"] / (t["cache_read"] + t["cache_write_total"]))
+        if (t["cache_read"] + t["cache_write_total"]) else 1.0,
+        "first": a["first"],
+        "last": a["last"],
+    }
+
+
+def scan(path: str, window_ts=None):
     """Agrega el usage de un transcript. Fail-open: un archivo ilegible no
-    rompe el reporte, se salta y se cuenta aparte."""
-    t = collections.Counter()
-    models = collections.Counter()
-    turns = tools = 0
-    ctx_samples = []
-    first = last = None
+    rompe el reporte, se salta y se cuenta aparte.
+
+    Con `window_ts` se agrega DOS veces en la misma pasada: el total (que es lo
+    que se reporta y lo que paga COST-BUDGET) y solo los turnos posteriores a
+    ese instante, que es lo que evalúan las bandas de tasa. La sub-fila viaja en
+    `row["window"]`, y es None cuando el agente no ejecutó nada en la ventana."""
+    total = _acc()
+    win = _acc() if window_ts is not None else None
     try:
         with open(path, "r", errors="replace") as fh:
             for line in fh:
@@ -261,54 +377,27 @@ def scan(path: str):
                 # Contarlos inflaría los turnos y ensuciaría el acierto de caché.
                 if model == "<synthetic>":
                     continue
-                turns += 1
-                models[model] += 1
-                i = u.get("input_tokens", 0) or 0
-                cr = u.get("cache_read_input_tokens", 0) or 0
-                cwt = u.get("cache_creation_input_tokens", 0) or 0
-                o = u.get("output_tokens", 0) or 0
-                t["input"] += i
-                t["cache_read"] += cr
-                t["output"] += o
-                # Desglose por TTL cuando existe: 1h se cobra al doble.
-                cc = u.get("cache_creation") or {}
-                w1h = cc.get("ephemeral_1h_input_tokens", 0) or 0
-                w5 = cc.get("ephemeral_5m_input_tokens", 0) or 0
-                if w1h or w5:
-                    t["cache_write_1h"] += w1h
-                    t["cache_write_5m"] += w5
-                else:
-                    t["cache_write_flat"] += cwt
-                t["cache_write_total"] += cwt
-                ctx = i + cr + cwt
-                if ctx:
-                    ctx_samples.append(ctx)
                 ts = rec.get("timestamp")
-                if ts:
-                    first = first or ts
-                    last = ts
-                for blk in (msg.get("content") or []):
-                    if isinstance(blk, dict) and blk.get("type") == "tool_use":
-                        tools += 1
+                tools = sum(
+                    1 for blk in (msg.get("content") or [])
+                    if isinstance(blk, dict) and blk.get("type") == "tool_use")
+                _add(total, model, u, tools, ts)
+                if win is not None:
+                    at = iso_epoch(ts)
+                    # Un turno sin fecha legible no se puede ubicar respecto de
+                    # la ventana, así que ENTRA: fail-closed ante datos malos.
+                    # Dejarlo afuera relajaría el umbral en silencio, que es la
+                    # única de las dos equivocaciones que nadie ve.
+                    if at is None or at >= window_ts:
+                        _add(win, model, u, tools, ts)
     except Exception:
         return None
-    if not turns:
+    row = _finish(total, path)
+    if row is None:
         return None
-    model = models.most_common(1)[0][0]
-    return {
-        "path": path,
-        "model": model,
-        "turns": turns,
-        "tools": tools,
-        "usage": dict(t),
-        "cost": cost_of(model, t),
-        "ctx_avg": statistics.mean(ctx_samples) if ctx_samples else 0,
-        "ctx_max": max(ctx_samples) if ctx_samples else 0,
-        "cache_hit": (t["cache_read"] / (t["cache_read"] + t["cache_write_total"]))
-        if (t["cache_read"] + t["cache_write_total"]) else 1.0,
-        "first": first,
-        "last": last,
-    }
+    row["windowed"] = win is not None
+    row["window"] = _finish(win, path) if win is not None else None
+    return row
 
 
 def role_of(agent_path: str) -> str:
@@ -355,13 +444,16 @@ def session_task_map() -> dict:
     return out
 
 
-def collect(project_dir: str, since_days=None, task_filter=None):
+def collect(project_dir: str, since_days=None, task_filter=None, window_ts=None):
     """Todas las sesiones y subagentes del workspace, con su tarea si se sabe.
 
     `task_filter` no es azúcar: sin él, un `check` en una transición tendría que
     escanear TODOS los transcripts del workspace para tirar el 95%, y un gate
     que tarda diez segundos es un gate que alguien va a querer apagar. Con el
     filtro solo se abren los archivos de la tarea, que son unos pocos.
+
+    `window_ts` recorta lo que evalúan las bandas de tasa, no lo que se reporta:
+    cada fila llega entera y con su sub-fila `window`.
     """
     s2t = session_task_map()
     cutoff = time.time() - since_days * 86400 if since_days else None
@@ -373,7 +465,7 @@ def collect(project_dir: str, since_days=None, task_filter=None):
             sid_early = os.path.basename(path)[: -len(".jsonl")]
             if s2t.get(sid_early) != task_filter:
                 continue
-        r = scan(path)
+        r = scan(path, window_ts=window_ts)
         if not r:
             continue
         sid = os.path.basename(path)[: -len(".jsonl")]
@@ -382,7 +474,7 @@ def collect(project_dir: str, since_days=None, task_filter=None):
         rows.append(r)
         subs = os.path.join(project_dir, sid, "subagents", "agent-*.jsonl")
         for sp in sorted(glob.glob(subs)):
-            sr = scan(sp)
+            sr = scan(sp, window_ts=window_ts)
             if not sr:
                 continue
             sr.update(sid=sid, kind="subagente", role=role_of(sp),
@@ -554,20 +646,26 @@ def waiver_note(w: dict) -> str:
             + (f": {w.get('reason')}" if w.get("reason") else ""))
 
 
-def evaluate(rows, task: str, budget):
-    """Los tres términos, partidos en lo que FRENA, lo eximido y lo no medible.
+def evaluate(rows, task: str, budget, window=None):
+    """Los tres términos, partidos en lo que FRENA y lo que no.
 
-    Devuelve (breaches, waived, unmeasurable), cada uno con entradas
+    Devuelve (breaches, waived, unmeasurable, outside), cada uno con entradas
     autodescriptivas: el mismo cálculo alimenta el texto del gate y el `--json`
     que consume `harness-policy.py cost-waive`. Dos evaluadores del mismo umbral
-    es una oportunidad de divergir."""
+    es una oportunidad de divergir.
+
+    `window` es solo el texto del instante en que empezó la fase: quién queda
+    dentro ya viene resuelto en `row["window"]`, que lo calculó `scan`."""
     waivers = load_waivers(task_state(task))
-    breaches, waived, unmeasurable = [], [], []
+    breaches, waived, unmeasurable, outside = [], [], [], []
 
     def entry(code, role, value, r=None, text=""):
         return {"code": code, "agent": role, "value": value, "text": text,
                 "cost": (r or {}).get("cost"), "turns": (r or {}).get("turns")}
 
+    # EL GASTO NO SE VENTANA. Los dólares son acumulativos y miden el bolsillo,
+    # no una tasa: recortarlos a la fase en curso haría que una tarea cara
+    # pasara por barata cada vez que avanza de fase.
     _, cost, _ = totals(rows)
     if budget and cost > float(budget):
         breaches.append(entry(
@@ -576,17 +674,29 @@ def evaluate(rows, task: str, budget):
             f"${float(budget):,.2f}"))
     min_turns = min_turns_for_cache_floor()
     for r in sorted(rows, key=lambda r: -(r["cost"] or 0)):
-        if r["cache_hit"] < CACHE_HIT_FLOOR:
-            e = entry("COST-CACHE", r["role"], round(r["cache_hit"], 6), r,
-                      f"COST-CACHE: {r['role']} con {r['cache_hit']*100:.0f}% de "
+        # `m` es lo que se MIDE (la ventana), `r` lo que se reporta. Sin
+        # ventana declarada son la misma fila y la conducta es la de siempre.
+        m = r["window"] if r.get("windowed") else r
+        if m is None:
+            outside.append(entry(
+                "COST-WINDOW", r["role"], None, r,
+                f"fuera de la ventana: {r['role']} no ejecutó ningún turno "
+                f"desde que empezó la fase en curso ({window}), así que sus "
+                f"{r['turns']} turno(s) no se evalúan. Su métrica sale de "
+                "transcripts inmutables y ninguna remediación futura la mueve: "
+                "cobrársela a esta transición trabaría la tarea para siempre"))
+            continue
+        if m["cache_hit"] < CACHE_HIT_FLOOR:
+            e = entry("COST-CACHE", r["role"], round(m["cache_hit"], 6), m,
+                      f"COST-CACHE: {r['role']} con {m['cache_hit']*100:.0f}% de "
                       f"acierto de caché (piso {CACHE_HIT_FLOOR*100:.0f}%), "
-                      f"${r['cost'] or 0:,.2f} de los cuales la reescritura es "
+                      f"${m['cost'] or 0:,.2f} de los cuales la reescritura es "
                       "la mayoría")
-            w = covered_by(waivers, "cache", r["role"], r["cache_hit"])
-            if r["turns"] < min_turns:
+            w = covered_by(waivers, "cache", r["role"], m["cache_hit"])
+            if m["turns"] < min_turns:
                 e["text"] += (
-                    f". NO se evalúa: con {r['turns']} turno(s) el máximo "
-                    f"alcanzable es {max_cache_hit(r['turns'])*100:.0f}%, así que "
+                    f". NO se evalúa: con {m['turns']} turno(s) el máximo "
+                    f"alcanzable es {max_cache_hit(m['turns'])*100:.0f}%, así que "
                     f"acá el piso mide la ventana de caché y no el derroche "
                     f"(hacen falta {min_turns} turnos)")
                 unmeasurable.append(e)
@@ -596,19 +706,19 @@ def evaluate(rows, task: str, budget):
                 waived.append(e)
             else:
                 breaches.append(e)
-        if r["ctx_avg"] > CTX_CEILING:
-            e = entry("COST-CTX", r["role"], round(r["ctx_avg"], 2), r,
-                      f"COST-CTX: {r['role']} arrastra {r['ctx_avg']/1000:.0f}k de "
+        if m["ctx_avg"] > CTX_CEILING:
+            e = entry("COST-CTX", r["role"], round(m["ctx_avg"], 2), m,
+                      f"COST-CTX: {r['role']} arrastra {m['ctx_avg']/1000:.0f}k de "
                       f"contexto medio (techo {CTX_CEILING/1000:.0f}k) sobre "
-                      f"{r['tools']} tool calls")
-            w = covered_by(waivers, "ctx", r["role"], r["ctx_avg"])
+                      f"{m['tools']} tool calls")
+            w = covered_by(waivers, "ctx", r["role"], m["ctx_avg"])
             if w:
                 e["waiver"] = w
                 e["text"] += f". {waiver_note(w)}"
                 waived.append(e)
             else:
                 breaches.append(e)
-    return breaches, waived, unmeasurable
+    return breaches, waived, unmeasurable, outside
 
 
 def cmd_check(args) -> int:
@@ -618,14 +728,27 @@ def cmd_check(args) -> int:
     transcripts no se puede afirmar nada y bloquear sería mentir al revés; si
     los hay y están fuera de banda, se bloquea con el número delante.
 
-    Lo eximido y lo no medible se IMPRIMEN igual: un término que deja de frenar
-    y deja de verse es la misma clase de silencio que el gate vino a matar.
+    Lo eximido, lo no medible y lo que quedó fuera de la ventana se IMPRIMEN
+    igual: un término que deja de frenar y deja de verse es la misma clase de
+    silencio que el gate vino a matar.
     """
     pd = find_project_dir(WS)
     if not pd:
         print("cost-check: sin transcripts, no puedo medir (fail-open).")
         return EXIT_OK
-    rows = collect(pd, task_filter=args.task)
+
+    state = task_state(args.task)
+    # Precedencia: lo que el llamador dijo, después lo que la tarea declara.
+    window = getattr(args, "since", None) or state.get("phase_since")
+    window_ts = iso_epoch(window) if window else None
+    aviso_ventana = None
+    if window and window_ts is None:
+        aviso_ventana = (f"ventana ilegible ({window!r}): mido TODA la historia "
+                         "de la tarea. phase_since lo escribe harness-policy.py "
+                         "en cada movimiento de fase")
+        window = None
+
+    rows = collect(pd, task_filter=args.task, window_ts=window_ts)
     if not rows:
         print(f"cost-check: sin transcripts para {args.task} (fail-open).")
         return EXIT_OK
@@ -633,9 +756,10 @@ def cmd_check(args) -> int:
     _, cost, _ = totals(rows)
     budget = args.budget
     if budget is None:
-        budget = task_state(args.task).get("budget_usd")
+        budget = state.get("budget_usd")
 
-    breaches, waived, unmeasurable = evaluate(rows, args.task, budget)
+    breaches, waived, unmeasurable, outside = evaluate(
+        rows, args.task, budget, window)
 
     if getattr(args, "json", False):
         print(json.dumps({
@@ -645,15 +769,28 @@ def cmd_check(args) -> int:
             "cache_hit_floor": CACHE_HIT_FLOOR,
             "ctx_ceiling": CTX_CEILING,
             "min_turns_for_cache_floor": min_turns_for_cache_floor(),
+            "window": window,
             "breaches": breaches,
             "waived": waived,
             "unmeasurable": unmeasurable,
+            "outside": outside,
         }, ensure_ascii=False))
         return EXIT_BREACH if breaches else EXIT_OK
 
     print(f"cost-check {args.task}: ${cost:,.2f}"
           + (f" / ${float(budget):,.2f}" if budget else ""))
-    for e in waived + unmeasurable:
+    if aviso_ventana:
+        print(f"  ⚠️  {aviso_ventana}")
+    elif window:
+        print(f"  ventana: la fase en curso, desde {window}. COST-CACHE y "
+              "COST-CTX solo miran lo que corrió ahí (es lo único sobre lo que "
+              "la remediación puede actuar); el gasto en dólares es de toda la "
+              "tarea")
+    else:
+        print("  sin ventana: esta tarea no declara phase_since, así que las "
+              "bandas miran toda su historia (tarea creada antes de la ventana "
+              "de fase, o estado ilegible)")
+    for e in waived + unmeasurable + outside:
         print(f"  {e['text']}")
     if not breaches:
         print("dentro de banda.")
@@ -675,6 +812,10 @@ def cmd_check(args) -> int:
               "--agent <rol> --actor <quien> --reason \"<por qué>\"`, que queda en "
               "history[] y se declara en cada cost-check. `budget --to` NO sirve "
               "acá: solo mueve el término COST-BUDGET.")
+        if window:
+            print("Lo que ves corrió en la FASE EN CURSO: un agente de una fase "
+                  "anterior ya no frena esta transición, así que el eximido "
+                  "cubre esta fase y no condena a la tarea entera.")
     return EXIT_BREACH
 
 
@@ -755,6 +896,11 @@ def main(argv=None) -> int:
     c = sub.add_parser("check", help="gate: sale 3 si está fuera de banda")
     c.add_argument("task")
     c.add_argument("--budget", type=float, default=None)
+    c.add_argument("--since", default=None,
+                   help="instante ISO-8601 desde el que se evalúan las bandas "
+                        "de tasa. Sin esto se usa el `phase_since` de la tarea "
+                        "(la fase EN CURSO), que es la ventana sobre la que la "
+                        "remediación impresa puede actuar")
     c.add_argument("--json", action="store_true",
                    help="el mismo veredicto legible por máquina (breaches, "
                         "eximidos y no medibles). Lo consume "

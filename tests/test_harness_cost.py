@@ -50,7 +50,7 @@ class CostBase(unittest.TestCase):
         self.tmp.cleanup()
 
     def turn(self, model="claude-opus-5", inp=0, read=0, write=0, out=0,
-             ttl=None, tools=1):
+             ttl=None, tools=1, ts="2026-08-05T12:00:00.000Z"):
         usage = {
             "input_tokens": inp,
             "cache_read_input_tokens": read,
@@ -64,7 +64,7 @@ class CostBase(unittest.TestCase):
         return json.dumps({
             "type": "assistant",
             "cwd": str(self.ws),
-            "timestamp": "2026-08-05T12:00:00.000Z",
+            "timestamp": ts,
             "message": {"role": "assistant", "model": model,
                         "usage": usage, "content": content},
         })
@@ -437,6 +437,131 @@ class PisoAlcanzable(CostBase):
         self.assertEqual(data["min_turns_for_cache_floor"], 20, data)
         self.assertTrue(any(u["agent"] == "implementer"
                             for u in data["unmeasurable"]), data)
+
+
+class Ventana(CostBase):
+    """Las bandas de TASA miden la fase en curso; el gasto mide toda la tarea.
+
+    POR QUE (issue #95): `cache_hit` y `ctx_avg` son promedios sobre
+    transcripts inmutables. Sin ventana, el primer agente que cierra bajo el
+    piso cobra su peaje en TODA transicion futura de la tarea, y la remediacion
+    que el gate imprime (recortar el contexto de ARRANQUE) solo puede afectar a
+    agentes que todavia no corrieron: el gate frenaba por algo que ninguna
+    conducta futura podia mover. El caso de campo fueron dos abogados de RFC de
+    una sola respuesta que congelaron una tarea con 94.4% de acierto global.
+
+    Lo que se protege aca: que la ventana ACOTE sin APAGAR, que lo que queda
+    afuera se DIGA, y que los dolares no se ventanen (son acumulativos: son el
+    bolsillo, no una tasa que alguien pueda mejorar).
+    """
+
+    VIEJO = "2026-08-01T09:00:00.000Z"
+    NUEVO = "2026-08-05T12:00:00.000Z"
+    FASE = "2026-08-04T00:00:00Z"          # entre los dos
+
+    def estado(self, **campos):
+        (self.task / "state.json").write_text(json.dumps(campos))
+
+    def orquestador_sano(self, ts=None):
+        self.write([self.turn(read=40_000, write=500, ts=ts or self.NUEVO)
+                    for _ in range(30)])
+
+    def subagente(self, role, turns, read, write, ts, name="agent-uno"):
+        subs = self.proj / self.sid / "subagents"
+        subs.mkdir(parents=True, exist_ok=True)
+        (subs / f"{name}.jsonl").write_text(
+            "\n".join(self.turn(read=read, write=write, ts=ts)
+                      for _ in range(turns)) + "\n")
+        (subs / f"{name}.meta.json").write_text(json.dumps({"agentType": role}))
+
+    def test_el_agente_de_una_fase_anterior_NO_frena_y_se_DICE(self):
+        self.orquestador_sano()
+        self.subagente("architect", 33, 89_000, 11_000, ts=self.VIEJO)
+        self.estado(phase_since=self.FASE)
+        r = self.run_cost("check", "T1")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        # Un termino que deja de frenar y deja de verse es el mismo silencio
+        # que el gate vino a matar.
+        self.assertIn("fuera de la ventana", r.stdout, r.stdout)
+        self.assertIn("architect", r.stdout, r.stdout)
+
+    def test_el_agente_de_ESTA_fase_sigue_frenando(self):
+        # CONTRA-MITAD: la ventana acota el gate, no lo apaga.
+        self.orquestador_sano()
+        self.subagente("architect", 33, 89_000, 11_000, ts=self.NUEVO)
+        self.estado(phase_since=self.FASE)
+        r = self.run_cost("check", "T1")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn("COST-CACHE", r.stdout, r.stdout)
+
+    def test_el_gasto_en_dolares_NO_se_ventana(self):
+        # Los dolares son acumulativos: recortarlos a la fase en curso haria
+        # que una tarea cara pasara por barata cada vez que avanza de fase.
+        self.write([self.turn(read=1_000_000, ts=self.VIEJO) for _ in range(20)])
+        self.estado(phase_since=self.FASE, budget_usd=1.0)
+        r = self.run_cost("check", "T1")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn("COST-BUDGET", r.stdout, r.stdout)
+
+    def test_una_ventana_corta_no_inventa_un_breach_de_cache(self):
+        # El minimo de turnos se cobra sobre los turnos DE LA VENTANA: si en la
+        # fase en curso solo hubo 4, el maximo alcanzable es 75% y el piso
+        # mediria la ventana de cache y no el derroche.
+        self.orquestador_sano()
+        # UN solo agente que viene de la fase anterior (40 turnos) y ya lleva 4
+        # en esta: lo que se evalua son esos 4, no los 44.
+        subs = self.proj / self.sid / "subagents"
+        subs.mkdir(parents=True, exist_ok=True)
+        lineas = [self.turn(read=10_000, write=90_000, ts=self.VIEJO)
+                  for _ in range(40)]
+        lineas += [self.turn(read=10_000, write=90_000, ts=self.NUEVO)
+                   for _ in range(4)]
+        (subs / "agent-uno.jsonl").write_text("\n".join(lineas) + "\n")
+        (subs / "agent-uno.meta.json").write_text(
+            json.dumps({"agentType": "implementer"}))
+        self.estado(phase_since=self.FASE)
+        r = self.run_cost("check", "T1")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("NO se evalúa", r.stdout, r.stdout)
+
+    def test_sin_phase_since_mide_toda_la_historia(self):
+        # Compatibilidad: una tarea creada antes de la ventana no puede quedar
+        # sin gate. Se mide todo, y se DICE que no hay ventana.
+        self.orquestador_sano()
+        self.subagente("architect", 33, 89_000, 11_000, ts=self.VIEJO)
+        r = self.run_cost("check", "T1")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn("sin ventana", r.stdout, r.stdout)
+
+    def test_la_ventana_ilegible_se_declara_y_no_apaga_el_gate(self):
+        # Fail-CLOSED ante datos malos: un phase_since roto no puede volverse
+        # un apagador silencioso del umbral.
+        self.orquestador_sano()
+        self.subagente("architect", 33, 89_000, 11_000, ts=self.VIEJO)
+        self.estado(phase_since="ayer por la tarde")
+        r = self.run_cost("check", "T1")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn("ventana ilegible", r.stdout, r.stdout)
+
+    def test_since_explicito_manda_sobre_el_estado(self):
+        self.orquestador_sano()
+        self.subagente("architect", 33, 89_000, 11_000, ts=self.NUEVO)
+        self.estado(phase_since=self.FASE)
+        self.assertEqual(self.run_cost("check", "T1").returncode, 3)
+        r = self.run_cost("check", "T1", "--since", "2026-08-06T00:00:00Z")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_el_json_lleva_la_ventana_y_lo_que_quedo_afuera(self):
+        # Lo consume harness-policy.py cost-waive: si el termino no viaja, el
+        # eximido se pediria sobre algo que el gate ya no evalua.
+        self.orquestador_sano()
+        self.subagente("architect", 33, 89_000, 11_000, ts=self.VIEJO)
+        self.estado(phase_since=self.FASE)
+        data = json.loads(self.run_cost("check", "T1", "--json").stdout)
+        self.assertEqual(data["window"], self.FASE, data)
+        self.assertEqual(data["breaches"], [], data)
+        self.assertTrue(any(o["agent"] == "architect" for o in data["outside"]),
+                        data)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import datetime as dt
 import json
 import os
 import re
@@ -1764,14 +1765,27 @@ class CostGateTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def write_transcript(self, turns, cache_read, cache_write, ctx_extra=0):
-        """Un transcript minimo con el usage que el medidor lee."""
+    def ahora(self):
+        """El instante en que corre el test, con el formato de un transcript."""
+        return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    def write_transcript(self, turns, cache_read, cache_write, ctx_extra=0,
+                         ts=None):
+        """Un transcript minimo con el usage que el medidor lee.
+
+        Los turnos se estampan AHORA por default, que es lo que pasa en campo:
+        el agente corre DURANTE la fase. Las bandas de tasa (COST-CACHE y
+        COST-CTX) miden la fase en curso desde `phase_since`, asi que una fecha
+        fija del pasado simula al agente de una fase ANTERIOR, y para eso esta
+        el parametro `ts` explicito (issue #95).
+        """
+        stamp = ts or self.ahora()
         lines = []
         for _ in range(turns):
             lines.append(json.dumps({
                 "type": "assistant",
                 "cwd": str(self.ws),
-                "timestamp": "2026-08-05T12:00:00.000Z",
+                "timestamp": stamp,
                 "message": {
                     "role": "assistant",
                     "model": "claude-opus-5",
@@ -1927,14 +1941,15 @@ class CostGateTest(unittest.TestCase):
     # rastro. Trabajo commiteado, precheck verde, tarea viva e INMOVIL.
 
     def write_subagente(self, role, turns, cache_read, cache_write,
-                        name="agent-uno"):
+                        name="agent-uno", ts=None):
         subs = self.proj / self.sid / "subagents"
         subs.mkdir(parents=True, exist_ok=True)
+        stamp = ts or self.ahora()
         lines = []
         for _ in range(turns):
             lines.append(json.dumps({
                 "type": "assistant", "cwd": str(self.ws),
-                "timestamp": "2026-08-06T12:00:00.000Z",
+                "timestamp": stamp,
                 "message": {"role": "assistant", "model": "claude-opus-5",
                             "usage": {"input_tokens": 0,
                                       "cache_read_input_tokens": cache_read,
@@ -2048,6 +2063,77 @@ class CostGateTest(unittest.TestCase):
         self.assertIn("EXIMIDO", r.stderr, "el eximido se sigue declarando")
         self.assertNotIn("solo mueve el término COST-BUDGET", r.stderr,
                          "no ofrece cost-waive cuando lo que frena son dólares")
+
+    # ── LA VENTANA: las bandas de tasa miran la FASE EN CURSO (#95) ─────────
+    # El eximido resolvia el caso de "acepto este 89%", pero no la CLASE del
+    # problema: `cache_hit` y `ctx_avg` son promedios sobre transcripts
+    # inmutables, asi que sin ventana el primer agente bajo el piso cobra su
+    # peaje en TODA transicion futura, una por una, para siempre. El caso de
+    # campo fueron dos abogados de RFC de una sola respuesta que dejaron
+    # trabada una tarea que globalmente estaba en 94.4% de acierto.
+
+    def test_el_subagente_de_una_fase_ANTERIOR_ya_no_frena(self):
+        self.assertEqual(self.init(budget=500).returncode, 0)
+        self.write_transcript(turns=30, cache_read=40_000, cache_write=500)
+        # El abogado de RFC cerro bajo el piso ANTES de que empezara esta fase.
+        self.write_subagente("architect", 33, 89_000, 11_000,
+                             ts="2026-08-05T12:00:00.000Z")
+        r = self.transition("implement")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_pero_el_que_corrio_EN_esta_fase_sigue_frenando(self):
+        # CONTRA-MITAD obligatoria: la ventana acota el gate, no lo apaga. Lo
+        # que se gasto en la fase que se esta cerrando todavia se cobra.
+        self.cache_historica()
+        r = self.transition("implement")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("COST-CACHE", r.stderr)
+
+    def test_la_ventana_avanza_con_la_fase_y_el_peaje_se_paga_UNA_vez(self):
+        # El corazon del issue: la tarea vuelve a moverse sola. Se acepta el
+        # termino de ESTA fase (con actor y motivo, auditable), la fase avanza,
+        # y la transicion siguiente ya no arrastra al agente que cerro atras.
+        self.assertEqual(self.init(budget=500).returncode, 0)
+        self.write_transcript(turns=30, cache_read=40_000, cache_write=500)
+        self.write_subagente("architect", 33, 89_000, 11_000,
+                             ts="2026-08-06T12:00:00.000Z")
+        # La fase en curso empezo ANTES que ese subagente, asi que esta
+        # transicion SI lo cobra. Se fija a mano y no con el reloj: el test no
+        # puede depender de cuantos milisegundos tarda en llegar hasta aca.
+        estado = json.loads((self.task / "state.json").read_text())
+        estado["phase_since"] = "2026-08-06T00:00:00Z"
+        (self.task / "state.json").write_text(json.dumps(estado))
+        self.assertEqual(self.transition("implement").returncode, 3)
+        self.assertEqual(self.waive("cache", "architect").returncode, 0)
+        self.assertEqual(self.transition("implement").returncode, 0)
+        estado = json.loads((self.task / "state.json").read_text())
+        self.assertTrue(estado.get("phase_since"),
+                        "la fase nueva tiene que declarar cuando empezo, o la "
+                        "ventana se queda anclada a la anterior")
+        # Sin tocar el eximido ni el umbral: la fase siguiente sale limpia
+        # porque el subagente quedo del otro lado de la ventana.
+        (self.task / "state.json").write_text(json.dumps(
+            {k: v for k, v in estado.items() if k != "cost_waivers"}))
+        r = self.transition("review")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_lo_que_queda_fuera_de_la_ventana_se_DICE(self):
+        # Un termino que deja de frenar y deja de verse es el mismo silencio
+        # que el gate vino a matar. Se declara con nombre y con motivo.
+        self.assertEqual(self.init(budget=500).returncode, 0)
+        self.write_transcript(turns=30, cache_read=40_000, cache_write=500)
+        self.write_subagente("architect", 33, 89_000, 11_000,
+                             ts="2026-08-05T12:00:00.000Z")
+        env = os.environ.copy()
+        env.update(CLAUDE_CONFIG_DIR=str(self.cfg), HARNESS_WS=str(self.ws))
+        r = subprocess.run(
+            ["python3", str(ROOT / "templates/scripts/harness-cost.py"),
+             "check", self.task.name],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            check=False, env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("fuera de la ventana", r.stdout, r.stdout)
+        self.assertIn("architect", r.stdout, r.stdout)
 
     def test_un_agente_corto_no_traba_la_tarea(self):
         # El piso mide DERROCHE, no la ventana de cache: con 4 turnos el maximo

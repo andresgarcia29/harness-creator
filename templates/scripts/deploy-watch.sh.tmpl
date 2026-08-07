@@ -29,6 +29,15 @@
 #   DEPLOY_HARD_LIMIT      2400   techo TOTAL del script. Backstop: si algún
 #                                 camino nuevo se olvida de acotar, esto lo mata
 #                                 igual y dice en qué etapa estaba.
+#
+# ── LA OTRA PERILLA, QUE NO ES DE TIEMPO ──────────────────────────────
+#   DEPLOY_CRITICAL_JOBS  build   qué jobs del run de Actions PRODUCEN o
+#                                 DESPLIEGAN el artefacto. Un skipped ahí es
+#                                 rojo (no hay nada desplegado); un skipped en
+#                                 cualquier otro job se dice y sigue. Se
+#                                 declara por repo en harness-answers.yaml
+#                                 (deploy: <repo>: critical_jobs: "a, b") y
+#                                 esta variable pisa esa lista por corrida.
 set -uo pipefail
 
 TASK="${1:?uso: deploy-watch.sh <task-id> <repo>}"
@@ -408,6 +417,33 @@ answers_repo_key() {  # answers_repo_key <repo> <clave> → valor plano declarad
 
 answers_driver() {  # answers_driver <repo> → driver declarado, o vacío
   answers_repo_key "$1" driver
+}
+
+# ── QUÉ JOB DEL PIPELINE PRODUCE O DESPLIEGA EL ARTEFACTO (issue #96) ──
+# El eje varía entre proyectos, así que se DETECTA y se DECLARA en vez de
+# cablearse: la lista se pregunta por repo en harness-answers.yaml, se puede
+# pisar por corrida con DEPLOY_CRITICAL_JOBS, y el default es el nombre que
+# usa la abrumadora mayoría de los pipelines. Lo que NO puede hacer el
+# watcher es tratar a todos los jobs por igual: un `docs-dry-run` condicional
+# saltado es sano, un `build` saltado significa que no hay nada desplegado, y
+# darles el mismo rojo entrena al humano a ignorar los dos.
+CRITICAL_JOBS="${DEPLOY_CRITICAL_JOBS:-$(answers_repo_key "$REPO" critical_jobs)}"
+[ -n "$CRITICAL_JOBS" ] || CRITICAL_JOBS="build"
+TAB="$(printf '\t')"
+
+job_es_critico() {  # job_es_critico <nombre-del-job> → 0 si construye o despliega
+  # Se compara por TOKEN y no por subcadena: `build-and-push` es el build de
+  # este pipeline y tiene que matchear, pero `rebuild-cache` o `no-build` no
+  # construyen nada y con `case *build*` habrían pasado por críticos.
+  local nombre tokens tok crit
+  nombre="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c '[:alnum:]' ' ')"
+  tokens="$(printf '%s' "$CRITICAL_JOBS" | tr '[:upper:]' '[:lower:]' | tr -c '[:alnum:]' ' ')"
+  for crit in $tokens; do
+    for tok in $nombre; do
+      [ "$tok" = "$crit" ] && return 0
+    done
+  done
+  return 1
 }
 
 KIND="$(repo_kind "$REPO")"
@@ -889,34 +925,83 @@ if [ "$DRIVER" != "none" ] && command -v gh >/dev/null; then
   # "actions"`: ceguera declarada arriba y verde cantado abajo, en el mismo
   # bloque. (El rojo no llega acá: red() sale.)
   if [ -n "$run_id" ] && [ "${run_rc:-1}" -eq 0 ]; then
-    # ── UN RUN EN success CON JOBS SALTADOS NO ES VERDE (skipped != success)
+    # ── UN RUN EN success CON EL BUILD SALTADO NO ES VERDE (skipped != success)
     # Caso real (issue #66): deploy.yml condiciona el job build a un bump
     # semver por conventional commits. Un ship sin prefijo (feat:/fix:) dejó
     # tag con bump_type=none y build SKIPPED, y como un job saltado NO mancha
     # la conclusión del run, el watcher cantó "🟢 verificado por driver=gitops:
     # actions" sin imagen construida ni deploy. La conclusión del run no
-    # alcanza: hay que mirar la de CADA job. Cualquier skipped se reporta con
-    # nombre: la API no distingue requeridos de opcionales, y un tramo del
-    # pipeline que no corrió no puede pasar por verificado en silencio.
-    # Es rojo observado pero SIN rollback: no se desplegó nada nuevo, el
-    # cluster sigue en la versión anterior; revertir no construye la imagen.
-    skipped_jobs="$(run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+    # alcanza: hay que mirar la de CADA job.
+    #
+    # ── PERO "CUALQUIER skipped" MEDÍA OTRA COSA (issue #96) ────────────
+    # La primera versión declaraba rojo ante CUALQUIER job saltado, y eso
+    # sobre-matchea: en un run medido en campo el único saltado era un
+    # `docs-dry-run` condicional, con `build`, `notify-kargo` y `deploy-portal`
+    # en success. El artefacto se construyó y se desplegó, y el watcher dijo
+    # "no se construyó artefacto y NO hay nada que desplegar". Falso.
+    #
+    # Un verificador de deploy que grita lobo es PEOR que no tenerlo: se lo
+    # empieza a ignorar, y el día que el build de verdad se saltee, ese rojo
+    # también se ignora. Así que el chequeo mide lo que dice medir ("¿se
+    # construyó y se desplegó?") sobre los jobs que producen o despliegan el
+    # artefacto, y el resto de los skipped se DICEN sin frenar nada.
+    #
+    # Los tres desenlaces, y ninguno se calla:
+    #   · un job CRÍTICO saltado  → rojo observado, sin rollback (no se
+    #     desplegó nada nuevo: el cluster sigue en la versión anterior y
+    #     revertir no construye la imagen)
+    #   · skipped no críticos     → verde, con los nombres en el log
+    #   · skipped y NINGÚN job crítico en el run → ceguera declarada: si no
+    #     reconozco quién construye en este pipeline, no puedo afirmar que
+    #     corrió. No es rojo (no observé nada roto) y no es verde.
+    jobs_tsv="$(run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
       gh run view --repo "$ORG/$REPO" "$run_id" --json jobs \
-      --jq '[.jobs[] | select(.conclusion == "skipped") | .name] | join(", ")' \
+      --jq '.jobs[] | [.name, .conclusion] | @tsv' \
       2>/dev/null || echo "")"
-    if [ -n "$skipped_jobs" ]; then
-      say "🔴 el run $run_id cerró SUCCESS pero con job(s) SKIPPED: $skipped_jobs."
+    skipped_jobs=""; skipped_criticos=""; hay_critico=""
+    while IFS="$TAB" read -r j_name j_concl; do
+      [ -n "$j_name" ] || continue
+      job_es_critico "$j_name" && hay_critico=1
+      [ "$j_concl" = "skipped" ] || continue
+      skipped_jobs="${skipped_jobs:+$skipped_jobs, }$j_name"
+      job_es_critico "$j_name" \
+        && skipped_criticos="${skipped_criticos:+$skipped_criticos, }$j_name"
+    done <<EOF
+$jobs_tsv
+EOF
+    if [ -n "$skipped_criticos" ]; then
+      say "🔴 el run $run_id cerró SUCCESS pero con job(s) CRÍTICOS SKIPPED: $skipped_criticos."
       say "   skipped != success: ese tramo del pipeline NO corrió, así que no"
       say "   se construyó artefacto y NO hay nada que desplegar."
       say "   NO propongo revertir nada: no se desplegó nada nuevo. La remediación"
       say "   es que el build CORRA (p. ej. shippear con prefijo conventional"
       say "   commits si el bump de versión lo condiciona) y volver a correr esto."
-      emit deploy "$REPO: Actions success con job(s) skipped ($skipped_jobs), sin artefacto" false
-      emit stop "deploy de $REPO sin artefacto: el run $run_id dejó skipped: $skipped_jobs"
+      emit deploy "$REPO: Actions success con job(s) críticos skipped ($skipped_criticos), sin artefacto" false
+      emit stop "deploy de $REPO sin artefacto: el run $run_id dejó skipped: $skipped_criticos"
       exit 1
     fi
-    say "✅ actions verde (run $run_id)"
-    verified "actions"
+    if [ -n "$skipped_jobs" ] && [ -z "$hay_critico" ]; then
+      say "⚠️ el run $run_id tiene job(s) SKIPPED ($skipped_jobs) y NINGUNO de sus"
+      say "   jobs se llama como un job crítico ($CRITICAL_JOBS): no sé cuál"
+      say "   construye el artefacto en este pipeline, así que no puedo afirmar"
+      say "   que corrió. Esto es CEGUERA, no un rojo: no propongo revertir nada."
+      say "   ↳ declaralo y este tramo vuelve a medir: en harness-answers.yaml,"
+      say "     deploy: $REPO: critical_jobs: \"<job-que-construye>, <job-que-despliega>\""
+      say "     (o DEPLOY_CRITICAL_JOBS=... para una corrida suelta)"
+      emit assumption "Actions de $REPO NO verificado: skipped ($skipped_jobs) y ningún job crítico reconocible en el run $run_id"
+      ciego "actions: skipped ($skipped_jobs) sin job crítico reconocible (critical_jobs: $CRITICAL_JOBS)"
+    else
+      if [ -n "$skipped_jobs" ]; then
+        # Se DICE, no se calla: un tramo que no corrió tiene que verse. Lo que
+        # ya no hace es frenar, porque los que construyen y despliegan sí
+        # corrieron y este watcher mide eso.
+        say "ℹ️  job(s) SKIPPED no críticos: $skipped_jobs."
+        say "   Los jobs críticos ($CRITICAL_JOBS) SÍ corrieron, así que hubo"
+        say "   artefacto: un job condicional saltado es normal y no es un rojo."
+      fi
+      say "✅ actions verde (run $run_id)"
+      verified "actions"
+    fi
   fi
 fi
 

@@ -54,6 +54,33 @@ def state_path(task_dir: Path) -> Path:
     return task_dir / "state.json"
 
 
+def utcnow() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def set_phase(state: dict, phase: str) -> None:
+    """La fase y CUÁNDO empezó, siempre juntas.
+
+    `phase_since` no es telemetría: es la VENTANA que usan los dos términos de
+    banda del costo. `cache_hit` y `ctx_avg` son promedios sobre transcripts
+    inmutables, así que un umbral sobre toda la historia de la tarea es un
+    trinquete de un solo sentido: el primer agente que cerró bajo el piso
+    bloquea TODA transición futura, y la remediación que el gate imprime
+    (recortar el contexto de arranque) solo puede afectar a agentes que
+    todavía no corrieron (issue #95).
+
+    Con el instante estampado acá, `harness-cost.py check` mide esos dos
+    términos sobre la fase EN CURSO, que es lo único sobre lo que el operador
+    puede actuar. El gasto en dólares sigue midiéndose sobre toda la tarea:
+    ese sí es acumulativo.
+
+    Se estampa en TODO cambio de fase (transition, escalate, rollback, pause y
+    resume): una fase que empieza sin estampa dejaría la ventana anclada a la
+    anterior, que es el bug con más pasos."""
+    state["phase"] = phase
+    state["phase_since"] = utcnow()
+
+
 def emit_bus(task_dir: Path, kind: str, summary: str) -> None:
     """Cuenta el movimiento de fase en el bus, que es lo que el humano mira.
 
@@ -687,6 +714,10 @@ def cmd_init(args: argparse.Namespace) -> int:
         "schema": 1,
         "task_id": task_dir.name,
         "phase": policy["workflow"]["initial_phase"],
+        # La primera fase también tiene comienzo: sin esto, la ventana de las
+        # bandas de costo no existiría hasta la primera transición y el gate
+        # mediría toda la historia justo en el tramo más largo de la tarea.
+        "phase_since": utcnow(),
         "lane": args.lane,
         "review_rounds": 0,
         "budget_usd": args.budget_usd,
@@ -737,7 +768,7 @@ def cmd_escalate(args: argparse.Namespace) -> int:
     reentry = "rfc" if "rfc" in graph else policy.get("workflow", {}).get("initial_phase", "intake")
     destination = reentry if previous_phase in ("implement", "review", "ship") else previous_phase
     state["lane"] = args.to
-    state["phase"] = destination
+    set_phase(state, destination)
     state.setdefault("history", []).append({
         "from": previous_phase, "to": destination, "actor": args.actor,
         "lane": f"{current_lane}→{args.to}", "reason": args.reason,
@@ -1060,7 +1091,7 @@ def cmd_pause(args: argparse.Namespace) -> int:
         fail("POLICY-PAUSE-002", "la tarea ya está bloqueada")
     previous = state.get("phase")
     state["paused_from"] = previous
-    state["phase"] = "blocked"
+    set_phase(state, "blocked")
     state.setdefault("history", []).append({
         "from": previous, "to": "blocked", "actor": args.actor,
         "reason": args.reason, "detail": args.detail,
@@ -1079,7 +1110,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
     if state.get("phase") != "blocked" or not state.get("paused_from"):
         fail("POLICY-PAUSE-003", "la tarea no tiene una pausa reanudable")
     destination = state.pop("paused_from")
-    state["phase"] = destination
+    set_phase(state, destination)
     state.setdefault("history", []).append({
         "from": "blocked", "to": destination, "actor": args.actor,
     })
@@ -1419,7 +1450,10 @@ def cmd_transition(args: argparse.Namespace) -> int:
                 "que YA CERRÓ y no se pueden remediar en retroactivo, la salida "
                 "auditable es `harness-policy.py cost-waive tasks/<id> --band "
                 "cache|ctx --agent <rol> --actor <quien> --reason \"<por qué>\"`: "
-                "queda en history[] y cada cost-check lo declara."
+                "queda en history[] y cada cost-check lo declara. Esos dos "
+                "términos se miden sobre la FASE EN CURSO (phase_since), así "
+                "que lo que frena corrió en esta fase: un agente de una fase "
+                "anterior ya no puede trabar la tarea para siempre (#95)."
             )
         fail("POLICY-BUDGET-005",
              (proc.stdout or "").strip() + "\n\n"
@@ -1539,7 +1573,7 @@ def cmd_transition(args: argparse.Namespace) -> int:
     if args.repo:
         entry["repo"] = args.repo
     history.append(entry)
-    state["phase"] = args.phase
+    set_phase(state, args.phase)
     state["review_rounds"] = rounds
     if rounds_by_repo:
         state["review_rounds_by_repo"] = rounds_by_repo
@@ -1590,7 +1624,7 @@ def cmd_rollback(args: argparse.Namespace) -> int:
         "kind": "rollback", "from": current, "to": destination,
         "actor": args.actor, "reason": args.reason,
     })
-    state["phase"] = destination
+    set_phase(state, destination)
     atomic(path, state)
     emit_bus(task_dir, "decision", f"rollback {current} → {destination}: {args.reason}")
     print(f"↩️  {task_dir.name}: rollback {current} → {destination} ({args.reason})")

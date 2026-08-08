@@ -79,7 +79,7 @@ assert_contains "$(cat "$root/templates/docs/intake.md.tmpl")" "enrichment" \
 # de terminal "──" (U+2500) son otro carácter y no cuentan.
 # El tope es el conteo REAL del día, sin holgura: dejarlo por encima (487 con
 # 447 medidos) regala 40 guiones largos gratis y el ratchet deja de morder.
-EMDASH_MAX=438
+EMDASH_MAX=434
 emdash_now=$(grep -ro "—" --include="*.md" --include="*.tmpl" --include="*.yaml" \
   --include="*.sh" --include="*.py" --include="*.json" "$root" 2>/dev/null \
   | grep -v "/\.git/" | grep -v "templates/ui/dist" | wc -l | tr -d ' ')
@@ -99,6 +99,90 @@ if out="$(bash "$root/scripts/templates-manifest.sh" verify 2>&1)"; then
 else
   fail "$out"
 fi
+
+echo
+echo "── las cuentas que el README canta las deriva la suite, no la memoria"
+# CASO DE CAMPO, y es el que paga este bloque: el README decia "son 37
+# archivos" con 63 tests en el arbol, y "cada uno de los 96 archivos" con 109
+# en el manifiesto. Ninguna de las dos mentia el dia que se escribio:
+# envejecieron PR a PR, calladas, porque una cuenta en prosa no tiene quien la
+# mire. Es el mismo defecto que el manifiesto de arriba existe para cazar, solo
+# que aplicado a la documentacion, y se arregla igual: lo que se puede DERIVAR
+# del arbol se deriva, y la prosa se compara contra eso.
+#
+# Solo entran cuentas que un script puede reconstruir sin juicio. La duracion
+# de la suite, por ejemplo, NO esta aca a proposito: depende de la maquina, y
+# un test que la fije seria mas fragil que la prosa que pretende cuidar.
+readme_dice() {  # readme_dice <expr sed con UN grupo> → el numero que afirma el README
+  sed -n "s/$1/\1/p" "$root/README.md" | head -1
+}
+
+# 1. archivos de test. El `ls` es la fuente: si manana entra test_nuevo.sh, esta
+#    linea cambia sola y la prosa tiene que seguirla.
+t_reales="$(ls "$root"/tests/test_*.sh "$root"/tests/test_*.py 2>/dev/null | grep -c .)"
+t_dice="$(readme_dice '.*no los lista todos (son \([0-9][0-9]*\) archivos).*')"
+if [ "$t_dice" = "$t_reales" ]; then
+  pass "README: dice $t_dice archivos de test y en tests/ hay $t_reales"
+else
+  fail "README: dice '$t_dice archivos' de test y en tests/ hay $t_reales.
+   ↳ remediación: corregí 'son N archivos' en la sección Tests del README.md"
+fi
+
+# 2. entradas del manifiesto. Se cuentan las lineas hash+ruta, que es lo que
+#    templates-manifest.sh llama "templates": ni las de cabecera, ni
+#    plugin_version, ni el digest del final. Incluye scripts/doctor.sh, que se
+#    COPIA a la instancia y por eso cuenta como template (lo dice el propio
+#    README en "Estructura de este repo").
+m_reales="$(grep -c '^[0-9a-f]\{64\}  ' "$root/templates/MANIFEST.sha256")"
+m_dice="$(readme_dice '.*de los \([0-9][0-9]*\) archivos que terminan dentro de una instancia.*')"
+if [ "$m_dice" = "$m_reales" ]; then
+  pass "README: dice $m_dice archivos en el manifiesto y hay $m_reales"
+else
+  fail "README: dice '$m_dice archivos' en el manifiesto y hay $m_reales.
+   ↳ remediación: corregí el número en 'el sha256 de cada uno de los N archivos'
+     de la sección 'El número de versión no alcanza' del README.md"
+fi
+
+# 3. Y la red de la red: si alguien reescribe esas frases y el sed deja de
+#    encontrarlas, los dos casos de arriba compararian "" contra "" y pasarian
+#    en verde sin haber mirado nada. Un verificador que no encuentra qué
+#    verificar tiene que decirlo, no aprobar.
+if [ -n "$t_dice" ] && [ -n "$m_dice" ]; then
+  pass "las dos frases con cuenta siguen existiendo en el README (el test no quedó ciego)"
+else
+  fail "no encontré en el README las frases con las cuentas (tests='$t_dice' manifiesto='$m_dice').
+   ↳ remediación: si reescribiste esas líneas, actualizá los sed de tests/test_docs.sh;
+     si borraste la cuenta, borrá también su caso: un test que no mide nada es peor que ninguno"
+fi
+
+echo
+echo "── README.en.md es un ESPEJO del español, no un resumen"
+# Hasta hoy era un resumen de 148 lineas contra 1003 del español, y llevaba
+# semanas sin tocarse. Un documento que promete "overview" envejece sin que
+# nadie lo note, porque nada se rompe cuando queda atras. Ahora es un espejo, y
+# un espejo que solo se sostiene con disciplina se raja en el primer PR apurado.
+#
+# NO se compara el TEXTO (son dos idiomas) sino la FORMA: si el español gana una
+# seccion, un diagrama o una fila de tabla, el ingles tiene que ganarla tambien.
+# Es la comprobacion mas barata que distingue "traducido" de "quedo a medias", y
+# la unica que un script puede hacer sin opinar sobre prosa.
+espejo() {  # espejo <patron grep> <qué se cuenta>
+  local es en
+  es="$(grep -c "$1" "$root/README.md")"
+  en="$(grep -c "$1" "$root/README.en.md")"
+  if [ "$es" = "$en" ]; then
+    pass "README.en.md espeja $2 ($es)"
+  else
+    fail "README.en.md tiene $en $2 y README.md tiene $es.
+   ↳ remediación: los dos README son el mismo documento en dos idiomas
+     (CONTRIBUTING lo declara). Si tocaste uno, tocá el otro; si el cambio es
+     deliberadamente asimétrico, este caso es el lugar para declararlo"
+  fi
+}
+espejo '^## '        "las secciones de primer nivel"
+espejo '^### '       "las subsecciones"
+espejo '^```mermaid' "los diagramas mermaid"
+espejo '^|'          "las filas de tabla"
 
 echo
 echo "── /harness-update clasifica TODOS los scripts del plugin"

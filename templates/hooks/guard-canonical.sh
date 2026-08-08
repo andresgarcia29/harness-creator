@@ -92,6 +92,37 @@ LEY0
   exit 2
 }
 
+# ── QUÉ SCRIPTS SON DEL PLUGIN (issue #104) ──────────────────────────
+# La lista viaja como DATO y no como cuarenta ramas de `case` por dos razones.
+# La primera es que un `case` multilínea mete los espacios de la indentación
+# DENTRO del patrón y deja de matchear, que es un pie de bala silencioso. La
+# segunda importa más: así el test la lee sin parsear bash y la compara contra
+# templates/scripts/, o sea que una lista cableada no puede envejecer sin que
+# la suite lo cace. Es la misma regla que se aplicó a las cuentas del README.
+#
+# Son los scripts que el generador instala bajo scripts/ (la tabla de
+# generación de skills/harness-init/SKILL.md), más doctor.sh, que se COPIA
+# desde el repo del plugin. El panel (scripts/ui/*) va por su propia rama.
+PLUGIN_SCRIPTS='
+adr-new.sh archived-repos.sh bootstrap.sh bounded.sh build-slot.sh
+change-id.sh deploy-watch.sh doctor.sh emit.sh evidence.py fe.sh finding.sh
+forge.sh gowork.sh graph-refresh.sh harness-bug.sh harness-cost.py
+harness-metrics.py harness-policy.py harness-sink.py harness-version.sh
+instance-ship.sh mark-read.sh minion-probe.sh pipeline-steps.sh plan-lint.sh
+port-forwards.sh pull-all.sh py.sh quiet.sh repo-brief.sh secrets.sh
+ship-wave.sh ship.sh skills-sync.sh stamp-models.sh task-note.py ticket-close.sh
+ticket-pull.sh verdict-beads.sh verdict-scaffold.sh with-secrets.sh
+worktree-task.sh
+'
+
+del_plugin() {  # del_plugin <ruta relativa a scripts/> → 0 si la instala el plugin
+  case "$1" in ui/*) return 0 ;; esac
+  local s
+  # shellcheck disable=SC2086
+  for s in $PLUGIN_SCRIPTS; do [ "$s" = "$1" ] && return 0; done
+  return 1
+}
+
 case "$path" in
   "$root"/repos/*)
     echo "⛔ edición del clon canónico bloqueada (Ley 4): $path" >&2
@@ -147,14 +178,32 @@ case "$path" in
   "$root"/.claude/hooks/*|"$root"/.claude/settings.json|"$root"/harness-policy.json)
     ley0_juzga "$path"
     ;;
-  # Bajo scripts/, el criterio SÍ es la existencia: un archivo nuevo es de la
-  # instancia (pipeline-step-creator declara pasos con `run: scripts/mi.sh`, y
-  # ese archivo hay que poder crearlo), uno que ya existe es el juez.
+  # ── BAJO scripts/ LA PREGUNTA ES DE QUIÉN ES, NO SI EXISTE (issue #104) ──
+  # El criterio era `[ -e "$path" ]`, o sea: existir equivalía a ser del plugin.
+  # Medido en campo, las dos mitades se contradecían dentro de la MISMA tarea:
+  # un Write creaba scripts/check-nats-events.py y pasaba (todavía no existía),
+  # y el Edit siguiente sobre ESE MISMO archivo se bloqueaba (ya existía) con un
+  # mensaje de Ley 0 que le decía al agente que no tocara el harness cuando no
+  # estaba tocando el harness. Si crear ahí estuviera prohibido, el Write
+  # tampoco debía pasar; si está permitido, corregir lo recién creado también.
+  #
+  # Y el daño no era la molestia: el archivo quedaba CONGELADO en su primera
+  # versión, en esa tarea y en todas las futuras. Varias reglas del workspace
+  # mandan versionar herramientas propias justo bajo scripts/, así que la ley
+  # castigaba exactamente lo que otra ley ordena hacer. Peor, el límite se
+  # descubría DESPUÉS de escribir, no antes.
+  #
+  # La procedencia no se adivina: es la lista de lo que el generador instala.
+  # tests/test_guard_canonical.sh la DERIVA de templates/scripts/ y falla si
+  # esta se queda atrás, que es la única forma de que una lista cableada no
+  # envejezca. Lo que no está acá lo escribió la instancia, y la instancia
+  # puede corregir lo suyo.
+  #
   # NO entra acá el trabajo legítimo sobre el repo del plugin dentro de un
   # worktree: estos patrones están anclados a "$root"/scripts/, y
   # worktrees/<task>/harness-creator/templates/scripts/... no matchea.
   "$root"/scripts/*)
-    [ -e "$path" ] && ley0_juzga "$path"
+    del_plugin "${path#"$root"/scripts/}" && ley0_juzga "$path"
     ;;
 esac
 exit 0

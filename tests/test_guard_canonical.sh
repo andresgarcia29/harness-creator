@@ -46,7 +46,7 @@ rc() {  # rc <path> → exit code; stderr queda en $WS/canon.err
 
 echo "── el juez no se edita: scripts, hooks y la politica"
 
-assert_eq 2 "$(rc "$WS/scripts/ship.sh")" "un script del harness que YA EXISTE: bloqueado"
+assert_eq 2 "$(rc "$WS/scripts/ship.sh")" "un script del plugin: bloqueado"
 err="$(cat "$WS/canon.err")"
 assert_contains "$err" "Ley 0" "el mensaje nombra la ley que corta el bucle"
 assert_contains "$err" "harness-bug.sh report" "y da el canal de vuelta (reportar, no arreglar)"
@@ -67,6 +67,49 @@ echo "── la ley no se derrama: lo que es de la INSTANCIA se escribe"
 
 assert_eq 0 "$(rc "$WS/scripts/nuevo-paso.sh")" \
   "un script NUEVO bajo scripts/ es de la instancia (pipeline-step-creator lo declara)"
+
+# ── issue #104: el criterio es DE QUIEN ES, no SI EXISTE ──────────────
+# El guard decidia con `[ -e "$path" ]`, y eso partia en dos la misma tarea:
+# el Write que CREA scripts/check-nats-events.py pasaba (no existia todavia) y
+# el Edit siguiente sobre ESE MISMO archivo se bloqueaba (ya existia). El
+# archivo quedaba congelado en su primera version para siempre, y el agente
+# recibia un mensaje de Ley 0 por tocar algo que no es el harness.
+: > "$WS/scripts/check-nats-events.py"     # lo acaba de crear la tarea
+assert_eq 0 "$(rc "$WS/scripts/check-nats-events.py")" \
+  "un script de la INSTANCIA que ya existe se puede corregir (era el bug de #104)"
+# La contra-mitad, que es la que evita "arreglarlo" abriendo la mano: existir o
+# no existir deja de importar TAMBIEN del lado del plugin. Antes, un script del
+# plugin borrado del disco se podia recrear con cualquier cosa.
+assert_eq 2 "$(rc "$WS/scripts/harness-policy.py")" \
+  "un script del plugin que NO esta en disco: bloqueado igual (procedencia, no existencia)"
+# El panel es codigo del plugin y vive en un SUBDIRECTORIO, o sea que no entra
+# por nombre de archivo sino por su propia rama. Sin este caso, borrar esa rama
+# no rompia un solo test: el mutante sobrevivio la primera vez que se probo.
+assert_eq 2 "$(rc "$WS/scripts/ui/panel.sh")" \
+  "el panel (scripts/ui/) es del plugin: bloqueado"
+assert_eq 2 "$(rc "$WS/scripts/ui/dist/assets/app.js")" \
+  "y todo lo que cuelga de el, aunque nadie lo haya creado todavia"
+# Y la incoherencia de origen: sobre el MISMO path, crear y editar tienen que
+# contestar lo mismo. Se descubria despues de escribir, que es el peor momento.
+for f in "$WS/scripts/coherente.sh" "$WS/scripts/ship.sh"; do
+  antes="$(rc "$f")"; : > "$f"; despues="$(rc "$f")"
+  assert_eq "$antes" "$despues" "crear y editar $(basename "$f") contestan lo mismo"
+done
+rm -f "$WS/scripts/coherente.sh"
+
+# ── la lista de procedencia NO puede envejecer ────────────────────────
+# Una lista cableada a mano es exactamente la clase de dato que se queda atras
+# sin que nadie se entere: el dia que el plugin agregue un script, el hook lo
+# dejaria editar durante una tarea. Se DERIVA del arbol de templates y se
+# compara, que es la unica forma de que la lista siga siendo verdad.
+lista_real="$( { for f in "$ROOT"/templates/scripts/*; do
+                   b="$(basename "$f")"; [ "$b" = "__pycache__" ] && continue
+                   echo "${b%.tmpl}"
+                 done; echo doctor.sh; } | sort | tr '\n' ' ')"
+lista_hook="$(sed -n "/^PLUGIN_SCRIPTS='/,/^'$/p" "$HOOK" \
+  | sed "s/^PLUGIN_SCRIPTS='//; s/^'$//" | tr ' \n' '\n\n' | grep -v '^$' | sort | tr '\n' ' ')"
+assert_eq "$lista_real" "$lista_hook" \
+  "PLUGIN_SCRIPTS del hook == lo que el generador instala bajo scripts/"
 assert_eq 0 "$(rc "$WS/scripts/smoke/svc.sh")" "scripts/smoke/ es de la instancia (tabla de owner_of)"
 assert_eq 0 "$(rc "$WS/scripts/cronjobs/jobs/local-x.sh")" "scripts/cronjobs/ tambien"
 assert_eq 0 "$(rc "$WS/worktrees/T1/harness-creator/templates/scripts/ship.sh.tmpl")" \

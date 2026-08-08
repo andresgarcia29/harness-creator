@@ -520,6 +520,46 @@ classDef stop fill:#450a0a,stroke:#f87171,stroke-width:2px,color:#fee2e2
 classDef script fill:#0b3d2e,stroke:#10b981,stroke-width:2px,color:#d1fae5
 ```
 
+**Zoom: cómo el gate de lenguaje decide qué correr.** Es la parte que más crece a medida que el harness se topa con stacks nuevos, y la forma nunca cambia: un marcador en el árbol elige la rama, `need()` pregunta si la toolchain está de verdad, y lo que no se pudo correr se declara en vez de pintarse de verde.
+
+```mermaid
+flowchart TD
+  W(["worktree del repo<br/><i>run_lang_gates, ship.sh</i>"]):::script --> D{"¿qué marcadores<br/>hay en el árbol?"}:::dec
+  D -->|"ninguno"| NONE(["⚠️ <b>no reconozco el stack</b><br/>se DICE y viaja al ledger:<br/>un gate que no miró nada<br/>no pasa callado"]):::stop
+  D -->|"uno o varios<br/>(no son exclusivos)"| SG
+
+  subgraph SG["una rama por marcador"]
+    direction LR
+    L1["<b>go.mod</b> · vet · build · test<br/><i>raíz y subdirs</i>"]:::lang
+    L2["<b>package.json</b> · el typecheck<br/>que DECLARA el repo · npm test"]:::lang
+    L3["<b>pyproject.toml</b> · ruff con ratchet<br/>contra la rama trunk · pytest"]:::lang
+    L4["<b>pubspec.yaml</b> · analyze · test"]:::lang
+    L5["<b>Cargo.toml</b> · build --locked · test"]:::lang
+    L6["<b>pom.xml</b> · mvn verify"]:::lang
+    L7["<b>build.gradle</b> · gradlew build"]:::lang
+    L8["<b>Gemfile</b> · rake o rspec"]:::lang
+    L9["<b>composer.json</b> · phpunit"]:::lang
+    L10["<b>*.sln · *.csproj</b> · dotnet build · test"]:::lang
+    L11["<b>mix.exs</b> · compile --warnings-as-errors · test"]:::lang
+    L12["<b>*.tf</b> · init -backend=false<br/>validate · fmt -check"]:::lang
+    L13["<b>Chart.yaml</b> · lint · template<br/>· unittest si está el plugin"]:::lang
+  end
+
+  SG --> N{"¿la toolchain está<br/>en el PATH?<br/><i>need()</i>"}:::dec
+  N -->|"no"| ASS(["⚠️ <b>supuesto al ledger</b><br/>TESTS_RAN=0 y el sello dice<br/>'verificado: ninguno'"]):::stop
+  N -->|"sí"| RUN[["corre el gate"]]:::gate
+  RUN -->|"verde"| OK(["sigue a los gates de<br/>seguridad y veredicto"]):::script
+  RUN -->|"rojo"| FIX(["🔴 el mensaje ES el prompt del fix:<br/>trae su remediación exacta"]):::stop
+
+classDef script fill:#0b3d2e,stroke:#10b981,stroke-width:2px,color:#d1fae5
+classDef dec fill:#4a3410,stroke:#f59e0b,stroke-width:2px,color:#fef3c7
+classDef gate fill:#3f1d1d,stroke:#ef4444,stroke-width:3px,color:#fee2e2
+classDef lang fill:#111827,stroke:#6b7280,stroke-width:1px,color:#e5e7eb
+classDef stop fill:#450a0a,stroke:#f87171,stroke-width:2px,color:#fee2e2
+```
+
+Encima de eso, y solo si el repo los declara, van los gates de contratos y arquitectura: `buf lint` y `buf breaking`, `import-linter` (`.importlinter`), `go-arch-lint` (`.go-arch-lint.yml`) y `squawk` sobre las migraciones SQL nuevas del diff. Config presente sin la herramienta instalada es un aviso honesto, jamás un gate fingido.
+
 Los **hooks** son la diferencia entre una regla y una ley. "No hagas push a main" en un `CLAUDE.md` es una sugerencia que un agente puede racionalizar a las 3 de la mañana. `block-direct-push` es un hook PreToolUse que intercepta la llamada **antes de que ocurra**, y es *fail-closed*: si falta `jq`, bloquea por precaución. Mismo caso con `guard-canonical` (el clon de `repos/` es intocable; se trabaja en worktrees).
 
 Fíjate en la asimetría del diagrama, porque es **todo** el diseño: el mismo hook que bloquea a *cualquier* agente es el que **deja pasar a `ship.sh`**. No hay dos caminos a main con distinta severidad. Hay uno solo, y está pavimentado de gates.
@@ -719,6 +759,29 @@ Esta regla tiene una compañera que conviene leer junto a ella. La **ley 13** di
 
 Lo delicado no es reportar: es no convertir el canal en spam. Por eso el juicio y la verificación están separados. El juicio lo pone la skill `harness-bug-report` (¿el repro se sostiene dos veces en una shell limpia? ¿es del plugin o de tu instancia? ¿le pasa a alguien más? ¿vale la pena arreglarlo?) y lo verificable lo hace `scripts/harness-bug.sh`, que es **fail-closed** y no publica nada si algo no cuadra:
 
+```mermaid
+flowchart TD
+  A["un agente en TU instancia topa con un artefacto<br/>que falla o contradice su propia cabecera"]:::agent --> L12{"<b>ley 12</b> del CLAUDE.md<br/>¿de quién es el artefacto?"}:::dec
+  L12 -->|"tuyo: spec, paso custom,<br/>abogado, regla local"| MINE(["no es bug del plugin<br/>se arregla donde vive"]):::script
+  L12 -->|"del plugin"| SK["skill <b>harness-bug-report</b><br/><i>pone el JUICIO</i><br/>¿el repro se sostiene 2 veces en shell limpia?<br/>¿le pasa a alguien más? ¿vale la pena?"]:::agent
+  SK --> SC[["<b>scripts/harness-bug.sh</b><br/><i>verifica lo verificable, fail-closed</i>"]]:::gate
+  SC --> C1{"propiedad · drift sha256 · versión al día<br/>repro no vacío · dedupe por huella<br/>cuota 3 cada 24 h · redacción de secretos"}:::dec
+  C1 -->|"algo no cuadra"| STOP(["⛔ no publica NADA<br/>y dice exactamente qué faltó"]):::stop
+  C1 -->|"todo cuadra"| ISS(["<b>issue en harness-creator</b><br/>con su huella harness-fp"]):::script
+  ISS -->|"upstream_issues: off"| YOU(["el hallazgo se te reporta a VOS<br/>make bugs · nada sale de la máquina"]):::human
+  ISS --> FIX["fix <b>más el test que muerde</b><br/>en este repo"]:::agent
+  FIX --> REL(["release: versión nueva<br/>+ digest del set de templates"]):::script
+  REL --> UPD(["<b>make update</b> en tu instancia<br/>make version compara CONTENIDO, no números"]):::script
+  UPD -.->|"el loop se cierra"| A
+
+classDef agent fill:#1e2a5a,stroke:#60a5fa,stroke-width:2px,color:#dbeafe
+classDef dec fill:#4a3410,stroke:#f59e0b,stroke-width:2px,color:#fef3c7
+classDef gate fill:#3f1d1d,stroke:#ef4444,stroke-width:3px,color:#fee2e2
+classDef stop fill:#450a0a,stroke:#f87171,stroke-width:2px,color:#fee2e2
+classDef script fill:#0b3d2e,stroke:#10b981,stroke-width:2px,color:#d1fae5
+classDef human fill:#3b1a4a,stroke:#c084fc,stroke-width:2px,color:#f3e8ff
+```
+
 | Verificación | Por qué existe |
 |---|---|
 | **Propiedad del artefacto** (plugin o instancia) | tu spec, tu paso custom o tu abogado no son bugs del plugin, aunque duelan igual |
@@ -791,7 +854,7 @@ El flujo es fijo (discovery, entrevista, generación, verificación); **todo lo 
 | Quieres | Tocas |
 |---|---|
 | Soportar una herramienta nueva (CLI o MCP) | agrega una entrada a `catalog/capabilities.yaml` (provider, bin/mcp, tier, profiles, detect, install); la entrevista la ofrecerá cuando su señal aparezca |
-| Otro lenguaje o stack | el gate cubre Go (raíz y subdirs), Node/TS, Python, Dart, Rust, Java (Maven y Gradle), Ruby, PHP, .NET, Elixir y Terraform. Uno nuevo es una rama más en `run_lang_gates` (`ship.sh.tmpl`) y su marcador en `discover.sh` |
+| Otro lenguaje o stack | el gate cubre Go (raíz y subdirs), Node/TS, Python, Dart, Rust, Java (Maven y Gradle), Ruby, PHP, .NET, Elixir, Terraform y Helm. Uno nuevo es una rama más en `run_lang_gates` (`ship.sh.tmpl`) y su marcador en `discover.sh` |
 | Otro gestor de tickets | ya está: `linear` y `github` vienen implementados en `ticket-pull` y `ticket-close`, y se eligen en la entrevista. Agregar Jira o GitLab es una función más en esos dos scripts, con el mismo contrato de exits |
 | Otro forge (GitLab, Bitbucket) | `scripts/forge.sh` despacha por forge: `github` (gh) y `gitlab` (glab) vienen implementados, y el forge se detecta del remote. Los detectores de [harness-cronjobs](https://github.com/andresgarcia29/harness-cronjobs), que vive aparte, entregan por esa capa |
 | Que la rama trunk no se llame `main` | nada: se resuelve de `origin/HEAD` en cada repo. `HARNESS_BASE_BRANCH` fuerza otro nombre si tu remote no lo declara |
@@ -829,12 +892,12 @@ Y cumple la regla de la casa: si no puede consultar la versión de upstream (sin
 
 Un número de versión lo escribe quien genera, y por lo tanto puede mentir sin proponérselo. Pasó en la forma más cara posible: un generador escribió `.harness-version` con la versión **nueva** habiendo generado desde templates **viejos**. Reportó "1 actualizado, 24 conflictos" y ninguno de esos 24 archivos traía los arreglos que el número prometía. Nada en la salida lo decía, así que la única forma de enterarse era resolver los 24 diffs a mano y notar que faltaban.
 
-Por eso el repo publica **`templates/MANIFEST.sha256`**: el sha256 de cada uno de los 96 archivos que terminan dentro de una instancia, más un `digest:` que identifica al set completo. Y todo generador **debe** escribir ese digest en `.harness-templates` al generar.
+Por eso el repo publica **`templates/MANIFEST.sha256`**: el sha256 de cada uno de los 109 archivos que terminan dentro de una instancia, más un `digest:` que identifica al set completo. Y todo generador **debe** escribir ese digest en `.harness-templates` al generar. (Ese 109 también lo verifica la suite contra el manifiesto real: ver el final de esta sección.)
 
 Con eso, `make version` compara **contenido**, no solo números:
 
 ```
-✅ instancia 0.47.0 · upstream 0.47.0: al día
+✅ instancia 0.59.3 · upstream 0.59.3: al día
 ⬆️  templates 200c9fe534c2 · upstream 4a1f88b0d213: DISTINTOS
 ```
 
@@ -846,7 +909,7 @@ Ese par de líneas es el caso que antes era invisible: la versión coincide y lo
 
 Significa que quien la generó no dejó rastro de su fuente. No es un archivo faltante cualquiera: implica que **el número de versión de arriba no se puede creer**, porque nadie puede verificar qué contiene realmente la instancia. `make doctor` lo reporta igual, con esa misma remediación.
 
-El manifiesto se verifica en cada corrida de la suite (`tests/test_docs.sh`). Un manifiesto desactualizado es peor que ninguno: afirmaría que una instancia se generó con un set que no es el que se usó, que es justo el fallo que existe para impedir. Si tocas un template, `scripts/templates-manifest.sh generate` lo pone al día.
+El manifiesto se verifica en cada corrida de la suite (`tests/test_docs.sh`), y ahí mismo se verifica **el número de arriba contra el manifiesto real**: una cuenta que solo vive en prosa envejece calladita, que es exactamente el defecto que este párrafo denuncia una línea más arriba. Un manifiesto desactualizado es peor que ninguno: afirmaría que una instancia se generó con un set que no es el que se usó, que es justo el fallo que existe para impedir. Si tocas un template, `scripts/templates-manifest.sh generate` lo pone al día.
 
 El modo update **no re-pregunta** lo respondido, migra esquemas sin tocar tus decisiones, **reconcilia** (una respuesta nueva propaga diffs a manifest, `CLAUDE.md` y DAG) y distingue propiedad: los scripts del plugin se actualizan con upstream; tus answers, modelos, specs y constituciones son ley local y se conservan. Nada se pisa sin confirmación, con una excepción declarada: los **paquetes atados** (carriles, modelos, plan hondo con loop corto) se aceptan o rechazan juntos, porque a medias romperían la instancia. Al aplicar, el update re-estampa modelos y vuelve a correr el doctor.
 
@@ -893,13 +956,13 @@ templates/         todo lo que se genera:
 ## Tests
 
 ```
-./tests/run.sh        # todo (~40 s: el lock prueba su gracia de 15 s en tiempo real)
+./tests/run.sh        # todo (unos 10 min: el lock prueba su gracia de 15 s en tiempo real)
 ./tests/run.sh fast   # salta el test lento del lock
 ```
 
-La suite prueba **el código real de los templates**, no copias ni mocks del sistema bajo prueba, y cada test crea su workspace temporal y lo borra: nada toca tu workspace ni la red.
+La suite prueba **el código real de los templates**, no copias ni mocks del sistema bajo prueba, y cada test crea su workspace temporal y lo borra: nada toca tu workspace ni la red. El reloj es de la corrida completa medida en un laptop (9 m 53 s en macOS): crece con la suite, así que tómalo como orden de magnitud y no como promesa.
 
-La tabla de abajo no los lista todos (son 37 archivos): están los que explican mejor qué se protege y por qué.
+La tabla de abajo no los lista todos (son 63 archivos): están los que explican mejor qué se protege y por qué. El número lo verifica la propia suite (`test_docs.sh` cuenta los archivos y lo compara con esta línea), porque una cuenta escrita a mano en prosa se queda atrás en tres PRs y nadie se entera.
 
 | Test | Qué protege |
 |---|---|
@@ -927,7 +990,7 @@ La tabla de abajo no los lista todos (son 37 archivos): están los que explican 
 | `test_worktree_task.sh` | Que `--rm` no destruya trabajo sin publicar, incluido el caso multi-repo donde shippear un repo se llevaba la rama lista del otro |
 | `test_dead_knobs.sh` | Que una opción que se pregunta haga algo: el flujo a main, el tier de un MCP, los perfiles de memoria y el alias de escalación |
 | `test_ui_emit.sh` | El par arranque/cierre de cada llamada, que es lo que le permite al watchdog distinguir "atascado" de "trabajando en algo lento" |
-| `test_docs.sh` | Que las leyes existan y no se caigan en una reescritura: la ley 13, la fase de enrichment con su barra de calidad, el `.gitignore` de la instancia como template verificable, y el ratchet de guion largo |
+| `test_docs.sh` | Que las leyes existan y no se caigan en una reescritura: la ley 13, la fase de enrichment con su barra de calidad, el `.gitignore` de la instancia como template verificable, el ratchet de guion largo, y **las cuentas que este README canta, derivadas del árbol en vez de la memoria** |
 | `test_server.py` y `test_op_http.py` | El panel: modelo sin precio nunca hereda tarifa ajena, normalización del bus, y todo el plano de operar (validación, dedupe, tokens con permisos 600, rechazo por token, Host y CSRF) |
 
 La suite ya se pagó el primer día: cazó que el `\b` de `sed` no existe en macOS (cuatro familias de secretos viajaban sin redactar), seis templates sin bit de ejecución, y un `_record_run` que dependía en silencio del orden de llamadas.

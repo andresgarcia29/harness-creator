@@ -1,7 +1,8 @@
 # Contribuir a harness-creator
 
-*(English speakers: issues and PRs in English are welcome; the codebase docs
-are currently Spanish-first; see [README.en.md](README.en.md) for an overview.)*
+*(English speakers: issues and PRs in English are welcome. The code comments
+are Spanish-first, but [README.en.md](README.en.md) is a full mirror of the
+Spanish README, not a summary: if you change one, change the other.)*
 
 Gracias por querer contribuir. Este proyecto tiene una filosofía fuerte y las
 contribuciones que la respetan se mergean rápido.
@@ -60,7 +61,7 @@ hay juicio. De ahí se derivan las reglas de este repo:
 ```bash
 git clone https://github.com/andresgarcia29/harness-creator
 cd harness-creator
-./tests/run.sh          # la suite completa (~40s)
+./tests/run.sh          # la suite completa (unos 10 min; medido: 9m53s en macOS)
 ./tests/run.sh fast     # salta el test lento del lock
 ```
 

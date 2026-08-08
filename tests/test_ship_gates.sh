@@ -1953,6 +1953,187 @@ assert_contains "$sh" "TESTS_RAN" "el gate distingue 'corri tests' de 'reconoci 
 assert_not_contains "$sh" 'printf ../%s.. "${LANG_SEEN:-0}" > "$WS/tasks' "y el sello ya no usa LANG_SEEN como prueba"
 
 echo
+echo "── flutter: los infos no dejan al repo entero sin poder shippear (#100)"
+# Caso de campo: `flutter analyze` PELADO trata los infos como fatales (es el
+# default de dart), asi que un repo con 11 infos heredados, NINGUNO en los
+# archivos del diff y con su propia CI de release en verde, quedaba entero
+# inshippeable. Y el daño peor no era el falso rojo: analyze abortaba ANTES de
+# `flutter test`, la suite nunca corria y el precheck no podia sellar su
+# EV-TEST, lo que empuja a sellar la evidencia a mano.
+
+extract flutter_issues > "$WS/flissues.sh"
+grep -q 'want' "$WS/flissues.sh" || { echo "no pude extraer flutter_issues"; exit 1; }
+# run_lang_gates la LLAMA, asi que el runner tiene que tenerla: en ship.sh de
+# verdad las dos son funciones del mismo archivo.
+cat "$WS/flissues.sh" >> "$WS/lang.sh"
+
+# La salida real de `flutter analyze` (formato estable desde flutter 2.x).
+# El ultimo info trae un "•" DENTRO del mensaje a proposito: es lo que rompe
+# un parseo por posicion de campo, y por eso la ruta se busca por forma.
+# printf y no un heredoc: un `<<'EOF'` DENTRO de un `$( )` con un apostrofe en
+# el cuerpo (el `isn't` de abajo) rompe el parseo de bash, que sigue buscando
+# el parentesis de cierre a traves del heredoc.
+FL_SALIDA="$(printf '%s\n' \
+  "Analyzing app..." \
+  "" \
+  "   info • Unused import: 'dart:async' • lib/main.dart:1:8 • unused_import" \
+  "   warning • The value of the local variable 'x' isn't used • lib/a.dart:5:7 • unused_local_variable" \
+  "   error • Undefined name 'foo' • lib/b.dart:9:3 • undefined_identifier" \
+  "   info • Prefer 'a • b' over c • lib/d.dart:3:1 • prefer_x" \
+  "" \
+  "4 issues found. (ran in 1.2s)")"
+TAB="$(printf '\t')"
+
+fl_i="$( ( . "$WS/flissues.sh"; printf '%s\n' "$FL_SALIDA" | flutter_issues info ) )"
+assert_eq 2 "$(printf '%s\n' "$fl_i" | grep -c .)" "flutter_issues info: dos infos, ni el warning ni el error"
+assert_contains "$fl_i" "lib/main.dart${TAB}Unused import" "saca archivo y mensaje, sin la linea:columna"
+assert_contains "$fl_i" "lib/d.dart${TAB}Prefer" "un '•' dentro del mensaje no corre la ruta (se busca por forma)"
+assert_not_contains "$fl_i" "lib/b.dart" "y no se cuela el error entre los infos"
+fl_e="$( ( . "$WS/flissues.sh"; printf '%s\n' "$FL_SALIDA" | flutter_issues error ) )"
+assert_contains "$fl_e" "lib/b.dart" "la misma funcion sirve para cualquier severidad"
+
+# ── #98 otra vez, en el awk nuevo: red ESTATICA + red de CONDUCTA ──────
+# mawk (Debian, Ubuntu, cualquier contenedor minimo) no soporta intervalos ERE.
+# Un parseo degradado aca no pondria un rojo: dejaria el conteo de infos mudo,
+# que es la misma clase de silencio. Se quitan los comentarios antes de mirar:
+# el que explica por que no se usa `{2,}` tiene que poder escribirlo.
+fl_awk="$(grep -v '^[[:space:]]*#' "$WS/flissues.sh")"
+case "$fl_awk" in
+  *"{"[0-9]*)
+    fail "flutter_issues usa un intervalo ERE en su awk: mawk no los soporta (#98)" ;;
+  *) pass "flutter_issues no usa intervalos ERE (mawk los ignora y el conteo quedaria mudo)" ;;
+esac
+if command -v mawk >/dev/null 2>&1; then
+  mkdir -p "$WS/mawkbin" && printf '#!/bin/sh\nexec mawk "$@"\n' > "$WS/mawkbin/awk"
+  chmod +x "$WS/mawkbin/awk"
+  fl_m="$( ( PATH="$WS/mawkbin:$PATH"; . "$WS/flissues.sh"
+             printf '%s\n' "$FL_SALIDA" | flutter_issues info ) )"
+  assert_eq "$fl_i" "$fl_m" "bajo mawk real: el mismo parseo (el bullet son 3 bytes, y length() lo cuenta)"
+else
+  echo "  · mawk no esta instalado: la pata de conducta no corre (la estatica ya mordio)"
+fi
+
+mk_flutter() {  # mk_flutter <dir>: repo Flutter con origin/main simulado
+  rm -rf "$1"; mkdir -p "$1/lib"; cd "$1"
+  git init -q .; git config user.email t@t; git config user.name t
+  printf 'name: app\n' > pubspec.yaml
+  printf '// base\n' > lib/main.dart
+  printf '// base\n' > lib/viejo.dart
+  git add -A && git commit -qm init
+  git update-ref refs/remotes/origin/main HEAD
+  cd "$WS"
+}
+
+FLLOG="$WS/flutter.log"
+run_flutter() {  # run_flutter <dir> <stub-flutter> → stdout; el log en $FLLOG
+  # Igual que run_helm: esto corre dentro de un $( ), o sea en un subshell.
+  # Lo que tiene que sobrevivir va al ARCHIVO, no a una variable.
+  : > "$FLLOG"
+  ( cd "$1"; WT="$1"; REPO=app; TASK=T1; BASE_REF=main; FLLOG="$FLLOG"
+    gate() { :; }; emit() { echo "EMIT $*"; }
+    eval "$2"
+    . "$WS/lang.sh"; run_lang_gates ) 2>&1
+}
+
+# El stub imita a analyze de verdad: con --no-fatal-infos sale 0 aunque haya
+# infos, y SIN el flag sale 1. Si el gate dejara de pasar el flag, este mismo
+# stub reproduce el bug de campo y el caso muerde.
+FL_STUB='flutter() {
+  echo "FLUTTER $*" >> "$FLLOG"
+  case "$*" in
+    *analyze*)
+      printf "%s\n" "Analyzing app..." "" \
+        "   info • Unused import • lib/viejo.dart:1:8 • unused_import" "" \
+        "1 issue found. (ran in 0.1s)"
+      case "$*" in *--no-fatal-infos*) return 0 ;; *) return 1 ;; esac ;;
+    test*) echo "SUITE CORRIO" ;;
+  esac
+}'
+
+# 1. infos heredados: NO bloquean, y la suite SI corre (era el daño peor)
+mk_flutter "$WS/fl1"
+out="$(run_flutter "$WS/fl1" "$FL_STUB")"; rc=$?
+log="$(cat "$FLLOG")"
+assert_eq 0 "$rc" "infos heredados: el repo puede shippear (era el falso rojo de #100)"
+assert_contains "$log" "--no-fatal-infos" "corre el MISMO comando que la CI del repo"
+assert_contains "$out" "SUITE CORRIO" "y llega a flutter test: sin eso el precheck no puede sellar EV-TEST"
+assert_contains "$out" "1 info(s) en el repo" "cuenta los infos en vez de esconderlos"
+assert_contains "$out" "1 en archivos que este cambio NO tocó" "y separa la deuda ajena"
+assert_contains "$out" "ratchet-keeper" "con su remediación, como buf y ruff"
+
+# 2. un info en un archivo que ESTE cambio tocó: se señala aparte, sin bloquear
+mk_flutter "$WS/fl2"; cd "$WS/fl2"
+printf '// tocado\n' > lib/viejo.dart
+git add -A && git commit -qm toca >/dev/null; cd "$WS"
+out="$(run_flutter "$WS/fl2" "$FL_STUB")"; rc=$?
+assert_eq 0 "$rc" "un info tuyo tampoco bloquea: tu CI sale verde con él"
+assert_contains "$out" "ESTE cambio tocó" "pero se dice aparte: es el único que probablemente es tuyo"
+assert_contains "$out" "lib/viejo.dart: Unused import" "nombrando archivo y hallazgo"
+
+# 3. errors: siguen siendo rojo, y ahí sí se para antes de la suite
+FL_STUB_ERR='flutter() {
+  echo "FLUTTER $*" >> "$FLLOG"
+  case "$*" in
+    *analyze*)
+      printf "%s\n" "   error • Undefined name • lib/main.dart:9:3 • undefined_identifier" \
+        "" "1 issue found."
+      return 1 ;;
+    test*) echo "SUITE CORRIO" ;;
+  esac
+}'
+mk_flutter "$WS/fl3"
+out="$(run_flutter "$WS/fl3" "$FL_STUB_ERR")"; rc=$?
+assert_eq 1 "$rc" "errors: el gate sigue bloqueando (los infos no son una amnistía general)"
+assert_contains "$out" "Undefined name" "muestra lo que analyze dijo"
+assert_contains "$out" "--no-fatal-infos" "y la remediación cita el comando exacto que debe salir en 0"
+assert_not_contains "$out" "SUITE CORRIO" "con el análisis en rojo no se sigue a la suite"
+
+# 4. el formato cambió y el parseo quedó ciego: se dice, no se sella un 0
+FL_STUB_RARO='flutter() {
+  echo "FLUTTER $*" >> "$FLLOG"
+  case "$*" in
+    *analyze*) printf "%s\n" "[info] formato viejo (lib/x.dart:1:1)" "" "3 issues found." ;;
+    test*) echo "SUITE CORRIO" ;;
+  esac
+}'
+mk_flutter "$WS/fl4"
+out="$(run_flutter "$WS/fl4" "$FL_STUB_RARO")"; rc=$?
+assert_eq 0 "$rc" "formato no reconocido: no se inventa un rojo (el veredicto lo dio el exit code)"
+assert_contains "$out" "no supe clasificar" "pero se declara la ceguera del conteo"
+assert_contains "$out" "EMIT assumption" "y el supuesto viaja al bus"
+assert_contains "$out" "SUITE CORRIO" "la suite corre igual"
+
+# Contra-mitad: un árbol limpio NO dispara el aviso de formato raro.
+# `No issues found!` lleva la palabra "found" y sin el [0-9] delante el gate
+# gritaba ceguera en todos los repos sanos.
+FL_STUB_LIMPIO='flutter() {
+  echo "FLUTTER $*" >> "$FLLOG"
+  case "$*" in
+    *analyze*) printf "%s\n" "Analyzing app..." "" "No issues found! (ran in 0.9s)" ;;
+    test*) echo "SUITE CORRIO" ;;
+  esac
+}'
+mk_flutter "$WS/fl5"
+out="$(run_flutter "$WS/fl5" "$FL_STUB_LIMPIO")"; rc=$?
+assert_eq 0 "$rc" "árbol limpio: verde"
+assert_not_contains "$out" "no supe clasificar" "y sin el falso aviso de ceguera del 'No issues found!'"
+assert_not_contains "$out" "info(s) en el repo" "ni un conteo de infos que no existen"
+
+# 5. sin flutter en el PATH: se dice, no se finge (y no muere con un 127 pelado)
+# PATH recortado y no un stub: lo que se mide es la rama de toolchain ausente,
+# y en una maquina con flutter instalado un stub vacio correria el flutter REAL.
+mk_flutter "$WS/fl6"
+out="$( ( cd "$WS/fl6"; WT="$WS/fl6"; REPO=app; TASK=T1; BASE_REF=main
+          PATH=/usr/bin:/bin
+          gate() { :; }; emit() { echo "EMIT $*"; }
+          . "$WS/lang.sh"; run_lang_gates ) 2>&1 )"; rc=$?
+assert_eq 0 "$rc" "sin la toolchain el gate no revienta con un 127"
+assert_contains "$out" "no está instalado" "dice que ese gate NO CORRIÓ"
+assert_contains "$out" "EMIT assumption" "y el tramo sin verificar viaja como supuesto"
+
+cd "$WS"
+
+echo
 echo "── terraform: el repo infra deja de pasar el precheck sin validar nada"
 # Caso de campo: los repos terraform pasaban el precheck sin verificar NADA
 # (caian al aviso de stack no reconocido, que no bloquea) y son justo los que

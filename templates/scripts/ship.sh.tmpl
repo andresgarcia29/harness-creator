@@ -900,6 +900,43 @@ gate_quick_size() {
   exit 3
 }
 
+# flutter_issues <severidad>: lee la salida de `flutter analyze` por stdin y
+# devuelve "archivo<TAB>mensaje" por cada hallazgo de esa severidad.
+#
+# El formato de analyze es estable desde flutter 2.x y viene indentado:
+#     info • Unused import: 'dart:async' • lib/main.dart:1:8 • unused_import
+# Se parsea SOLO para reportar (cuántos infos hay y cuáles tocó este cambio):
+# el veredicto rojo/verde lo da el exit code de flutter, nunca este awk. Si
+# mañana el formato cambia, lo peor que pasa es que el reporte quede mudo, y
+# el propio gate lo dice; jamás se convierte en un verde que nadie verificó.
+#
+# El archivo se busca por FORMA (el último token `algo:linea:columna`) y no
+# por posición de campo: un mensaje que traiga un "•" adentro (los hay, en las
+# comillas de un literal) corre los campos y rompería un `$4`.
+#
+# Sin intervalos ERE en el programa awk: mawk, el awk de fábrica de Debian y
+# Ubuntu, no los soporta y se apagaría en silencio (issue #98).
+flutter_issues() {
+  awk -v want="$1" '
+    $1 != want { next }
+    {
+      ruta = ""
+      for (i = 2; i <= NF; i++) if ($i ~ /:[0-9]+:[0-9]+$/) ruta = $i
+      if (ruta == "") next
+      sub(/:[0-9]+:[0-9]+$/, "", ruta)
+      # Mensaje: lo que va entre el primer "• " y el siguiente " • ".
+      # length("• ") en vez de un 2 pelado: mawk cuenta BYTES y gawk cuenta
+      # caracteres, y el bullet ocupa tres bytes en UTF-8.
+      p = index($0, "• ")
+      if (p == 0) next
+      resto = substr($0, p + length("• "))
+      q = index(resto, " • ")
+      msg = (q > 0) ? substr(resto, 1, q - 1) : resto
+      print ruta "\t" msg
+    }
+  '
+}
+
 run_lang_gates() {
   # ¿Reconocimos el stack de este repo? Si al final sigue en 0, el gate no
   # verificó NADA, y eso tiene que verse: era el silencio más caro del script.
@@ -912,6 +949,12 @@ run_lang_gates() {
   # suite" sin que ninguna suite hubiera corrido. TESTS_RAN mide lo que el
   # sello afirma, que es lo unico honesto que puede medir.
   TESTS_RAN=0
+  need() {  # need <bin> <stack>: ¿está la toolchain? si no, avisa honesto
+    command -v "$1" >/dev/null && return 0
+    echo "⚠️  $REPO es $2 pero '$1' no está instalado: ese gate NO CORRIÓ."
+    emit assumption "$REPO ($2) NO compilado ni testeado: falta '$1' en el PATH"
+    return 1
+  }
   if [ -f go.mod ]; then
     # UN COMANDO POR LINEA, NUNCA `A && B`: bajo set -e una AND-list que falla
     # NO aborta (set -e se ignora en todo comando de una lista AND-OR que no
@@ -1212,11 +1255,89 @@ run_lang_gates() {
     fi
   fi
   if [ -f pubspec.yaml ]; then
-    gate flutter
-    flutter analyze
-    flutter test
-    TESTS_RAN=1
     LANG_SEEN=1
+    # ── `flutter analyze` PELADO JUZGA OTRO REPO (issue #100) ────────────
+    # dart trata los `info` como FATALES cuando no se le pasa --no-fatal-infos,
+    # y un repo Flutter vivo SIEMPRE acumula infos: deprecaciones del SDK,
+    # lints informativos, TODOs marcados. Caso de campo: un repo con 11 infos,
+    # ninguno en los archivos que el diff tocaba y con su propia CI de release
+    # en verde, quedó ENTERO inshippeable por el harness. Un gate que ignora el
+    # contrato del repo que juzga está juzgando otro repo.
+    #
+    # Y el daño peor no era el falso rojo: analyze abortaba ANTES de
+    # `flutter test`, así que la suite nunca corría y el precheck no podía
+    # sellar su EV-TEST. Eso empuja a sellar la evidencia a mano, que es
+    # exactamente el atajo que el gate de evidencia existe para impedir.
+    #
+    # Se corre el MISMO comando que corre la CI de un proyecto Flutter maduro.
+    # errors y warnings siguen siendo rojo (es el default de dart y los bloquea
+    # cualquier CI); los infos se miran, se cuentan y se dicen, pero NO
+    # bloquean: es la misma línea que ya trazan el ratchet de ruff y el de buf,
+    # "la deuda preexistente no secuestra shipping ajeno".
+    if need flutter Flutter; then
+      gate flutter
+      local fl_rc=0 fl_out fl_infos fl_n fl_tocados fl_mios fl_viejos
+      # --no-color para que el parseo de abajo no tenga que pelear con códigos
+      # ANSI si el gate corre bajo un pty. El `|| fl_rc=$?` es obligatorio: bajo
+      # set -e una asignación con `$( )` que sale distinto de 0 mata el script,
+      # y acá el exit code ES el veredicto que hay que leer, no un accidente.
+      fl_out="$(flutter --no-color analyze --no-fatal-infos 2>&1)" || fl_rc=$?
+      printf '%s\n' "$fl_out"
+      if [ "$fl_rc" -ne 0 ]; then
+        echo "❌ flutter analyze: hay errors/warnings (los infos NO bloquean)."
+        echo "   ↳ remediación: corregí los hallazgos de arriba hasta que"
+        echo "     'flutter analyze --no-fatal-infos' salga en 0. Es el mismo"
+        echo "     comando que corre la CI de release de este repo."
+        exit "$fl_rc"
+      fi
+      # Los infos que quedan: se dicen SIEMPRE, y se separan los de los archivos
+      # que ESTE cambio tocó de la deuda que ya estaba. Sin esa separación "11
+      # infos" es ruido que nadie lee; con ella, el implementer ve en una línea
+      # cuáles son probablemente suyos.
+      fl_infos="$(printf '%s\n' "$fl_out" | flutter_issues info)"
+      fl_n="$(printf '%s' "$fl_infos" | awk 'NF{n++} END{print n+0}')"
+      if [ "$fl_n" -gt 0 ]; then
+        fl_tocados="$(git diff --name-only --diff-filter=d \
+          "origin/$BASE_REF...HEAD" -- '*.dart' 2>/dev/null || true)"
+        fl_mios="$(printf '%s\n' "$fl_infos" | awk -F'\t' -v t="$fl_tocados" '
+          BEGIN { n = split(t, a, "\n"); for (i = 1; i <= n; i++) if (a[i] != "") m[a[i]] = 1 }
+          ($1 in m)')"
+        fl_viejos=$((fl_n - $(printf '%s' "$fl_mios" | awk 'NF{n++} END{print n+0}')))
+        if [ -n "$fl_mios" ]; then
+          echo "⚠️  flutter analyze: infos en archivos que ESTE cambio tocó:"
+          printf '%s\n' "$fl_mios" | awk -F'\t' '{print "   " $1 ": " $2}'
+          echo "   No bloquean (la CI de este repo corre --no-fatal-infos y sale"
+          echo "   verde con ellos), pero son los únicos de la lista que"
+          echo "   probablemente escribiste vos: míralos antes de mandar."
+        fi
+        echo "⚠️  flutter analyze: $fl_n info(s) en el repo ($fl_viejos en archivos que este cambio NO tocó)."
+        echo "   Los infos no bloquean el ship: dart los trata como fatales por"
+        echo "   default, pero un repo vivo siempre acumula, y ponerlos en rojo"
+        echo "   deja al repo entero sin poder shippear por deuda que este"
+        echo "   cambio no causó."
+        echo "   ↳ candidatos al ratchet-keeper: flutter analyze"
+      else
+        # analyze reportó hallazgos, salió en 0 (o sea: eran infos) y el parseo
+        # no clasificó ninguno. Eso es formato cambiado, y se dice: un "0 infos"
+        # que nadie verificó es el falso verde de siempre.
+        #
+        # `case` y no `grep -q`: bajo `set -o pipefail` el grep cierra el pipe
+        # al primer match, el printf muere con SIGPIPE y la condición sale 141,
+        # o sea FALSA justo cuando hay algo que decir. La lección ya está
+        # escrita dos veces en este archivo. El `[0-9]` delante es lo que
+        # separa "11 issues found" del "No issues found!" de un árbol limpio.
+        case "$fl_out" in
+          *[0-9]" issue found"*|*[0-9]" issues found"*)
+            echo "⚠️  flutter analyze reportó hallazgos que no supe clasificar."
+            echo "   El verde de arriba lo dio el exit code de flutter, no este parseo,"
+            echo "   pero el conteo de infos de este gate quedó CIEGO. Revisá la salida."
+            emit assumption "$REPO (Flutter): no pude clasificar los hallazgos de analyze (¿cambió el formato?)"
+            ;;
+        esac
+      fi
+      flutter test
+      TESTS_RAN=1
+    fi
   fi
   # ── Stacks que faltaban ───────────────────────────────────────────────
   # Hasta aquí el gate solo reconocía Go, Node, Python y Dart. Un repo Rust,
@@ -1226,13 +1347,11 @@ run_lang_gates() {
   # agujero más grande (regla 8 de CONTRIBUTING).
   #
   # Cada uno sigue la regla de la casa: si el marcador está pero la toolchain
-  # no, se dice, no se finge un veredicto.
-  need() {  # need <bin> <stack>: ¿está la toolchain? si no, avisa honesto
-    command -v "$1" >/dev/null && return 0
-    echo "⚠️  $REPO es $2 pero '$1' no está instalado: ese gate NO CORRIÓ."
-    emit assumption "$REPO ($2) NO compilado ni testeado: falta '$1' en el PATH"
-    return 1
-  }
+  # no, se dice, no se finge un veredicto. Eso lo hace need(), que ahora se
+  # declara ARRIBA de todo (junto a TESTS_RAN) porque el gate de Flutter
+  # también lo usa y vive ANTES en el archivo: una función declarada a mitad
+  # de camino solo existe para lo que viene después de ella, y esa asimetría
+  # es justo la que dejaba a Flutter muriendo con un 127 pelado.
   if [ -f Cargo.toml ]; then
     LANG_SEEN=1
     if need cargo Rust; then gate rust; cargo build --locked; cargo test; TESTS_RAN=1; fi

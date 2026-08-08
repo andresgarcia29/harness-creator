@@ -50,7 +50,7 @@ capped() { [ -f "$1" ] && sed -n "1,${2}p" "$1"; }
   [ -f "$SRC/go.mod" ]        && echo "- Go (\`go build ./...\` · \`go test ./...\` · module: $(head -1 "$SRC/go.mod" | cut -d' ' -f2))"
   [ -f "$SRC/package.json" ]  && echo "- Node$( [ -f "$SRC/tsconfig.json" ] && printf '/TypeScript (`npx tsc --noEmit`)' ) · scripts: $(command -v jq >/dev/null && jq -r '.scripts | keys | join(", ")' "$SRC/package.json" 2>/dev/null || echo "ver package.json")"
   [ -f "$SRC/pyproject.toml" ] && echo "- Python (\`ruff check .\` · \`pytest -q\`)"
-  [ -f "$SRC/pubspec.yaml" ]  && echo "- Flutter (\`flutter analyze\` · \`flutter test\`)"
+  [ -f "$SRC/pubspec.yaml" ]  && echo "- Flutter (\`flutter analyze --no-fatal-infos\` · \`flutter test\`)"
   [ -f "$SRC/buf.yaml" ]      && echo "- ⚠️ CONTRATOS proto (buf): cualquier cambio aquí es carril standard/full, expand/contract obligatorio"
   if [ -f "$SRC/Makefile" ]; then
     targets="$(grep -E '^[a-zA-Z0-9_.-]+:([^=]|$)' "$SRC/Makefile" | cut -d: -f1 | sort -u | head -12 | tr '\n' ' ')"

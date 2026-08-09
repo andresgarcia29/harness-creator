@@ -2037,6 +2037,48 @@ class CostGateTest(unittest.TestCase):
         r = self.transition("implement")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_el_eximido_de_ctx_deja_REGISTRAR_la_fase_que_ya_se_shippeo(self):
+        # ISSUE #111: el mismo defecto que el #103, reportado desde el otro
+        # extremo y con la consecuencia puesta. En campo: los dos repos de la
+        # tarea YA estaban en main y desplegados verdes, y la fase no se podia
+        # registrar. El propio ship.sh lo habia avisado: "no pude registrar la
+        # fase: POLICY-BUDGET-005 / El push SI ocurrio. Registrala a mano o el
+        # estado va a mentir." El waive se sello dos veces (350474.1 y despues
+        # 360800.82) y las dos veces la transicion siguiente volvio a frenar,
+        # porque entre el sello y la transicion el contexto ya habia crecido.
+        #
+        # Lo que este caso fija y el del #103 no: que el eximido se compara
+        # contra la fase de la que se SALE, no contra la que se entra. Cubre la
+        # ventana que se midio, y esa ventana es la fase que ya se trabajo.
+        self.assertEqual(self.init(budget=500).returncode, 0)
+        # Se llega a la fase en limpio: lo que se mide es la fase que se CIERRA.
+        self.assertEqual(self.transition("implement").returncode, 0)
+        self.write_transcript(turns=34, cache_read=430_000, cache_write=1_000)
+        frena = self.transition("review")
+        self.assertEqual(frena.returncode, 3, frena.stdout + frena.stderr)
+        self.assertIn("COST-CTX", frena.stdout + frena.stderr,
+                      "el que frena tiene que ser el termino que se va a eximir")
+        w = self.waive("ctx", "orquestador",
+                       reason="cierre de fase: los dos repos ya estan en main")
+        self.assertEqual(w.returncode, 0, w.stdout + w.stderr)
+        state = json.loads((self.task / "state.json").read_text())
+        ctx = [x for x in state["cost_waivers"] if x.get("band") == "ctx"][0]
+        self.assertEqual(ctx["phase"], "implement",
+                         "el eximido cubre la fase que se esta cerrando, no la que se entra")
+        # El contexto sigue creciendo entre el sello y la transicion, que es la
+        # carrera entera del reporte: son tool calls del propio waive.
+        self.write_transcript(turns=40, cache_read=460_000, cache_write=1_000)
+        r = self.transition("review")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # Y destraba DEJANDO RASTRO, que es la otra mitad del reporte: la unica
+        # salida que quedaba era HARNESS_CTX_CEILING, y el propio mensaje la
+        # describe como el ultimo recurso justamente porque no se puede auditar.
+        final = json.loads((self.task / "state.json").read_text())
+        sello = [h for h in final["history"] if h.get("kind") == "cost-waive"]
+        self.assertEqual(len(sello), 1, final)
+        self.assertEqual(sello[0]["actor"], "humano")
+        self.assertIn("ya estan en main", sello[0]["reason"])
+
     def test_no_se_exime_lo_que_no_esta_frenando(self):
         # El eximido se ancla al valor MEDIDO: eximir por adelantado seria
         # declarar algo que nadie midio, y ahi si seria un boton de apagado.

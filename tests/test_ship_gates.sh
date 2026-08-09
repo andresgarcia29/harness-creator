@@ -798,6 +798,7 @@ extract muerde_limpia >> "$WS/gate_muerde.sh"
 # gate: son sus tres lecturas (el delta-spec, el diff y el grafo de modulos de
 # la base). Sin ellas el gate extraido muere con 127 en vez de decidir.
 for fn in delta_seccion declara_tests_nuevos muerde_pytest muerde_go \
+          muerde_go_tags_de muerde_go_tags \
           muerde_go_base_compila muerde_tf muerde_tf_root muerde_tf_base_init \
           muerde_node con_limite muerde_node_colecta_en muerde_node_colecta muerde_corre \
           muerde_corre_grupo muerde_salto gate_test_muerde; do
@@ -1279,6 +1280,104 @@ assert_eq 0 "$rc" "sin gowork.sh: el gate no inventa un rojo"
 assert_contains "$out" "el ÁRBOL BASE no compila sin tu cambio" "y la ceguera del #43 sigue diciendose"
 assert_contains "$out" "EMIT assumption" "con su supuesto en el bus"
 mv "$WS/scripts/gowork.sh.off" "$WS/scripts/gowork.sh"
+rm -f "$WS/bin-muerde/go"
+
+# (m3) #109: el gate corria `go test <pkg>` SIN -tags, asi que un test bajo
+#      `//go:build integration` ni se compilaba sobre la base y el paquete
+#      "pasaba". Medido en hermes, cuyo CLAUDE.md ya documenta la tag:
+#        go test              -list '.*' ./internal/infrastructure/postgres → 0
+#        go test -tags=integration -list '.*' ./…/postgres                  → 2
+#      O sea que el comando del gate no podia ni OBSERVAR el test que juzgaba, y
+#      el veredicto salia "PASA sobre el arbol base" sobre un test que si muerde
+#      (sin la transaccion, la sucursal queda sin ninguna cuenta primaria).
+#      Efecto: todo test de integracion nuevo en un repo Go con build tags se
+#      rechaza como vacuo, lo que empuja a escribir un test redundante solo para
+#      el gate: justo lo que el gate existe para evitar.
+# El stub modela la UNICA distincion que importa: sin la tag el paquete no ve el
+# archivo (verde vacio), con la tag el test compila contra un simbolo que la
+# base no tiene y revienta.
+cat > "$WS/bin-muerde/go" <<'SH'
+#!/bin/sh
+tags=""; prev=""
+for a in "$@"; do
+  [ "$prev" = "-tags" ] && tags="$a"
+  case "$a" in -tags=*) tags="${a#-tags=}" ;; esac
+  prev="$a"
+done
+case "$1" in
+  build) exit 0 ;;
+  test)
+    case ",$tags," in
+      *,integration,*)
+        echo "--- FAIL: TestITCreateAsPrimary (undefined: CreateAsPrimary)"; exit 1 ;;
+    esac
+    echo "ok  example.com/svc/internal/postgres  0.009s"; exit 0 ;;
+esac
+exit 0
+SH
+chmod +x "$WS/bin-muerde/go"
+mk_muerde_repo "$WS/mu11d"
+mkdir -p internal/postgres
+printf '//go:build integration\n\npackage postgres\n\nfunc TestITCreateAsPrimary(t *testing.T) {}\n' \
+  > internal/postgres/channel_create_as_primary_integration_test.go
+git add -A && git commit -qm "test de integracion nuevo, bajo build tag"
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "#109: el gate llega a un veredicto sobre un test con build tags"
+assert_contains "$out" "-tags integration" \
+  "#109: pasa la tag que declara el propio archivo (los tags estan en el archivo que el gate ya tiene en la mano)"
+assert_contains "$out" "o sea que MUERDE" \
+  "#109: y entonces VE el test que juzga, en vez de correr sobre un paquete donde no existe"
+assert_not_contains "$out" "PASA sobre el árbol base" \
+  "#109: el falso vacuo que rechazaba todo test de integracion nuevo de un repo Go"
+
+# Un test SIN build tags no recibe -tags: agregar una tag inventada cambiaria el
+# conjunto de archivos del paquete, o sea que el gate juzgaria otro paquete.
+cat > "$WS/bin-muerde/go" <<'SH'
+#!/bin/sh
+for a in "$@"; do
+  case "$a" in -tags|-tags=*) echo "-tags sobre un paquete que no lo pidio" >&2; exit 2 ;;
+  esac
+done
+case "$1" in build) exit 0 ;; test) echo "--- FAIL: TestNuevo"; exit 1 ;; esac
+exit 0
+SH
+chmod +x "$WS/bin-muerde/go"
+mk_muerde_repo "$WS/mu11e"
+printf 'package svc\n\nfunc TestNuevo(t *testing.T) {}\n' > svc_test.go
+git add -A && git commit -qm "test go sin build tags"
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "un test sin build tags sigue corriendo igual que antes"
+assert_contains "$out" "o sea que MUERDE" "y su veredicto no cambia"
+assert_not_contains "$out" "build tags declaradas" "sin anunciar tags que nadie declaro"
+
+# Una tag NEGADA pide lo CONTRARIO: definirla EXCLUIRIA el archivo, y el rojo
+# volveria a salir de un paquete vacio, solo que por el motivo simetrico.
+# Mismo stub: cualquier -tags es un rojo del test, no del arbol.
+mk_muerde_repo "$WS/mu11f"
+printf '//go:build !integration\n\npackage svc\n\nfunc TestUnit(t *testing.T) {}\n' > svc_test.go
+git add -A && git commit -qm "test bajo una tag negada"
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "#109: una tag negada no se convierte en -tags"
+assert_not_contains "$out" "build tags declaradas" \
+  "#109: definir la tag que el archivo NIEGA lo sacaria del paquete: el mismo falso verde al reves"
+
+# Ni las tags que pone el toolchain: -tags=cgo con CGO_ENABLED=0 compila codigo
+# cgo sin cgo, que es un rojo INVENTADO (el pecado que el #43 mato por el otro
+# lado). GOOS, GOARCH y go1.x tampoco se habilitan con -tags.
+cat > "$WS/bin-muerde/go" <<'SH'
+#!/bin/sh
+case "$1" in build) exit 0 ;; test) echo "--- FAIL: TestX"; exit 1 ;; esac
+exit 0
+SH
+chmod +x "$WS/bin-muerde/go"
+mk_muerde_repo "$WS/mu11g"
+printf '//go:build cgo && linux && arm64 && go1.22 && slow_db\n\npackage svc\n\nfunc TestX(t *testing.T) {}\n' > svc_test.go
+git add -A && git commit -qm "tags automaticas mezcladas con una de verdad"
+out="$(run_muerde)"; rc=$?
+# El parentesis cierra la linea del anuncio: pin exacto de la lista, para que
+# una tag automatica colandose no pase inadvertida.
+assert_contains "$out" "-tags slow_db)" \
+  "#109: pasa la unica tag que se habilita con -tags, y ninguna de las que pone el toolchain"
 rm -f "$WS/bin-muerde/go"
 
 # (n) COR-625: un .tftest.hcl NI SIQUIERA entraba al alcance del gate (el

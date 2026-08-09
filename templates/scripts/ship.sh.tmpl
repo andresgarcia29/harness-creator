@@ -2423,6 +2423,86 @@ muerde_tf_base_init() {  # muerde_tf_base_init <archivo>
   ( cd "$MUERDE_BASE/$(muerde_tf_root "$1")"
     terraform init -backend=false -input=false )
 }
+# ── LAS BUILD TAGS SALEN DEL PROPIO ARCHIVO (#109) ────────────────────
+# `go test ./pkg` SIN -tags no compila los archivos con `//go:build integration`,
+# así que el gate corría sobre un paquete donde el test que está juzgando NI
+# EXISTE, y el paquete "pasaba". Medido en campo (hermes, cuyo CLAUDE.md ya
+# documenta `go test -tags=integration ./...`):
+#   go test              -list '.*' ./internal/infrastructure/postgres → 0 casos
+#   go test -tags=integration -list '.*' ./…/postgres                  → 2 casos
+# El veredicto era "✗ PASA sobre el árbol base" sobre un test que SÍ muerde
+# (sacándole la transacción al repo, el caso falla y la sucursal queda sin
+# ninguna cuenta primaria). Efecto: TODO test de integración nuevo en un repo Go
+# con build tags se rechaza como vacuo, lo que empuja a agregar un test
+# redundante solo para contentar al gate: exactamente lo que el gate existe para
+# evitar. Y el comando del gate no podía ni observar lo que estaba juzgando.
+#
+# QUÉ SE EXTRAE Y QUÉ NO:
+#  · Solo los identificadores POSITIVOS. `!integration` pide lo CONTRARIO, y
+#    definir esa tag EXCLUIRÍA el archivo que se quiere ver: el rojo saldría de
+#    un paquete vacío otra vez, solo que por la razón simétrica.
+#  · Ni GOOS/GOARCH ni las tags que pone el toolchain (`cgo`, `race`, `unix`,
+#    `go1.22`): esas NO se habilitan con -tags. `-tags=cgo` con CGO_ENABLED=0
+#    compila código cgo sin cgo, o sea un rojo inventado, que es el mismo pecado
+#    que el #43 arregló por el otro lado.
+#  · La UNIÓN de los archivos nuevos del paquete. Un archivo sin restricción
+#    entra siempre, así que sumar tags no puede sacar a nadie del alcance.
+muerde_go_tags_de() {  # muerde_go_tags_de <archivo> → una tag por línea
+  [ -f "$1" ] || return 0
+  awk '
+    BEGIN {
+      # Las que el toolchain decide por sí solo: pasarlas por -tags no las
+      # habilita, miente sobre el entorno, o las dos cosas. Una sola línea a
+      # propósito: la continuación con `\` dentro de una cadena es indefinida
+      # en POSIX awk, y este script corre en el awk que traiga el host.
+      split("aix android darwin dragonfly freebsd hurd illumos ios js linux nacl netbsd openbsd plan9 solaris wasip1 windows zos unix 386 amd64 amd64p32 arm armbe arm64 arm64be loong64 mips mipsle mips64 mips64le mips64p32 mips64p32le ppc ppc64 ppc64le riscv riscv64 s390 s390x sparc sparc64 wasm cgo race msan asan gc gccgo boringcrypto purego ignore", a, " ")
+      for (i in a) auto[a[i]] = 1
+    }
+    # Las restricciones viven ANTES de la cláusula package, siempre.
+    /^[[:space:]]*package[[:space:]]/ { exit }
+    {
+      linea = ""
+      if ($0 ~ /^\/\/go:build[[:space:]]/) linea = substr($0, 11)
+      # La sintaxis vieja (pre Go 1.17) sigue siendo válida en un archivo sin
+      # `//go:build`, y hay repos que todavía la tienen.
+      else if ($0 ~ /^\/\/[[:space:]]*\+build[[:space:]]/) {
+        linea = $0; sub(/^\/\/[[:space:]]*\+build/, "", linea)
+      }
+      if (linea == "") next
+      # && || , ( ) son estructura; lo que importa es qué identificadores
+      # quedan SIN negar. El `!` se pega a su token para no perderlo de vista.
+      gsub(/[(),]/, " ", linea); gsub(/&&/, " ", linea); gsub(/\|\|/, " ", linea)
+      gsub(/![[:space:]]*/, "!", linea)
+      n = split(linea, t, " ")
+      for (i = 1; i <= n; i++) {
+        tok = t[i]
+        if (tok == "" || tok ~ /^!/) continue
+        if (tok !~ /^[A-Za-z_][A-Za-z0-9_.]*$/) continue
+        if (tok ~ /^go1\.[0-9]/ || (tok in auto)) continue
+        print tok
+      }
+    }
+  ' "$1"
+}
+muerde_go_tags() {  # muerde_go_tags <paquete> → MUERDE_GO_TAGS (lista para -tags)
+  local pkg="$1" f d acumulado=""
+  MUERDE_GO_TAGS=""
+  # `go_files` es el alcance ya clasificado de gate_test_muerde: los archivos
+  # que ESTE gate trajo al árbol base. Se leen del worktree, que es donde el
+  # archivo nuevo es autoritativo.
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    d="$(dirname "$f")"
+    if [ "$d" = "." ]; then d="./"; else d="./$d"; fi
+    [ "$d" = "$pkg" ] || continue
+    acumulado="$acumulado$(muerde_go_tags_de "$WT/$f")
+"
+  done <<TAGSEOF
+${go_files:-}
+TAGSEOF
+  MUERDE_GO_TAGS="$(printf '%s\n' "$acumulado" \
+    | awk 'NF && !visto[$0]++ { s = s (s ? "," : "") $0 } END { print s }')"
+}
 # ── ¿el ÁRBOL BASE resuelve su grafo de módulos? ──────────────────────
 # Caso de campo: en un monorepo con `replace ... => ../../pkg`, el worktree
 # temporal del gate nace SIN el go.work que hace resolver ese replace, así que
@@ -2440,7 +2520,12 @@ muerde_tf_base_init() {  # muerde_tf_base_init <archivo>
 # Misma asimetría que muerde_node ya aplica con node_modules: un gate honesto
 # que se salta es mejor que uno que aprueba todo.
 muerde_go_base_compila() {  # muerde_go_base_compila <paquete>
-  ( cd "$MUERDE_BASE"; go build "$1" )
+  ( cd "$MUERDE_BASE"
+    # Las MISMAS tags que la corrida: si el paquete solo compila bajo la tag y
+    # acá se pregunta sin ella, la pregunta "¿la base era construible?" se le
+    # hace a un paquete distinto del que después se corre.
+    if [ -n "${MUERDE_GO_TAGS:-}" ]; then go build -tags "$MUERDE_GO_TAGS" "$1"
+    else go build "$1"; fi )
 }
 muerde_node() {  # → MUERDE_NODE_RUNNERS con los runners declarados E instalados
   local pkg="$WT/package.json" unit=""
@@ -2599,7 +2684,11 @@ muerde_corre() {  # muerde_corre <clase> <unidad> → el exit REAL sobre el árb
         PYTHONPATH="$MUERDE_BASE:$MUERDE_BASE/src${PYTHONPATH:+:$PYTHONPATH}" \
           "$MUERDE_PY" -q "$2" ) ;;
     go)
-      ( cd "$MUERDE_BASE"; go test "$2" ) ;;
+      # -tags con lo que declara el propio archivo (#109): sin esto, un test
+      # bajo `//go:build integration` NI SE COMPILA acá y el paquete "pasa".
+      ( cd "$MUERDE_BASE"
+        if [ -n "${MUERDE_GO_TAGS:-}" ]; then go test -tags "$MUERDE_GO_TAGS" "$2"
+        else go test "$2"; fi ) ;;
     tf)
       # -filter corre SOLO este archivo, unidad por unidad como el resto.
       # La ruta del filtro es relativa a la raiz del modulo, no al repo.
@@ -2636,6 +2725,13 @@ muerde_corre_grupo() {  # muerde_corre_grupo <clase> <lista>: unidad por unidad
     # se compra con esta línea es lo otro que el reporte pedía: que un cuelgue
     # deje de ser silencioso y se pueda nombrar el culpable de un vistazo.
     echo "   → corriendo sobre la base: $u"
+    # Las build tags ANTES de las dos invocaciones de Go (compilar la base y
+    # correr el test), que tienen que preguntarle al MISMO paquete (#109).
+    if [ "$clase" = "go" ]; then
+      muerde_go_tags "$u"
+      [ -n "$MUERDE_GO_TAGS" ] && \
+        echo "     (build tags declaradas por el propio archivo: -tags $MUERDE_GO_TAGS)"
+    fi
     # Go: si la BASE no compila sin el cambio, su exit != 0 es ambiental y
     # cobrarlo como MUERDE es el falso verde que este bloque existe para matar.
     if [ "$clase" = "go" ] && ! muerde_go_base_compila "$u" > "$MUERDE_SALIDA" 2>&1; then
@@ -2715,7 +2811,10 @@ gate_test_muerde() {
   local artifacts="${TEST_ARTIFACT_PATTERN:-(__pycache__/|\.pyc$|\.pyo$|\.class$|\.pytest_cache/|/node_modules/)}"
   local nuevos tocados delta added="" escape="" f dir
   local scope="" escapados=""
-  local py_files="" go_dirs="" node_files="" tf_units="" otros=""
+  # `go_dirs` es la UNIDAD que corre `go test` (un paquete: no acepta un archivo
+  # suelto sin arrastrar a sus vecinos) y `go_files` es de dónde salen sus build
+  # tags (#109), que viven en el archivo y no en el directorio.
+  local py_files="" go_dirs="" go_files="" node_files="" tf_units="" otros=""
   local corre_py=0 corre_go=0 corre_node=0 corre_tf=0
   local MUERDE_PY="" MUERDE_NODE_RUNNERS="" MUERDE_NODE_RUNNER="" MUERDE_MOTIVO=""
   local mb head tmp
@@ -2791,6 +2890,8 @@ TOCEOF
       *.go) dir="$(dirname "$f")"
             if [ "$dir" = "." ]; then dir="./"; else dir="./$dir"; fi
             go_dirs="$go_dirs$dir
+"
+            go_files="$go_files$f
 " ;;
       *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs) node_files="$node_files$f
 " ;;
@@ -2842,6 +2943,7 @@ SCOPEOF
   (
     MUERDE_TMP="$tmp"; MUERDE_WT=""; MUERDE_BASE="$tmp/base"
     MUERDE_SALIDA="$tmp/salida"; MUERDE_VACUOS=""; MUERDE_CIEGOS=""; MUERDE_SINRED=""
+    MUERDE_GO_TAGS=""
     trap muerde_limpia EXIT
     if ! git -C "$WT" worktree add --detach --quiet "$MUERDE_BASE" "$mb"; then
       echo "⚠️  no pude crear el worktree temporal del árbol base ($mb): el gate NO CORRIÓ."

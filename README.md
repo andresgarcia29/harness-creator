@@ -892,7 +892,7 @@ Y cumple la regla de la casa: si no puede consultar la versión de upstream (sin
 
 Un número de versión lo escribe quien genera, y por lo tanto puede mentir sin proponérselo. Pasó en la forma más cara posible: un generador escribió `.harness-version` con la versión **nueva** habiendo generado desde templates **viejos**. Reportó "1 actualizado, 24 conflictos" y ninguno de esos 24 archivos traía los arreglos que el número prometía. Nada en la salida lo decía, así que la única forma de enterarse era resolver los 24 diffs a mano y notar que faltaban.
 
-Por eso el repo publica **`templates/MANIFEST.sha256`**: el sha256 de cada uno de los 110 archivos que terminan dentro de una instancia, más un `digest:` que identifica al set completo. Y todo generador **debe** escribir ese digest en `.harness-templates` al generar. (Ese 110 también lo verifica la suite contra el manifiesto real: ver el final de esta sección.)
+Por eso el repo publica **`templates/MANIFEST.sha256`**: el sha256 de cada uno de los 111 archivos que terminan dentro de una instancia, más un `digest:` que identifica al set completo. Y todo generador **debe** escribir ese digest en `.harness-templates` al generar. (Ese 111 también lo verifica la suite contra el manifiesto real: ver el final de esta sección.)
 
 Con eso, `make version` compara **contenido**, no solo números:
 

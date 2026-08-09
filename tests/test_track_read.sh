@@ -244,4 +244,37 @@ assert_not_contains "$(cat "$WS/tasks/COR-12/evidence.log")" "no/existe.go" \
 out="$(bash "$WS/scripts/mark-read.sh" "../evil" "x.go" 2>&1)"; rc=$?
 assert_eq 2 "$rc" "task-id con traversal: rechazado"
 
+echo
+echo "── #114: una tarea ARCHIVADA no se resucita"
+# El mkdir -p era incondicional, asi que este hook recreaba tasks/<id>/ despues
+# de que /archive lo movio. No era una carrera: era el ORDEN del playbook (mover
+# artefactos en el 3, retirar worktrees en el 5), asi que le pasaba a TODA tarea
+# archivada al pie de la letra. Y una tarea archivada con directorio vuelve a
+# parecer viva para todo lo que mire el filesystem, que es justo lo que el paso
+# de retirar worktrees existe para evitar: ningun hook conoce el estado
+# "archivada", todos derivan la tarea de la RUTA.
+mkdir -p "$WS/tasks/archive/2026-08-09-COR-944"
+payload Read "{\"file_path\":\"$WS/worktrees/COR-944/atlas/repo.go\"}" | "$HOOK"
+assert_no_file "$WS/tasks/COR-944/evidence.log" \
+  "#114: el hook NO recrea tasks/<id>/ de una tarea ya archivada"
+[ ! -d "$WS/tasks/COR-944" ] && pass "#114: ni siquiera el directorio" \
+  || fail "#114: recreo tasks/COR-944/, que es el estado que /archive existe para evitar"
+assert_contains "$(cat "$WS/tasks/archive/2026-08-09-COR-944/evidence.log" 2>/dev/null)" "repo.go" \
+  "#114: la evidencia se escribe donde la tarea vive ahora (el archive es su audit trail), no se tira"
+
+# Dos archivados del mismo id: no se elige. Escribir en la tarea equivocada es
+# peor que no escribir, porque gate_evidence citaria una corrida ajena.
+mkdir -p "$WS/tasks/archive/2026-08-01-COR-777" "$WS/tasks/archive/2026-08-09-COR-777"
+payload Read "{\"file_path\":\"$WS/worktrees/COR-777/atlas/dup.go\"}" | "$HOOK"
+[ ! -d "$WS/tasks/COR-777" ] && pass "#114: con dos archivados del mismo id tampoco resucita" \
+  || fail "#114: recreo tasks/COR-777/"
+for d in "$WS/tasks/archive/2026-08-01-COR-777" "$WS/tasks/archive/2026-08-09-COR-777"; do
+  assert_no_file "$d/evidence.log" "y no adivina cuál de los dos: $(basename "$d")"
+done
+
+# La tarea VIVA sigue igual: el directorio se crea como siempre.
+payload Read "{\"file_path\":\"$WS/worktrees/COR-31/atlas/vivo.go\"}" | "$HOOK"
+assert_contains "$(cat "$WS/tasks/COR-31/evidence.log" 2>/dev/null)" "vivo.go" \
+  "una tarea viva sin directorio previo lo sigue creando (no se rompe el caso normal)"
+
 t_done

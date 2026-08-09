@@ -70,6 +70,65 @@ assert_contains "$out" "promotion-1" "el camino feliz sigue mostrando la promoci
 assert_not_contains "$(bus)" "assumption" "kargo en verde: NO emite supuesto"
 
 echo
+echo "── #112: el CLI revienta con su propio renderer de texto"
+# Medido en cuatro deploys de DOS instancias, cuatro dias aparte: `kargo get
+# promotions` sin -o json muere deserializando su propia respuesta
+# (*models.PromotionList no implementa TextUnmarshaler), asi que el tramo de
+# promocion estaba ciego en TODA tarea. El stub modela exactamente eso: texto
+# revienta, json contesta.
+cat > "$WS/bin/kargo" <<'STUB'
+#!/usr/bin/env bash
+for a in "$@"; do case "$a" in json) exec cat "$KARGO_JSON" ;; esac; done
+echo "Error: list promotions: &{ []  <nil>} (*models.PromotionList) is not supported by the TextConsumer" >&2
+exit 1
+STUB
+chmod +x "$WS/bin/kargo"
+cat > "$WS/promos.json" <<'JSON'
+{"items":[
+ {"metadata":{"name":"promo-vieja","creationTimestamp":"2026-08-01T00:00:00Z"},"spec":{"freight":"f-001"},"status":{"phase":"Succeeded"}},
+ {"metadata":{"name":"promo-nueva","creationTimestamp":"2026-08-09T00:00:00Z"},"spec":{"freight":"f-042"},"status":{"phase":"Running"}}
+]}
+JSON
+: > "$WS/.harness/events.jsonl"
+out="$(KARGO_JSON="$WS/promos.json" run_kargo)"
+assert_contains "$out" "-o json" "#112: cae a -o json cuando el renderer de texto revienta"
+assert_contains "$out" "promo-nueva" "#112: y el tramo DEJA de estar ciego"
+assert_contains "$out" "f-042" "nombrando el freight, que es lo que distingue 'ArgoCD sano' de 'sano CON MI imagen'"
+assert_contains "$out" "Running" "y la fase"
+assert_not_contains "$(bus)" "assumption" "#112: sin supuesto: el tramo se verifico de verdad"
+# El JSON crudo no se vuelca: cinco lineas de objeto no dicen si promovio.
+assert_not_contains "$out" "creationTimestamp" "y no vuelca el objeto entero"
+
+# LA HIPOTESIS DEL REPORTE NO ESTA CONFIRMADA (falta auth de kargo), asi que lo
+# que se fija es que NINGUN resultado sea peor que el de hoy: si json tampoco
+# sirve, el tramo vuelve a declararse ciego, que es la conducta actual.
+cat > "$WS/bin/kargo" <<'STUB'
+#!/usr/bin/env bash
+echo "Error: list promotions: (*models.PromotionList) is not supported by the TextConsumer" >&2
+exit 1
+STUB
+chmod +x "$WS/bin/kargo"
+: > "$WS/.harness/events.jsonl"
+out="$(run_kargo)"
+assert_contains "$out" "ni con -o json ni en texto" \
+  "#112: si json tampoco sirve, el motivo dice que se probaron los dos"
+assert_contains "$(bus)" "Kargo NO verificada" "#112: y la ceguera declarada del diseno sigue intacta"
+
+# Un CLI que SI sabe hablar texto no se rompe por este arreglo: sigue el camino
+# de siempre, porque el json de un CLI viejo puede no existir.
+cat > "$WS/bin/kargo" <<'STUB'
+#!/usr/bin/env bash
+for a in "$@"; do case "$a" in json) echo "unknown flag: -o" >&2; exit 1 ;; esac; done
+echo "promotion-1  Succeeded"
+STUB
+chmod +x "$WS/bin/kargo"
+: > "$WS/.harness/events.jsonl"
+out="$(run_kargo)"
+assert_contains "$out" "promotion-1" "#112: un CLI sin -o json sigue funcionando por texto"
+assert_contains "$out" "salida de texto" "y el motivo dice por donde contesto"
+assert_not_contains "$(bus)" "assumption" "sin supuesto: contesto igual"
+
+echo
 echo "── un repo que no despliega por GitOps no puede tener un deploy rojo"
 # Bug de campo (P1): el primer repo de infra que cruzó el pipeline. deploy-watch
 # construía APP=<prefijo><repo> y esperaba una app de ArgoCD que nunca iba a

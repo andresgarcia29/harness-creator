@@ -21,6 +21,47 @@ contra una instalación real).
   línea escrita.
 
 ### Corregido
+- **`/archive` ya no resucita la tarea que acaba de archivar (#114).** El hook de
+  evidencia deriva su ruta del task-id y hacía `mkdir -p` incondicional, así que
+  retirar los worktrees DESPUÉS de mover los artefactos recreaba `tasks/<id>/`
+  con una línea adentro. No era una carrera: era el orden del playbook, así que
+  le pasaba a toda tarea archivada al pie de la letra, y una tarea archivada con
+  directorio vuelve a parecer viva para todo lo que mire el filesystem. Se
+  arregla por los dos lados: el playbook retira los worktrees primero (elimina
+  la causa) y el hook escribe en `tasks/archive/<fecha>-<id>/` cuando la tarea ya
+  no está donde estaba (cubre cualquier hook que dispare después). Con dos
+  archivados del mismo id no elige: escribir en la tarea equivocada es peor que
+  no escribir.
+- **El dedupe de `harness-bug.sh` mira el ARTEFACTO, no solo la huella (#115).**
+  La huella es `sha(archivo|título)`, así que atrapaba al mismo agente
+  reportando dos veces seguido y dejaba pasar el caso real: el mismo defecto
+  contado con otras palabras, o uno ya reportado y CERRADO. Medido en este
+  repo: #90/#91/#93/#95 son cuatro issues del mismo defecto. Ahora se listan los
+  issues que ya existen sobre ese artefacto en todos los estados y hace falta
+  declarar `--not-duplicate "<por qué>"` (exit 11), que viaja en el cuerpo del
+  issue para quien haga triage. `--dry-run` hace la misma comprobación: un
+  preview que no mira lo que mira el camino real no es un preview.
+- **El carril de Linear tiene una sola fuente: `scripts/linear.sh` (#113).**
+  "El ticket no existe" y "tu API key es de otra organización" son la misma
+  respuesta del API y dos remediaciones opuestas. Se había arreglado en
+  `ticket-pull.sh` y el mismo bug seguía vivo en `ticket-close.sh`, que decía
+  "❌ ticket COR-944 no existe" sobre un ticket abierto en el navegador (dos
+  orgs con un team `COR` y numeración solapada). El diagnóstico se mudó a una
+  pieza que los dos consumen.
+- **`ticket-close.sh` cierra de verdad (#113).** Comentaba y movía un label, y
+  cuando el label no existía en el team el "cierre" no dejaba NINGUNA marca de
+  estado. Ahora `shipped` mueve el issue al estado de tipo `completed` (por
+  `type` y no por nombre: "Done", "Merged" y "Completado" son el mismo estado en
+  distintos idiomas). Si el team no declara ninguno, lo dice y no se da por
+  cerrado. `failed` no toca el estado: vuelve a la cola y su triage no es de acá.
+- **`deploy-watch.sh` pide las promociones en JSON (#112).** `kargo get
+  promotions` sin `-o json` muere deserializando su propia respuesta
+  (`*models.PromotionList` no implementa `TextUnmarshaler`), así que el tramo de
+  promoción estaba ciego en TODA tarea: medido en cuatro deploys de dos
+  instancias, cuatro días aparte. Se intenta JSON y se cae al llamado de texto
+  si falla, para que ningún resultado sea peor que el de hoy, y el motivo dice
+  cuál de los dos contestó. Del JSON se saca freight y fase, que es lo que
+  distingue "ArgoCD está sano" de "ArgoCD está sano CON MI imagen".
 - **`gate_test_muerde` lee las build tags de Go (#109).** Corría `go test <pkg>`
   sin `-tags`, así que un test bajo `//go:build integration` NI SE COMPILABA
   sobre el árbol base y el paquete "pasaba". Medido: `go test -list` daba 0

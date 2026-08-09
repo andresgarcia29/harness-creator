@@ -309,8 +309,11 @@ class BandaConSalida(CostBase):
             "\n".join(self.turn(read=read, write=write) for _ in range(turns)) + "\n")
         (subs / f"{name}.meta.json").write_text(json.dumps({"agentType": role}))
 
-    def waivers(self, *entries):
-        (self.task / "state.json").write_text(json.dumps({"cost_waivers": list(entries)}))
+    def waivers(self, *entries, phase=None):
+        estado = {"cost_waivers": list(entries)}
+        if phase is not None:
+            estado["phase"] = phase
+        (self.task / "state.json").write_text(json.dumps(estado))
 
     def test_sin_eximido_el_termino_historico_TRABA(self):
         # La mitad que justifica todo lo demas: sin salida, esto es permanente.
@@ -368,6 +371,62 @@ class BandaConSalida(CostBase):
                       "actor": "humano", "reason": "aceptado mas chico"})
         self.assertEqual(self.run_cost("check", "T1").returncode, 3,
                          "un contexto MAYOR que el aceptado tiene que volver a frenar")
+
+    def test_el_eximido_de_ctx_atado_a_la_fase_SOBREVIVE_a_que_el_valor_crezca(self):
+        # ISSUE #103: el eximido de ctx nacia VENCIDO. `cache` sale de un agente
+        # que ya cerro (transcript inmutable), pero el ctx del orquestador crece
+        # mientras se lo mide: lo suben las propias tool calls del waive y de la
+        # transicion. Medido en campo: se autorizo 167938.23 y la medicion
+        # siguiente ya daba 169k, asi que el unico escape auditable no servia
+        # para el caso mas comun y quedaba HARNESS_CTX_CEILING, sin rastro.
+        self.write([self.turn(read=400_000, write=1_000) for _ in range(20)])
+        ctx = json.loads(self.run_cost("check", "T1", "--json").stdout)
+        valor = next(b["value"] for b in ctx["breaches"] if b["code"] == "COST-CTX")
+        # El waive se autoriza por MENOS de lo que ya se mide: es exactamente la
+        # carrera del caso de campo, y antes de #103 esto salia 3.
+        self.waivers({"band": "ctx", "agent": "orquestador", "value": valor - 5_000,
+                      "phase": "implement", "actor": "humano",
+                      "reason": "sesion larga declarada"}, phase="implement")
+        r = self.run_cost("check", "T1")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("EXIMIDO por humano", r.stdout, r.stdout)
+
+    def test_el_eximido_de_ctx_CADUCA_al_cambiar_de_fase(self):
+        # La contra-mitad, que es la que lo separa de un cheque en blanco: vale
+        # para la ventana en la que el termino se mide (la fase), ni un turno
+        # mas. En la fase siguiente se vuelve a medir y a frenar.
+        self.write([self.turn(read=400_000, write=1_000) for _ in range(20)])
+        self.waivers({"band": "ctx", "agent": "orquestador", "value": 1,
+                      "phase": "implement", "actor": "humano", "reason": "x"},
+                     phase="review")
+        r = self.run_cost("check", "T1")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertNotIn("EXIMIDO", r.stdout, r.stdout)
+
+    def test_un_eximido_de_ctx_VIEJO_sigue_anclado_al_valor(self):
+        # Compatibilidad: una instancia que actualiza no pierde lo que ya habia
+        # autorizado. Sin `phase`, el eximido conserva la comparacion por valor.
+        self.write([self.turn(read=400_000, write=1_000) for _ in range(20)])
+        ctx = json.loads(self.run_cost("check", "T1", "--json").stdout)
+        valor = next(b["value"] for b in ctx["breaches"] if b["code"] == "COST-CTX")
+        self.waivers({"band": "ctx", "agent": "orquestador", "value": valor,
+                      "actor": "humano", "reason": "viejo, sin fase"})
+        self.assertEqual(self.run_cost("check", "T1").returncode, 0)
+        self.waivers({"band": "ctx", "agent": "orquestador", "value": valor - 1,
+                      "actor": "humano", "reason": "viejo, sin fase"})
+        self.assertEqual(self.run_cost("check", "T1").returncode, 3,
+                         "sin fase declarada, el ancla por valor sigue mordiendo")
+
+    def test_la_cache_NO_se_atiene_a_la_fase(self):
+        # No se toca lo que ya funcionaba: cache mide un agente CERRADO, su
+        # numero no se mueve mas y el ancla por valor es lo correcto ahi. Un
+        # `phase` de mas en un eximido de cache no lo convierte en permiso.
+        self.sano()
+        self.subagente("architect", 33, 40_000, 60_000)      # 40%, peor que 0.89
+        self.waivers({"band": "cache", "agent": "architect", "value": 0.89,
+                      "phase": "implement", "actor": "humano", "reason": "x"},
+                     phase="implement")
+        self.assertEqual(self.run_cost("check", "T1").returncode, 3)
 
     def test_json_para_la_maquina(self):
         # harness-policy.py cost-waive lo consume para exigir que el termino

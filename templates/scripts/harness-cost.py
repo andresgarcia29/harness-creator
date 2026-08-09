@@ -621,16 +621,42 @@ def load_waivers(state: dict) -> list:
     return [w for w in value if isinstance(w, dict)]
 
 
-def covered_by(waivers: list, band_code: str, role: str, value: float):
+def covered_by(waivers: list, band_code: str, role: str, value: float,
+               phase: str = ""):
     """El eximido que cubre este término, o None.
 
     UN EXIMIDO NO ES UN CHEQUE EN BLANCO: declara la banda, el rol y el valor
     MEDIDO cuando se autorizó. Algo PEOR que lo aceptado vuelve a frenar, que es
     lo que separa "acepto este 89% del architect que ya cerró" de "no me midas
-    más la caché de esta tarea"."""
+    más la caché de esta tarea".
+
+    ── PERO EL VALOR CLAVADO SOLO SIRVE SI LA MEDICIÓN NO PUEDE CRECER (#103) ──
+    Anclar al valor medido es correcto para `cache`, cuyo agente YA CERRÓ: su
+    transcript es inmutable y el número no se mueve más. Para `ctx` del
+    orquestador es INAPLICABLE POR CONSTRUCCIÓN: el orquestador está vivo por
+    definición en el momento en que pide la transición, su contexto medio es
+    monótono creciente, y lo suben las propias tool calls del waive y de la
+    transición. Medido en campo: se autorizó 167938.23 y para cuando el waive
+    terminó de escribirse la medición ya iba en 169k. El eximido nacía vencido,
+    o sea que la única salida que el gate llama auditable no funcionaba para el
+    caso más común, y quedaba solo `HARNESS_CTX_CEILING`, que el propio mensaje
+    describe como último recurso que NO deja rastro.
+
+    Un eximido de `ctx` se ata entonces a la FASE en que se autorizó, que es
+    exactamente la ventana en la que el término se mide (`phase_since`, ver
+    LA VENTANA arriba). No es un cheque en blanco por tres razones: caduca solo
+    en la siguiente transición, cubre la misma ventana que la medición (ni un
+    turno más), y sigue apareciendo con actor y motivo en cada corrida.
+
+    Los eximidos VIEJOS (sin `phase`) conservan la comparación por valor: una
+    instancia que actualiza no pierde lo que ya había autorizado."""
     for w in waivers:
         if w.get("band") != band_code or w.get("agent") != role:
             continue
+        if band_code == "ctx" and w.get("phase"):
+            if phase and w.get("phase") == phase:
+                return w
+            continue                     # el eximido era de otra fase: se acabó
         at = w.get("value")
         if not isinstance(at, (int, float)):
             return w                     # sin valor declarado: cubre la banda entera
@@ -656,7 +682,11 @@ def evaluate(rows, task: str, budget, window=None):
 
     `window` es solo el texto del instante en que empezó la fase: quién queda
     dentro ya viene resuelto en `row["window"]`, que lo calculó `scan`."""
-    waivers = load_waivers(task_state(task))
+    estado = task_state(task)
+    waivers = load_waivers(estado)
+    # La fase en curso: un eximido de `ctx` vale para ELLA y no para siempre
+    # (#103). Se lee acá y no dentro del bucle: es la misma para todos los roles.
+    fase = estado.get("phase") or ""
     breaches, waived, unmeasurable, outside = [], [], [], []
 
     def entry(code, role, value, r=None, text=""):
@@ -711,7 +741,7 @@ def evaluate(rows, task: str, budget, window=None):
                       f"COST-CTX: {r['role']} arrastra {m['ctx_avg']/1000:.0f}k de "
                       f"contexto medio (techo {CTX_CEILING/1000:.0f}k) sobre "
                       f"{m['tools']} tool calls")
-            w = covered_by(waivers, "ctx", r["role"], m["ctx_avg"])
+            w = covered_by(waivers, "ctx", r["role"], m["ctx_avg"], fase)
             if w:
                 e["waiver"] = w
                 e["text"] += f". {waiver_note(w)}"

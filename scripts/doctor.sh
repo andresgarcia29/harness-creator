@@ -362,6 +362,20 @@ if [ -f "$WS/scripts/ui/server.py" ]; then
     || warn "el CLI 'claude' no está en PATH — el plano de OPERAR del panel (Nueva tarea, responder a un agente) lanza 'claude -p' headless y sin él esos botones devolverán error (observar sigue funcionando)"
 fi
 
+# 8c-bis · La memoria que nadie lee (issue #101). La regla 1 del repo exige la
+# cadena COMPLETA para toda herramienta que un prompt cite: quién la instala,
+# quién la alimenta, quién la vigila y quién la EJECUTA. engram tenía instalador
+# (catálogo) y alimentador (mem_save), y le faltaban los dos últimos: se
+# acumulaban observaciones que ningún agente consultaba. El ejecutor es
+# mem-recall.sh; el vigilante es esto.
+if [ -f "$WS/.mcp.json" ] && grep -q '"engram"' "$WS/.mcp.json" 2>/dev/null; then
+  if grep -q "mem-recall.sh" "$WS/.claude/settings.json" 2>/dev/null; then
+    ok "engram con su lector cableado (mem-recall.sh en SessionStart)"
+  else
+    warn "engram está en .mcp.json pero mem-recall.sh NO está registrado en .claude/settings.json: la memoria se escribe y no la lee nadie; re-corré /harness-init . para cablearlo"
+  fi
+fi
+
 # 8d · Bits de ejecución: un hook sin +x falla EN SILENCIO (Claude Code no
 # puede ejecutarlo y nadie te lo dice). La suite del instalador cachó seis
 # templates así; aquí vigilamos la instancia instalada.

@@ -1096,6 +1096,79 @@ run_lang_gates() {
       echo "     tipos (\"typecheck\": \"astro check\" / \"tsc --noEmit\" / \"tsc -b\")."
       exit 3
     fi
+    # ── EL LINT QUE EL REPO DECLARA TAMBIÉN ES SU CONTRATO (issue #106) ──
+    # El gate corría el `typecheck` y el `test` que declara package.json, y NO
+    # el `lint`. La asimetría no tenía justificación escrita en ningún lado:
+    # son los dos scripts que el mismo repo publica en el mismo archivo como su
+    # contrato de calidad, y el gate obedecía uno.
+    #
+    # Lo que costó, medido en un solo día sobre un workspace de 8 frontends:
+    # 73 errores duros de eslint (de la propia Design System Law del repo)
+    # conviviendo en main sin que nada los frenara; un batch que los arregló
+    # introdujo 5 nuevos y lo detectó un implementer de OTRA tarea; y un tercer
+    # repo con `bun run lint` en rojo sobre main. Agravante: el paso Lint de su
+    # CI se llama "Lint (informational)" y lleva `continue-on-error: true`, así
+    # que el lint de los frontends no era puerta en NINGÚN lado.
+    #
+    # PERO ENCENDERLO DE GOLPE ES EL BUG DE FLUTTER OTRA VEZ (#100): un gate que
+    # se pone rojo por deuda que este cambio no causó deja al repo entero sin
+    # poder shippear, y se termina apagando. Va con RATCHET, como buf, ruff y
+    # semgrep: bloquea lo que ESTE cambio introdujo, y la deuda preexistente se
+    # cuenta y se dice.
+    #
+    # EL RATCHET NO PARSEA LA SALIDA, y por eso sirve con eslint, biome, oxlint
+    # o lo que el repo declare: compara la salida del MISMO script en el árbol
+    # de la tarea contra la del árbol base, y de lo que aparece solo en el
+    # primero se queda con lo que menciona un archivo que el diff tocó. Un
+    # hallazgo en un archivo intacto sale byte a byte igual en las dos corridas
+    # y se cancela solo; los resúmenes ("✖ 73 problems") tampoco mencionan
+    # rutas tocadas, así que no ensucian.
+    if jq -e '.scripts.lint' package.json >/dev/null 2>&1; then
+      local ts_lrc=0 ts_lout ts_base ts_bout ts_tocados ts_nuevos ts_viejos
+      ts_lout="$(npm run --silent lint 2>&1)" || ts_lrc=$?
+      if [ "$ts_lrc" -eq 0 ]; then
+        echo "· lint del repo: verde"
+      else
+        printf '%s\n' "$ts_lout"
+        # La baseline es un checkout de origin/$BASE_REF con el MISMO
+        # node_modules: un linter sin sus plugins instalados no falla honesto,
+        # falla distinto, y esa diferencia se leería como deuda nueva.
+        ts_base="$(mktemp -d)"; ts_bout=""; ts_nuevos=""
+        if [ -d node_modules ] \
+           && git -C "$WT" worktree add --detach --quiet "$ts_base/base" "origin/$BASE_REF" 2>/dev/null; then
+          ln -s "$WT/node_modules" "$ts_base/base/node_modules" 2>/dev/null || true
+          ts_bout="$( (cd "$ts_base/base" && npm run --silent lint 2>&1) || true )"
+          ts_tocados="$(git diff --name-only --diff-filter=d "origin/$BASE_REF...HEAD" 2>/dev/null || true)"
+          # La lista por stdin y no por `-v`: ver el bloque del gate de Flutter.
+          ts_nuevos="$(comm -13 <(printf '%s\n' "$ts_bout" | sort) <(printf '%s\n' "$ts_lout" | sort) \
+            | awk '
+                NR == FNR { if ($0 != "") m[$0] = 1; next }
+                { for (k in m) if (index($0, k)) { print; next } }' <(printf '%s\n' "$ts_tocados") -)"
+          git -C "$WT" worktree remove --force "$ts_base/base" 2>/dev/null || true
+        else
+          echo "⚠️  no pude sacar la baseline del lint (sin node_modules o sin checkout de origin/$BASE_REF)."
+          echo "   Sin baseline no hay ratchet, y bloquear con TODA la deuda pondría en rojo"
+          echo "   un repo por lo que este cambio no causó. NO bloqueo, y queda dicho."
+          emit assumption "$REPO (TS): lint rojo SIN ratchet (no hubo baseline): no se pudo separar la deuda nueva de la vieja"
+        fi
+        rm -rf "$ts_base"
+        if [ -n "$ts_nuevos" ]; then
+          echo "❌ lint: hallazgos NUEVOS en archivos que este cambio tocó:"
+          printf '%s\n' "$ts_nuevos" | sed 's/^/   /'
+          echo "   ↳ remediación: corregí SOLO estos. La deuda preexistente de $BASE_REF"
+          echo "     no bloquea, y el comando es el que ya declara tu repo: npm run lint"
+          exit 3
+        fi
+        if [ -n "$ts_bout" ]; then
+          ts_viejos="$(printf '%s\n' "$ts_lout" | grep -c . || true)"
+          echo "⚠️  lint: el repo está rojo en $BASE_REF y este cambio no lo empeoró"
+          echo "   ($ts_viejos línea(s) de salida; ninguna nueva en los archivos que tocaste)."
+          echo "   No bloquea: es deuda que este cambio no causó, y ponerla en rojo de golpe"
+          echo "   dejaría al repo entero sin poder shippear."
+          echo "   ↳ candidatos al ratchet-keeper: npm run lint"
+        fi
+      fi
+    fi
     # `npm test --if-present` se callaba cuando NO había script test: un repo
     # sin tests salía verde sin decir una palabra. El silencio de un
     # verificador se lee igual que un verde.
@@ -1299,9 +1372,16 @@ run_lang_gates() {
       if [ "$fl_n" -gt 0 ]; then
         fl_tocados="$(git diff --name-only --diff-filter=d \
           "origin/$BASE_REF...HEAD" -- '*.dart' 2>/dev/null || true)"
-        fl_mios="$(printf '%s\n' "$fl_infos" | awk -F'\t' -v t="$fl_tocados" '
-          BEGIN { n = split(t, a, "\n"); for (i = 1; i <= n; i++) if (a[i] != "") m[a[i]] = 1 }
-          ($1 in m)')"
+        # LA LISTA VA POR STDIN, NO POR -v (y esto es un bug de campo, no una
+        # preferencia): `awk -v t="a\nb"` es un ERROR en awk, no una variable
+        # con dos líneas. Con UN archivo tocado funcionaba y con dos el awk
+        # moría con "newline in string", fl_mios quedaba vacío y la sección
+        # "infos en archivos que tocaste" no salía nunca. Degradación a
+        # silencio, que es la familia de #98: el gate seguía en verde diciendo
+        # menos de lo que sabía. El test cubría un solo archivo y por eso pasó.
+        fl_mios="$(printf '%s\n' "$fl_infos" | awk -F'\t' '
+          NR == FNR { if ($0 != "") m[$0] = 1; next }
+          ($1 in m)' <(printf '%s\n' "$fl_tocados") -)"
         fl_viejos=$((fl_n - $(printf '%s' "$fl_mios" | awk 'NF{n++} END{print n+0}')))
         if [ -n "$fl_mios" ]; then
           echo "⚠️  flutter analyze: infos en archivos que ESTE cambio tocó:"

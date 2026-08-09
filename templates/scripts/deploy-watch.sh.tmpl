@@ -1047,9 +1047,50 @@ if command -v kargo >/dev/null; then
   # El CLI de kargo NO tiene timeout de ninguna clase: ni flag, ni variable de
   # entorno, ni context con deadline en su cliente HTTP. run_bounded es el único
   # límite que va a tener nunca.
+  # ── EL RENDERER DE TEXTO DEL CLI REVIENTA SOLO (#112) ──────────────
+  # Medido en cuatro deploys de DOS instancias, cuatro días aparte: el CLI
+  # (v1.10.9) no puede deserializar su propia respuesta cuando la pide en texto.
+  #   Error: list promotions: &{ []  <nil>}
+  #   (*models.PromotionList) is not supported by the TextConsumer,
+  #   can be resolved by supporting TextUnmarshaler interface
+  # No es un timeout ni una credencial: es go-openapi eligiendo TextConsumer
+  # para un modelo que no implementa TextUnmarshaler. O sea que el tramo de
+  # promoción estaba ciego en TODA tarea, no en un caso raro.
+  #
+  # `-o json` sale por otra rama del CLI y debería esquivarlo. NO ESTÁ
+  # CONFIRMADO: quien lo reportó no pudo probarlo (falta auth de kargo desde la
+  # shell del agente), y si el fallo estuviera en el modelo y no en el renderer,
+  # `-o json` no lo tocaría. Por eso esto se escribe para que NINGÚN resultado
+  # sea peor que el de hoy: se intenta json, y si falla se cae al llamado pelado,
+  # que es exactamente lo que se hacía antes. Lo único que cambia si la hipótesis
+  # es falsa es que el motivo dice cuál de los dos se probó, que es lo que le
+  # faltaba al reporte para poder cerrarse.
+  kargo_via=""
   if kargo_out="$(run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
-                    kargo get promotions --project "{{KARGO_PROJECT}}" 2>&1)"; then
-    printf '%s\n' "$kargo_out" | tail -5 | tee -a "$LOG"
+                    kargo get promotions --project "{{KARGO_PROJECT}}" -o json 2>&1)" \
+     && printf '%s' "$kargo_out" | jq -e . >/dev/null 2>&1; then
+    kargo_via="-o json"
+  elif kargo_out="$(run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+                      kargo get promotions --project "{{KARGO_PROJECT}}" 2>&1)"; then
+    kargo_via="salida de texto"
+  fi
+  if [ -n "$kargo_via" ]; then
+    say "   (kargo respondió por $kargo_via)"
+    # Del JSON se saca lo que importa (qué freight, en qué fase) en vez de
+    # volcar el objeto entero: cinco líneas de JSON crudo no dicen si promovió.
+    # Si el esquema no es el esperado, se muestra tal cual: inventar un resumen
+    # a partir de campos que no existen sería peor que el volcado.
+    if [ "$kargo_via" = "-o json" ] \
+       && resumen="$(printf '%s' "$kargo_out" | jq -r '
+             (if type == "object" and has("items") then .items else [.] end)
+             | map(select(type == "object"))
+             | sort_by(.metadata.creationTimestamp // "") | reverse | .[:5]
+             | .[] | "   · \(.metadata.name // "?")  \(.status.phase // .status.currentPromotion.phase // "?")  freight=\(.spec.freight // "?")"
+           ' 2>/dev/null)" && [ -n "$resumen" ]; then
+      printf '%s\n' "$resumen" | tee -a "$LOG"
+    else
+      printf '%s\n' "$kargo_out" | tail -5 | tee -a "$LOG"
+    fi
     # Caso de campo: el warehouse no refresca solo tras el push y el freight
     # nuevo no aparece hasta que alguien lo pide. Si la lista no muestra nada
     # reciente, la remediación exacta es pedir el refresh, no esperar más.
@@ -1058,7 +1099,11 @@ if command -v kargo >/dev/null; then
   else
     printf '%s\n' "$kargo_out" >> "$LOG"
     reason="$(printf '%s' "$kargo_out" | head -1 | cut -c1-160)"
-    say "⚠️ kargo no respondió: ${reason:-sin salida}"
+    # Cuál de los DOS falló va en el motivo: sin eso, el próximo reporte de
+    # campo no puede distinguir "el CLI sigue roto en json" de "ni siquiera
+    # llegué a probarlo", que es la ambigüedad que dejó a este bug reportado
+    # dos veces con cuatro días de diferencia.
+    say "⚠️ kargo no respondió (ni con -o json ni en texto): ${reason:-sin salida}"
     say "   la promoción del freight NO se verificó; el deploy sigue por health de ArgoCD"
     emit assumption "promoción de Kargo NO verificada en $REPO: ${reason:-kargo no respondió}"
     ciego "kargo: ${reason:-no respondió}"

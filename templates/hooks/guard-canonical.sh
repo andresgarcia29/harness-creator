@@ -108,7 +108,7 @@ adr-new.sh archived-repos.sh bootstrap.sh bounded.sh build-slot.sh
 change-id.sh deploy-watch.sh doctor.sh emit.sh evidence.py fe.sh finding.sh
 forge.sh gowork.sh graph-refresh.sh harness-bug.sh harness-cost.py
 harness-metrics.py harness-policy.py harness-sink.py harness-version.sh
-instance-ship.sh mark-read.sh minion-probe.sh pipeline-steps.sh plan-lint.sh
+instance-ship.sh linear.sh mark-read.sh minion-probe.sh pipeline-steps.sh plan-lint.sh
 port-forwards.sh pull-all.sh py.sh quiet.sh repo-brief.sh secrets.sh
 ship-wave.sh ship.sh skills-sync.sh stamp-models.sh task-note.py ticket-close.sh
 ticket-pull.sh verdict-beads.sh verdict-scaffold.sh with-secrets.sh

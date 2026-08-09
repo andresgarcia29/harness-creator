@@ -87,15 +87,15 @@ write_task_md() {  # write_task_md <id> <frontmatter-extra> <descripción>
 }
 
 pull_linear() {
-API="https://api.linear.app/graphql"
-[ -n "${LINEAR_API_KEY:-}" ] || { echo "❌ LINEAR_API_KEY no está en el entorno: usa scripts/with-secrets.sh"; exit 4; }
-
-gql() { # gql <query-json>  → respuesta cruda
-  curl -sf --retry 3 --retry-delay 2 --retry-all-errors -X POST "$API" \
-    -H "Authorization: $LINEAR_API_KEY" \
-    -H "Content-Type: application/json" \
-    --data "$1" || { echo "❌ error de red/auth contra Linear" >&2; exit 4; }
-}
+# El carril de Linear vive en scripts/linear.sh: el diagnóstico de "no existe"
+# vs "tu key es de otra org" se arregló acá primero (COR-622) y después hubo que
+# arreglarlo OTRA VEZ en ticket-close.sh, que es la señal de que no era de este
+# script (#113). Una copia de la fórmula es un segundo diagnóstico que un día
+# deja de coincidir.
+# shellcheck source=/dev/null
+. "$WS/scripts/linear.sh"
+linear_require_key
+gql() { linear_gql "$1"; }
 
 # 1 · Traer el ticket
 resp="$(gql "$(jq -n --arg id "$ID" '{query: "query($id:String!){ issue(id:$id){ id identifier title description priority url state{name} team{id} labels{nodes{id name}} } }", variables: {id:$id}}')")"
@@ -106,19 +106,7 @@ if [ "$issue" = "null" ] || [ -z "$issue" ]; then
   # ticket no está, o la key es de OTRA organización. Caso de campo (COR-622):
   # dos orgs comparten el team key COR y todo COR-N salía "no existe" con la
   # auth válida, mandando al usuario a verificar lo único que estaba bien.
-  errcode="$(echo "$resp" | jq -r '.errors[0].extensions.code // empty')"
-  scope="$(gql '{"query":"query{ organization { urlKey } teams { nodes { key } } }"}')"
-  orgkey="$(echo "$scope" | jq -r '.data.organization.urlKey // "desconocida"')"
-  teamkeys="$(echo "$scope" | jq -r '[.data.teams.nodes[].key] | join(", ")' 2>/dev/null || echo "")"
-  prefix="${ID%%-*}"
-  if [ -n "$errcode" ] && ! printf '%s\n' "$teamkeys" | tr ', ' '\n\n' | grep -qx "$prefix"; then
-    echo "❌ $ID está fuera del alcance de esta credencial: la key entra a la org '$orgkey' (teams: ${teamkeys:-ninguno}) y ahí no existe el team '$prefix'."
-    echo "   ↳ la LINEAR_API_KEY es de otra organización: mintea una de la org dueña de '$prefix' y recargala vía with-secrets."
-    exit 6
-  fi
-  echo "❌ ticket $ID no existe en la org '$orgkey' (teams alcanzables: ${teamkeys:-ninguno})"
-  echo "   ↳ ojo: si otra organización comparte el prefijo '$prefix', esta key no la ve; compará el urlKey de la URL del ticket con '$orgkey'."
-  exit 2
+  linear_no_existe "$ID" "$resp" || exit $?
 fi
 
 labels="$(echo "$issue" | jq -r '.labels.nodes[].name')"

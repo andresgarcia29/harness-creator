@@ -892,7 +892,7 @@ And it follows the house rule: if it cannot query the upstream version (no `gh`,
 
 A version number is written by whoever generates, and therefore it can lie without meaning to. It happened in the most expensive possible way: a generator wrote `.harness-version` with the **new** version having generated from **old** templates. It reported "1 updated, 24 conflicts" and none of those 24 files carried the fixes the number promised. Nothing in the output said so, so the only way to find out was resolving the 24 diffs by hand and noticing they were missing.
 
-That is why the repo publishes **`templates/MANIFEST.sha256`**: the sha256 of each of the 110 files that end up inside an instance, plus a `digest:` identifying the complete set. And every generator **must** write that digest into `.harness-templates` when generating. (That 110 is also verified by the suite against the real manifest: see the end of this section.)
+That is why the repo publishes **`templates/MANIFEST.sha256`**: the sha256 of each of the 111 files that end up inside an instance, plus a `digest:` identifying the complete set. And every generator **must** write that digest into `.harness-templates` when generating. (That 111 is also verified by the suite against the real manifest: see the end of this section.)
 
 With that, `make version` compares **content**, not just numbers:
 

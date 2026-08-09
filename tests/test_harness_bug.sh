@@ -18,6 +18,51 @@ printf 'docs locales\n' > "$WS/docs/quality.md"
 printf -- '---\nafter: ship\n---\n' > "$WS/.claude/pipeline/mio.md"
 printf 'paso 1: bash -c "scripts/ship.sh --precheck T1 svc"\nsalida: task-id invalido\n' > "$WS/repro.log"
 
+# El `gh` de mentira va ARRIBA y en el PATH de TODA la suite: desde el #115 el
+# --dry-run tambien mira si ya hay issues sobre el artefacto, asi que un `gh` de
+# verdad en el host (o en el runner de CI, que lo trae autenticado) haria red de
+# verdad contra el repo publico. Un test que depende de la red no mide lo que dice.
+mkdir -p "$WS/bin"
+cat > "$WS/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+# Cada invocación queda anotada en $GH_CALLS: sin ese contador, "el claim corta
+# antes de la red" solo se podría afirmar leyendo el código, que es justo lo que
+# un test existe para no tener que hacer.
+if [ -n "${GH_CALLS:-}" ]; then printf '%s\n' "$*" >> "$GH_CALLS"; fi
+case "${1:-}" in
+  api)  printf '{"version":"%s"}\n' "${GH_FAKE_VERSION:-1.0.0}" ;;
+  auth) exit 0 ;;
+  issue)
+    case "${2:-}" in
+      list)
+        # Hay DOS listados con formas distintas: el dedupe previo pide --json url
+        # y la reconciliación pide --json number,body. Responderles lo mismo haría
+        # pasar los tests por el motivo equivocado.
+        case "$*" in
+          # #115: los CANDIDATOS por artefacto piden number,state,title,url. Sin
+          # una rama propia caerian en la del dedupe por huella y los dos tests
+          # se taparian: pasarian por el motivo equivocado.
+          *number,state,title,url*)
+            printf '%s\n' "${GH_FAKE_CANDS:-}" ;;
+          *number,body*)
+            if [ "${GH_FAKE_LIST_FAIL:-0}" = 1 ]; then
+              echo "gh: no pude listar los issues (stub)" >&2; exit 1
+            fi
+            printf '%s\n' "${GH_FAKE_RIVALS:-[]}" ;;
+          *) printf '%s\n' "${GH_FAKE_DUP:-}" ;;
+        esac ;;
+      create) printf '%s\n' "${GH_FAKE_NEW:-https://github.com/andresgarcia29/harness-creator/issues/42}" ;;
+      close)
+        if [ "${GH_FAKE_CLOSE_FAIL:-0}" = 1 ]; then
+          echo "gh: no pude cerrar el issue (stub)" >&2; exit 1
+        fi
+        printf 'cerrado #%s\n' "${3:-?}" ;;
+    esac ;;
+esac
+STUB
+chmod +x "$WS/bin/gh"
+export PATH="$WS/bin:$PATH"
+
 BUG="bash $WS/scripts/harness-bug.sh"
 RPT="report --title 'ship.sh --precheck se lee como task-id' --repro repro.log --impact 'toda instancia en macOS'"
 
@@ -206,40 +251,6 @@ rm -f "$WS/harness-answers.yaml"
 
 echo "── instancia atrasada y publicación (gh de mentira, cero red)"
 
-mkdir -p "$WS/bin"
-cat > "$WS/bin/gh" <<'STUB'
-#!/usr/bin/env bash
-# Cada invocación queda anotada en $GH_CALLS: sin ese contador, "el claim corta
-# antes de la red" solo se podría afirmar leyendo el código, que es justo lo que
-# un test existe para no tener que hacer.
-if [ -n "${GH_CALLS:-}" ]; then printf '%s\n' "$*" >> "$GH_CALLS"; fi
-case "${1:-}" in
-  api)  printf '{"version":"%s"}\n' "${GH_FAKE_VERSION:-1.0.0}" ;;
-  auth) exit 0 ;;
-  issue)
-    case "${2:-}" in
-      list)
-        # Hay DOS listados con formas distintas: el dedupe previo pide --json url
-        # y la reconciliación pide --json number,body. Responderles lo mismo haría
-        # pasar los tests por el motivo equivocado.
-        case "$*" in
-          *number,body*)
-            if [ "${GH_FAKE_LIST_FAIL:-0}" = 1 ]; then
-              echo "gh: no pude listar los issues (stub)" >&2; exit 1
-            fi
-            printf '%s\n' "${GH_FAKE_RIVALS:-[]}" ;;
-          *) printf '%s\n' "${GH_FAKE_DUP:-}" ;;
-        esac ;;
-      create) printf '%s\n' "${GH_FAKE_NEW:-https://github.com/andresgarcia29/harness-creator/issues/42}" ;;
-      close)
-        if [ "${GH_FAKE_CLOSE_FAIL:-0}" = 1 ]; then
-          echo "gh: no pude cerrar el issue (stub)" >&2; exit 1
-        fi
-        printf 'cerrado #%s\n' "${3:-?}" ;;
-    esac ;;
-esac
-STUB
-chmod +x "$WS/bin/gh"
 
 # La huella la calcula el script, no el test: pedírsela con --dry-run (que no
 # toca la red ni toma claim) evita reimplementar el hash acá y que el test siga
@@ -453,6 +464,68 @@ echo "── coherencia con el resto del harness"
 grep -q "harness-bug.sh" "$ROOT/scripts/doctor.sh" || fail "doctor.sh no vigila harness-bug.sh"
 grep -q "harness-bug-report" "$ROOT/scripts/doctor.sh" || fail "doctor.sh no vigila la skill del canal"
 grep -q "harness-bug.sh" "$ROOT/templates/CLAUDE.md.tmpl" || fail "la ley 12 no está en CLAUDE.md.tmpl"
+echo
+echo "── #115: la huella solo ve el caso facil; el ARTEFACTO ve el caso real"
+# Medido en campo: `report --dry-run` salio 0 para un bug de pull-all.sh que ya
+# estaba reportado Y ARREGLADO (#77, CLOSED). Lo corto la verificacion manual del
+# agente, no el script. La huella es sha(archivo|titulo), asi que el mismo defecto
+# contado con otras palabras la esquiva, y un issue cerrado no frena nada. Ese
+# duplicado no es hipotetico: #90/#91/#93/#95 son cuatro issues del mismo defecto.
+rm -f "$WS/.harness/upstream-issues.jsonl"
+CANDS="$(printf '77\tCLOSED\tpull-all.sh no propaga el exit\thttps://github.com/x/y/issues/77\n90\tOPEN\tel gate de costo no explica\thttps://github.com/x/y/issues/90')"
+
+out="$(cd "$WS" && GH_FAKE_CANDS="$CANDS" $BUG report --title "otra redaccion del mismo defecto" \
+  --file scripts/emit.sh --repro repro.log --impact z --dry-run 2>&1)"; rc=$?
+assert_eq 11 "$rc" "#115: con issues previos sobre el artefacto NO publica (exit 11), aunque la huella sea nueva"
+assert_contains "$out" "#77 [CLOSED]" "#115: y muestra el CERRADO, que era el que no frenaba nada"
+assert_contains "$out" "#90 [OPEN]" "y el abierto"
+assert_contains "$out" "--not-duplicate" "nombrando la salida exacta, no un 'revisá a mano'"
+# El dry-run daba 0 sobre un defecto ya reportado: ese 0 es lo que se leia como
+# "se habria publicado". Un preview que no mira lo que mira el camino real no es
+# un preview.
+assert_contains "$out" "ya hay issues sobre" "#115: el --dry-run mira lo MISMO que el camino real"
+
+# La salida declarada: sigue, y el POR QUE queda en el cuerpo del issue, que es
+# donde lo lee quien hace triage. Sin eso seria un --force con otro nombre.
+out="$(cd "$WS" && GH_FAKE_CANDS="$CANDS" $BUG report --title "otra redaccion del mismo defecto" \
+  --file scripts/emit.sh --repro repro.log --impact z --dry-run \
+  --not-duplicate "el #77 es del exit code y este es del glob de repos" 2>&1)"; rc=$?
+assert_eq 0 "$rc" "#115: declarado no-duplicado, sigue"
+assert_contains "$out" "Por qué no es duplicado" "#115: y la declaracion viaja EN EL CUERPO del issue"
+assert_contains "$out" "el #77 es del exit code" "con el motivo textual, no un tilde"
+assert_contains "$out" "los hay, y el autor declaró" "y la verificacion previa lo dice"
+
+# Sin candidatos, nada cambia: el canal no se vuelve inusable por un artefacto
+# sobre el que nunca se reporto nada.
+out="$(cd "$WS" && $BUG report --title "un defecto sin issues previos" \
+  --file scripts/emit.sh --repro repro.log --impact z --dry-run 2>&1)"; rc=$?
+assert_eq 0 "$rc" "sin issues previos sobre el artefacto: el reporte sigue como siempre"
+assert_contains "$out" "previos sobre el mismo artefacto (todos los estados): ninguno" \
+  "y el cuerpo declara que se miro y no habia"
+
+# Declarar que no es duplicado de NADA es una declaracion vacia, y en el cuerpo
+# se leeria como una verificacion que nadie hizo.
+out="$(cd "$WS" && $BUG report --title "otro sin issues previos" --file scripts/emit.sh \
+  --repro repro.log --impact z --dry-run --not-duplicate "de ninguno" 2>&1)"; rc=$?
+assert_eq 0 "$rc" "--not-duplicate sin candidatos: no es un error"
+assert_not_contains "$out" "Por qué no es duplicado" "pero no se registra: seria una verificacion inventada"
+assert_contains "$out" "no hacía falta" "y se dice"
+
+# NO PUDE MIRAR NO ES "NO HAY". El camino real se para (publicar sin haber
+# mirado es lo que la ley fail-closed prohibe); el --dry-run no publica nada,
+# asi que sigue sirviendo offline mientras diga que no miro.
+sin_gh="$(t_path_without gh)"
+out="$(cd "$WS" && PATH="$sin_gh" bash scripts/harness-bug.sh report --title "sin gh en el host" \
+  --file scripts/emit.sh --repro repro.log --impact z --dry-run 2>&1)"; rc=$?
+assert_eq 0 "$rc" "#115: un preview offline sigue saliendo 0"
+assert_contains "$out" "NO verificó duplicados" "pero DICE que no verifico: silencio y verde no son lo mismo"
+
+rm -f "$WS/.harness/upstream-issues.jsonl"
+out="$(cd "$WS" && PATH="$sin_gh" GH_FAKE_VERSION=0.99.0 bash scripts/harness-bug.sh report \
+  --title "sin gh y publicando" --file scripts/emit.sh --repro repro.log --impact z 2>&1)"; rc=$?
+assert_eq 11 "$rc" "#115: el camino REAL se niega si no pudo mirar (fail-closed)"
+assert_contains "$out" "sin esa mirada no publico" "y dice por que"
+
 grep -q "harness-bug.sh" "$ROOT/templates/AGENTS.md.tmpl" || fail "la ley no está en AGENTS.md.tmpl (multi-herramienta)"
 grep -q "harness-bug.sh" "$ROOT/skills/harness-init/SKILL.md" || fail "la tabla de generación no instala harness-bug.sh"
 grep -q "harness-bug-report" "$ROOT/skills/harness-init/SKILL.md" || fail "la tabla de generación no instala la skill"
@@ -461,6 +534,8 @@ grep -q "harness-bug-report" "$ROOT/skills/harness-init/SKILL.md" || fail "la ta
 SK="$ROOT/templates/skills/harness-bug-report/SKILL.md"
 grep -q "claim huérfano (9)" "$SK" || fail "la skill no documenta el exit 9 (claim huérfano)"
 grep -q "(10)" "$SK" || fail "la skill no documenta el exit 10 (no pude tomar el claim)"
+grep -q "(11)" "$SK" || fail "la skill no documenta el exit 11 (candidatos a duplicado sin declarar)"
+grep -q -- "--not-duplicate" "$SK" || fail "la skill no dice como salir del 11, que es el unico exit que pide juicio"
 [ -x "$ROOT/templates/scripts/harness-bug.sh" ] && pass "harness-bug.sh ejecutable en el plugin" || fail "harness-bug.sh sin +x (un script sin +x muere en el primer uso)"
 bash -n "$ROOT/templates/scripts/harness-bug.sh" && pass "sintaxis válida" || fail "error de sintaxis"
 

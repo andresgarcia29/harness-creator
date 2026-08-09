@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
-# ticket-close.sh — cierra el loop harness → Linear. Cero tokens.
-# shipped: comenta commits por repo + resultado del deploy, label → shipped.
-# failed:  comenta el diagnóstico, label regresa a agent-ready.
+# ticket-close.sh — cierra el loop harness → tracker. Cero tokens.
+# shipped: comenta commits por repo + resultado del deploy, label → shipped, y
+#          en Linear mueve el ESTADO a completado, que es la marca real de
+#          cierre: un label puede no existir en el team y el ticket quedaría
+#          igual de abierto que antes (#113).
+# failed:  comenta el diagnóstico, label regresa a agent-ready. El estado NO se
+#          toca: alguien lo va a retomar, y decidir su triage no es de acá.
+#
+# Exit: 0 ok · 1 uso · 2 el ticket no existe · 4 error auth/red
+#       6 la LINEAR_API_KEY alcanza otra organizacion de Linear
 #
 # Uso: ticket-close.sh <TICKET-ID> --status shipped|failed [--note "..."]
 # Requiere LINEAR_API_KEY (vía with-secrets.sh).
@@ -16,7 +23,6 @@ while [ $# -gt 0 ]; do case "$1" in
 esac; done
 [ "$STATUS" = "shipped" ] || [ "$STATUS" = "failed" ] || { echo "❌ --status shipped|failed"; exit 1; }
 WS="$(cd "$(dirname "$0")/.." && pwd)"
-API="https://api.linear.app/graphql"
 PROVIDER="{{TICKETS_PROVIDER}}"
 
 close_github() {
@@ -49,13 +55,17 @@ case "$PROVIDER" in
   *) echo "❌ proveedor de tickets desconocido: '$PROVIDER' (implementados: linear, github)"; exit 4 ;;
 esac
 if [ "$PROVIDER" = "linear" ]; then
-  [ -n "${LINEAR_API_KEY:-}" ] || { echo "❌ LINEAR_API_KEY no está en el entorno: usa scripts/with-secrets.sh"; exit 4; }
+  # El carril de Linear vive en scripts/linear.sh (#113): el diagnóstico de "el
+  # ticket no existe" vs "tu key es de otra organización" ya se había arreglado
+  # en ticket-pull.sh, y este script seguía diciendo "❌ ticket COR-944 no
+  # existe" sobre un ticket que existía. Arreglarlo acá copiando la fórmula
+  # habría dejado la misma trampa armada para el próximo script del carril.
+  # shellcheck source=/dev/null
+  . "$WS/scripts/linear.sh"
+  linear_require_key
 fi
 
-gql() {
-  curl -sf --retry 3 --retry-delay 2 --retry-all-errors -X POST "$API" -H "Authorization: $LINEAR_API_KEY" -H "Content-Type: application/json" --data "$1" \
-    || { echo "❌ error de red/auth contra Linear" >&2; exit 4; }
-}
+gql() { linear_gql "$1"; }
 
 # 1 · Recolectar evidencia: commits con el trailer, por repo
 evidence=""
@@ -91,7 +101,12 @@ fi
 # 2 · Resolver ids y publicar (linear)
 resp="$(gql "$(jq -n --arg id "$ID" '{query:"query($id:String!){ issue(id:$id){ id team{id} labels{nodes{id name}} } }", variables:{id:$id}}')")"
 issue="$(echo "$resp" | jq '.data.issue')"
-[ "$issue" != "null" ] || { echo "❌ ticket $ID no existe"; exit 2; }
+# "❌ ticket $ID no existe" a secas era el peor desvío posible: manda a buscar un
+# ticket borrado cuando el ticket está abierto en el navegador y lo que no
+# coincide es la ORGANIZACIÓN de la credencial (#113).
+if [ "$issue" = "null" ] || [ -z "$issue" ]; then
+  linear_no_existe "$ID" "$resp" || exit $?
+fi
 uuid="$(echo "$issue" | jq -r '.id')"
 team_id="$(echo "$issue" | jq -r '.team.id')"
 
@@ -107,4 +122,39 @@ if [ -n "$label_id" ]; then
   echo "✅ label → $target_label"
 else
   echo "⚠️  no existe el label $target_label en el team — créalo en Linear"
+fi
+
+# ── EL CIERRE TIENE QUE CERRAR (#113) ─────────────────────────────────
+# Este script se llama ticket-close y no cerraba nada: comentaba y movía un
+# label. Medido en campo cerrando COR-944: el label `shipped` ni siquiera existía
+# en el team de destino, así que el aviso de arriba salió, el script siguió, y el
+# "cierre" no dejó NINGUNA marca de estado. El ticket quedó exactamente igual que
+# antes, con una tarea entera shippeada y desplegada detrás.
+#
+# La señal real de cierre en Linear es el ESTADO, no un label: los labels son
+# convención de cada team y pueden no existir, mientras que todo team tiene un
+# estado de tipo `completed` porque el propio Linear lo exige.
+#
+# Solo en `shipped`. Un `failed` vuelve a agent-ready para que alguien lo retome,
+# y moverle el estado ahí sería decidir una política de triage que este script no
+# tiene por qué tener.
+if [ "$STATUS" = "shipped" ]; then
+  # `type` y no el nombre: "Done", "Completado", "Shipped" y "Merged" son todos
+  # nombres legítimos del mismo estado, y elegir por nombre es adivinar el idioma
+  # del team. Entre varios completed gana el de menor `position`, que es el que
+  # Linear muestra primero.
+  state_id="$(gql "$(jq -n --arg t "$team_id" '{query:"query($t:String!){ team(id:$t){ states{ nodes{ id name type position } } } }", variables:{t:$t}}')" \
+    | jq -r '[.data.team.states.nodes[] | select(.type=="completed")] | sort_by(.position) | .[0].id // empty')"
+  if [ -n "$state_id" ]; then
+    ok="$(gql "$(jq -n --arg id "$uuid" --arg s "$state_id" '{query:"mutation($id:String!,$s:String!){ issueUpdate(id:$id, input:{stateId:$s}){ success } }", variables:{id:$id, s:$s}}')" \
+      | jq -r '.data.issueUpdate.success // false')"
+    if [ "$ok" = "true" ]; then
+      echo "✅ estado → completado (la marca de cierre que un label no da)"
+    else
+      echo "⚠️  no pude mover el estado a completado: el ticket queda comentado y etiquetado, pero ABIERTO"
+    fi
+  else
+    echo "⚠️  el team no declara ningún estado de tipo 'completed': no hay a dónde cerrar."
+    echo "   El ticket queda comentado y etiquetado, pero ABIERTO. No lo doy por cerrado."
+  fi
 fi

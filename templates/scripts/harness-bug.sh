@@ -14,7 +14,8 @@
 # Uso:
 #   harness-bug.sh check <ruta>            ¿es artefacto del plugin y está sin tocar?
 #   harness-bug.sh report --title "..." --file <ruta> --repro <archivo> \
-#                         --impact "<a quién más le pasa>" [--dry-run] [--force]
+#                         --impact "<a quién más le pasa>" [--dry-run] [--force] \
+#                         [--not-duplicate "<por qué no es ninguno de los que ya hay>"]
 #   harness-bug.sh record --url <issue> --file <ruta> --title "..."   anota un issue abierto a mano
 #   harness-bug.sh list                    el ledger local de lo ya reportado
 #
@@ -30,6 +31,15 @@
 #     local atómico antes de tocar la red (misma máquina), búsqueda remota
 #     antes de crear, y reconciliación contra el forge después de crear (otra
 #     máquina que ganó por segundos: el número de issue menor sobrevive).
+#     Y una CUARTA que no es carrera sino juicio (#115): la huella es
+#     sha(archivo|título), así que el mismo defecto contado con otras palabras
+#     la esquiva y un issue CERRADO no frena nada. Antes de publicar se listan
+#     los issues que ya existen sobre ese ARTEFACTO, en todos los estados, y
+#     hace falta declarar `--not-duplicate "<por qué>"` para seguir. Esa
+#     declaración viaja EN EL CUERPO del issue: quien haga triage tiene que
+#     poder leer por qué el autor dijo que no era ninguno de esos. Medido:
+#     #90/#91/#93/#95 son cuatro issues del mismo defecto, y ninguno de los
+#     tres dedupes anteriores podía verlo.
 #   · APAGABLE. HARNESS_UPSTREAM_ISSUES=off o `upstream_issues: off` en
 #     harness-answers.yaml y este script no publica nada.
 #
@@ -75,6 +85,27 @@ fp_of() {  # fp_of <file> <title> → huella estable del defecto
   local norm
   norm="$(printf '%s' "$2" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -cs '[:alnum:]' ' ' | awk '{$1=$1};1')"
   printf '%s|%s' "$1" "$norm" | sha | cut -c1-12
+}
+
+# ── EL DEDUPE POR HUELLA SOLO VE EL CASO FÁCIL (#115) ──────────────────
+# `fp_of` es sha(archivo|título normalizado), así que atrapa al MISMO agente
+# reportando dos veces seguido y deja pasar el caso real: dos tareas distintas,
+# semanas aparte, describiendo el mismo defecto con otras palabras. Y eso no es
+# hipotético, está publicado en este repo: #90/#91/#93/#95 son cuatro issues del
+# mismo defecto de POLICY-BUDGET-005, #82/#84 el mismo lectura-de-rename en dos
+# gates, y #103/#111 el mismo `cost-waive` sellando un escalar.
+#
+# La pregunta que sí generaliza es la del ARTEFACTO: "¿ya hay issues sobre este
+# archivo del harness?". No decide (un archivo tiene varios bugs legítimos), pero
+# es lo que nadie hizo antes de abrir esos cuatro. Se busca en TODOS los estados
+# a propósito: el caso medido era un defecto de `pull-all.sh` ya reportado Y
+# ARREGLADO (#77, CLOSED), y un issue cerrado no frenaba nada.
+dup_candidatos() {  # dup_candidatos <archivo> → filas TSV · 2 si NO se pudo mirar
+  command -v gh >/dev/null 2>&1 || return 2
+  gh auth status >/dev/null 2>&1 || return 2
+  gh issue list --repo "$UPSTREAM_REPO" --state all --search "\"$1\"" \
+    --limit 10 --json number,state,title,url \
+    --jq '.[] | [.number, .state, .title, .url] | @tsv' 2>/dev/null || return 2
 }
 
 ver_lt() {  # ver_lt <a> <b> → 0 si a < b (semver simple, sin pre-releases)
@@ -335,7 +366,7 @@ cmd_check() {
 
 # ── report ─────────────────────────────────────────────────────────────────
 cmd_report() {
-  local title="" file="" repro="" impact="" just="" dry=0 force=0
+  local title="" file="" repro="" impact="" just="" nodup="" dry=0 force=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --title) title="${2:-}"; shift 2 ;;
@@ -344,6 +375,7 @@ cmd_report() {
       --impact) impact="${2:-}"; shift 2 ;;
       --justification) just="${2:-}"; shift 2 ;;
       --dry-run) dry=1; shift ;;
+      --not-duplicate) nodup="${2:-}"; shift 2 ;;
       --force)   force=1; shift ;;
       *) die "flag desconocido: $1" 1 ;;
     esac
@@ -448,6 +480,46 @@ cmd_report() {
     die "tu instancia está en $local_ver y upstream va en $up_ver: actualiza (/harness-update) y re-verifica antes de reportar" 6
   fi
 
+  # 6b · CANDIDATOS A DUPLICADO POR ARTEFACTO (#115)
+  # Corre también en --dry-run: el caso medido fue justamente un `--dry-run`
+  # que salió 0 sobre un defecto ya reportado y ARREGLADO (#77, CLOSED), y ese
+  # 0 se lee como "se habría publicado". Un preview que no mira lo que mira el
+  # camino real no es un preview, es otra respuesta.
+  #
+  # Y va DESPUÉS del claim, no antes: el claim existe para que diez sesiones de
+  # esta máquina tropezando con el mismo bug no lleguen las diez a la red, y
+  # una búsqueda previa al claim las devolvía a todas ahí (test_harness_bug
+  # lo fija con un contador de llamadas, y fue el test el que lo cazó).
+  local cands crc2
+  cands="$(dup_candidatos "$file")"; crc2=$?
+  if [ "$crc2" -eq 2 ]; then
+    # NO PUDE MIRAR NO ES "NO HAY". En el camino real se para: publicar sin
+    # haber mirado es exactamente lo que la ley FAIL-CLOSED prohíbe, y sin gh
+    # el `issue create` de más abajo iba a morir igual. En --dry-run no se
+    # para: no publica nada, así que un preview offline sigue sirviendo
+    # mientras diga que no miró.
+    if [ "$dry" -eq 1 ]; then
+      echo "⚠️  no pude buscar candidatos a duplicado (¿gh sin instalar, sin auth, sin red?):"
+      echo "   este preview NO verificó duplicados. El reporte real sí lo va a exigir."
+    else
+      die "no pude buscar issues previos sobre $file (¿gh sin auth, sin red?): sin esa mirada no publico, porque el dedupe por huella solo ve un título casi idéntico y este canal ya publicó el mismo defecto cuatro veces (#90 #91 #93 #95)" 11
+    fi
+  elif [ -n "$cands" ]; then
+    echo "🔎 ya hay issues sobre \`$file\` (todos los estados):"
+    printf '%s\n' "$cands" | while IFS="$(printf '\t')" read -r num st tit url; do
+      printf '   #%s [%s] %s\n      %s\n' "$num" "$st" "$tit" "$url"
+    done
+    if [ -z "$nodup" ]; then
+      die "no publico hasta que alguien MIRE esos issues: la huella (archivo|título) solo atrapa un título casi idéntico, así que el mismo defecto descrito con otras palabras la esquiva, y un issue CERRADO tampoco frena nada. Si ninguno es este bug, decilo y queda escrito en el cuerpo: --not-duplicate \"<por qué no es ninguno de esos>\"" 11
+    fi
+    echo "   ↳ declarado NO duplicado: $nodup"
+  elif [ -n "$nodup" ]; then
+    # Declarar que no es duplicado de nada es una declaración vacía, y en el
+    # cuerpo del issue se leería como una verificación que nadie hizo.
+    echo "ℹ️  no hay issues previos sobre $file: --not-duplicate no hacía falta y no se registra"
+    nodup=""
+  fi
+
   # 7 · cuerpo, redactado SIEMPRE
   local body os bashv jqv
   os="$(uname -sr 2>/dev/null)"; bashv="${BASH_VERSION:-?}"; jqv="$(jq --version 2>/dev/null)"
@@ -469,6 +541,7 @@ $(head -c 12000 "$repro_path" | head -120)
 ### A quién más le pasa
 
 $impact
+$([ -n "$nodup" ] && printf '\n### Por qué no es duplicado de los issues que ya existen sobre este artefacto\n\n%s\n' "$nodup")
 
 ### Entorno
 
@@ -481,6 +554,7 @@ $impact
 - Comparación contra el template del plugin: $drift
 - Instancia al día contra upstream: $([ -n "$up_ver" ] && { ver_lt "${local_ver:-0}" "$up_ver" && echo "NO (forzado)" || echo "✅"; } || echo "no verificado (sin red)")
 - Repro adjunto y no vacío: ✅
+- Issues previos sobre el mismo artefacto (todos los estados): $([ -n "$cands" ] && echo "los hay, y el autor declaró por qué este no es ninguno" || echo "ninguno")
 - Redacción de secretos aplicada al reporte: ✅
 
 <!-- harness-fp: $fp -->

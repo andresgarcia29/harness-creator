@@ -15,6 +15,10 @@ t_ws
 R="$(cd "$(dirname "$0")/.." && pwd)"
 
 mkdir -p "$WS/scripts" "$WS/bin" "$WS/repos"
+# El carril de Linear se sourcea desde scripts/linear.sh (#113), asi que tiene
+# que estar ANTES del primer render: sin el, los scripts renderizados mueren en
+# el `.` y el test mediria eso en vez de lo suyo.
+cp "$R/templates/scripts/linear.sh" "$WS/scripts/"
 render() {  # render <tmpl> <destino> <provider> <repo-de-issues>
   sed -e "s|{{TICKETS_PROVIDER}}|$3|g" -e "s|{{TICKETS_REPO}}|$4|g" \
       -e "s|{{TICKET_PREFIX}}|ACME|g" "$R/templates/scripts/$1" > "$WS/scripts/$2"
@@ -245,5 +249,95 @@ rm -rf "$WS/tasks/42"
 out="$( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/tp-gh.sh 42 2>&1 )"; rc=$?
 assert_eq 0 "$rc" "claim ilegible: no bloquea (fail-open hacia poder trabajar)"
 assert_contains "$out" "no pude releerlo" "pero lo DICE en vez de fingir exclusividad"
+
+echo
+echo "── #113: Linear, una sola fuente para todo el carril autenticado por PAT"
+# "el ticket no existe" y "tu API key es de OTRA organizacion" son la misma
+# respuesta del API y dos remediaciones opuestas. Se arreglo en ticket-pull.sh
+# (COR-622) y meses despues el MISMO bug se midio en ticket-close.sh cerrando
+# COR-944: "❌ ticket COR-944 no existe" sobre un ticket abierto en el navegador.
+# Una clase de error que sobrevive al arreglo de un consumidor y sigue viva en el
+# otro no era un bug de ese consumidor: era una pieza faltante.
+render ticket-close.sh.tmpl tc-lin.sh linear ""
+render ticket-pull.sh.tmpl  tp-lin2.sh linear ""
+bash -n "$WS/scripts/tc-lin.sh" && pass "ticket-close (linear): sintaxis válida tras renderizar" \
+  || fail "ticket-close no compila"
+
+# El curl de mentira contesta segun la QUERY, que es lo unico que distingue una
+# llamada de otra. LIN_TEAMS son los teams que alcanza la credencial.
+cat > "$WS/bin/curl" <<'CURL'
+#!/usr/bin/env bash
+data=""; prev=""
+for a in "$@"; do [ "$prev" = "--data" ] && data="$a"; prev="$a"; done
+case "$data" in
+  *organization*)
+    keys=""; for k in ${LIN_TEAMS:-COR}; do keys="$keys{\"key\":\"$k\"},"; done
+    printf '{"data":{"organization":{"urlKey":"%s"},"teams":{"nodes":[%s]}}}' \
+      "${LIN_ORG:-corvux}" "${keys%,}" ;;
+  *issue\(id*)
+    if [ "${LIN_ISSUE_OK:-0}" = 1 ]; then
+      printf '{"data":{"issue":{"id":"uuid-1","team":{"id":"t1"},"identifier":"%s","title":"t","description":"d","priority":1,"url":"u","state":{"name":"In Progress"},"labels":{"nodes":[{"id":"l1","name":"agent-ready"}]}}}}' "${LIN_ID:-COR-944}"
+    else
+      printf '{"data":{"issue":null},"errors":[{"message":"Entity not found: Issue","extensions":{"code":"INPUT_ERROR"}}]}'
+    fi ;;
+  *states*)
+    if [ "${LIN_HAS_DONE:-1}" = 1 ]; then
+      printf '{"data":{"team":{"states":{"nodes":[{"id":"s-done","name":"Done","type":"completed","position":2},{"id":"s-merged","name":"Merged","type":"completed","position":1},{"id":"s-wip","name":"In Progress","type":"started","position":0}]}}}}'
+    else
+      printf '{"data":{"team":{"states":{"nodes":[{"id":"s-wip","name":"In Progress","type":"started","position":0}]}}}}'
+    fi ;;
+  *issueUpdate*)
+    printf '%s' "$data" >> "${LIN_CALLS:-/dev/null}"; echo
+    printf '{"data":{"issueUpdate":{"success":%s}}}' "${LIN_UPDATE_OK:-true}" ;;
+  *labels*) printf '{"data":{"team":{"labels":{"nodes":[{"id":"lab-ship","name":"shipped"}]}}}}' ;;
+  *) printf '{"data":{"commentCreate":{"success":true}}}' ;;
+esac
+CURL
+chmod +x "$WS/bin/curl"
+lin() { ( cd "$WS" && PATH="$WS/bin:$PATH" LINEAR_API_KEY=k "$@" ) 2>&1; }
+
+# (a) EL CASO MEDIDO: dos orgs con un team COR y numeracion solapada. El
+#     identifier es valido y el ticket existe... del otro lado.
+out="$(lin bash scripts/tc-lin.sh COR-944 --status shipped)"; rc=$?
+assert_eq 2 "$rc" "#113: ticket-close ya no dice un 'no existe' pelado"
+assert_contains "$out" "no existe en la org 'corvux'" "#113: nombra la ORG de la credencial, que es lo que no coincidia"
+assert_contains "$out" "compará el urlKey" "y da la comprobacion de un segundo contra la URL del ticket"
+assert_contains "$out" "teams alcanzables" "y enumera lo que la credencial SI alcanza"
+
+# (b) el prefijo ni siquiera es un team alcanzable: ahi no hay ambiguedad
+out="$(lin env LIN_TEAMS="ENG PLAT" bash scripts/tc-lin.sh COR-944 --status shipped)"; rc=$?
+assert_eq 6 "$rc" "#113: prefijo fuera de la credencial: exit 6, distinto de 'no existe'"
+assert_contains "$out" "es de otra organización" "y lo dice sin rodeos"
+
+# (c) el MISMO diagnostico en ticket-pull, que es de donde salio: la pieza es
+#     una sola, asi que los dos consumidores contestan igual.
+out="$(lin bash scripts/tp-lin2.sh COR-944)"; rc=$?
+assert_eq 2 "$rc" "#113: ticket-pull conserva su exit 2"
+assert_contains "$out" "no existe en la org 'corvux'" "y el MISMO texto: una sola fuente, no dos que divergen"
+
+echo
+echo "── #113 (b): el cierre tiene que CERRAR"
+# Medido cerrando COR-944: el label `shipped` no existia en el team, el script
+# aviso y siguio, y el "cierre" no dejo NINGUNA marca de estado. El ticket quedo
+# igual que antes con una tarea entera shippeada y desplegada detras.
+: > "$WS/lincalls.log"
+out="$(lin env LIN_ISSUE_OK=1 LIN_CALLS="$WS/lincalls.log" bash scripts/tc-lin.sh COR-944 --status shipped)"; rc=$?
+assert_eq 0 "$rc" "shipped: sale 0"
+assert_contains "$out" "estado → completado" "#113: mueve el ESTADO, que es la marca real de cierre"
+assert_contains "$(cat "$WS/lincalls.log")" "s-merged" \
+  "#113: elige el completed de menor position, no el que se llame 'Done' (el nombre depende del idioma del team)"
+
+# Sin ningun estado completed no se finge el cierre: es el mismo silencio que
+# dejaba el label ausente.
+out="$(lin env LIN_ISSUE_OK=1 LIN_HAS_DONE=0 bash scripts/tc-lin.sh COR-944 --status shipped)"; rc=$?
+assert_contains "$out" "no hay a dónde cerrar" "sin estado completed: se dice"
+assert_contains "$out" "ABIERTO" "y NO se da por cerrado"
+
+# Un failed vuelve a la cola: mover su estado seria decidir un triage que no es
+# de este script.
+: > "$WS/lincalls.log"
+out="$(lin env LIN_ISSUE_OK=1 LIN_CALLS="$WS/lincalls.log" bash scripts/tc-lin.sh COR-944 --status failed)"
+assert_not_contains "$out" "estado → completado" "un failed NO se cierra"
+assert_not_contains "$(cat "$WS/lincalls.log")" "stateId" "y no toca el estado en absoluto"
 
 t_done

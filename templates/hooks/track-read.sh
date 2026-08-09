@@ -193,9 +193,40 @@ emit() {
   # los dos que se salen de tasks/: un id `..` escribiría el evidence.log en la
   # raíz del workspace, donde ningún gate lo va a buscar.
   case "$task" in *[!A-Za-z0-9._-]*|.|..) return 0 ;; esac
-  local log="$WS/tasks/$task/evidence.log"
-  mkdir -p "$WS/tasks/$task" 2>/dev/null || return 0
-  printf '%s\t%s\t%s\t%s\n' "$ts" "$sid" "$1" "$2" >> "$log" 2>/dev/null
+  # ── UNA TAREA ARCHIVADA NO SE RESUCITA (#114) ───────────────────────
+  # El `mkdir -p` de acá abajo era incondicional, así que este hook RECREABA
+  # `tasks/<id>/` después de que /archive lo movió a `tasks/archive/<fecha>-<id>/`.
+  # No es una carrera ni depende de la máquina: es el ORDEN del playbook (mueve
+  # los artefactos en el paso 3 y retira los worktrees en el 5), así que le
+  # pasaba a TODA tarea archivada al pie de la letra. Medido: un `worktree-task.sh
+  # --rm` posterior al archivado dejaba `tasks/COR-944/evidence.log` con una sola
+  # línea, y una tarea archivada con directorio vuelve a parecer viva para todo
+  # lo que mire el filesystem, que es exactamente lo que el paso 5 existe para
+  # evitar (ningún hook conoce el estado "archivada": todos derivan de la RUTA).
+  #
+  # El playbook además cambia el orden, que elimina la causa. Esto cubre lo otro:
+  # CUALQUIER hook que dispare después del archivado, hoy o mañana. La evidencia
+  # no se tira, se escribe donde la tarea vive ahora, que es su audit trail.
+  local dir="$WS/tasks/$task" n c
+  if [ ! -d "$dir" ]; then
+    # Glob directo y NO `set --`: los posicionales de esta función son el kind y
+    # la ruta que se van a escribir dos líneas más abajo, y pisarlos acá dejaba
+    # el hook muriendo con "$2: unbound variable" bajo `set -u`.
+    n=0
+    for c in "$WS"/tasks/archive/*-"$task"; do
+      [ -d "$c" ] && { n=$((n+1)); dir="$c"; }
+    done
+    case "$n" in
+      0) dir="$WS/tasks/$task" ;;  # no está archivada: es una tarea viva sin dir todavía
+      1) : ;;                      # archivada: su evidencia va a su audit trail
+      # Dos archivados del mismo id: NO se elige. Escribir en la tarea
+      # equivocada es peor que no escribir, porque gate_evidence citaría
+      # después una corrida que pertenece a otra.
+      *) return 0 ;;
+    esac
+  fi
+  mkdir -p "$dir" 2>/dev/null || return 0
+  printf '%s\t%s\t%s\t%s\n' "$ts" "$sid" "$1" "$2" >> "$dir/evidence.log" 2>/dev/null
 }
 
 case "$tool" in

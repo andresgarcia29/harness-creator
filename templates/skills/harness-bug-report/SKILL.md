@@ -110,7 +110,30 @@ cuota de 3 issues **creados** por 24h (un issue que resultó duplicado, o que
 cediste a otra máquina, no te la gasta) y publica en el repo del plugin. Sale
 distinto de cero con la razón exacta cuando NO procede: propiedad (3), repro
 ausente (4), cuota (5), instancia atrasada (6), drift local (7), canal apagado
-(8), claim huérfano (9), claim imposible de tomar (10).
+(8), claim huérfano (9), claim imposible de tomar (10), **candidatos a duplicado
+sin declarar (11)**.
+
+El **11** es el único que te pide juicio a vos, y por eso va explicado: el
+dedupe por huella es `sha(archivo|título)`, así que solo atrapa un título casi
+idéntico. El mismo defecto contado con otras palabras lo esquiva, y un issue
+**cerrado** no frena nada. Medido en este repo: #90/#91/#93/#95 son cuatro
+issues del mismo defecto de `POLICY-BUDGET-005`, y #103/#111 el mismo
+`cost-waive`. Así que antes de publicar el script lista los issues que ya
+existen **sobre ese artefacto, en todos los estados**, y se para.
+
+Lo que tenés que hacer con un 11 es **abrir esos issues y leerlos**, no
+sortearlo. Si alguno es este bug, no reportes: sumá tu repro como comentario
+ahí, que vale más que un issue nuevo. Si ninguno lo es, decí por qué:
+
+```bash
+  --not-duplicate "el #77 es del exit code de pull-all; este es del glob de repos"
+```
+
+Ese texto viaja **en el cuerpo del issue**, bajo su propio encabezado, porque
+quien haga triage tiene que poder leer por qué vos dijiste que no era ninguno de
+esos. Sin él sería un `--force` con otro nombre. Y `--dry-run` hace la misma
+comprobación que el camino real: un preview que no mira lo que mira el reporte
+de verdad no es un preview, es otra respuesta.
 
 Si la cuota (5) te frena y abres el issue **a mano**, anótalo en el ledger o el
 dedupe local quedará ciego justo para el bug que más se repite:

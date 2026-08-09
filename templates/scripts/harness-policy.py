@@ -1043,6 +1043,20 @@ def cmd_cost_waive(args: argparse.Namespace) -> int:
         "actor": args.actor, "reason": args.reason,
         "at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+    # ── LA FASE, PARA EL TÉRMINO QUE NO PUEDE ANCLARSE A UN VALOR (#103) ──
+    # `cache` sale de un agente que ya cerró: su transcript es inmutable y el
+    # valor clavado alcanza. `ctx` del orquestador NO: está vivo por definición
+    # en el momento de pedir la transición, su contexto medio solo crece, y lo
+    # suben las tool calls de este mismo comando. Anclarlo a un valor lo dejaba
+    # VENCIDO ANTES DE ESCRIBIRSE (medido: se autorizó 167938.23 y la siguiente
+    # medición ya daba 169k), así que el único escape auditable no servía para
+    # el caso más común y quedaba `HARNESS_CTX_CEILING`, que no deja rastro.
+    #
+    # Se ata a la fase, que es la MISMA ventana en la que el término se mide
+    # (`phase_since`). Caduca sola en la próxima transición: no es un cheque en
+    # blanco, es un cheque con la vigencia de lo que cubre.
+    if args.band == "ctx":
+        entry["phase"] = state.get("phase") or ""
     waivers.append(entry)
     state["cost_waivers"] = waivers
     # kind=cost-waive: no es un movimiento de fase (phase_is_declared lo saltea

@@ -57,6 +57,9 @@ verify_rc() { ( cd "$WS" && PATH="$WS/bin:$PATH" CLAUDE_PLUGIN_ROOT="$WS/plugin"
   bash scripts/harness-version.sh --verify >/dev/null 2>&1; echo $?); }
 SET_A=aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff6666aaaa7777bbbb8888
 SET_B=9999ffff8888eeee7777dddd6666cccc5555bbbb4444aaaa3333999922221111
+# HARNESS_GENERATOR_BIN apunta al stub y no a `harness` a secas: este host
+# puede tener el binario del tap instalado, y sin esto el test mediria ESE.
+export HARNESS_GENERATOR_BIN=harness-stub
 run() { ( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/harness-version.sh "$@" ) 2>&1; }
 rc_of() { ( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/harness-version.sh "$@" >/dev/null 2>&1; echo $?); }
 
@@ -318,5 +321,96 @@ out="$(verify)"
 assert_contains "$out" "SIN VERIFICAR" "sin upstream: se dice que no se verifico"
 assert_not_contains "$out" "aterrizó: instancia" "y no se declara exito"
 assert_eq 2 "$(verify_rc)" "exit 2: ni verde ni rojo, no se pudo mirar"
+
+echo
+echo "── --generator (#102): el binario del tap se AUTORIZA antes de generar"
+# El paso 2 de /harness-update prefiere el binario sobre la re-instanciacion
+# manual, y nada comprobaba que su version correspondiera a algo publicado. En
+# campo: el binario reportaba 0.60.0 con el ultimo tag en 0.59.3. Generar con el
+# habria escrito templates que no existen en ningun origen, el paso 5 habria
+# estampado ese numero, y el --verify posterior saldria rojo sin explicar por
+# que. La unica defensa eran tres parrafos de prosa pidiendole al humano que
+# comparara a mano, y el incidente ocurrio con la prosa ya escrita.
+stub_harness() {  # stub_harness <lo-que-dice> [modo]
+  if [ -z "$1" ]; then rm -f "$WS/bin/harness-stub"; return; fi
+  cat > "$WS/bin/harness-stub" <<EOF
+#!/usr/bin/env bash
+case "\$1" in
+  --version) [ "${2:-flag}" = "subcomando" ] && exit 1; echo "harness $1" ;;
+  version)   echo "harness version : $1" ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$WS/bin/harness-stub"
+}
+gen()    { ( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/harness-version.sh --generator ) 2>&1; }
+gen_rc() { ( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/harness-version.sh --generator >/dev/null 2>&1; echo $?); }
+
+stub_gh "0.59.3" "$SET_A"
+# (1) EL caso del reporte: una version que no existe como tag ni release.
+stub_harness "0.60.0"
+out="$(gen)"
+assert_contains "$out" "NO EXISTE upstream" "#102: 0.60.0 con el ultimo tag en 0.59.3: se dice que no existe"
+assert_contains "$out" "0.59.3" "y nombra contra que se comparo"
+assert_contains "$out" "incidente 0.60.0" "y lo ata al incidente que el playbook ya citaba"
+assert_eq 1 "$(gen_rc)" "#102: exit 1, NO generes con este binario"
+
+# (2) el binario al dia: es la unica autorizacion que existe
+stub_harness "0.59.3"
+out="$(gen)"
+assert_contains "$out" "es el último tag publicado" "el binario al dia SI autoriza"
+assert_eq 0 "$(gen_rc)" "exit 0"
+
+# (3) un tag publicado pero VIEJO: generaria una instancia vieja que reporta
+#     exito igual, que es el mismo final por otro camino.
+stub_harness "0.1.0"
+out="$(gen)"
+assert_contains "$out" "pero NO el último" "un tag viejo tampoco autoriza"
+assert_eq 1 "$(gen_rc)" "exit 1: sus templates son mas viejos que lo publicado"
+
+# (4) un pre-release se distingue del numero inventado: la remediacion difiere
+stub_harness "0.60.0-rc1"
+out="$(gen)"
+assert_contains "$out" "PRE-RELEASE" "#102: un pre-release se nombra como tal"
+assert_eq 1 "$(gen_rc)" "y tampoco autoriza por defecto"
+
+# (5) el binario que habla por subcomando, no por --flag
+stub_harness "0.59.3" subcomando
+assert_eq 0 "$(gen_rc)" "lee la version del binario que solo responde \`harness version\`"
+
+# (6) NO PODER COMPROBAR NO ES AUTORIZAR: la ley de este script, en el lugar
+#     donde incumplirla escribe archivos.
+stub_harness "0.59.3"
+stub_gh ""
+out="$(gen)"
+assert_contains "$out" "comprobación que no corrió" "sin upstream: se dice que no se comparo"
+assert_not_contains "$out" "podés generar" "y NO autoriza"
+assert_eq 2 "$(gen_rc)" "exit 2: ni autorizado ni rechazado"
+
+stub_gh "0.59.3" "$SET_A"
+stub_harness ""
+out="$(gen)"
+assert_contains "$out" "no hay binario" "sin binario: no hay generador que autorizar"
+assert_eq 2 "$(gen_rc)" "exit 2 (el 2b es el camino, y se declara)"
+
+printf '#!/usr/bin/env bash\necho "harness, el generador"\n' > "$WS/bin/harness-stub"
+chmod +x "$WS/bin/harness-stub"
+out="$(gen)"
+assert_contains "$out" "no dice qué versión es" "un binario mudo no se puede autorizar"
+assert_eq 2 "$(gen_rc)" "exit 2, no 0: sin numero no hay vintage de templates que juzgar"
+
+echo
+echo "── y el modo normal lo dice sin que nadie se lo pregunte"
+# El reporte del #102 venia de una instancia al dia en numero Y digest: nada en
+# la salida habitual insinuaba que el update iba a correr con un binario 0.60.0.
+echo "0.59.3" > "$WS/.harness-version"
+echo "$SET_A" > "$WS/.harness-templates"
+stub_harness "0.60.0"
+out="$(run)"
+assert_contains "$out" "al día" "la instancia sigue reportandose al dia (lo esta)"
+assert_contains "$out" "NO EXISTE upstream" "#102: y AUN ASI avisa del generador"
+stub_harness ""
+out="$(run)"
+assert_not_contains "$out" "generador" "sin binario instalado no hay ruido: no todos lo tienen"
 
 t_done

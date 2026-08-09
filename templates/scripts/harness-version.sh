@@ -28,6 +28,8 @@
 #   scripts/harness-version.sh --check    solo el veredicto, por exit code
 #   scripts/harness-version.sh --quiet    solo versión y set de templates
 #   scripts/harness-version.sh --verify   DESPUÉS de actualizar: ¿aterrizó?
+#   scripts/harness-version.sh --generator  ANTES de generar: ¿el binario del
+#                                           tap corresponde a un tag publicado?
 set -u
 
 WS="$(cd "$(dirname "$0")/.." && pwd)"
@@ -37,13 +39,18 @@ UPSTREAM_REPO="${HARNESS_UPSTREAM_REPO:-andresgarcia29/harness-creator}"
 # El plugin EN DISCO: la fuente real de la que un update copia. Claude Code lo
 # exporta como CLAUDE_PLUGIN_ROOT dentro de los comandos.
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${HARNESS_PLUGIN_ROOT:-}}"
+# El generador del tap. Se nombra por variable y no a pelo porque el propio
+# playbook avisa de "otro binario que se llame igual": apuntarlo es la forma de
+# comprobar EL que se va a usar, y no el primero que aparezca en el PATH.
+GENERATOR_BIN="${HARNESS_GENERATOR_BIN:-harness}"
 MODE=full
 case "${1:-}" in
-  --check)  MODE=check ;;
-  --quiet)  MODE=quiet ;;
-  --verify) MODE=verify ;;
-  "")       MODE=full ;;
-  *) echo "uso: harness-version.sh [--check|--quiet|--verify]"; exit 1 ;;
+  --check)     MODE=check ;;
+  --quiet)     MODE=quiet ;;
+  --verify)    MODE=verify ;;
+  --generator) MODE=generator ;;
+  "")          MODE=full ;;
+  *) echo "uso: harness-version.sh [--check|--quiet|--verify|--generator]"; exit 1 ;;
 esac
 
 ver_lt() {  # ver_lt <a> <b> → 0 si a < b (semver simple, sin pre-releases)
@@ -60,12 +67,22 @@ ver_lt() {  # ver_lt <a> <b> → 0 si a < b (semver simple, sin pre-releases)
 # El último tag semver. Se ordena acá y no se confía en el orden del API:
 # /tags devuelve por fecha de creación, y un tag de arreglo publicado tarde
 # sobre una versión vieja quedaría primero.
+#
+# La LISTA entera se guarda, no solo el último: `--generator` no pregunta "¿cuál
+# es el más nuevo?" sino "¿esta versión EXISTE?", y son preguntas distintas. Una
+# sola llamada al API para las dos.
 UP_TAG=""
+UP_TAGS=""
 if command -v gh >/dev/null 2>&1; then
-  UP_TAG="$(gh api "repos/$UPSTREAM_REPO/tags" --paginate --jq '.[].name' 2>/dev/null \
+  UP_TAGS="$(gh api "repos/$UPSTREAM_REPO/tags" --paginate --jq '.[].name' 2>/dev/null \
     | awk '{ v=$0; sub(/^v/,"",v); if (v ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) print v"\t"$0 }' \
-    | sort -t. -k1,1n -k2,2n -k3,3n | tail -1 | cut -f2)"
+    | sort -t. -k1,1n -k2,2n -k3,3n)"
+  UP_TAG="$(printf '%s\n' "$UP_TAGS" | tail -1 | cut -f2)"
 fi
+# El tag SIN la `v`: `UP_TAG` es el ref que consume `gh_raw` (y lleva el prefijo
+# tal cual lo publica upstream), pero comparar VERSIONES con él haría que
+# `0.59.3` nunca igualara a `v0.59.3`. Dos nombres porque son dos cosas.
+UP_TAG_VER="$(printf '%s\n' "$UP_TAGS" | tail -1 | cut -f1)"
 UP_WHERE="tag ${UP_TAG:-}"
 [ -n "$UP_TAG" ] || UP_WHERE="rama por defecto (upstream no publica tags)"
 
@@ -84,6 +101,98 @@ gh_head_ver() {
   gh api "repos/$UPSTREAM_REPO/contents/.claude-plugin/plugin.json" \
     -H "Accept: application/vnd.github.raw" 2>/dev/null | jq -r '.version // empty' 2>/dev/null || true
 }
+
+# ── 0b · EL GENERADOR: ¿su versión existe en algún origen? (#102) ─────
+# El paso 2 de /harness-update PREFIERE el binario `harness` del tap sobre la
+# re-instanciación manual, y con razón: es determinista. Pero el binario trae su
+# propia copia de los templates y su propio número, y nada comprobaba que ese
+# número correspondiera a algo publicado.
+#
+# CASO DE CAMPO: el binario del tap reportaba 0.60.0 con el último tag y el
+# último release de upstream en 0.59.3, o sea una versión que no existe en
+# NINGÚN origen. Generar con él habría escrito templates no publicados, el paso
+# 5 habría estampado ese número en `.harness-version`, y el `--verify` posterior
+# habría salido rojo contra el último tag SIN explicar por qué. Es el incidente
+# 0.60.0 que el propio playbook cita como uno de los tres más caros.
+#
+# En esa instancia no llegó a pasar porque el binario murió antes, rechazando la
+# clave `gcp:` de un answers perfectamente válido (el esquema embebido era otro).
+# O sea que el segundo síntoma tapó al primero: los dos salen de lo mismo, un
+# generador que no corresponde a la versión publicada, y los dos los ataja esta
+# única pregunta hecha ANTES de escribir nada.
+#
+# Hasta acá la única defensa era que el humano comparara a mano, y el playbook
+# tenía que dedicarle tres párrafos a pedirlo. Un chequeo que depende de que
+# alguien se acuerde no es un chequeo.
+generador_dice() {  # → la versión que reporta el binario, o vacío
+  local out=""
+  command -v "$GENERATOR_BIN" >/dev/null 2>&1 || return 0
+  # Las dos formas: no se adivina cuál habla este binario, se prueban.
+  out="$("$GENERATOR_BIN" --version 2>/dev/null || true)"
+  [ -n "$out" ] || out="$("$GENERATOR_BIN" version 2>/dev/null || true)"
+  # El sufijo entra a propósito (`0.60.0-rc1`): distinguir un pre-release de un
+  # tag publicado es justo lo que el reporte pide poder hacer.
+  printf '%s' "$out" | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+[0-9A-Za-z.+-]*' | head -1
+}
+
+generador_check() {  # → 0 autorizado · 1 NO generar con él · 2 no pude comprobarlo
+  local ver=""
+  if ! command -v "$GENERATOR_BIN" >/dev/null 2>&1; then
+    echo "ℹ️  generador: no hay binario \`$GENERATOR_BIN\` en el PATH."
+    echo "   No es un error: el camino es la re-instanciación manual (paso 2b),"
+    echo "   que se DECLARA como tal para que quien lea el resultado sepa que"
+    echo "   lo produjo un LLM y no el generador."
+    return 2
+  fi
+  ver="$(generador_dice)"
+  if [ -z "$ver" ]; then
+    echo "⚠️  generador: el binario \`$GENERATOR_BIN\` no dice qué versión es."
+    echo "   Sin ese número no se puede saber qué vintage de templates embebe,"
+    echo "   así que no hay nada que autorizar: andá al paso 2b y declaralo."
+    return 2
+  fi
+  if [ -z "$UP_TAGS" ]; then
+    echo "⚠️  generador $ver: no pude traer los tags de upstream para comparar."
+    echo "   Esto NO es una autorización: es una comprobación que no corrió."
+    echo "   (¿gh sin auth, sin red?) Andá al paso 2b y declaralo."
+    return 2
+  fi
+  if ! printf '%s\n' "$UP_TAGS" | cut -f1 | grep -qxF "$ver"; then
+    # Las dos formas de no existir se separan porque la remediación difiere.
+    case "$ver" in
+      *[!0-9.]*)
+        echo "❌ generador $ver: es un PRE-RELEASE, no un tag publicado."
+        echo "   Un pre-release puede traer templates que todavía no existen en"
+        echo "   ningún origen. Si querés usarlo, es una decisión declarada, no"
+        echo "   el camino por defecto de un update." ;;
+      *)
+        echo "❌ generador $ver: esa versión NO EXISTE upstream (último tag: ${UP_TAG_VER:-?})."
+        echo "   Un binario no puede ir adelante de su origen: ese número no se"
+        echo "   leyó de ningún lado. Generar con él escribiría templates NO"
+        echo "   publicados y el paso 5 estamparía ese número en .harness-version,"
+        echo "   con lo que el --verify posterior saldría rojo sin explicar por qué."
+        echo "   Es exactamente el incidente 0.60.0." ;;
+    esac
+    echo "   ↳ NO generes con este binario: andá al paso 2b (re-instanciación"
+    echo "     manual) y declaralo, o actualizá el tap y volvé a correr esto."
+    return 1
+  fi
+  if [ "$ver" != "$UP_TAG_VER" ]; then
+    echo "❌ generador $ver: es un tag publicado, pero NO el último (${UP_TAG_VER:-?})."
+    echo "   Sus templates son más viejos que lo que upstream publica, así que"
+    echo "   generar con él produce una instancia vieja... que va a reportar"
+    echo "   éxito igual, y estampar un número que dice que está al día."
+    echo "   ↳ actualizá el tap (brew upgrade harness) y volvé a correr esto."
+    return 1
+  fi
+  echo "✅ generador $ver: es el último tag publicado, podés generar con él"
+  return 0
+}
+
+if [ "$MODE" = "generator" ]; then
+  generador_check
+  exit $?
+fi
 
 # ── 1 · versión ───────────────────────────────────────────────────────
 local_ver="$(cat "$WS/.harness-version" 2>/dev/null | tr -d ' \n' || true)"
@@ -202,6 +311,17 @@ fi
 
 [ "$MODE" = "quiet" ] && exit 0
 if [ "$MODE" = "check" ]; then exit "$verdict"; fi
+
+# ── 1b2 · el generador instalado, si lo hay ───────────────────────────
+# Se dice acá y no solo bajo `--generator` porque el reporte del #102 lo pedía
+# sin saberlo: la instancia estaba al día en número y digest, y aun así el
+# update iba a correr con un binario 0.60.0. Este script es el lugar donde
+# alguien ya viene a preguntar "¿estoy al día?", y el generador es parte de la
+# respuesta. Silencio si no hay binario: no todo el mundo lo tiene, y un aviso
+# por algo que no está instalado es ruido.
+if [ "$MODE" = "full" ] && command -v "$GENERATOR_BIN" >/dev/null 2>&1; then
+  generador_check || true
+fi
 
 # ── 1c · --verify: DESPUÉS de actualizar, ¿aterrizó donde dijo? ───────
 # Un update que termina diciendo "listo" no es evidencia de nada: el modo de

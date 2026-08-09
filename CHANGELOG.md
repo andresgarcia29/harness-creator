@@ -21,6 +21,28 @@ contra una instalación real).
   línea escrita.
 
 ### Corregido
+- **`gate_test_muerde` lee las build tags de Go (#109).** Corría `go test <pkg>`
+  sin `-tags`, así que un test bajo `//go:build integration` NI SE COMPILABA
+  sobre el árbol base y el paquete "pasaba". Medido: `go test -list` daba 0
+  casos sin la tag y 2 con ella, o sea que el comando del gate no podía ni
+  observar el test que estaba juzgando, y el veredicto salía "PASA sobre el
+  árbol base" sobre un test que sí muerde. Efecto: todo test de integración
+  nuevo de un repo Go con build tags se rechazaba como vacuo, lo que empujaba a
+  escribir un test redundante solo para el gate. Ahora las tags salen del propio
+  archivo, y solo las que `-tags` habilita de verdad: nunca las negadas (definir
+  la que el archivo niega lo sacaría del paquete) ni las que pone el toolchain
+  (`cgo`, GOOS/GOARCH, `go1.x`), que fabricarían un rojo ambiental.
+- **El generador del tap se AUTORIZA antes de generar (#102).** El binario
+  `harness` reportaba `0.60.0` con el último tag de upstream en `0.59.3`: una
+  versión que no existe en ningún origen. Generar con él habría escrito
+  templates no publicados y el paso 5 habría estampado ese número en
+  `.harness-version`, con el `--verify` posterior en rojo sin explicar por qué.
+  `harness-version.sh --generator` lo pregunta ahora con contrato por exit code
+  (0 autoriza, 1 no, 2 no se pudo comprobar), y `/harness-update` lo corre en el
+  paso 2 en vez de pedirle al humano que compare a mano en tres párrafos de
+  prosa. El rechazo del answers por la clave `gcp:` (#42) es el mismo defecto
+  visto dos veces: un generador que no corresponde a la versión publicada trae
+  también un esquema que no corresponde.
 - **`deploy-watch.sh` ya no llama "health" a lo que es sincronía.** ArgoCD
   Synced+Healthy prueba el manifiesto, no la imagen corriendo (Kargo promueve
   tags aparte). Ahora dice "argocd sincronizado al manifiesto" y, si nadie

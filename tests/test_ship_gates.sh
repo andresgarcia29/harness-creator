@@ -889,7 +889,11 @@ assert_contains "$out" "corriendo sobre la base: tests/test_feature.py" \
 sh_src="$(cat "$TMPL")"
 assert_contains "$sh_src" 'ln -s "$WT/node_modules" "$MUERDE_BASE/node_modules"' \
   "el arbol base recibe node_modules prestado del worktree"
-enlace_ln="$(grep -n 'ln -s "\$WT/node_modules"' "$TMPL" | cut -d: -f1)"
+# El patron nombra el DESTINO (MUERDE_BASE) y no solo el origen: desde que el
+# gate de lint tiene su propio enlace prestado, `ln -s "$WT/node_modules"`
+# matchea dos lineas y el `-lt` recibia "1139\n2870" en vez de un numero. Un
+# test que se rompe al agregar un segundo caso legitimo estaba midiendo de mas.
+enlace_ln="$(grep -n 'ln -s "\$WT/node_modules" "\$MUERDE_BASE' "$TMPL" | cut -d: -f1)"
 corre_ln="$(grep -n 'muerde_corre_grupo node' "$TMPL" | tail -1 | cut -d: -f1)"
 [ -n "$enlace_ln" ] && [ -n "$corre_ln" ] && [ "$enlace_ln" -lt "$corre_ln" ] \
   && pass "y el enlace se crea ANTES de invocar al runner de node (COR-683)" \
@@ -1495,6 +1499,130 @@ assert_contains "$out" "NO corrió tests" "sin script test: lo dice en vez de ca
 cd "$WS"
 
 echo
+echo "── gate ts: el lint que el repo DECLARA, con trinquete (#106)"
+# Caso de campo, un solo dia sobre 8 frontends: 73 errores duros de eslint (de
+# la propia Design System Law del repo) conviviendo en main sin que nada los
+# frenara, y un batch que los arreglo introdujo 5 nuevos que detecto un
+# implementer de OTRA tarea. El gate corria el `typecheck` y el `test` que
+# declara package.json y NO el `lint`, sin justificacion escrita en ningun lado:
+# son los dos scripts que el mismo repo publica en el mismo archivo.
+#
+# Encenderlo de golpe seria el bug de Flutter (#100) otra vez, asi que va con
+# trinquete. El stub de npm es el que hace medible todo esto: imprime lo que le
+# dicta un archivo por arbol, asi que se puede simular "el base ya estaba rojo".
+
+mk_fe_lint() {  # mk_fe_lint <dir>: repo TS que declara lint, con origin/main
+  rm -rf "$1"; mkdir -p "$1/src"; cd "$1"
+  git init -q .; git config user.email t@t; git config user.name t
+  printf '{"name":"fe","scripts":{"lint":"eslint .","test":"vitest run"}}\n' > package.json
+  echo '{}' > tsconfig.json
+  printf 'export const a = 1\n' > src/viejo.ts
+  git add -A && git commit -qm init
+  git update-ref refs/remotes/origin/main HEAD
+  mkdir -p node_modules
+  cd "$WS"
+}
+
+# El stub lee .lint-salida del arbol en el que corre: asi el arbol base puede
+# tener una salida distinta de la del worktree, que es todo el punto del ratchet.
+NPM_STUB='npm() {
+  case "$*" in
+    *"--silent lint"*|*"run lint"*)
+      if [ -f .lint-salida ]; then cat .lint-salida; return 1; fi
+      return 0 ;;
+    test*) echo "SUITE TS CORRIO" ;;
+    *) : ;;
+  esac
+}'
+
+run_ts() {  # run_ts <dir> → stdout de run_lang_gates con npm stubbeado
+  ( set -u; cd "$1"; WT="$1"; REPO=fe; TASK=T1; BASE_REF=main; WS="$WS"
+    gate() { :; }; emit() { echo "EMIT $*"; }
+    npx() { :; }
+    eval "$NPM_STUB"
+    . "$WS/lang.sh"; run_lang_gates ) 2>&1
+}
+
+# 1. lint verde: no molesta y sigue a los tests
+mk_fe_lint "$WS/lint1"
+out="$(run_ts "$WS/lint1")"; rc=$?
+assert_eq 0 "$rc" "lint verde: el gate sigue"
+assert_contains "$out" "lint del repo: verde" "y lo dice, para que se vea que CORRIO"
+assert_contains "$out" "SUITE TS CORRIO" "y llega a los tests"
+
+# 2. LA MITAD QUE JUSTIFICA EL TRINQUETE: deuda heredada en el base. El repo
+#    esta rojo desde antes y este cambio no lo empeoro: NO bloquea.
+mk_fe_lint "$WS/lint2"; cd "$WS/lint2"
+printf 'src/viejo.ts:1:1  error  no-restricted-syntax\n' > .lint-salida
+git add -A && git commit -qm "deuda que ya estaba" >/dev/null
+git update-ref refs/remotes/origin/main HEAD
+printf 'export const b = 2\n' > src/nuevo.ts
+git add -A && git commit -qm "mi cambio, que no toca viejo.ts" >/dev/null
+cd "$WS"
+out="$(run_ts "$WS/lint2")"; rc=$?
+assert_eq 0 "$rc" "deuda preexistente: NO bloquea (era el bug de Flutter otra vez)"
+assert_contains "$out" "no lo empeoró" "y dice que el rojo no es de este cambio"
+assert_contains "$out" "ratchet-keeper" "con su remediación, como buf y ruff"
+
+# 2c. Un hallazgo que APARECE pero en un archivo que este cambio NO toco: se
+#     cuenta como deuda ajena y no bloquea. Es lo que separa el trinquete de
+#     "todo lo que no estaba en el base es tuyo": la salida de un linter se
+#     mueve sola (numeros de linea que corren, reglas que se disparan en
+#     cascada), y cobrarle eso al que paso por ahi es el falso rojo de siempre.
+#     Sin este caso, borrar el filtro por archivos tocados no rompia un solo
+#     test: el mutante sobrevivio la primera vez que se probo.
+mk_fe_lint "$WS/lint2c"; cd "$WS/lint2c"
+printf 'src/viejo.ts:1:1  error  deuda vieja\n' > .lint-salida
+printf 'export const c = 3\n' > src/otro.ts
+git add -A && git commit -qm base >/dev/null
+git update-ref refs/remotes/origin/main HEAD
+printf 'export const b = 2\n' > src/nuevo.ts
+printf 'src/viejo.ts:1:1  error  deuda vieja\nsrc/otro.ts:1:1  error  aparecio solo, y no lo toque\n' > .lint-salida
+git add -A && git commit -qm "mi cambio, que NO toca otro.ts" >/dev/null
+cd "$WS"
+out="$(run_ts "$WS/lint2c")"; rc=$?
+assert_eq 0 "$rc" "hallazgo nuevo en archivo NO tocado: no bloquea"
+assert_contains "$out" "no lo empeoró" "se cuenta como deuda ajena"
+
+# 3. LA OTRA MITAD: un hallazgo NUEVO en un archivo que este cambio toco.
+#    Sin esto el trinquete seria una amnistia general.
+mk_fe_lint "$WS/lint3"; cd "$WS/lint3"
+printf 'src/viejo.ts:1:1  error  deuda vieja\n' > .lint-salida
+git add -A && git commit -qm base >/dev/null
+git update-ref refs/remotes/origin/main HEAD
+printf 'export const b = 2\n' > src/nuevo.ts
+printf 'src/viejo.ts:1:1  error  deuda vieja\nsrc/nuevo.ts:1:1  error  esto lo trajiste vos\n' > .lint-salida
+git add -A && git commit -qm "mi cambio" >/dev/null
+cd "$WS"
+out="$(run_ts "$WS/lint3")"; rc=$?
+assert_eq 3 "$rc" "hallazgo nuevo en archivo tocado: bloquea (exit 3)"
+assert_contains "$out" "src/nuevo.ts" "y nombra SOLO el que introdujo el cambio"
+assert_not_contains "$out" "   src/viejo.ts:1:1  error  deuda vieja" \
+  "sin arrastrar la deuda ajena al mensaje de error"
+assert_contains "$out" "npm run lint" "la remediación cita el comando que el repo declara"
+
+# 4. sin baseline el ratchet no se puede calcular: se DICE y no se bloquea.
+#    Bloquear con toda la deuda seria el falso rojo de siempre.
+#    La baseline se rompe borrando la ref, NO node_modules: sin node_modules el
+#    gate ts se niega mucho antes, por su propia rama, y este caso no se
+#    ejercitaria (la primera version de este test media eso sin saberlo).
+mk_fe_lint "$WS/lint4"; cd "$WS/lint4"
+printf 'src/viejo.ts:1:1  error  algo\n' > .lint-salida
+git update-ref -d refs/remotes/origin/main
+cd "$WS"
+out="$(run_ts "$WS/lint4")"; rc=$?
+assert_eq 0 "$rc" "sin baseline: NO bloquea"
+assert_contains "$out" "Sin baseline no hay ratchet" "y explica por qué no puede juzgar"
+assert_contains "$out" "EMIT assumption" "y el tramo sin ratchet viaja al bus"
+
+# 5. un repo que NO declara lint no recibe un gate que no pidió
+mk_fe "$WS/lint5"; mkdir -p "$WS/lint5/node_modules"
+out="$(run_ts "$WS/lint5")"
+assert_not_contains "$out" "lint del repo" "sin script lint declarado: el gate ni se menciona"
+
+cd "$WS"
+
+echo
 echo "── gate de lenguaje: los stacks que faltaban, y el silencio que quedaba"
 # Bug P0: run_lang_gates solo reconocia go/node/python/dart. Un repo Rust,
 # Java, Ruby, PHP, .NET o Elixir salia VERDE del precheck con el build roto y
@@ -2069,6 +2197,34 @@ out="$(run_flutter "$WS/fl2" "$FL_STUB")"; rc=$?
 assert_eq 0 "$rc" "un info tuyo tampoco bloquea: tu CI sale verde con él"
 assert_contains "$out" "ESTE cambio tocó" "pero se dice aparte: es el único que probablemente es tuyo"
 assert_contains "$out" "lib/viejo.dart: Unused import" "nombrando archivo y hallazgo"
+
+# 2b. DOS archivos tocados, que es el caso normal de un diff y el que este test
+#     NO cubría. La lista de tocados viajaba a awk por `-v`, y `-v t="a\nb"` no
+#     es una variable con dos líneas: es un ERROR ("newline in string"). Con UN
+#     archivo pasaba y con dos el awk moría, fl_mios quedaba vacío y la sección
+#     de infos propios no salía nunca: verde que dice menos de lo que sabe, la
+#     misma familia que #98. Un test que solo prueba el caso de uno no mira.
+FL_STUB_DOS='flutter() {
+  echo "FLUTTER $*" >> "$FLLOG"
+  case "$*" in
+    *analyze*)
+      printf "%s\n" "Analyzing app..." "" \
+        "   info • Unused import • lib/viejo.dart:1:8 • unused_import" \
+        "   info • Prefer const • lib/main.dart:2:1 • prefer_const" "" \
+        "2 issues found. (ran in 0.1s)"
+      case "$*" in *--no-fatal-infos*) return 0 ;; *) return 1 ;; esac ;;
+    test*) echo "SUITE CORRIO" ;;
+  esac
+}'
+mk_flutter "$WS/fl2b"; cd "$WS/fl2b"
+printf '// tocado\n' > lib/viejo.dart
+printf '// tocado\n' > lib/main.dart
+git add -A && git commit -qm "toca DOS archivos" >/dev/null; cd "$WS"
+out="$(run_flutter "$WS/fl2b" "$FL_STUB_DOS")"; rc=$?
+assert_eq 0 "$rc" "dos archivos tocados: sigue sin bloquear"
+assert_contains "$out" "lib/viejo.dart: Unused import" "y el filtro NO se apaga: nombra el primero"
+assert_contains "$out" "lib/main.dart: Prefer const" "y también el segundo"
+assert_contains "$out" "0 en archivos que este cambio NO tocó" "la cuenta de deuda ajena queda en cero"
 
 # 3. errors: siguen siendo rojo, y ahí sí se para antes de la suite
 FL_STUB_ERR='flutter() {

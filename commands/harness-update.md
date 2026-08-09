@@ -76,7 +76,20 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
 2. **Re-instancia por el camino DETERMINISTA.** Si `command -v harness`
    responde (el generador de brew: `brew install andresgarcia29/agm/harness`;
    confirmá con `harness --version` que es ESE binario y no otro que se llame
-   igual), no redactes vos los archivos:
+   igual), **el binario tiene que AUTORIZARSE antes de usarse**:
+   ```
+   scripts/harness-version.sh --generator
+   ```
+   Contrato por exit code, y no hay cuarta lectura: **0** su versión es el
+   último tag publicado (generá), **1** NO (su versión no existe upstream, es un
+   pre-release, o es un tag viejo: **andá al 2b y declaralo**), **2** no se pudo
+   comprobar (sin binario, sin `gh`, o el binario no dice su versión: **también
+   2b, declarado**). Exit 2 no es autorización: es una comprobación que no
+   corrió. Esto reemplaza el "compará a mano" que este paso pedía en prosa, y
+   por eso es un comando y no un párrafo: el incidente `0.60.0` ocurrió con la
+   prosa ya escrita. Sin `scripts/harness-version.sh` en la instancia (una
+   instancia vieja), el 2b es el camino: no lo suplas comparando de memoria.
+   Autorizado el binario, no redactes vos los archivos:
    ```
    harness generate --workspace <workspace> --answers <el answers YA registrado>
    ```
@@ -108,16 +121,17 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
    clave que el binario no reconoce.** El binario valida contra un esquema fijo
    que trae embebido, y ese esquema puede ser más viejo que tu instancia o no
    conocer las claves LOCALES que el workspace agregó para sus propios scripts.
-   Caso de campo (issue #42): un binario 0.60.0 rechazó `gcp:` (que lee un
-   script local para descubrir el endpoint de GKE) y después `upstream_issues:`,
-   que está en el template desde v0.48.0. Quitarlas para que `generate` corra
-   habría dejado el answers "válido" para el binario y roto para la instancia,
-   en silencio y sin que nada lo detecte después. Una clave rechazada es SIEMPRE
-   el tercer estado: se declara y se va al fallback 2b. Nunca se borra.
-   Antes de confiar en el binario, comprobá que sus templates no sean más viejos
-   que los del plugin en disco: si `harness --version` no dice qué vintage de
-   templates trae, no podés saberlo, y entonces el fallback 2b es el camino
-   honesto aunque el binario exista.
+   Caso de campo (issues #42 y #102): un binario 0.60.0 rechazó `gcp:` (que lee
+   un script local para descubrir el endpoint de GKE) y después
+   `upstream_issues:`, que está en el template desde v0.48.0. Quitarlas para que
+   `generate` corra habría dejado el answers "válido" para el binario y roto
+   para la instancia, en silencio y sin que nada lo detecte después. Una clave
+   rechazada es SIEMPRE el tercer estado: se declara y se va al fallback 2b.
+   Nunca se borra. Y notá que ese rechazo y el `0.60.0` son **el mismo defecto
+   visto dos veces**: un generador que no corresponde a la versión publicada
+   trae también un esquema que no corresponde. El `--generator` de arriba ataja
+   los dos antes de que se escriba nada; si igual llegaste hasta acá con una
+   clave rechazada, el binario no era el que decía ser.
    El porqué: este paso es el último lugar donde un LLM improvisa con permisos
    de escritura sobre una instancia, y de acá salieron los tres incidentes más
    caros de campo (la versión `0.60.0` que no existía en ningún origen, el

@@ -2012,6 +2012,31 @@ class CostGateTest(unittest.TestCase):
         r = self.transition("implement")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_el_eximido_de_ctx_del_orquestador_VIVO_destraba_de_verdad(self):
+        # ISSUE #103, extremo a extremo. `cache` se exime bien porque su agente
+        # YA CERRO: el transcript es inmutable y el valor clavado alcanza. El
+        # ctx del ORQUESTADOR es otra cosa: esta vivo por definicion cuando pide
+        # la transicion, su contexto medio es monotono creciente, y lo suben las
+        # propias tool calls del waive y de la transicion. Anclado a un valor,
+        # el eximido nacia VENCIDO: la transicion se frenaba igual DESPUES de un
+        # waive aceptado, y la unica salida que quedaba era HARNESS_CTX_CEILING,
+        # que el propio mensaje describe como el recurso que no deja rastro.
+        self.assertEqual(self.init(budget=500).returncode, 0)
+        self.write_transcript(turns=20, cache_read=400_000, cache_write=1_000)
+        self.assertEqual(self.transition("implement").returncode, 3)
+        w = self.waive("ctx", "orquestador", reason="sesion larga declarada")
+        self.assertEqual(w.returncode, 0, w.stdout + w.stderr)
+        state = json.loads((self.task / "state.json").read_text())
+        ctx = [x for x in state["cost_waivers"] if x.get("band") == "ctx"]
+        self.assertEqual(len(ctx), 1, state)
+        self.assertTrue(ctx[0].get("phase"),
+                        "el eximido de ctx declara la FASE que cubre: es su vigencia")
+        # Y ahora el contexto CRECE, que es exactamente lo que pasa en campo
+        # entre el waive y la transicion. Antes de #103 esto volvia a salir 3.
+        self.write_transcript(turns=26, cache_read=420_000, cache_write=1_000)
+        r = self.transition("implement")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_no_se_exime_lo_que_no_esta_frenando(self):
         # El eximido se ancla al valor MEDIDO: eximir por adelantado seria
         # declarar algo que nadie midio, y ahi si seria un boton de apagado.

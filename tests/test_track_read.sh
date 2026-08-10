@@ -141,6 +141,35 @@ payload Bash "{\"command\":\"grep -n titulo worktrees/COR-12/atlas/nota.md\"}" "
 assert_contains "$(cat "$WS/tasks/COR-12/evidence.log")" "nota.md" \
   "grep sobre un archivo real: queda registrado"
 
+# 8b. ISSUE #127: un SUBAGENTE lee con una ruta RELATIVA a SU arbol, y el cwd
+# que llega en el payload es el de la sesion (la raiz del workspace). Antes eso
+# se resolvia contra un solo directorio, no existia, y la lectura se perdia: el
+# reviewer citaba el archivo, gate_evidence lo acusaba de no haberlo leido y el
+# ship rebotaba tres veces sobre una lectura que SI ocurrio. Las lecturas por
+# `Read` del mismo subagente si quedaban (traen ruta completa), o sea que era
+# la via Bash la que se perdia, justo donde el harness pide economia de tokens.
+mkdir -p "$WS/worktrees/COR-12/.review-atlas"
+echo 'lock' > "$WS/worktrees/COR-12/.review-atlas/bun.lock"
+# La sesion ya toco el pin (como en el caso real: el reviewer leyo con Read
+# antes), asi que su puntero de tarea existe.
+payload Read "{\"file_path\":\"$WS/worktrees/COR-12/.review-atlas/src/x.ts\"}" "$WS" | "$HOOK"
+payload Bash "{\"command\":\"sed -n '1406p' bun.lock\"}" "$WS" | "$HOOK"
+assert_contains "$(cat "$WS/tasks/COR-12/evidence.log")" "bun.lock" \
+  "#127: la lectura relativa de un subagente se resuelve contra SU arbol, no contra el cwd de la sesion"
+
+# 8c. Y el `cd` del propio comando tambien cuenta como donde esta parado.
+mkdir -p "$WS/worktrees/COR-12/atlas/deep"
+echo 'z' > "$WS/worktrees/COR-12/atlas/deep/config.yaml"
+payload Bash "{\"command\":\"cd worktrees/COR-12/atlas/deep && cat config.yaml\"}" "$WS" | "$HOOK"
+assert_contains "$(cat "$WS/tasks/COR-12/evidence.log")" "config.yaml" \
+  "#127: un 'cd X && cat y' resuelve y contra X"
+
+# 8d. Lo que NO puede pasar: registrar una lectura que no existe. Sin archivo
+# real no hay entrada, o el gate empezaria a dar por leido lo que nadie abrio.
+payload Bash "{\"command\":\"cat inventado-que-no-existe.txt\"}" "$WS" | "$HOOK"
+assert_not_contains "$(cat "$WS/tasks/COR-12/evidence.log")" "inventado-que-no-existe" \
+  "un token que no resuelve a un archivo real NO se registra"
+
 # 9. pytest con archivo::caso → el ARCHIVO queda registrado
 mkdir -p "$WS/worktrees/COR-12/atlas/tests"
 printf 'def test_a():\n    pass\n' > "$WS/worktrees/COR-12/atlas/tests/test_a.py"

@@ -83,12 +83,35 @@
           "blocked": []
         }
       },
+      "triado": {
+        "allowed_transitions": {
+          "intake": [
+            "implement"
+          ],
+          "implement": [
+            "review"
+          ],
+          "review": [
+            "implement",
+            "ship"
+          ],
+          "ship": [
+            "deploy"
+          ],
+          "deploy": [
+            "archive"
+          ],
+          "archive": [],
+          "blocked": []
+        }
+      },
       "standard": {},
       "full": {}
     },
     "lane_escalation": [
       "quick",
       "express",
+      "triado",
       "standard",
       "full"
     ],
@@ -103,11 +126,16 @@
       "deploy_failed",
       "prompt_injection",
       "requested_boundary",
-      "custom_step_failed"
+      "custom_step_failed",
+      "orchestrator_stalled"
     ]
   },
   "limits": {
-    "max_review_rounds": {{LOOP_BUDGET}}
+    "max_review_rounds": {{LOOP_BUDGET}},
+    "ctx_ceiling_by_role": {
+      "orquestador": 220000,
+      "reviewer": 200000
+    }
   },
   "ship": {
     "require_independent_review": true,

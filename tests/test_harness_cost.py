@@ -348,6 +348,70 @@ class BandaConSalida(CostBase):
         self.assertEqual(r.returncode, 3, r.stdout)
         self.assertNotIn("EXIMIDO", r.stdout, r.stdout)
 
+    def test_el_eximido_CUBRE_SU_PROPIO_BREACH_pase_lo_que_pase_el_redondeo(self):
+        # ISSUES #119, #122, #123, #124, #125, #126, #128: `cost-waive` decia
+        # "aceptado", el eximido quedaba en state.json con EL MISMO valor que el
+        # gate reportaba, y la transicion seguia frenada. Causa: el breach se
+        # persiste REDONDEADO (round(cache_hit, 6)) y covered_by comparaba
+        # contra la medicion CRUDA con epsilon 1e-9; cuando round() subia (la
+        # mitad de los casos, por el septimo decimal) la diferencia de 5e-7 era
+        # 500 veces el epsilon y el eximido no podia cubrirse a si mismo.
+        #
+        # La prueba es la que importa en campo y no depende de sortear decimales:
+        # se toma el valor que el propio --json declara y se exime con EL. Si
+        # eso no destraba, la salida auditable del gate no existe.
+        self.sano()
+        self.subagente("architect", 33, 89_000, 11_000)
+        data = json.loads(self.run_cost("check", "T1", "--json").stdout)
+        breach = next(b for b in data["breaches"] if b["code"] == "COST-CACHE")
+        self.waivers({"band": "cache", "agent": "architect", "value": breach["value"],
+                      "actor": "orchestrator", "reason": "el valor que el gate reporto"})
+        r = self.run_cost("check", "T1")
+        self.assertEqual(r.returncode, 0,
+                         "el eximido escrito con el valor que el gate REPORTA "
+                         "tiene que cubrir ese mismo breach\n" + r.stdout)
+        self.assertIn("EXIMIDO por orchestrator", r.stdout, r.stdout)
+
+    def test_covered_by_no_depende_del_lado_al_que_redondee(self):
+        # La misma garantia, directa sobre la funcion y en los dos sentidos del
+        # redondeo, que es lo que hacia que el bug le tocara a la mitad de los
+        # valores y pareciera aleatorio (#126 lo aisla asi).
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("hc", str(SCRIPT))
+        hc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hc)
+        for crudo in (0.8486905, 0.8486914):       # round sube / round baja
+            guardado = round(crudo, 6)
+            w = [{"band": "cache", "agent": "reviewer", "value": guardado}]
+            self.assertIsNotNone(hc.covered_by(w, "cache", "reviewer", crudo),
+                                 f"cache crudo={crudo} guardado={guardado}")
+        for crudo in (156162.6949, 156162.6851):   # idem en ctx (round a 2)
+            guardado = round(crudo, 2)
+            w = [{"band": "ctx", "agent": "orquestador", "value": guardado}]
+            self.assertIsNotNone(hc.covered_by(w, "ctx", "orquestador", crudo),
+                                 f"ctx crudo={crudo} guardado={guardado}")
+        # Y lo que NO puede pasar: seguir siendo un cheque en blanco. Algo
+        # PEOR que lo aceptado vuelve a frenar.
+        w = [{"band": "cache", "agent": "reviewer", "value": 0.89}]
+        self.assertIsNone(hc.covered_by(w, "cache", "reviewer", 0.40))
+
+    def test_dos_agentes_del_mismo_rol_se_eximen_por_separado(self):
+        # ISSUE #122: dos pasos custom corren como el mismo rol en la misma fase
+        # y los dos incumplen. Cada eximido tiene su valor; el peor tiene que
+        # encontrar el suyo. Antes quedaba uno vivo y la tarea trabada para
+        # siempre (con el push a main YA hecho).
+        self.sano()
+        self.subagente("general-purpose", 33, 89_000, 11_000, name="agent-uno")
+        self.subagente("general-purpose", 33, 80_000, 20_000, name="agent-dos")
+        data = json.loads(self.run_cost("check", "T1", "--json").stdout)
+        valores = sorted(b["value"] for b in data["breaches"] if b["code"] == "COST-CACHE")
+        self.assertTrue(valores, data)
+        self.waivers(*[{"band": "cache", "agent": "general-purpose", "value": v,
+                        "actor": "orchestrator", "reason": f"paso custom {i}"}
+                       for i, v in enumerate(valores)])
+        r = self.run_cost("check", "T1")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
     def test_el_eximido_es_de_UN_rol(self):
         self.sano()
         self.subagente("implementer", 33, 89_000, 11_000)
@@ -443,6 +507,68 @@ class BandaConSalida(CostBase):
         self.assertEqual(b[0]["turns"], 33)
         self.assertAlmostEqual(b[0]["value"], 0.89, places=2)
         self.assertEqual(data["min_turns_for_cache_floor"], 10)
+
+
+class TechoPorRol(CostBase):
+    """ISSUE #120: 150k era el MISMO numero para tres modos de uso distintos.
+
+    Un subagente de una tarea, el ORQUESTADOR de un lote y un reviewer que el
+    harness declara PERSISTENTE entre rondas arrastran contexto por razones
+    distintas, y los dos ultimos lo hacen por DISENO. Medido en una sola tarea:
+    6 de 6 evaluaciones de banda ctx dieron breach y las 6 se eximieron a mano.
+    Un gate que se exime siempre no es un gate, es un peaje.
+
+    Lo que se protege: que el techo sea DATO por rol, que el default no se
+    mueva para nadie que no lo declare, y que estar por encima del piso general
+    se SIGA VIENDO aunque no frene.
+    """
+
+    def policy(self, **por_rol):
+        (self.ws / "harness-policy.json").write_text(json.dumps(
+            {"schema": 1, "limits": {"ctx_ceiling_by_role": por_rol}}))
+
+    def orquestador_pesado(self):
+        # ~180k de contexto medio: por encima del piso general de 150k.
+        self.write([self.turn(read=180_000, write=500) for _ in range(20)])
+
+    def test_sin_techo_declarado_el_default_sigue_frenando(self):
+        self.orquestador_pesado()
+        r = self.run_cost("check", "T1")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn("COST-CTX", r.stdout)
+
+    def test_con_techo_del_rol_no_frena_pero_SE_DICE(self):
+        self.orquestador_pesado()
+        self.policy(orquestador=220_000)
+        r = self.run_cost("check", "T1")
+        self.assertEqual(r.returncode, 0, r.stdout)
+        # No frena, pero no desaparece: un termino que deja de verse es el
+        # mismo silencio que el gate vino a matar.
+        self.assertIn("COST-CTX", r.stdout, r.stdout)
+        self.assertIn("dentro del techo declarado", r.stdout, r.stdout)
+
+    def test_el_techo_del_rol_NO_es_un_cheque_en_blanco(self):
+        # Pasarse del techo propio sigue siendo breach: lo que cambio es el
+        # numero, no que exista un limite.
+        self.write([self.turn(read=400_000, write=1_000) for _ in range(20)])
+        self.policy(orquestador=220_000)
+        r = self.run_cost("check", "T1")
+        self.assertEqual(r.returncode, 3, r.stdout)
+
+    def test_el_techo_es_de_UN_rol(self):
+        # Declarar el del reviewer no le sube el techo al orquestador.
+        self.orquestador_pesado()
+        self.policy(reviewer=220_000)
+        self.assertEqual(self.run_cost("check", "T1").returncode, 3)
+
+    def test_el_override_por_entorno_sigue_mandando_sobre_todo(self):
+        self.orquestador_pesado()
+        self.policy(orquestador=220_000)
+        env = dict(os.environ, HARNESS_CTX_CEILING="100000",
+                   CLAUDE_CONFIG_DIR=str(self.cfg), HARNESS_WS=str(self.ws))
+        r = subprocess.run(["python3", str(SCRIPT), "check", "T1"], text=True,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        self.assertEqual(r.returncode, 3, r.stdout)
 
 
 class PisoAlcanzable(CostBase):

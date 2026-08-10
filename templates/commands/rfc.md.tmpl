@@ -62,19 +62,39 @@ tasks/$ARGUMENTS/task.md).
    lo exige como gate antes de `rfc → implement`, y su esquema es exacto:
 
    ```json
-   {"schema": 1,
-    "tasks": [{"id": "T1", "repo": "atlas",  "depends_on": []},
-              {"id": "T2", "repo": "proto",  "depends_on": ["T1"]}]}
+   {"schema": 2,
+    "tasks": [{"id": "T1", "repo": "atlas", "depends_on": [],
+               "files": ["internal/ratelimit/limiter.go"]},
+              {"id": "T2", "repo": "atlas", "depends_on": [],
+               "files": ["internal/http/middleware.go"]},
+              {"id": "T3", "repo": "proto", "depends_on": ["T1"],
+               "files": ["gateway/v1/limits.proto"]}]}
    ```
 
    Reglas que el validador hace cumplir, con el código que vas a ver si
-   fallan: `schema` es 1 y `tasks[]` no va vacío (`POLICY-DAG-001`); cada
+   fallan: `schema` es 1 o 2 y `tasks[]` no va vacío (`POLICY-DAG-001`); cada
    entrada es un objeto (`DAG-002`); `id` no vacío y sin repetir
    (`DAG-003`); `repo` no vacío y sin `/` ni `..` (`DAG-004`); `depends_on`
    es una lista (`DAG-005`) de ids que existan en el mismo archivo
    (`DAG-006`); y no puede haber ciclos (`DAG-007`). Los ids son los mismos
    bloques `### T<n>` del plan: el DAG es su orden de shipping en JSON, no
    una lista aparte.
+
+   **`schema: 2` y `files[]` son lo que compra el paralelo DENTRO de un repo**,
+   y es la diferencia entre 80 minutos y 15 en un lote de 6. Con schema 1, dos
+   tareas del mismo repo TIENEN que ir ordenadas por `depends_on`
+   (`POLICY-DAG-010`): comparten árbol, rama e index. Con schema 2, si sus
+   `files[]` son DISJUNTOS, cada una corre en su propio worktree
+   (`worktrees/<id>/<repo>@<Tn>`) y `dag-coalesce.sh` las junta después.
+   - `files[]` es **obligatorio y no vacío en CADA tarea** del schema 2
+     (`POLICY-DAG-011`): fail-closed a propósito, porque lo que no se declara
+     no se puede probar disjunto y por lo tanto se serializa.
+   - Las rutas salen del grafo y del plan (el campo `archivos:` de cada
+     bloque), **no de una conjetura**: declarar de menos es exactamente cómo
+     dos implementers terminan pisándose.
+   - Si no podés decir qué archivos toca una tarea, el DAG correcto es
+     `schema: 1` con su arista de orden. Un schema 2 inventado es peor que un
+     schema 1 honesto.
 6. **Plan** → `tasks/$ARGUMENTS/plan.md` + `delta-spec.md` + beads
    (`bd create` con deps y ref al ticket), en el formato de bloques
    `### T<n>` que exige `.claude/agents/architect.md`: una entrega es
@@ -91,12 +111,22 @@ tasks/$ARGUMENTS/task.md).
    o sea UNO por (tarea, repo), así que dos tareas del mismo repo
    comparten árbol, rama e index de git y en paralelo se pisan los
    commits (pasó: un `git add` amplio se llevó seis archivos de la tarea
-   vecina). `POLICY-DAG-010` lo rechaza, y cualquiera de los dos órdenes
-   sirve. El paralelo que da ganancia de reloj vive ENTRE repos; el plan
-   declara los ARCHIVOS por tarea para justificarlo. **Si una
+   vecina). `POLICY-DAG-010` lo rechaza salvo que el DAG declare `files[]`
+   DISJUNTOS (schema 2), que es lo que habilita el worktree por nodo; y
+   cualquiera de los dos órdenes sirve. El plan declara los ARCHIVOS por
+   tarea, y esos son los mismos que van al `files[]`. **Si una
    tarea toca tests**, la entrada MODIFIED/REMOVED del delta-spec
    NOMBRA los archivos de test afectados: gate_tests_untouched exige
    esa declaración por archivo.
+
+   **Y hay una tercera sección, para lo que es COBERTURA y no cambio de
+   conducta**: `## COVERAGE Requirements`. Un test de regresión sobre algo que
+   YA funciona bien (el clásico "falta una aserción que fije X") pasa sobre el
+   árbol base por definición, así que `gate_test_muerde` lo declararía vacuo y
+   no habría camino verde honesto. Esa sección nombra el archivo de test y cita
+   el `EV-...` de una corrida donde el test FALLÓ con el código mutado. El gate
+   comprueba que ese id exista en `tasks/<id>/evidence/`: la declaración se
+   apoya en una ejecución, no en una afirmación.
 5b. **`scripts/plan-lint.sh $ARGUMENTS`** (determinista, $0). Verifica
    que cada tarea trae repo/req/archivos/criterios/complexity/deps, que
    no quedaron decisiones abiertas y que cada `req` existe en el

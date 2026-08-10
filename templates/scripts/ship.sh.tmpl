@@ -799,8 +799,15 @@ gate_lane() {
   # tampoco se lo permite un carril todavía más corto. Los carriles con
   # deliberación (standard, full) no pasan por acá: ahí un .proto ya se
   # discutió, y este gate no tiene nada que decir.
+  #
+  # triado entra en la MISMA lista, y es justo el carril donde más importa:
+  # su plan lo escribe el orquestador sin sesión de architect, apoyado en el
+  # triage read-only. Un .proto o una migración en ese diff significan que la
+  # tarea necesitaba una deliberación que nadie tuvo, y este gate es el único
+  # que puede notarlo (el triage miró el código, no el diff que todavía no
+  # existía).
   case "$lane" in
-    express|quick) ;;
+    express|quick|triado) ;;
     *) return 0 ;;
   esac
   # `\.tf\$|\.tfvars\$` van ademas de `(^|/)terraform/` y no es redundante: un
@@ -2710,6 +2717,48 @@ muerde_corre() {  # muerde_corre <clase> <unidad> → el exit REAL sobre el árb
       esac ;;
   esac
 }
+# muerde_verde_vacio <clase> <unidad> → 0 si el exit 0 NO ejecutó ningún caso.
+#
+# Es la contra-pregunta de `muerde_corre`: un runner que sale 0 sin haber
+# corrido nada (todo skipeado, sin casos que colectar) no está diciendo "el
+# test pasa", está diciendo "no probé". Tratarlos igual es lo que hacía el
+# falso rojo del #129 y habilitaba el falso verde simétrico.
+#
+# Fail-CLOSED al revés que el resto: ante la duda devuelve 1 (o sea "sí corrió
+# algo") y el gate se comporta como siempre. Inventar un "no corrió nada"
+# sacaría del alcance a un test legítimamente vacuo, que es justo lo que este
+# gate existe para cazar.
+muerde_verde_vacio() {
+  local clase="$1" u="$2" salida
+  case "$clase" in
+    go)
+      # Go no imprime NADA sobre casos sin `-v`: `ok pkg 0.04s` es idéntico con
+      # diez tests verdes y con diez skipeados. Se vuelve a correr con -v SOLO
+      # acá (el paquete ya está compilado y en caché, así que es barato) y se
+      # cuenta lo único que prueba ejecución real: las líneas `--- PASS`.
+      if [ -n "${MUERDE_GO_TAGS:-}" ]; then
+        salida="$( cd "$MUERDE_BASE" && go test -v -tags "$MUERDE_GO_TAGS" "$u" 2>&1 )"
+      else
+        salida="$( cd "$MUERDE_BASE" && go test -v "$u" 2>&1 )"
+      fi
+      printf '%s\n' "$salida" >> "$MUERDE_SALIDA"
+      printf '%s\n' "$salida" | grep -qE '^[[:space:]]*--- (PASS|FAIL)' && return 1
+      # Sin PASS ni FAIL: o todo skip, o el paquete no tiene casos. Las dos
+      # cosas son "no probé", y las dos se dicen igual.
+      return 0 ;;
+    py)
+      # pytest -q cierra con una línea de resumen. "passed" prueba ejecución;
+      # "no tests ran" y un resumen con solo skipped, no.
+      grep -qE '[0-9]+ (passed|failed|error)' "$MUERDE_SALIDA" && return 1
+      grep -qE 'no tests ran|[0-9]+ skipped' "$MUERDE_SALIDA" && return 0
+      return 1 ;;
+    *)
+      # node y tf: sus runners no tienen un marcador estable y barato acá, así
+      # que se conserva la conducta de antes en vez de adivinar.
+      return 1 ;;
+  esac
+}
+
 muerde_corre_grupo() {  # muerde_corre_grupo <clase> <lista>: unidad por unidad
   local clase="$1" u rc
   # Unidad por unidad y no todo junto: con una sola invocación, un test que sí
@@ -2784,6 +2833,24 @@ muerde_corre_grupo() {  # muerde_corre_grupo <clase> <lista>: unidad por unidad
       tail -3 "$MUERDE_SALIDA" | sed 's/^/       /'
       continue
     fi
+    # ── UN VERDE VACÍO NO ES UN VERDE (#129) ────────────────────────────
+    # `go test` sale 0 cuando el paquete SKIPea todos sus casos (t.Skip por una
+    # variable de entorno, un short mode, un build tag que deja el cuerpo
+    # vacío), y este gate leía ese 0 como "PASA sobre el árbol base", o sea un
+    # FALSO ROJO hoy. Y es peor de lo que parece: el mismo silencio es
+    # simétrico, así que el día que el paquete skipee sobre el árbol NUEVO, un
+    # test que no probó nada se cobraría como verde.
+    # La pregunta correcta no es "¿salió 0?" sino "¿corrió algún caso?", y solo
+    # se puede contestar mirando la salida. Se pregunta ÚNICAMENTE en el camino
+    # verde, que es el sospechoso: el rojo ya demostró que algo se ejecutó.
+    if [ "$rc" -eq 0 ] && muerde_verde_vacio "$clase" "$u"; then
+      echo "   ⚠️  $u: sobre la base NO corrió ni un caso (todo skip / sin casos): NO puedo verificarlo"
+      echo "       Un exit 0 sin casos ejecutados no dice que el test pase: dice que nadie lo probó."
+      MUERDE_SINRED="$MUERDE_SINRED   · $u
+"
+      tail -3 "$MUERDE_SALIDA" | sed 's/^/       /'
+      continue
+    fi
     if [ "$rc" -eq 0 ]; then
       echo "   ✗ $u: PASA sobre el árbol base"
       MUERDE_VACUOS="$MUERDE_VACUOS   · $u
@@ -2826,9 +2893,11 @@ gate_test_muerde() {
   tocados="$(git diff -M "origin/$BASE_REF...HEAD" --diff-filter=AM --name-only \
     | grep -E "$pat" | grep -vE "$artifacts" | sort -u || true)"
   delta="${HARNESS_DELTA_SPEC_FILE:-$WS/tasks/$TASK/delta-spec.md}"
+  local cobertura=""
   if [ -f "$delta" ]; then
     added="$(delta_seccion "$delta" 'ADDED')"
     escape="$(delta_seccion "$delta" '(MODIFIED|REMOVED)')"
+    cobertura="$(delta_seccion "$delta" '(COVERAGE|COBERTURA)')"
   fi
   while IFS= read -r f; do
     [ -n "$f" ] || continue
@@ -2857,6 +2926,36 @@ gate_test_muerde() {
     # título de un `it()`, reordenar casos o reindentar da neto 0 y el escape
     # se concede; agregar un caso de verdad da neto > 0 y no. Así la
     # remediación que este gate imprime sigue funcionando para los dos casos.
+    # ── EL CAMINO VERDE DE LA COBERTURA PURA (#121) ─────────────────
+    # Hay una clase entera de trabajo legítimo que este gate no podía dejar
+    # pasar: el test de REGRESIÓN sobre conducta que YA es correcta. Sale de
+    # los hallazgos de review del tipo "falta una aserción que fije X", y por
+    # definición pasa sobre la base: eso es lo que se quiere: fijar lo que ya
+    # funciona para que nadie lo rompa mañana.
+    # Los caminos que quedaban eran todos deshonestos (inventar un cambio de
+    # producción para que muerda, o sacar el archivo del ADDED escribiendo algo
+    # falso en el delta-spec), y un gate que solo se puede pasar mintiendo
+    # enseña a mentirle a los gates.
+    #
+    # El escape existe, pero NO es una palabra: es una MEDICIÓN. Se declara el
+    # archivo bajo `## COVERAGE Requirements` y se cita el `EV-...` de una
+    # corrida real donde el test FALLÓ con el código mutado. Eso responde la
+    # misma pregunta que el gate ("¿este test puede fallar?") por el único
+    # camino que le queda a un test de cobertura, y la respuesta la sella
+    # `evidence.py`, no la prosa: el id tiene que existir en tasks/<id>/evidence/.
+    if [ -n "$cobertura" ] && printf '%s\n' "$cobertura" | grep -qiF -- "$(basename "$f")"; then
+      local ev ev_ok=""
+      for ev in $(printf '%s\n' "$cobertura" | grep -oE 'EV-[A-Za-z0-9-]+' | sort -u); do
+        if [ -f "$WS/tasks/$TASK/evidence/$ev.json" ]; then ev_ok="$ev"; break; fi
+      done
+      if [ -n "$ev_ok" ]; then
+        escapados="$escapados   ℹ️  $f: declarado COVERAGE con mutación sellada ($ev_ok), fuera del alcance
+"
+        continue
+      fi
+      escapados="$escapados   ⚠️  $f: declarado COVERAGE pero SIN un EV-... sellado que exista en tasks/$TASK/evidence/: sigue en el alcance
+"
+    fi
     if printf '%s\n' "$escape" | grep -qiF -- "$(basename "$f")"; then
       if declara_tests_nuevos "$f"; then
         escapados="$escapados   ⚠️  $f: declarado bajo MODIFIED/REMOVED, pero AGREGA tests nuevos: sigue en el alcance
@@ -3024,6 +3123,20 @@ CKEOF
     echo "     conducta nueva: hazlo fallar primero (rojo sobre la base, verde"
     echo "     sobre tu cambio), o si es un refactor de test declaralo bajo"
     echo "     MODIFIED en el delta-spec, nombrando su archivo."
+    echo "   ↳ Y si lo que entregás es COBERTURA sobre conducta que YA es"
+    echo "     correcta (el clásico 'falta una aserción que fije X'), ese test"
+    echo "     pasa sobre la base por definición y tiene su propio camino verde,"
+    echo "     que NO es una palabra sino una medición:"
+    echo "       1. mutá el código de producción que el test fija (borrá la"
+    echo "          línea, invertí la condición) y corré el test SELLANDO:"
+    echo "          python3 scripts/evidence.py run --task-dir tasks/$TASK --repo $REPO \\"
+    echo "            --runner implementer --kind test --cwd <tu-worktree> -- <el test>"
+    echo "          Tiene que quedar ROJO: eso es lo que prueba que muerde."
+    echo "       2. revertí la mutación (el árbol se queda como estaba)."
+    echo "       3. declaralo en el delta-spec bajo '## COVERAGE Requirements',"
+    echo "          nombrando el archivo de test y citando ese EV-... ."
+    echo "     El gate comprueba que el EV exista en tasks/$TASK/evidence/, así que"
+    echo "     la declaración se apoya en una corrida, no en una afirmación."
     exit 3
   )
 }

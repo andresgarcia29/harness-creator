@@ -801,7 +801,7 @@ for fn in delta_seccion declara_tests_nuevos muerde_pytest muerde_go \
           muerde_go_tags_de muerde_go_tags \
           muerde_go_base_compila muerde_tf muerde_tf_root muerde_tf_base_init \
           muerde_node con_limite muerde_node_colecta_en muerde_node_colecta muerde_corre \
-          muerde_corre_grupo muerde_salto gate_test_muerde; do
+          muerde_verde_vacio muerde_corre_grupo muerde_salto gate_test_muerde; do
   extract "$fn" >> "$WS/gate_muerde.sh"
 done
 grep -q 'MUERDE_VACUOS' "$WS/gate_muerde.sh" || { echo "no pude extraer gate_test_muerde"; exit 1; }
@@ -848,6 +848,8 @@ for a in "$@"; do t="$a"; done
 case "$t" in *vacuo*) echo "1 passed"; exit 0 ;; esac
 # exit 5 = "no collected any tests", el código que pytest reserva para eso
 case "$t" in *sincasos*) echo "no tests ran in 0.01s"; exit 5 ;; esac
+# exit 0 con TODO skipeado: el runner sale verde sin haber probado nada (#129)
+case "$t" in *skipeado*) echo "1 skipped in 0.01s"; exit 0 ;; esac
 if [ -f feature.py ]; then echo "1 passed"; exit 0; fi
 echo "ImportError: cannot import name 'feature'"
 exit 1
@@ -1206,6 +1208,58 @@ assert_eq 0 "$rc" "pytest exit 5 (nada colectado): no bloquea"
 assert_contains "$out" "no colectó ningún caso" "y lo dice como tramo sin red"
 assert_contains "$out" "EMIT assumption" "con el supuesto en el bus"
 assert_not_contains "$out" "o sea que MUERDE" "sin cobrarlo como verificación"
+
+# (l2) ISSUE #129: un exit 0 SIN CASOS EJECUTADOS no es "PASA sobre la base".
+#      `go test` sale 0 cuando el paquete skipea todos sus casos, y el gate leia
+#      ese 0 como "este test pasa sin tu cambio", o sea un FALSO ROJO. Y es peor
+#      de lo que parece: el mismo silencio es simetrico, asi que el dia que el
+#      paquete skipee sobre el arbol NUEVO, un test que no probo nada se
+#      cobraria como verde. La pregunta correcta no es "salio 0" sino "corrio
+#      algun caso".
+mk_muerde_repo "$WS/mu10b"
+printf 'import pytest\n\n@pytest.mark.skip\ndef test_skipeado():\n    assert True\n' > tests/test_skipeado.py
+git add -A && git commit -qm "test que se skipea entero"
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "#129: exit 0 sin casos ejecutados no bloquea"
+assert_contains "$out" "NO corrió ni un caso" "y lo dice: es un tramo sin red, no un verde"
+assert_not_contains "$out" "PASA sobre el árbol base" \
+  "#129: y NO lo acusa de vacuo, que es el falso rojo que costaba la ronda"
+assert_contains "$out" "EMIT assumption" "con el supuesto en el bus"
+
+# (l3) ISSUE #121: la COBERTURA pura tiene camino verde, y es una MEDICION.
+#      Un test de regresion sobre conducta que ya es correcta pasa sobre la base
+#      por definicion: eso es lo que se quiere. Antes los unicos caminos verdes
+#      eran deshonestos (inventar un cambio de produccion, o sacar el archivo
+#      del ADDED escribiendo algo falso), y un gate que solo se pasa mintiendo
+#      ensena a mentirle a los gates.
+mk_muerde_repo "$WS/mu10c"
+printf 'def test_cobertura_vacuo():\n    assert True\n' > tests/test_vacuo_cov.py
+git add -A && git commit -qm "test de cobertura"
+# sin declararlo: sigue siendo un vacuo y frena
+out="$(run_muerde)"; rc=$?
+assert_eq 3 "$rc" "#121: sin declarar, un test que pasa sobre la base sigue frenando"
+assert_contains "$out" "COVERAGE" "y la remediacion nombra el camino que SI existe"
+assert_contains "$out" "evidence.py run" "con el comando que lo sella"
+# declarado bajo COVERAGE pero SIN evidencia sellada: no alcanza la palabra
+mkdir -p "$WS/tasks/TM"
+cat > "$WS/tasks/TM/delta-spec.md" <<'DS'
+## COVERAGE Requirements
+- test_vacuo_cov.py fija el mapeo que ya era correcto (EV-TEST-nunca-existio)
+DS
+out="$(run_muerde)"; rc=$?
+assert_eq 3 "$rc" "#121: declarar sin un EV que exista NO abre nada"
+assert_contains "$out" "SIN un EV" "y dice exactamente que le falta"
+# con la mutacion sellada: fuera del alcance
+mkdir -p "$WS/tasks/TM/evidence"
+echo '{"id":"EV-TEST-abc123","exit_code":1}' > "$WS/tasks/TM/evidence/EV-TEST-abc123.json"
+cat > "$WS/tasks/TM/delta-spec.md" <<'DS'
+## COVERAGE Requirements
+- test_vacuo_cov.py fija el mapeo que ya era correcto; muere bajo mutacion: EV-TEST-abc123
+DS
+out="$(run_muerde)"; rc=$?
+assert_eq 0 "$rc" "#121: con la mutacion SELLADA, la cobertura pura tiene camino verde"
+assert_contains "$out" "mutación sellada" "y queda dicho cual fue la prueba"
+rm -f "$WS/tasks/TM/delta-spec.md"; rm -rf "$WS/tasks/TM/evidence"
 
 # (m) el falso verde de Go en monorepo. El arreglo (muerde_go_base_compila)
 #     estaba puesto pero SIN un solo test que lo fijara, o sea que la próxima

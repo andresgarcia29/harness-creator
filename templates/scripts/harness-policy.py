@@ -203,6 +203,20 @@ def phase_is_declared(state: dict, policy: dict) -> bool:
 # del workspace, como siempre.
 DELIVERY_MODES = ("review", "prs", "trunk")
 
+# ── LAS DOS VERSIONES DEL DAG, Y POR QUÉ CONVIVEN ─────────────────────
+# schema 1: `id`, `repo`, `depends_on`. Es todo lo que hacía falta mientras dos
+#           tareas del mismo repo TENÍAN que ir en serie (POLICY-DAG-010).
+# schema 2: agrega `files[]` por tarea, y con eso la serialización dentro de un
+#           repo deja de ser obligatoria: dos tareas que declaran conjuntos de
+#           archivos DISJUNTOS pueden correr en paralelo, cada una en su propio
+#           worktree de nodo (worktrees/<task>/<repo>@<Tn>, rama task/<id>@<Tn>).
+#           Medido: cadenas de 80 min por 6 tareas contra una cota paralela de
+#           6-15 min por nodo.
+# Los dos se aceptan a propósito: un dag.json de una tarea en vuelo no se
+# reescribe por actualizar el harness, y schema 1 sigue siendo la respuesta
+# correcta cuando no se sabe qué archivos toca cada tarea.
+DAG_SCHEMAS = (1, 2)
+
 
 def delivery_of(state: dict) -> "str | None":
     """La entrega declarada en state.json, o None si la tarea no declara ninguna.
@@ -328,9 +342,9 @@ def repos_planned(task_dir: Path) -> list:
              "Regenerá el DAG (fase rfc) y validalo con 'harness-policy.py "
              f"validate-dag tasks/{task_dir.name}/dag.json'")
     tasks = dag.get("tasks") if isinstance(dag, dict) else None
-    if not isinstance(dag, dict) or dag.get("schema") != 1 or not isinstance(tasks, list):
+    if not isinstance(dag, dict) or dag.get("schema") not in DAG_SCHEMAS or not isinstance(tasks, list):
         fail("POLICY-SHIP-004",
-             f"tasks/{task_dir.name}/dag.json no cumple schema:1 con tasks[]: "
+             f"tasks/{task_dir.name}/dag.json no cumple schema:1|2 con tasks[]: "
              "corré 'harness-policy.py validate-dag' y regeneralo antes de "
              "pedir review → ship")
     repos = []
@@ -623,6 +637,24 @@ def vet_repos_for_lane(lane: str, repos: list, ws: Path) -> None:
     # así que nada ordena el ship entre repos, y descubrirlo al final
     # costaría el trabajo del implementer más una escalada.
     distinct = list(dict.fromkeys(repos))
+    # ── triado también promete UN repo, y por un motivo distinto ─────────
+    # quick es de un repo porque no genera DAG. triado SÍ genera DAG, así que
+    # el ship se ordenaría igual; lo que no sobrevive al segundo repo es su
+    # PREMISA: el carril existe porque un triage read-only ya recorrió UN
+    # código y dejó cada defecto con evidencia archivo:símbolo, y eso es lo
+    # que autoriza a saltarse la sesión del architect. Dos repos son dos
+    # terrenos, y el segundo no lo recorrió nadie. Medido: la ventana
+    # intake→rfc→implement en lotes ya triados son 11-17 minutos para producir
+    # un plan que el triage ya había escrito; recuperar eso vale solo mientras
+    # la evidencia cubra todo lo que se va a tocar.
+    if lane == "triado" and len(distinct) > 1:
+        fail("POLICY-LANE-006",
+             f"triado es de UN repo; esta tarea declara {len(distinct)}: "
+             f"{', '.join(distinct)}. El carril salta la sesión del architect "
+             "porque un triage read-only ya dejó cada defecto con su evidencia "
+             "archivo:símbolo EN ESE código; un segundo repo no tiene esa "
+             "evidencia y el plan pasaría a ser una conjetura. Remediación: "
+             "una tarea triado por repo, o iniciá con --lane standard")
     if lane == "quick" and len(distinct) > 1:
         fail("POLICY-LANE-005",
              f"quick es de UN repo; para multi-repo usa express o superior. "
@@ -650,7 +682,7 @@ def vet_repos_for_lane(lane: str, repos: list, ws: Path) -> None:
               "corrio (ni el freno de infra ni el aviso de repos "
               "desconocidos); el backstop es gate_lane en ship.sh",
               file=sys.stderr)
-    if lane in ("quick", "express"):
+    if lane in ("quick", "express", "triado"):
         infra = [r for r in repos if kinds.get(r) in ("infra-live", "infra-module")]
         if infra:
             # ── AVISA, NO RECHAZA (#71) ────────────────────────────────
@@ -1153,6 +1185,34 @@ def cmd_record_cost(args: argparse.Namespace) -> int:
     return 0
 
 
+def _dag_files(task_id: str, item: dict, schema: int) -> list:
+    """Los archivos que ESTA tarea del DAG declara tocar (schema 2).
+
+    FAIL-CLOSED, y ahí está todo el diseño: con schema 2 el campo es
+    OBLIGATORIO y no vacío. Un nodo sin `files` no es "un nodo que toca poco":
+    es un nodo del que no se sabe nada, y la única regla que puede aplicarse a
+    lo desconocido es la vieja (serializar). Permitirlo vacío convertiría el
+    silencio en permiso de paralelizar, que es exactamente cómo se pierde
+    trabajo: dos implementers sobre el mismo archivo, un `git add` amplio y seis
+    archivos del vecino en el commit equivocado (caso de campo de DAG-010)."""
+    if schema < 2:
+        return []
+    declared = item.get("files")
+    if not isinstance(declared, list) or not declared \
+       or any(not isinstance(f, str) or not f.strip() for f in declared):
+        fail("POLICY-DAG-011",
+             f"schema:2 exige files[] no vacío en cada tarea, y {task_id} no lo trae. "
+             "files[] es lo que habilita el paralelo dentro de un repo (worktree "
+             "por nodo): sin él no se puede saber si dos nodos se pisan, y lo "
+             "desconocido se serializa. ↳ remediación: declará las rutas que "
+             f"{task_id} va a tocar (salen del grafo, no de grep), o bajá el DAG "
+             "a schema:1 y ordená los nodos con depends_on")
+    # Normalizadas: el mismo archivo escrito de dos formas ("./a.go", "a.go")
+    # no puede leerse como dos archivos distintos, porque eso volvería
+    # "disjuntos" a dos nodos que pisan el mismo archivo.
+    return sorted({f.strip().lstrip("./") for f in declared})
+
+
 def load_dag_nodes(dag_path: Path) -> "tuple[dict, dict]":
     """Valida el DAG completo (DAG-001..007) y devuelve (deps, repo) por id.
 
@@ -1160,10 +1220,12 @@ def load_dag_nodes(dag_path: Path) -> "tuple[dict, dict]":
     exactamente las mismas reglas: dos validadores del mismo artefacto es una
     oportunidad de divergir."""
     dag = load(dag_path, "DAG")
-    if dag.get("schema") != 1 or not isinstance(dag.get("tasks"), list) or not dag["tasks"]:
-        fail("POLICY-DAG-001", "dag.json requiere schema:1 y tasks[] no vacío")
+    schema = dag.get("schema")
+    if schema not in DAG_SCHEMAS or not isinstance(dag.get("tasks"), list) or not dag["tasks"]:
+        fail("POLICY-DAG-001", "dag.json requiere schema:1 (o 2, con files[]) y tasks[] no vacío")
     nodes: dict[str, list[str]] = {}
     repos: dict[str, str] = {}
+    files: dict[str, list[str]] = {}
     for item in dag["tasks"]:
         if not isinstance(item, dict):
             fail("POLICY-DAG-002", "cada tarea del DAG debe ser un objeto")
@@ -1176,6 +1238,7 @@ def load_dag_nodes(dag_path: Path) -> "tuple[dict, dict]":
             fail("POLICY-DAG-005", f"depends_on inválido para {task_id}")
         nodes[task_id] = deps
         repos[task_id] = repo
+        files[task_id] = _dag_files(task_id, item, schema)
     for task_id, deps in nodes.items():
         missing = [dep for dep in deps if dep not in nodes]
         if missing:
@@ -1227,6 +1290,22 @@ def load_dag_nodes(dag_path: Path) -> "tuple[dict, dict]":
             stack.extend(nodes.get(cur, []))
         return False
 
+    # ── LA EXCEPCIÓN MEDIDA: ARCHIVOS DISJUNTOS DECLARADOS (schema 2) ────
+    # La premisa de DAG-010 sigue siendo cierta: un worktree por (tarea, repo)
+    # significa UN árbol, UNA rama y UN index compartidos. Lo que cambia con
+    # schema 2 es que el DAG puede decir qué toca cada nodo, y entonces el
+    # harness puede darle a cada uno SU worktree (worktrees/<task>/<repo>@<Tn>,
+    # rama task/<id>@<Tn>) y coalescer después con dag-coalesce.sh.
+    #
+    # El número que justifica la excepción: cadenas medidas de 80 min por 6
+    # tareas, 50 por 4, 36 por 6, contra una cota paralela de max(nodo) = 6-15
+    # min. Lo que NO cambia: sin `files` declarados no hay excepción (ver
+    # _dag_files), y el conflicto semántico entre archivos disjuntos lo caza el
+    # precheck (build + tests) antes de gastar un reviewer.
+    def disjuntos(left: str, right: str) -> bool:
+        a, b = set(files.get(left, [])), set(files.get(right, []))
+        return bool(a) and bool(b) and not (a & b)
+
     by_repo: dict[str, list[str]] = {}
     for task_id, repo in repos.items():
         by_repo.setdefault(repo, []).append(task_id)
@@ -1238,6 +1317,17 @@ def load_dag_nodes(dag_path: Path) -> "tuple[dict, dict]":
             for right in ordered[i + 1:]:
                 if reaches(left, right) or reaches(right, left):
                     continue
+                if disjuntos(left, right):
+                    continue
+                if schema >= 2:
+                    compartidos = sorted(set(files.get(left, [])) & set(files.get(right, [])))
+                    fail("POLICY-DAG-010",
+                         f"{left} y {right} comparten el repo '{repo}', el DAG no las "
+                         f"ordena, y sus files[] SE PISAN: {', '.join(compartidos)}. "
+                         "El paralelo dentro de un repo solo es seguro con conjuntos "
+                         "de archivos disjuntos. ↳ remediación: repartí esos archivos "
+                         "a un solo nodo, o agregá una arista de orden en depends_on "
+                         f"({left} → {right} o al revés)")
                 fail("POLICY-DAG-010",
                      f"{left} y {right} comparten el repo '{repo}' y el DAG no las "
                      f"ordena: en paralelo comparten worktrees/<task>/{repo}, la rama "
@@ -1252,6 +1342,41 @@ def load_dag_nodes(dag_path: Path) -> "tuple[dict, dict]":
 def cmd_validate_dag(args: argparse.Namespace) -> int:
     nodes, _ = load_dag_nodes(Path(args.dag))
     print(f"✅ DAG válido: {len(nodes)} tareas, sin ciclos")
+    return 0
+
+
+def cmd_dag_nodes(args: argparse.Namespace) -> int:
+    """Los NODOS del DAG en orden topológico: `<id><TAB><repo>` por línea.
+
+    Existe para que `dag-coalesce.sh` no vuelva a implementar el orden del DAG
+    en awk. El coalesce hace cherry-pick de la rama de cada nodo sobre
+    `task/<id>`, y ese orden TIENE que ser el del DAG: aplicar T3 antes que T1
+    cuando T3 depende de T1 produce un conflicto que no existe en el trabajo,
+    solo en el orden en que se lo aplicó. Con `--repo` se filtra al repo que se
+    está coalesciendo (los nodos de otros repos tienen su propio árbol)."""
+    task_dir = Path(args.task_dir).resolve()
+    dag_path = task_dir / "dag.json"
+    if not dag_path.exists():
+        fail("POLICY-DAG-008",
+             f"no existe tasks/{task_dir.name}/dag.json: no hay nodos que ordenar")
+    nodes, repos = load_dag_nodes(dag_path)
+    order: list = []
+    visited: set = set()
+
+    def visit(node: str) -> None:
+        if node in visited:
+            return
+        visited.add(node)
+        for dependency in nodes[node]:
+            visit(dependency)
+        order.append(node)
+
+    for node in sorted(nodes):
+        visit(node)
+    for node in order:
+        if args.repo and repos[node] != args.repo:
+            continue
+        print(f"{node}\t{repos[node]}")
     return 0
 
 
@@ -2097,6 +2222,11 @@ def build_parser() -> argparse.ArgumentParser:
     dag = sub.add_parser("validate-dag")
     dag.add_argument("dag")
     dag.set_defaults(func=cmd_validate_dag)
+    dagn = sub.add_parser("dag-nodes",
+                          help="nodos del DAG en orden topológico (id<TAB>repo)")
+    dagn.add_argument("task_dir")
+    dagn.add_argument("--repo", default="")
+    dagn.set_defaults(func=cmd_dag_nodes)
     dago = sub.add_parser("dag-order",
                           help="orden topológico de repos para ship-wave")
     dago.add_argument("task_dir")

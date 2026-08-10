@@ -91,6 +91,7 @@ al blast radius, no al revés. Clasifica con señales DETERMINISTAS
 | Carril | Señales (todas deben cumplirse) | Pipeline |
 |---|---|---|
 | **express** | 1 dominio de ownership · sin proto/migraciones/infra · sin decisión de arquitectura · **y el delta de CADA repo es chico** (orden de un archivo o dos, cambio mecánico) | Salta RFC: TÚ escribes el mini-plan y el delta-spec (abajo) → 1 implementer por repo → review → ship |
+| **triado** | **1 repo** · sin proto/migraciones/infra · **y CADA defecto ya viene con evidencia `archivo:símbolo` de un triage read-only** (el ticket la trae, no la inventás vos) | Salta la SESIÓN del architect, no sus artefactos: TÚ escribís plan multi-tarea + delta-spec + `dag.json` → implementers → review → ship |
 | **standard** | un solo dominio, o dominios NO cruzados · sin breaking · **y hay algo que decidir de verdad en al menos un repo** | RFC con architect, SIN abogados (no hay frontera que defender) |
 | **full** | cruza ownership · contrato breaking · servicio nuevo · migración de datos | El pipeline completo con abogados |
 
@@ -157,10 +158,37 @@ mal clasificado: escalá, no pienses más fuerte.
 - `scripts/plan-lint.sh <id>` antes de pedir `intake → implement`. Rojo se
   arregla ahí: es la revisión más barata del pipeline.
 
+**El carril `triado`** (el mini-plan express, generalizado a N bloques). Existe
+por un número: en lotes que llegaron YA triados, la ventana intake → rfc →
+implement midió 11 a 17 minutos para producir un plan que el triage ya había
+escrito. El architect volvía a recorrer un terreno que otro acababa de recorrer
+con la respuesta en la mano.
+
+Lo que el carril recorta es UNA SESIÓN LLM, jamás un artefacto ni un gate:
+- Escribís vos `tasks/<id>/plan.md` con **un bloque `### Tn` por defecto**
+  (mismo formato del architect: repo/req/archivos/criterios/complexity/deps),
+  `tasks/<id>/delta-spec.md` con los criterios en EARS, y `tasks/<id>/dag.json`.
+  Los archivos de cada bloque salen de la evidencia del triage y del grafo.
+- Corrés `scripts/plan-lint.sh <id>` y `scripts/harness-policy.py validate-dag
+  tasks/<id>/dag.json`, los dos en verde antes de pedir `intake → implement`.
+- `gate_lane`, review, QA y ship quedan **intactos**: `gate_lane` verifica sobre
+  el diff que este carril no tocó contratos, migraciones ni infra, que es
+  exactamente lo que el triage no podía prometer (miró el código, no el diff).
+- **La señal de que el carril está mal elegido es una decisión NO obvia al
+  redactar el plan.** Es la misma regla que ya tiene express: ahí no pienses más
+  fuerte, escalá (`harness-policy.py escalate tasks/<id> --to standard --actor
+  orchestrator`) y entrá por `/rfc`. Rollback del carril = clasificar standard
+  otra vez; no se pierde nada, el trabajo vive en el worktree.
+- **Un defecto sin `archivo:símbolo` mata el carril entero**, no solo ese
+  defecto: sin evidencia, el bloque del plan sería una conjetura, y una
+  conjetura con formato de plan es peor que no tener plan. `triado` es de UN
+  repo por la misma razón (`POLICY-LANE-006`): la evidencia cubre el código que
+  el triage recorrió, y nada más.
+
 ## Paso 0.2 — Estado ejecutable (la prosa no mueve fases)
 
 Toda tarea nueva se inicializa una sola vez con
-`scripts/harness-policy.py init tasks/<id> --lane <express|standard|full>
+`scripts/harness-policy.py init tasks/<id> --lane <express|triado|standard|full>
 --repos <repo1,repo2> --delivery review [--budget-usd <valor-del-panel>]`.
 
 **`--delivery review` no es un default tuyo: es lo que declara ESTE comando**, y
@@ -362,14 +390,49 @@ Reglas del ledger, en orden de precedencia:
    válidos, ejecuta `scripts/plan-lint.sh <id>` y
    `scripts/harness-policy.py validate-dag tasks/<id>/dag.json`, y
    solicita `rfc → implement` sólo si los dos quedan verdes.
-3. **Implement**. Un worktree por (tarea, repo), un implementer por tarea.
-   `bd ready` manda: todo lo que el DAG no serializa va EN PARALELO,
-   y el DAG serializa SIEMPRE las tareas que comparten repo, porque
-   comparten árbol, rama e index (`POLICY-DAG-010`). El paralelo que da
-   ganancia de reloj es el de repos distintos.
-   **Contexto de arranque, completo y mínimo**: su entrada del plan, sus
-   criterios, y el brief de `.cache/briefs/<repo>.md`. El implementer
-   NO explora el repo desde cero; Serena cubre el nivel símbolo.
+3. **Implement**. Un worktree por NODO del DAG, un implementer por nodo.
+   `bd ready` manda: todo lo que el DAG no serializa va EN PARALELO.
+   **Dos nodos del mismo repo YA NO se serializan solos**: se serializan si el
+   DAG no puede probar que no se pisan. Con `dag.json` schema 2, cada nodo
+   declara sus `files[]`, y dos nodos del mismo repo con conjuntos DISJUNTOS
+   corren a la vez, cada uno en su árbol:
+
+   ```bash
+   scripts/worktree-task.sh --node T1 <id> <repo>   # worktrees/<id>/<repo>@T1, rama task/<id>@T1
+   scripts/worktree-task.sh --node T2 <id> <repo>   # worktrees/<id>/<repo>@T2
+   # …los implementers trabajan en paralelo…
+   scripts/dag-coalesce.sh <id> <repo>              # cherry-pick en orden del DAG sobre task/<id>
+   ```
+
+   Por qué importa el número: cadenas medidas de 80 min por 6 tareas (50 por 4,
+   36 por 6) contra una cota paralela (el nodo más lento) de 6 a 15 minutos.
+   Las reglas duras, que no se negocian:
+   - **Sin `files[]` no hay paralelo.** `POLICY-DAG-011` es fail-closed: lo que
+     no se declara se serializa. No inventes los archivos para habilitarlo; si
+     no sabés qué toca un nodo, ese nodo va en serie.
+   - **Precheck, review, QA y ship siguen operando sobre el árbol base**
+     (`worktrees/<id>/<repo>`), DESPUÉS del coalesce. El paralelo es de la
+     implementación, no de la verificación.
+   - **Un conflicto en el coalesce no es un rojo**: `dag-coalesce.sh` aborta ese
+     cherry-pick, deja el árbol como estaba y sale 3 nombrando el nodo. Ese nodo
+     se re-implementa EN SERIE sobre el árbol coalescido y se sigue. Es el
+     rollback de la fase, y está previsto.
+   - El riesgo declarado es el conflicto SEMÁNTICO entre archivos disjuntos (dos
+     cambios que compilan sueltos y no juntos). Lo caza el precheck (build +
+     tests) sobre el árbol coalescido, antes del reviewer.
+   **Contexto de arranque, completo y mínimo, y se pasa por PUNTERO, no por
+   enunciado.** El implementer recibe la RUTA a su entrada del plan y a su
+   bloque de task.md (`tasks/<id>/plan.md#T3`, `tasks/<id>/task.md#COR-42`), no
+   el texto de los seis tickets del lote. Él lo lee; leerlo vos es pagar la
+   misma lectura en TU ventana, que es la grande: el mismo principio que ya
+   rige para `scripts/finding.sh read`.
+   Medido, y por eso es regla y no consejo: orquestador 199k de contexto medio,
+   reviewer 171k, qa 150k contra un techo de 150k; `COST-CTX` frenó tres
+   transiciones de un lote y en una el push a main YA había ocurrido. Un lote se
+   arma con **un ancla por ticket** en `tasks/<id>/task.md` (`## COR-42 · <título>`)
+   justamente para que el puntero exista. Va también su brief
+   (`.cache/briefs/<repo>.md`). El implementer NO explora el repo desde cero;
+   Serena cubre el nivel símbolo.
    Los hallazgos de sus hermanos NO se los inyectás vos: los lee él con
    `scripts/finding.sh read`, que está en su contrato. Correrlo vos sería pagar
    la misma lectura en TU ventana, que es la grande.
@@ -402,6 +465,14 @@ Reglas del ledger, en orden de precedencia:
    por (tarea, repo): la ronda ≥2 es un mensaje al mismo agente con el delta
    que imprime el scaffold, no un lanzamiento nuevo (ver /review).
    Toda prueba que sustenta un pass usa `scripts/evidence.py run`.
+   **El loop de rondas NO lo llevás vos: lo lleva un sub-orquestador de contexto
+   fresco por (tarea, repo).** Lanzalo como subagente con una consigna corta:
+   "llevá `<id>`/`<repo>` de review a verde: rondas, fixes y precheck; el estado
+   vive en `tasks/<id>/`". Lo único que vuelve a tu ventana es el veredicto
+   final. El estado ya vive en archivos (`verdict-<repo>.json`, `state.json`,
+   el scaffold), así que ese loop no necesita TU historia; lo que hacía era
+   acumularla. El reviewer persistente NO cambia: sigue siendo el mismo agente
+   entre rondas, con su memoria, que es donde esa memoria sí vale.
 5. **Checkpoint** (SOLO si `autonomy: checkpoint` en harness-answers.yaml): un
    resumen de 10 líneas antes del PRIMER ship a main y esperas un "go". Con
    `autonomy: full` este paso no existe.
@@ -440,6 +511,25 @@ Reglas del ledger, en orden de precedencia:
    mismo (`patch_id`): el que se re-corre es el test, no el reviewer.
 7. **Deploy-watch**. 🟢 sigue el DAG. 🔴 **rollback PRIMERO**,
    diagnóstico después. Al iniciar solicita `ship → deploy`.
+   **Y no te sentás a mirarlo.** El watcher bloquea hasta 2400 s (Actions 1800 +
+   ArgoCD 900 + smoke; medido: de 3 a 39 minutos), y ese es tiempo tuyo tirado:
+   lanzalo en BACKGROUND y seguí con lo que quede de la ola.
+
+   ```bash
+   scripts/with-secrets.sh scripts/deploy-watch.sh <id> <repo> --coalesce &
+   ```
+
+   - **`--coalesce` cuando el repo ya tiene un deploy en vuelo**: se anota y
+     sale, porque el watcher vivo re-apunta al sha más nuevo y ArgoCD despliega
+     HEAD (los ancestros van incluidos). Medido: una familia de 13 lotes del
+     mismo repo pagó 13 ciclos de deploy que UNO cubría. Al verde, el log
+     aterriza en las tareas cubiertas.
+   - **Verde**: dispara `/archive` de esa tarea. **Rojo**: te interrumpe, y la
+     política no cambia una coma: rollback PRIMERO, diagnóstico después.
+   - La CEGUERA (ni verde ni rojo) sigue siendo el tercer estado: se declara,
+     no se convierte en verde por estar en background.
+   - Un rojo coalescido atribuye peor (varias tareas comparten diagnóstico): el
+     rollback no cambia y la atribución fina es trabajo posterior.
 8. **Archive**. Fusiona el delta-spec en la spec maestra, cierra el
    ticket con evidencia (si origin: ticket), `mem_save`, y solicita
    `deploy → archive`.

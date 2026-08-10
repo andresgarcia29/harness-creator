@@ -2,8 +2,22 @@
 # worktree-task.sh — una tarea = un worktree por repo. Nunca el clon base.
 #
 # Uso:
-#   worktree-task.sh <task-id> <repo> [repo...]   crea worktrees de la tarea
-#   worktree-task.sh --rm <task-id>               quita los worktrees (post-ship)
+#   worktree-task.sh <task-id> <repo> [repo...]        crea worktrees de la tarea
+#   worktree-task.sh --node <Tn> <task-id> <repo>      worktree de UN NODO del DAG
+#   worktree-task.sh --rm <task-id>                    quita los worktrees (post-ship)
+#
+# ── POR QUÉ EXISTE --node ─────────────────────────────────────────────
+# Un worktree por (tarea, repo) obliga a serializar todas las tareas del DAG
+# que comparten repo (POLICY-DAG-010), y eso es lo que hace que un lote de 6
+# tarde 80 minutos cuando la cota paralela (el nodo más lento) son 15. Con
+# `files[]` disjuntos declarados en el DAG (schema 2), cada nodo puede tener SU
+# árbol y SU rama, y `dag-coalesce.sh` los junta después en `task/<id>`.
+#
+# El nombre de la rama NO es `task/<id>/<Tn>`, y no es un capricho: git guarda
+# las refs como archivos, así que `refs/heads/task/ID` (la rama de la tarea, que
+# es el destino del coalesce) y `refs/heads/task/ID/T1` no pueden coexistir:
+# el segundo `worktree add` muere con "cannot lock ref". Por eso el separador es
+# `@`, igual que en el directorio: `task/<id>@<Tn>` y `worktrees/<id>/<repo>@<Tn>`.
 set -euo pipefail
 WS="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -137,6 +151,11 @@ if [ "${1:-}" = "--rm" ]; then
       */.review-*) repo="${d##*/.review-}" ;;
       *)           repo="${d##*/}" ;;
     esac
+    # Un worktree de NODO se llama `<repo>@<Tn>`: el repo de git es lo de la
+    # izquierda del `@`. Sin esto, el --rm iría a buscar `repos/atlas@T1`, no lo
+    # encontraría, y dejaría worktrees registrados para siempre (el próximo
+    # `worktree add` en esa ruta muere con "already registered").
+    repo="${repo%@*}"
     pin="$WS/worktrees/$TASK/.review-$repo"
     gd="$WS/repos/$repo"
     [ -e "$gd/.git" ] || gd="$WS/worktrees/$TASK/$repo"
@@ -157,7 +176,16 @@ if [ "${1:-}" = "--rm" ]; then
   done
   for wt in "$WS/worktrees/$TASK"/*/; do
     [ -d "$wt" ] || continue
-    repo="$(basename "$wt")"
+    dirname_wt="$(basename "$wt")"
+    # `<repo>@<Tn>` → repo de git a la izquierda, nodo del DAG a la derecha. La
+    # rama del nodo es `task/<id>@<Tn>` (ver la cabecera: `task/<id>/<Tn>` no
+    # puede existir junto a `task/<id>`).
+    repo="${dirname_wt%@*}"
+    if [ "$dirname_wt" != "$repo" ]; then
+      branch="task/$TASK@${dirname_wt#*@}"
+    else
+      branch="task/$TASK"
+    fi
     # "No pude mirar" NO es "está limpio". Con 2>/dev/null, un git que falla
     # devolvía cadena vacía y el worktree se borraba igual.
     if ! st="$(git -C "$wt" status --porcelain 2>&1)"; then
@@ -178,13 +206,22 @@ if [ "${1:-}" = "--rm" ]; then
     # `branch -d` (minúscula) YA implementa exactamente el chequeo que hacía
     # falta: se niega si la rama tiene commits sin mergear. El bug era estar
     # pisándolo con la mayúscula.
-    if git -C "$WS/repos/$repo" branch -d "task/$TASK" 2>/dev/null; then
-      echo "   🧹 rama task/$TASK borrada (su trabajo ya está publicado)"
-    elif git -C "$WS/repos/$repo" show-ref --verify --quiet "refs/heads/task/$TASK"; then
-      n="$(git -C "$WS/repos/$repo" rev-list --count "task/$TASK" --not --remotes 2>/dev/null || echo "?")"
-      echo "   ⚠️  CONSERVO la rama task/$TASK de $repo: tiene $n commit(s) sin publicar."
+    # La rama de un NODO se juzga con la misma vara, y no alcanza con `-d`: sus
+    # commits ya viven en `task/<id>` por cherry-pick, o sea con OTRO sha, así
+    # que git los ve como "sin mergear" y la rama del nodo nunca se limpiaría.
+    # `dag-coalesce.sh` deja la marca de lo que ya coalesció; sin marca, se
+    # conserva (misma ley: un árbol limpio no significa trabajo publicado).
+    if [ "$branch" != "task/$TASK" ] \
+       && [ -f "$WS/tasks/$TASK/.coalesced-${dirname_wt}" ]; then
+      git -C "$WS/repos/$repo" branch -D "$branch" >/dev/null 2>&1 \
+        && echo "   🧹 rama $branch borrada (coalescida en task/$TASK)"
+    elif git -C "$WS/repos/$repo" branch -d "$branch" 2>/dev/null; then
+      echo "   🧹 rama $branch borrada (su trabajo ya está publicado)"
+    elif git -C "$WS/repos/$repo" show-ref --verify --quiet "refs/heads/$branch"; then
+      n="$(git -C "$WS/repos/$repo" rev-list --count "$branch" --not --remotes 2>/dev/null || echo "?")"
+      echo "   ⚠️  CONSERVO la rama $branch de $repo: tiene $n commit(s) sin publicar."
       echo "      Si de verdad querés descartar ese trabajo, es tu decisión y es explícita:"
-      echo "      git -C repos/$repo branch -D task/$TASK"
+      echo "      git -C repos/$repo branch -D $branch"
     fi
   done
   # Si ya no queda ningún worktree de repo, borra el dir de la tarea. rmdir no basta:
@@ -205,8 +242,28 @@ if [ "${1:-}" = "--rm" ]; then
   exit 0
 fi
 
-TASK="${1:?uso: worktree-task.sh <task-id> <repo> [repo...]}"; shift
+# ── EL NODO DEL DAG, SI LO HAY ───────────────────────────────────────
+# Se valida como lo que es: un componente de RUTA y un trozo de REF de git a la
+# vez. Un `..` o una barra acá no serían un nombre raro, serían un worktree
+# fuera de worktrees/ y una rama fuera de refs/heads/task/.
+NODE=""
+if [ "${1:-}" = "--node" ]; then
+  NODE="${2:?uso: worktree-task.sh --node <Tn> <task-id> <repo>}"
+  case "$NODE" in
+    *[!A-Za-z0-9_-]*|"")
+      echo "❌ nodo inválido: '$NODE' (solo letras, números, guion y guion bajo)"; exit 1 ;;
+  esac
+  shift 2
+fi
+
+TASK="${1:?uso: worktree-task.sh [--node <Tn>] <task-id> <repo> [repo...]}"; shift
 [ $# -gt 0 ] || { echo "❌ indica al menos un repo"; exit 1; }
+
+# El árbol y la rama de ESTE llamado: con --node, uno por nodo; sin él, el de
+# siempre. Una sola función porque abajo hay tres bucles que necesitan la misma
+# respuesta (crear, go.work, toolchain frontend) y tres copias divergirían.
+wt_dir()    { printf '%s' "$WS/worktrees/$TASK/$1${NODE:+@$NODE}"; }
+wt_branch() { printf '%s' "task/$TASK${NODE:+@$NODE}"; }
 
 # ── Lock de CREACIÓN por (task, repo) ─────────────────────────────────
 # Caso de campo: /smart lanza este script en paralelo y dos procesos pasaron
@@ -253,12 +310,13 @@ release_create_lock() {
 
 for repo in "$@"; do
   base="$WS/repos/$repo"
-  wt="$WS/worktrees/$TASK/$repo"
+  wt="$(wt_dir "$repo")"
+  branch="$(wt_branch)"
   [ -d "$base/.git" ] || { echo "❌ repo desconocido: $repo (ver manifest.yaml)"; exit 1; }
   # El lock va ANTES del chequeo de existencia: entre este [ -d ] y el
   # worktree add hay un fetch con red de por medio, y esa ventana es la que
   # dejaba pasar a dos procesos a la vez (TOCTOU).
-  acquire_create_lock "$TASK" "$repo" || exit 1
+  acquire_create_lock "$TASK" "$repo${NODE:+@$NODE}" || exit 1
   if [ -d "$wt" ]; then
     echo "→ ya existe: $wt"
     release_create_lock
@@ -276,12 +334,15 @@ for repo in "$@"; do
   # (rama ya tomada por otro worktree, index.lock ajeno) en una muerte muda a
   # mitad del bucle multi-repo. El fallback aplica SOLO al caso legítimo: la
   # rama de la tarea ya existe (retoma) y ningún worktree la tiene.
-  if git -C "$base" show-ref --verify --quiet "refs/heads/task/$TASK"; then
-    git -C "$base" worktree add "$wt" "task/$TASK"
+  # La rama del NODO nace de la trunk, NO de `task/<id>`: el coalesce hace
+  # cherry-pick de cada nodo sobre `task/<id>`, y si el nodo ya llevara adentro
+  # los commits de sus hermanos, ese cherry-pick los aplicaría dos veces.
+  if git -C "$base" show-ref --verify --quiet "refs/heads/$branch"; then
+    git -C "$base" worktree add "$wt" "$branch"
   else
-    git -C "$base" worktree add -b "task/$TASK" "$wt" "origin/$bb"
+    git -C "$base" worktree add -b "$branch" "$wt" "origin/$bb"
   fi
-  echo "✅ worktree: $wt (rama task/$TASK)"
+  echo "✅ worktree: $wt (rama $branch)"
   release_create_lock
 done
 
@@ -302,10 +363,14 @@ refresh_gowork_deps "$TASK" "$@"
 # NO es best-effort silencioso: si la instalación falla, se dice. Un prepare
 # que falla callado reconstruye exactamente la trampa que vino a desarmar.
 for repo in "$@"; do
-  wt="$WS/worktrees/$TASK/$repo"
+  wt="$(wt_dir "$repo")"
   [ -f "$wt/package.json" ] || continue
   echo "→ preparando toolchain frontend de $repo (el gate ts la necesita)"
-  if bash "$WS/scripts/fe.sh" 'install' "$repo" "$TASK" >/dev/null 2>&1; then
+  # fe.sh compone `worktrees/<task>/<lo-que-le-pases>`, así que en un worktree
+  # de nodo lo que hay que pasarle es `<repo>@<Tn>`: pasarle el repo pelado lo
+  # mandaría al árbol base (que puede no existir) y el prepare no prepararía
+  # el árbol donde el implementer va a trabajar.
+  if bash "$WS/scripts/fe.sh" 'install' "$repo${NODE:+@$NODE}" "$TASK" >/dev/null 2>&1; then
     if ls "$wt"/astro.config.* >/dev/null 2>&1; then
       (cd "$wt" && npx astro sync >/dev/null 2>&1) \
         && echo "  ✅ deps + astro sync" \
@@ -315,7 +380,7 @@ for repo in "$@"; do
     fi
   else
     echo "  ⚠️  no pude instalar las deps de $repo: el gate ts se negará a correr hasta que lo hagas:"
-    echo "     bash scripts/fe.sh 'install' $repo $TASK"
+    echo "     bash scripts/fe.sh 'install' $repo${NODE:+@$NODE} $TASK"
   fi
 done
 

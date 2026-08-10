@@ -6,8 +6,24 @@
 # Vigila: Actions → Kargo (si aplica) → health de ArgoCD → smoke.
 # ROJO: rollback PRIMERO ({{ROLLBACK_MODE}}), diagnóstico después.
 #
-# Uso: deploy-watch.sh <task-id> <repo>
+# Uso: deploy-watch.sh <task-id> <repo> [--coalesce]
 # Córrelo autenticado: scripts/with-secrets.sh scripts/deploy-watch.sh ...
+#
+# ── --coalesce: UN WATCHER POR REPO, NO UNO POR SHIP ──────────────────
+# Medido: una familia de 13 lotes sobre el mismo repo pagó 13 ciclos de deploy
+# (w1..w13) de 8 a 12 minutos cada uno, cuando ArgoCD despliega HEAD y los
+# ancestros van incluidos: UN watcher del sha final los cubría a todos.
+#
+# Con --coalesce, cada corrida se anota en `.harness/deploy-pending/<repo>.json`
+# y se elige UN watcher vivo por repo: los demás salen 0 en el acto ("te cubre
+# el que ya está mirando"). El vivo RE-APUNTA al sha más nuevo que aparezca
+# mientras mira, y al terminar atribuye su `deploy-<repo>.log` a TODAS las
+# tareas cubiertas.
+#
+# Riesgo declarado, porque el que no se declara se descubre tarde: un rojo
+# coalescido atribuye peor (varias tareas comparten el diagnóstico). Lo que NO
+# cambia es la política: rollback PRIMERO, y la atribución fina es diagnóstico
+# posterior, no una decisión que este script tenga que tomar en caliente.
 #
 # ── PERILLAS DE TIEMPO ────────────────────────────────────────────────
 # Este script NUNCA espera para siempre, y eso se sostiene con dos escalas
@@ -40,8 +56,10 @@
 #                                 esta variable pisa esa lista por corrida.
 set -uo pipefail
 
-TASK="${1:?uso: deploy-watch.sh <task-id> <repo>}"
-REPO="${2:?uso: deploy-watch.sh <task-id> <repo>}"
+TASK="${1:?uso: deploy-watch.sh <task-id> <repo> [--coalesce]}"
+REPO="${2:?uso: deploy-watch.sh <task-id> <repo> [--coalesce]}"
+COALESCE=""
+[ "${3:-}" = "--coalesce" ] && COALESCE=1
 WS="$(cd "$(dirname "$0")/.." && pwd)"
 
 # El bus: el humano mira el panel, no esta consola. Fail-open.
@@ -204,6 +222,11 @@ mute_guard() {
     wait "$WATCHDOG_PID" 2>/dev/null
   fi
   rm -f "$WATCHDOG_FLAG" 2>/dev/null
+  # La atribución va en el trap y no al final del camino verde: un watcher
+  # coalescido que muere en rojo, o al que matan, tiene que soltar el repo
+  # igual. Si no, el siguiente ship de ese repo se cree cubierto por un
+  # watcher que ya no existe y nadie mira su deploy.
+  coalesce_atribuir 2>/dev/null || true
   if [ -z "$SAID" ]; then
     echo "⚠️  deploy-watch está saliendo (exit $rc) SIN haber dicho una palabra."
     echo "   Eso es un bug del harness, no un estado del deploy: repórtalo con"
@@ -234,6 +257,97 @@ watchdog_trap() {
   exit 124
 }
 trap watchdog_trap TERM
+
+# ── COALESCENCIA POR REPO ─────────────────────────────────────────────
+# Tres piezas, y ninguna decide nada sobre la salud del deploy: el registro
+# (quién espera verificación), la elección (quién mira) y la atribución (a
+# quién le sirve lo que se vio). La verificación en sí no cambia una línea.
+COALESCE_DIR="$WS/.harness/deploy-pending"
+COALESCE_REG="$COALESCE_DIR/$REPO.jsonl"
+COALESCE_LOCK="$COALESCE_DIR/$REPO.lock.d"
+COALESCE_MINE=""
+
+# JSONL y no un JSON que se lee-modifica-escribe: dos ships del mismo repo
+# pueden anotarse a la vez, y un append de una línea corta es lo único que no
+# se pisa sin inventar un lock nuevo (el bus del harness usa el mismo criterio).
+coalesce_anotar() {
+  local sha
+  mkdir -p "$COALESCE_DIR" 2>/dev/null || return 0
+  sha="$(shipped_sha)"
+  printf '{"task":"%s","repo":"%s","sha":"%s","at":"%s"}\n' \
+    "$TASK" "$REPO" "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$COALESCE_REG" 2>/dev/null || true
+}
+
+coalesce_duenio_vivo() {  # → pid del watcher vivo de este repo, o nada
+  local pid
+  pid="$(cat "$COALESCE_LOCK/pid" 2>/dev/null || true)"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
+  printf '%s' "$pid"
+}
+
+coalesce_tomar() {  # → 0 si YO soy el watcher del repo
+  mkdir -p "$COALESCE_DIR" 2>/dev/null || return 1
+  if ! mkdir "$COALESCE_LOCK" 2>/dev/null; then
+    coalesce_duenio_vivo >/dev/null && return 1     # otro lo tiene y está vivo
+    rm -rf "$COALESCE_LOCK" 2>/dev/null || true     # huérfano: su dueño murió
+    mkdir "$COALESCE_LOCK" 2>/dev/null || return 1
+  fi
+  echo $$ > "$COALESCE_LOCK/pid" 2>/dev/null || true
+  COALESCE_MINE=1
+  return 0
+}
+
+# ── RE-APUNTAR NO ES CAMBIAR DE OPINIÓN: ES SEGUIR AL MISMO REPO ──────
+# ArgoCD despliega HEAD, así que la revisión más nueva CONTIENE a las
+# anteriores. Adoptar el sha más nuevo verifica todos los ships pendientes de
+# una sola pasada. La condición es dura y se comprueba con git, no de palabra:
+# solo se adopta un sha que DESCIENDA del que estaba vigilando. Un sha que no
+# desciende es otra historia (una rama, un revert) y ahí coalescer sería
+# afirmar sobre un cambio que nadie miró.
+coalesce_repoint() {  # → 0 si cambió el sha vigilado
+  [ -n "$COALESCE_MINE" ] || return 1
+  [ -f "$COALESCE_REG" ] || return 1
+  [ -n "${LANDED_SHA:-}" ] || return 1
+  local sha nuevo=""
+  run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+    git -C "$WS/repos/$REPO" fetch origin --quiet >/dev/null 2>&1 || true
+  while IFS= read -r sha; do
+    [ -n "$sha" ] || continue
+    [ "$sha" = "$LANDED_SHA" ] && continue
+    git -C "$WS/repos/$REPO" cat-file -e "$sha^{commit}" 2>/dev/null || continue
+    git -C "$WS/repos/$REPO" merge-base --is-ancestor "${nuevo:-$LANDED_SHA}" "$sha" 2>/dev/null \
+      && nuevo="$sha"
+  done <<EOF
+$(jq -r '.sha // empty' "$COALESCE_REG" 2>/dev/null)
+EOF
+  [ -n "$nuevo" ] || return 1
+  say "── coalesce: apareció un ship más nuevo de $REPO (${nuevo:0:12}) ──"
+  say "   Vigilo ese: desciende del que estaba mirando (${LANDED_SHA:0:12}), así que"
+  say "   verificarlo verifica los dos. Es un watcher en vez de dos."
+  LANDED_SHA="$nuevo"
+  return 0
+}
+
+# La atribución NO es cosmética: `deploy-<repo>.log` es lo que /archive y el
+# reporte final leen para decir que hubo deploy. Una tarea cubierta sin su log
+# aparece como "sin verificar" habiéndolo estado.
+coalesce_atribuir() {
+  [ -n "$COALESCE_MINE" ] || return 0
+  [ -f "$COALESCE_REG" ] || return 0
+  local otra
+  while IFS= read -r otra; do
+    [ -n "$otra" ] || continue
+    [ "$otra" = "$TASK" ] && continue
+    [ -d "$WS/tasks/$otra" ] || continue
+    cp "$LOG" "$WS/tasks/$otra/deploy-$REPO.log" 2>/dev/null || continue
+    emit deploy "$REPO: verificado por el watcher coalescido de $TASK (mismo repo, sha más nuevo)" "" "$otra"
+  done <<EOF
+$(jq -r '.task // empty' "$COALESCE_REG" 2>/dev/null | sort -u)
+EOF
+  rm -f "$COALESCE_REG" 2>/dev/null || true
+  rm -rf "$COALESCE_LOCK" 2>/dev/null || true
+  COALESCE_MINE=""
+}
 
 # ── LA APP SE RESUELVE ACÁ ABAJO, Y NO ES COSMÉTICO ───────────────────
 # `resolve_argocd_app` hace un `kubectl get` que, contra un cluster blackholeado
@@ -343,6 +457,26 @@ deploy_base_branch() {
   printf '%s' "$b"
 }
 BASE_REF="$(deploy_base_branch)"
+
+# ── LA ELECCIÓN: UN WATCHER POR REPO ──────────────────────────────────
+# Va acá abajo a propósito: necesita `shipped_sha` (para anotar qué sha espera
+# verificación) y necesita los traps de arriba (para no salir mudo ni dejar el
+# lock tomado si algo revienta). Anotar SIEMPRE, gane o pierda la elección: el
+# registro es lo que hace que el watcher vivo sepa que hay un ship más nuevo y
+# que después atribuya el log a esta tarea.
+if [ -n "$COALESCE" ]; then
+  coalesce_anotar
+  if ! coalesce_tomar; then
+    say "🤝 coalesce: ya hay un watcher vivo de $REPO (pid $(coalesce_duenio_vivo))."
+    say "   Anoté el ship de $TASK como pendiente: ese watcher va a re-apuntar al"
+    say "   sha más nuevo y te va a dejar el log acá cuando termine. ArgoCD"
+    say "   despliega HEAD, así que verificarlo a él es verificarte a vos."
+    say "   ↳ si querés vigilar este ship por tu cuenta, corré sin --coalesce."
+    emit deploy "$REPO: ship de $TASK coalescido en el watcher vivo del repo" "" "$TASK"
+    exit 0
+  fi
+  say "── coalesce: soy el watcher de $REPO ──"
+fi
 
 # ── ¿ESTE REPO DESPLIEGA POR AQUÍ? ────────────────────────────────────
 # Este watcher modela UNA forma de desplegar: Actions → Kargo → ArgoCD →
@@ -866,6 +1000,9 @@ if [ "$DRIVER" != "none" ] && command -v gh >/dev/null; then
   # rojo un deploy que ni siquiera había arrancado y proponía revertirlo.
   # Se filtra por el sha exacto y se espera a que aparezca.
   resolve_landed_sha || exit 0
+  # Antes de elegir QUÉ run mirar: si mientras tanto shippeó algo más nuevo del
+  # mismo repo, el run que importa es el de ese commit (contiene a este).
+  coalesce_repoint || true
   head_sha="$LANDED_SHA"
   run_id=""
   if [ -n "$head_sha" ]; then
@@ -1304,6 +1441,11 @@ check_argocd_health() {  # → 0 sano · 1 no sano · 2 no concluyente · 3 revi
 # Sin sha no se compara (el verde se degrada al de siempre), pero no se
 # inventa el dato.
 [ -n "$LANDED_SHA" ] || resolve_landed_sha || true
+# Segundo re-apunte: la etapa de Actions puede haber tardado minutos, y este es
+# el tramo que de verdad compara contra el cluster. Vigilar acá el sha viejo
+# cuando ya hay uno más nuevo obligaría al ship siguiente a pagar su propio
+# ciclo de deploy entero, que es exactamente lo que --coalesce vino a ahorrar.
+coalesce_repoint || true
 say "── argocd: verificando $APP (timeout ${TIMEOUT}s) ──"
 check_argocd_health; health_rc=$?
 case "$health_rc" in

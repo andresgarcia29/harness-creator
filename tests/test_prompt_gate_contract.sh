@@ -22,7 +22,9 @@ echo "── dag.json: lo exige validate-dag, así que alguien tiene que crearlo
 # que toda corrida standard/full llegaba al cierre del RFC sin el archivo.
 rfc="$(cmd rfc)"
 assert_contains "$rfc" "dag.json" "/rfc nombra el artefacto que el gate exige"
-assert_contains "$rfc" '"schema": 1' "y da el esquema exacto, no una descripción"
+assert_contains "$rfc" '"schema": 2' "y da el esquema exacto, no una descripción"
+assert_contains "$rfc" '"files"' "incluido files[], que es lo que POLICY-DAG-011 exige"
+assert_contains "$rfc" "DAG-011" "y la regla que lo hace obligatorio"
 assert_contains "$rfc" "depends_on" "con el campo de dependencias"
 assert_contains "$rfc" "DAG-007" "y las reglas que el validador hace cumplir"
 assert_contains "$(cat "$root/templates/agents/architect.md.tmpl")" "dag.json" \
@@ -40,6 +42,23 @@ python3 "$root/templates/scripts/harness-policy.py" --policy "$tmp/pol.json" \
   validate-dag "$tmp/dag.json" >/dev/null 2>&1 \
   && pass "el esquema que /rfc documenta PASA el validador de verdad" \
   || fail "la doc y el validador no coinciden: el productor seguiría a ciegas"
+
+# Y el ejemplo de schema 2 que /rfc imprime, TAL CUAL: dos nodos del mismo repo
+# en paralelo por files[] disjuntos. Si ese ejemplo no pasara, el prompt estaría
+# enseñando a escribir un DAG que el gate rechaza.
+cat > "$tmp/dag2.json" <<'JSON'
+{"schema": 2,
+ "tasks": [{"id": "T1", "repo": "atlas", "depends_on": [],
+            "files": ["internal/ratelimit/limiter.go"]},
+           {"id": "T2", "repo": "atlas", "depends_on": [],
+            "files": ["internal/http/middleware.go"]},
+           {"id": "T3", "repo": "proto", "depends_on": ["T1"],
+            "files": ["gateway/v1/limits.proto"]}]}
+JSON
+python3 "$root/templates/scripts/harness-policy.py" --policy "$tmp/pol.json" \
+  validate-dag "$tmp/dag2.json" >/dev/null 2>&1 \
+  && pass "y el ejemplo de schema 2 (paralelo intra-repo) también" \
+  || fail "el ejemplo de schema 2 de /rfc no pasa el validador"
 
 echo
 echo "── la máquina de fases: el flujo manual también tiene que moverla"

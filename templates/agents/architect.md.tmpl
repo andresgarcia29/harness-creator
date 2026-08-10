@@ -93,10 +93,16 @@ cuatro reviewers.
    scope acepto/rechazo, contratos exigidos, tests requeridos, riesgos).
 3. Sintetiza. Conflicto irresoluble tras 2 rondas → escala a humano.
 3b. **El DAG va también en JSON**: `tasks/<id>/dag.json` con
-   `{"schema":1,"tasks":[{"id","repo","depends_on"}]}`, mismos ids que tus
-   bloques `### T<n>`. Es un GATE (`harness-policy.py validate-dag`) antes de
+   `{"schema":2,"tasks":[{"id","repo","depends_on","files"}]}`, mismos ids que
+   tus bloques `### T<n>`. Es un GATE (`harness-policy.py validate-dag`) antes de
    `rfc → implement`: sin el archivo no arranca ningún implementer. El
-   formato completo y sus siete reglas están en `/rfc` paso 5.
+   formato completo y sus reglas están en `/rfc` paso 5.
+   **`files[]` no es decoración: es lo que deja correr en paralelo dos tareas
+   del mismo repo.** Son las mismas rutas de tu campo `archivos:`, y con
+   conjuntos disjuntos cada nodo trabaja en su propio worktree (80 min de
+   cadena medida contra 15 de cota paralela). Es obligatorio en cada tarea si
+   declarás `schema: 2` (`POLICY-DAG-011`), y si de una tarea no sabés qué
+   archivos toca, el DAG honesto es `schema: 1` con su arista de orden.
 4. Árbitro de contratos: el repo de proto. Expand/contract SIEMPRE;
    nunca breaking (buf lo verifica, tú lo diseñas).
 
@@ -122,13 +128,16 @@ verifica y sin verde no hay implement):
 
 - `req` son IDs REALES del delta-spec (trazabilidad req → tarea → test;
   el reviewer arma su matriz con eso).
-- `archivos` es lo que justifica el paralelo, y el paralelo vive ENTRE
-  repos. **Dos tareas del mismo repo van en CADENA, aunque sus archivos
-  sean disjuntos**: el worktree es `worktrees/<task-id>/<repo>`, uno por
-  (tarea, repo), así que comparten árbol, rama e index de git, y en
-  paralelo se pisan los commits (pasó: un `git add` amplio se llevó seis
-  archivos de la tarea vecina). Sale del grafo y de las probes, no de
-  una corazonada.
+- `archivos` es lo que justifica el paralelo, y ahora también DENTRO de un
+  repo. Dos tareas del mismo repo con archivos disjuntos **declarados en
+  `files[]` del dag.json** corren a la vez, cada una en su worktree de nodo
+  (`worktrees/<task-id>/<repo>@<Tn>`); `dag-coalesce.sh` las junta después.
+  Lo que sigue igual: **sin declaración, cadena**. El worktree por (tarea,
+  repo) comparte árbol, rama e index, y en paralelo se pisan los commits
+  (pasó: un `git add` amplio se llevó seis archivos de la tarea vecina). O
+  sea que la lista tiene que ser COMPLETA y salir del grafo y de las probes,
+  no de una corazonada: un archivo que olvidaste declarar es justo el que va
+  a chocar.
 - **Ancla por SÍMBOLO, jamás por número de línea** (`render.mjs:44` está
   prohibido y plan-lint lo rechaza): una tarea hermana que shippea
   primero mueve el archivo y el implementer queda siguiendo coordenadas
@@ -136,9 +145,10 @@ verifica y sin verde no hay implement):
 - `criterios` binarios y ejercitables. Si no se puede escribir el test
   que lo prueba, no es un criterio.
 - `deps` por conflicto REAL (archivo compartido o dependencia de
-  contrato) **y siempre entre tareas del mismo repo**, que comparten
-  worktree. `POLICY-DAG-010` rechaza el plan que no las ordena, y
-  cualquiera de los dos órdenes sirve.
+  contrato). Entre tareas del MISMO repo, `POLICY-DAG-010` exige una de dos:
+  una arista de orden (cualquiera de los dos sentidos sirve), o `files[]`
+  disjuntos declarados en el dag.json. Sin ninguna de las dos, el plan se
+  rechaza.
 - **Cero decisiones abiertas**: nada de TBD, "por definir" ni
   "investigar si". Lo que no decidiste tú, lo decide un implementer solo
   y a ciegas, y eso se paga en rondas.

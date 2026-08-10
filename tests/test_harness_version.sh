@@ -23,13 +23,18 @@ chmod +x "$WS/scripts/harness-version.sh"
 # a la rama por defecto: la rama se mueve con cada commit, así que compararse
 # contra ella reporta "hay update" por trabajo sin publicar. El tercer argumento
 # existe para el único caso donde tag y rama difieren legítimamente.
-stub_gh() {  # stub_gh <version-en-el-tag|""> [digest] [version-en-la-rama]
+# El 4o argumento son los tags del repo del GENERADOR (harness-daemon), que es
+# OTRA linea de versiones (#118): el binario del tap no se publica desde
+# harness-creator. Sin separarlos, el stub contestaba lo mismo a las dos
+# preguntas y el test no podia ver la diferencia que el bug tenia adentro.
+stub_gh() {  # stub_gh <version-en-el-tag|""> [digest] [version-en-la-rama] [tag-del-generador]
   if [ -z "$1" ]; then
     printf '#!/usr/bin/env bash\nexit 1\n' > "$WS/bin/gh"
   else
     cat > "$WS/bin/gh" <<EOF
 #!/usr/bin/env bash
 case "\$*" in
+  *harness-daemon/tags*) echo "v0.1.0"; echo "v${4:-$1}" ;;
   */tags*)    echo "v0.1.0"; echo "v$1"; echo "no-es-semver" ;;
   *MANIFEST*) [ -n "${2:-}" ] || exit 1
               echo "plugin_version: $1"; echo "digest: ${2:-}" ;;
@@ -350,7 +355,8 @@ stub_gh "0.59.3" "$SET_A"
 # (1) EL caso del reporte: una version que no existe como tag ni release.
 stub_harness "0.60.0"
 out="$(gen)"
-assert_contains "$out" "NO EXISTE upstream" "#102: 0.60.0 con el ultimo tag en 0.59.3: se dice que no existe"
+assert_contains "$out" "NO EXISTE en andresgarcia29/harness-daemon" \
+  "#102: 0.60.0 sin tag en el repo del binario: se dice que no existe"
 assert_contains "$out" "0.59.3" "y nombra contra que se comparo"
 assert_contains "$out" "incidente 0.60.0" "y lo ata al incidente que el playbook ya citaba"
 assert_eq 1 "$(gen_rc)" "#102: exit 1, NO generes con este binario"
@@ -360,6 +366,23 @@ stub_harness "0.59.3"
 out="$(gen)"
 assert_contains "$out" "es el último tag publicado" "el binario al dia SI autoriza"
 assert_eq 0 "$(gen_rc)" "exit 0"
+
+# (2b) ISSUE #118: el binario y los templates son DOS lineas de versiones.
+# El tap empaqueta un release de harness-daemon, asi que un generador legitimo
+# y al dia (0.60.0, tag real de harness-daemon) puede ir "adelante" del ultimo
+# tag de harness-creator (0.59.9) sin que eso tenga nada de raro. Comparandolo
+# contra el repo equivocado, ese generador sano quedaba rechazado con el texto
+# del incidente 0.60.0, el paso 2 de /harness-update se cerraba, y TODO update
+# caia a la re-instanciacion manual, que el playbook llama el camino mas
+# riesgoso.
+stub_gh "0.59.9" "$SET_A" "" "0.60.0"
+stub_harness "0.60.0"
+out="$(gen)"
+assert_contains "$out" "podés generar" \
+  "#118: el binario al dia en SU repo autoriza, aunque su numero sea mayor que el ultimo tag de los templates"
+assert_eq 0 "$(gen_rc)" "#118: exit 0, no el rechazo del incidente que no es"
+assert_not_contains "$out" "incidente 0.60.0" "y no lo acusa de un incidente ajeno"
+stub_gh "0.59.3" "$SET_A"
 
 # (3) un tag publicado pero VIEJO: generaria una instancia vieja que reporta
 #     exito igual, que es el mismo final por otro camino.
@@ -408,7 +431,7 @@ echo "$SET_A" > "$WS/.harness-templates"
 stub_harness "0.60.0"
 out="$(run)"
 assert_contains "$out" "al día" "la instancia sigue reportandose al dia (lo esta)"
-assert_contains "$out" "NO EXISTE upstream" "#102: y AUN ASI avisa del generador"
+assert_contains "$out" "NO EXISTE en andresgarcia29/harness-daemon" "#102: y AUN ASI avisa del generador"
 stub_harness ""
 out="$(run)"
 assert_not_contains "$out" "generador" "sin binario instalado no hay ruido: no todos lo tienen"

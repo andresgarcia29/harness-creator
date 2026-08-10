@@ -244,6 +244,50 @@ case "$tool" in
     cmd="$(printf '%s' "$payload" | jq -r '.tool_input.command // ""' 2>/dev/null)"
     [ -n "$cmd" ] || exit 0
     cwd="$(printf '%s' "$payload" | jq -r '.cwd // ""' 2>/dev/null)"
+
+    # ── UN TOKEN RELATIVO NO SE RESUELVE CONTRA UN SOLO DIRECTORIO (#127) ──
+    # El `cwd` que llega en el payload es el de la SESIÓN, y en un SUBAGENTE no
+    # es el árbol donde está mirando: un reviewer que corre
+    # `sed -n '1406p' bun.lock` desde su pin dejaba `$WS/bun.lock`, que no
+    # existe, y la lectura no se registraba. Después `gate_evidence` lo acusaba
+    # de citar algo que "nadie leyó" y el ship rebotaba tres veces sobre una
+    # lectura que SÍ ocurrió (y que el reviewer citaba textual).
+    # Lo delator del caso: las lecturas por `Read` del MISMO subagente sí
+    # quedaban, porque esas traen la ruta completa. Era la vía Bash la que se
+    # perdía, y se perdía SOLO en subagentes, que es donde más se usa.
+    #
+    # Se prueban, en orden y sin inventar nada: el cwd reportado, un `cd` al
+    # principio del propio comando (que es donde el agente dice dónde está), la
+    # raíz del workspace, el proyecto que la sesión activó en Serena, y por
+    # último los árboles de la tarea que esta sesión ya tocó (worktree y pin de
+    # review). Solo se registra lo que EXISTE como archivo: sigue sin haber
+    # forma de anotar una lectura que no pasó.
+    cd_dir=""
+    case "$cmd" in
+      "cd "*)
+        cd_dir="${cmd#cd }"; cd_dir="${cd_dir%%&&*}"; cd_dir="${cd_dir%%;*}"
+        cd_dir="${cd_dir%"${cd_dir##*[! ]}"}"          # sin espacios al final
+        cd_dir="$(printf '%s' "$cd_dir" | tr -d "\"'")"
+        case "$cd_dir" in /*) : ;; *) cd_dir="$WS/$cd_dir" ;; esac ;;
+    esac
+    resuelve_rel() {  # resuelve_rel <token> → ruta existente, o vacío
+      local b="$1" c d
+      case "$b" in /*) [ -f "$b" ] && printf '%s' "$b"; return 0 ;; esac
+      for c in "$cwd" "$cd_dir" "$WS" "$(recall_proj)"; do
+        [ -n "$c" ] || continue
+        [ -f "$c/$b" ] && { printf '%s' "$c/$b"; return 0; }
+      done
+      # Los árboles de la tarea que esta sesión ya tocó. Es el caso del
+      # subagente: su cwd no dice nada, pero su tarea sí, y el archivo que cita
+      # vive en SU árbol. El glob está acotado a esa tarea, no barre el disco.
+      local task; task="$(recall_task)"
+      case "$task" in ''|*[!A-Za-z0-9._-]*|.|..) return 0 ;; esac
+      for d in "$WS/worktrees/$task"/*/ "$WS/worktrees/$task"/.review-*/; do
+        [ -d "$d" ] || continue
+        [ -f "$d$b" ] && { printf '%s' "$d$b"; return 0; }
+      done
+      return 0
+    }
     # El cwd del hook es el de la SESIÓN (la raíz del workspace), no el del
     # comando: un "cd worktrees/COR-42/atlas && go test" corre en el worktree
     # pero el cwd reportado es la raíz. La tarea viene del TEXTO del comando.
@@ -282,8 +326,8 @@ case "$tool" in
         *) continue ;;
       esac
       base="${tok%%::*}"              # pytest cita archivo::caso; el archivo es la base
-      t="$base"; case "$t" in /*) : ;; *) t="$cwd/$base" ;; esac
-      if [ -f "$t" ]; then
+      t="$(resuelve_rel "$base")"
+      if [ -n "$t" ]; then
         emit ran-file "${base#"$WS"/}" "$t"
       fi
     done

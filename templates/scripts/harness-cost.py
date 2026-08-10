@@ -89,6 +89,56 @@ def set_ws(path: str) -> None:
 CACHE_HIT_FLOOR = float(os.environ.get("HARNESS_CACHE_HIT_FLOOR", "0.90"))
 CTX_CEILING = int(os.environ.get("HARNESS_CTX_CEILING", "150000"))
 
+# ── EL TECHO DE CONTEXTO NO PUEDE SER EL MISMO PARA TODOS LOS ROLES (#120) ──
+# 150k era un número solo, aplicado por igual a un subagente de una tarea, al
+# ORQUESTADOR de un lote y a un reviewer que el harness declara PERSISTENTE
+# entre rondas. Los dos últimos arrastran contexto por DISEÑO: el orquestador
+# sostiene el plan y el estado del lote, y el reviewer conserva su ronda 1
+# justamente para que la ronda 2 sea incremental (ver reviewer.md). Medido en
+# UNA sola tarea: 6 de 6 evaluaciones de banda ctx dieron breach y las 6 se
+# eximieron a mano (160k, 179k, 193k, 201k, 157k, 210k). Un gate que se exime
+# siempre no es un gate: es un peaje.
+#
+# Lo que NO se hace es subir el número para todos: eso apagaría el freno donde
+# sí mide derroche. El techo pasa a ser POR ROL y DATO del policy
+# (`limits.ctx_ceiling_by_role`), con el default de 150k intacto para todo rol
+# que no declare el suyo.
+#
+# Y no se compra silencio: un rol por encima de 150k pero dentro de SU techo se
+# IMPRIME igual, como aviso. Lo que cambia es que no traba la transición.
+# La causa de fondo se ataca aparte y en el otro extremo (que el orquestador
+# guarde punteros y no enunciados, y que el loop de rondas viva en un
+# sub-orquestador de contexto fresco): este techo solo deja de castigar lo que
+# el propio diseño manda hacer mientras tanto.
+def ctx_ceiling_for(role: str) -> int:
+    """El techo de contexto de ESTE rol: el declarado, o el general."""
+    if os.environ.get("HARNESS_CTX_CEILING"):
+        return CTX_CEILING          # un override explícito manda sobre todo
+    return CTX_CEILING_BY_ROLE.get(role or "", CTX_CEILING)
+
+
+def load_ctx_ceilings() -> dict:
+    """`workflow.limits.ctx_ceiling_by_role` de harness-policy.json, o {}.
+
+    Se lee del policy y no de una constante acá por la misma razón que el techo
+    de quick: un número cableado no se puede ajustar por instancia, y quien lo
+    intente editaría el policy creyendo que sirve de algo."""
+    path = os.path.join(WS, "harness-policy.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            pol = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    limits = ((pol.get("limits") or {}) if isinstance(pol, dict) else {})
+    raw = limits.get("ctx_ceiling_by_role")
+    if not isinstance(raw, dict):
+        return {}
+    return {k: int(v) for k, v in raw.items()
+            if isinstance(k, str) and isinstance(v, int) and v > 0}
+
+
+CTX_CEILING_BY_ROLE: dict = {}
+
 EXIT_OK, EXIT_USAGE, EXIT_BREACH, EXIT_NODATA = 0, 2, 3, 4
 
 
@@ -649,7 +699,24 @@ def covered_by(waivers: list, band_code: str, role: str, value: float,
     turno más), y sigue apareciendo con actor y motivo en cada corrida.
 
     Los eximidos VIEJOS (sin `phase`) conservan la comparación por valor: una
-    instancia que actualiza no pierde lo que ya había autorizado."""
+    instancia que actualiza no pierde lo que ya había autorizado.
+
+    ── LOS DOS LADOS TIENEN QUE MEDIR CON LA MISMA REGLA (#119, #124, #126) ──
+    El eximido guarda el valor del BREACH, y el breach se construye REDONDEADO
+    (`round(cache_hit, 6)` y `round(ctx_avg, 2)`, ver `evaluate`). Esta función
+    recibía en cambio la medición CRUDA y comparaba con una tolerancia de 1e-9.
+    Cuando `round()` empuja hacia el lado malo (hacia arriba en cache, hacia
+    abajo en ctx) la diferencia llega a 5e-7 en cache, o sea unas 500 veces la
+    tolerancia: el eximido quedaba por encima de lo que se mide y NO PODÍA
+    CUBRIR SU PROPIO BREACH. Determinista, y le tocaba a la mitad de los valores
+    por sorteo del séptimo decimal.
+    Efecto en campo: `cost-waive` decía "aceptado", el eximido quedaba escrito
+    en `state.json` con el valor exacto que el gate reportaba, y la transición
+    seguía frenada igual. O sea que la ÚNICA salida que el gate llama auditable
+    no funcionaba, y quedaba solo `HARNESS_CACHE_HIT_FLOOR`, que el propio
+    mensaje describe como el último recurso que no deja rastro.
+    El arreglo es que los dos lados usen la MISMA aritmética: se compara el
+    valor con el mismo redondeo con que se persistió."""
     for w in waivers:
         if w.get("band") != band_code or w.get("agent") != role:
             continue
@@ -660,11 +727,26 @@ def covered_by(waivers: list, band_code: str, role: str, value: float,
         at = w.get("value")
         if not isinstance(at, (int, float)):
             return w                     # sin valor declarado: cubre la banda entera
-        if band_code == "cache" and value >= float(at) - 1e-9:
+        medido = round_as_breach(band_code, value)
+        # La tolerancia sube a 1e-6 además del redondeo: con los dos lados ya
+        # redondeados sobra, y deja margen para un eximido viejo escrito por una
+        # instancia anterior a este arreglo (el error que ese introduce está
+        # acotado justamente por el paso del redondeo).
+        if band_code == "cache" and medido >= float(at) - 1e-6:
             return w
-        if band_code == "ctx" and value <= float(at) + 1e-9:
+        if band_code == "ctx" and medido <= float(at) + 1e-6:
             return w
     return None
+
+
+def round_as_breach(band_code: str, value: float) -> float:
+    """El valor con el MISMO redondeo con que `evaluate` persiste el breach.
+
+    Vive en una función porque tiene DOS llamadores que deben coincidir byte a
+    byte (el que escribe el breach y el que lo empareja con su eximido), y dos
+    copias de un redondeo divergen sin que nadie lo note hasta que una
+    transición queda trabada para siempre."""
+    return round(float(value), 6 if band_code == "cache" else 2)
 
 
 def waiver_note(w: dict) -> str:
@@ -717,7 +799,7 @@ def evaluate(rows, task: str, budget, window=None):
                 "cobrársela a esta transición trabaría la tarea para siempre"))
             continue
         if m["cache_hit"] < CACHE_HIT_FLOOR:
-            e = entry("COST-CACHE", r["role"], round(m["cache_hit"], 6), m,
+            e = entry("COST-CACHE", r["role"], round_as_breach("cache", m["cache_hit"]), m,
                       f"COST-CACHE: {r['role']} con {m['cache_hit']*100:.0f}% de "
                       f"acierto de caché (piso {CACHE_HIT_FLOOR*100:.0f}%), "
                       f"${m['cost'] or 0:,.2f} de los cuales la reescritura es "
@@ -736,10 +818,22 @@ def evaluate(rows, task: str, budget, window=None):
                 waived.append(e)
             else:
                 breaches.append(e)
-        if m["ctx_avg"] > CTX_CEILING:
-            e = entry("COST-CTX", r["role"], round(m["ctx_avg"], 2), m,
+        techo = ctx_ceiling_for(r["role"])
+        if m["ctx_avg"] > CTX_CEILING and m["ctx_avg"] <= techo:
+            # Por encima del piso general y dentro del techo DECLARADO para su
+            # rol: no traba, y no se calla. Verlo es lo que permite notar el día
+            # que el techo del rol se quedó corto o de más (#120).
+            unmeasurable.append(entry(
+                "COST-CTX", r["role"], round_as_breach("ctx", m["ctx_avg"]), m,
+                f"COST-CTX: {r['role']} arrastra {m['ctx_avg']/1000:.0f}k de "
+                f"contexto medio, por encima del piso general "
+                f"({CTX_CEILING/1000:.0f}k) pero dentro del techo declarado para "
+                f"su rol ({techo/1000:.0f}k): NO frena. El rol arrastra contexto "
+                "por diseño (lote, o reviewer persistente entre rondas)"))
+        elif m["ctx_avg"] > techo:
+            e = entry("COST-CTX", r["role"], round_as_breach("ctx", m["ctx_avg"]), m,
                       f"COST-CTX: {r['role']} arrastra {m['ctx_avg']/1000:.0f}k de "
-                      f"contexto medio (techo {CTX_CEILING/1000:.0f}k) sobre "
+                      f"contexto medio (techo {techo/1000:.0f}k) sobre "
                       f"{m['tools']} tool calls")
             w = covered_by(waivers, "ctx", r["role"], m["ctx_avg"], fase)
             if w:
@@ -941,6 +1035,10 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     if getattr(args, "ws", None):
         set_ws(args.ws)
+    # DESPUÉS de resolver el workspace: los techos por rol viven en el policy
+    # de ESA instancia (#120), y cargarlos antes leería el policy equivocado.
+    global CTX_CEILING_BY_ROLE
+    CTX_CEILING_BY_ROLE = load_ctx_ceilings()
     if not getattr(args, "func", None):
         ap.print_help()
         return EXIT_USAGE

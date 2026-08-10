@@ -60,12 +60,28 @@ now_epoch() { date -u +%s; }
 # El piso es el mtime de state.json: una tarea recién iniciada que todavía no
 # emitió nada NO lleva varada desde 1970.
 last_event_epoch() {  # last_event_epoch <task-id> → epoch del último rastro
-  local task="$1" ts="" floor=0 st="$WS/tasks/$task/state.json"
+  local task="$1" ts="" floor=0 f m st="$WS/tasks/$task/state.json"
   if [ -f "$BUS" ] && command -v jq >/dev/null 2>&1; then
     ts="$(jq -r --arg t "$task" 'select(.task == $t) | .ts // empty' "$BUS" 2>/dev/null | tail -1)"
   fi
   floor="$(stat -f%m "$st" 2>/dev/null || stat -c%Y "$st" 2>/dev/null || echo 0)"
   case "$floor" in ''|*[!0-9]*) floor=0 ;; esac
+  # ── LOS LOGS DE LA TAREA TAMBIÉN SON RASTRO ─────────────────────────
+  # Un `deploy-watch` puede pasarse 39 minutos mirando un deploy (medido) y
+  # emite al bus SOLO en los hitos: entre uno y otro la tarea se ve callada sin
+  # estarlo, y relanzar ahí es levantar un orquestador sobre un deploy en vuelo.
+  # Su log, en cambio, crece en cada poll. Cuesta un stat por archivo y cierra
+  # justo la ventana donde este vigilante se pisaría con el otro.
+  for f in "$WS/tasks/$task"/*.log; do
+    [ -f "$f" ] || continue
+    # NUESTRO propio log de relanzamiento no cuenta: si contara, el vigilante
+    # se leería a sí mismo como actividad de la tarea y un `claude -p` que
+    # muere en el arranque parecería una sesión trabajando.
+    case "$f" in */orchestrator-watch.log) continue ;; esac
+    m="$(stat -f%m "$f" 2>/dev/null || stat -c%Y "$f" 2>/dev/null || echo 0)"
+    case "$m" in ''|*[!0-9]*) m=0 ;; esac
+    [ "$m" -gt "$floor" ] && floor="$m"
+  done
   local e=0
   [ -n "$ts" ] && e="$(iso_to_epoch "$ts")"
   [ "$e" -gt "$floor" ] && { printf '%s' "$e"; return 0; }

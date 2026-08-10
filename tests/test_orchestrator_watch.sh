@@ -162,6 +162,21 @@ assert_eq 1 "$(jq -r '.attempts' "$WS/.harness/orch-watch/AVANZA.json")" \
   "el contador vuelve a 1: la huella cambió"
 
 echo
+echo "── un deploy-watch en vuelo NO es una sesión muerta"
+# deploy-watch puede mirar 39 minutos (medido) y emite al bus solo en los hitos.
+# Su log crece en cada poll: eso es rastro, y sin mirarlo este vigilante
+# levantaria un orquestador encima de un deploy en curso.
+rm -f "$WS/relanzamientos.txt"; rm -rf "$WS/.harness/claims" "$WS/.harness/orch-watch" "$WS/tasks"
+nueva_tarea DESPLEGANDO deploy 3000
+printf 'mirando argocd\n' > "$WS/tasks/DESPLEGANDO/deploy-atlas.log"
+out="$(corre once)"; reposa
+assert_eq 0 "$(relanzos)" "el log fresco del deploy cuenta como actividad"
+# y si el log tambien envejece, vuelve a ser un hueco de verdad
+envejece "$WS/tasks/DESPLEGANDO/deploy-atlas.log" 3000
+out="$(corre once)"
+assert_eq 1 "$(espera_relanzos 1)" "con el log parado, el hueco vuelve a contar"
+
+echo
 echo "── el kill switch y el modo status: dos formas de no gastar un peso"
 rm -f "$WS/relanzamientos.txt"; rm -rf "$WS/.harness/claims" "$WS/.harness/orch-watch" "$WS/tasks"
 nueva_tarea QUIETA implement

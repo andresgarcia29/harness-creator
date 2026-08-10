@@ -157,7 +157,7 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
      deploy-watch,bounded,emit,forge,gowork,graph-refresh,minion-probe,pull-all,
      ticket-close,ticket-pull,linear,harness-bug,harness-version,skills-sync,
      pipeline-steps,py,fe,archived-repos,mark-read,verdict-beads,ship-wave,
-     port-forwards,instance-ship,adr-new,finding}.sh,
+     port-forwards,instance-ship,adr-new,finding,dag-coalesce,orchestrator-watch}.sh,
      scripts/{harness-policy,evidence,harness-metrics,harness-cost,task-note,harness-sink}.py, `harness-policy.json`,
      **los hooks Y el archivo que los cablea**, que van JUNTOS o el update
      entrega un hook que nunca corre:

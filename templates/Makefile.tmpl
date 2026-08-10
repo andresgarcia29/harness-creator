@@ -80,8 +80,14 @@ forwards-status: ## estado + sonda de IDENTIDAD de cada forward
 forwards-down: ## baja todos los forwards supervisados
 	@bash scripts/port-forwards.sh down
 
-watch: ## vigila el deploy: make watch TASK=<id> REPO=<repo>
-	@bash scripts/with-secrets.sh bash scripts/deploy-watch.sh $(TASK) $(REPO)
+watch: ## vigila el deploy: make watch TASK=<id> REPO=<repo> [ARGS=--coalesce]
+	@bash scripts/with-secrets.sh bash scripts/deploy-watch.sh $(TASK) $(REPO) $(ARGS)
+
+orch-status: ## ¿hay orquestadores varados? (mira y no toca, cero tokens)
+	@bash scripts/orchestrator-watch.sh status
+
+orch-watch: ## vigila y RELANZA los orquestadores varados (el 51% del reloj de una ola)
+	@bash scripts/orchestrator-watch.sh daemon
 
 bug: ## verifica y reporta un bug del harness upstream: make bug ARGS='--title … --file … --repro … --impact … --dry-run'
 	@bash scripts/harness-bug.sh report $(ARGS)
@@ -101,4 +107,4 @@ ui-bg: ## panel en background (para VPS/ssh): arranca el daemon y sale; make ui-
 ui-stop: ## baja el daemon del panel
 	@fuser -k $(if $(PORT),$(PORT),7180)/tcp 2>/dev/null && echo "panel detenido" || echo "no había panel corriendo"
 
-.PHONY: help init version verify-update doctor secrets secrets-doctor models pull skills graph wt wt-rm gowork py fe precheck plan-lint ship ship-wave instance-ship forwards forwards-status forwards-down watch bug bugs usage ui ui-bg ui-stop
+.PHONY: help init version verify-update doctor secrets secrets-doctor models pull skills graph wt wt-rm gowork py fe precheck plan-lint ship ship-wave instance-ship forwards forwards-status forwards-down watch orch-status orch-watch bug bugs usage ui ui-bg ui-stop

@@ -8,6 +8,40 @@ contra una instalación real).
 ## No publicado
 
 ### Añadido
+- **`orchestrator-watch.sh`: el watchdog de la SESIÓN PRINCIPAL, cero tokens
+  (COR-1034, fase 1).** Medido sobre 37 corridas de `/smart-main` con 30.067
+  eventos de bus fechados: el 51% del reloj (34,4 h de 67,9 h) son huecos de
+  más de 20 minutos sin un solo evento, o sea orquestadores muertos o varados
+  que nadie relanza. El watchdog de `smart.md` vigila subagentes; a la sesión
+  que orquesta no la vigilaba nadie. El poller recorre `tasks/*/state.json` en
+  fase no terminal y, si lleva más de 12 minutos sin eventos y sin una llamada
+  en vuelo, toma un lease atómico en `.harness/claims/` y relanza
+  `claude -p '/smart <id>'` headless. Dos relanzamientos sin progreso (misma
+  fase, mismo HEAD) paran a humano con `orchestrator_stalled`. `make orch-status`
+  mira sin tocar; `make orch-watch` vigila. Kill switch: `.harness/orch-watch.off`.
+- **Paralelo DENTRO de un repo: worktree por NODO del DAG (COR-1034, fase 2).**
+  `dag.json` schema 2 declara `files[]` por tarea, y dos tareas del mismo repo
+  con conjuntos DISJUNTOS ya no se serializan: `worktree-task.sh --node <Tn>`
+  les da su árbol (`worktrees/<id>/<repo>@<Tn>`, rama `task/<id>@<Tn>`) y
+  `dag-coalesce.sh` hace cherry-pick determinista en orden del DAG sobre
+  `task/<id>`. Cadenas medidas de 80 min por 6 tareas contra una cota paralela
+  de 6 a 15 min por nodo. Fail-closed: sin `files[]` no hay paralelo
+  (`POLICY-DAG-011`), y un conflicto en el coalesce aborta ese cherry-pick, deja
+  el árbol intacto y devuelve ese nodo a implementación serial.
+- **Carril `triado` (COR-1034, fase 3).** Cuando el ticket ya trae CADA defecto
+  con evidencia `archivo:símbolo` de un triage read-only sobre UN repo, el
+  orquestador escribe plan multi-tarea + delta-spec + `dag.json` sin sesión de
+  architect. Medido: la ventana intake → rfc → implement en lotes ya triados son
+  11 a 17 minutos para producir un plan que el triage ya había escrito. Recorta
+  una sesión LLM, jamás un artefacto ni un gate: `plan-lint`, `validate-dag`,
+  `gate_lane`, review, QA y ship quedan intactos. Es de un repo por
+  `POLICY-LANE-006`: la evidencia cubre el código que el triage recorrió.
+- **`deploy-watch.sh --coalesce`: un watcher por REPO, no uno por ship
+  (COR-1034, fase 4).** Los ships del mismo repo se anotan en
+  `.harness/deploy-pending/<repo>.jsonl` y el watcher vivo re-apunta al sha más
+  nuevo que DESCIENDA del que vigila (ArgoCD despliega HEAD, los ancestros van
+  incluidos), atribuyendo su log a todas las tareas cubiertas. Medido: una
+  familia de 13 lotes del mismo repo pagó 13 ciclos de deploy que uno cubría.
 - **`repo-brief.sh` publica los homónimos cross-repo.** Si un identificador del
   repo está definido también en otro, el brief lo dice, con el nombre del otro
   repo, antes de que nadie edite. Sale de los nodos del grafo, cuesta $0 tokens
@@ -21,6 +55,53 @@ contra una instalación real).
   línea escrita.
 
 ### Corregido
+- **El eximido de costo ya puede cubrir su propio breach (#119, #122, #123,
+  #124, #125, #126, #128).** `cost-waive` decía "aceptado", el eximido quedaba
+  en `state.json` con EL MISMO valor que el gate reportaba, y la transición
+  seguía frenada: el breach se persiste REDONDEADO (`round(cache_hit, 6)`,
+  `round(ctx_avg, 2)`) y `covered_by` comparaba contra la medición CRUDA con
+  tolerancia 1e-9. Cuando el redondeo empuja hacia el lado malo la diferencia
+  llega a 5e-7, unas 500 veces esa tolerancia, así que le tocaba a la mitad de
+  los valores por sorteo del séptimo decimal. Los siete reportes son el mismo
+  defecto visto desde distintos roles (reviewer, general-purpose, dos agentes
+  del mismo rol) y ninguno era un problema de nombres ni de fase: ahora los dos
+  lados usan la misma aritmética.
+- **El techo de contexto deja de ser un número solo para tres modos de uso
+  (#120).** 150k se aplicaba igual a un subagente de una tarea, al orquestador
+  de un lote y a un reviewer que el harness declara PERSISTENTE entre rondas;
+  los dos últimos arrastran contexto por diseño, y en una sola tarea medida 6
+  de 6 evaluaciones de banda ctx dieron breach y las 6 se eximieron a mano. El
+  techo pasa a ser DATO por rol (`limits.ctx_ceiling_by_role` del policy), con
+  el default intacto para todo rol que no declare el suyo, y lo que queda por
+  encima del piso general pero dentro del techo del rol se SIGUE IMPRIMIENDO:
+  deja de frenar, no de verse.
+- **`gate_test_muerde` deja de leer un exit 0 sin casos como "PASA sobre la
+  base" (#129).** `go test` sale 0 cuando el paquete skipea todos sus casos, y
+  eso se cobraba como test vacuo: falso rojo hoy, y el mismo silencio habilita
+  el falso verde simétrico mañana. En el camino verde (el sospechoso) el gate
+  pregunta ahora si corrió algún caso; si no corrió ninguno lo declara tramo sin
+  red, que no es ni verde ni rojo.
+- **La cobertura pura tiene camino verde, y es una medición (#121).** Un test de
+  regresión sobre conducta que YA es correcta pasa sobre el árbol base por
+  definición, y los únicos caminos que quedaban eran deshonestos (inventar un
+  cambio de producción, o sacar el archivo del `## ADDED`). Ahora se declara
+  bajo `## COVERAGE Requirements` citando el `EV-...` de una corrida donde el
+  test FALLÓ con el código mutado; el gate comprueba que ese id exista en
+  `tasks/<id>/evidence/`, así que la declaración se apoya en una ejecución.
+- **`harness-version.sh --generator` compara contra el repo donde el binario se
+  publica (#118).** Comparaba la versión del binario del tap contra los tags de
+  harness-creator, y ese binario sale de harness-daemon, que lleva su propia
+  línea de versiones: un generador legítimo y al día se declaraba "esa versión
+  NO EXISTE upstream ... Es exactamente el incidente 0.60.0", y TODO update caía
+  a la re-instanciación manual, el camino que el propio playbook llama el más
+  riesgoso.
+- **`track-read` ya no pierde las lecturas por Bash de un subagente (#127).** El
+  `cwd` del payload es el de la sesión, no el árbol donde mira un subagente, así
+  que un `sed -n '1406p' bun.lock` desde el pin de review no resolvía a ningún
+  archivo y no se registraba; después `gate_evidence` acusaba al reviewer de no
+  leer lo que sí leyó y el ship rebotaba. Ahora el token relativo se resuelve
+  contra el cwd, el `cd` del propio comando, el workspace, el proyecto de Serena
+  y los árboles de la tarea, y se sigue registrando SOLO lo que existe.
 - **`/archive` ya no resucita la tarea que acaba de archivar (#114).** El hook de
   evidencia deriva su ruta del task-id y hacía `mkdir -p` incondicional, así que
   retirar los worktrees DESPUÉS de mover los artefactos recreaba `tasks/<id>/`

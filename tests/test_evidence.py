@@ -175,6 +175,61 @@ class EvidenceTest(unittest.TestCase):
         data = json.loads(manifests[-1].read_text())
         self.assertTrue(data["tree_clean"])
 
+    def test_arbol_COMPARTIDO_sella_con_suciedad_ajena_y_la_declara(self):
+        """ISSUE #137: el repo de la INSTANCIA no tiene worktree por tarea.
+
+        Es UN arbol para todas, asi que "limpio" es una precondicion inalcanzable
+        por construccion y sin escape: medido, ninguna prueba se podia sellar
+        justo en el repo que contiene los gates de todos los demas, y el
+        veredicto quedaba sin evidence[]. Lo que NO se afloja: lo que ensucio
+        ESTA tarea sigue siendo rechazo.
+        """
+        repo = Path(self.tmp.name) / "instancia"      # NO cuelga de worktrees/
+        repo.mkdir()
+        run = lambda *a: subprocess.run(["git", "-C", str(repo), *a],
+                                        capture_output=True, text=True)
+        run("init", "-q", "."); run("config", "user.email", "t@t"); run("config", "user.name", "t")
+        (repo / "mio.txt").write_text("v1")
+        (repo / "ajeno.txt").write_text("v1")
+        run("add", "-A"); run("commit", "-qm", "base")
+        # Un commit de ESTA tarea, con su trailer: es lo que define "lo mio".
+        (repo / "mio.txt").write_text("v2")
+        run("add", "mio.txt"); run("commit", "-qm", "mio\n\nTask: T1")
+
+        # Suciedad AJENA (otra tarea en vuelo sobre el arbol compartido).
+        (repo / "ajeno.txt").write_text("otra tarea trabajando")
+        ok = self.run_ev_in(repo)
+        self.assertEqual(ok.returncode, 0,
+                         "el arbol compartido tiene que poder sellar\n" + ok.stderr)
+        self.assertIn("COMPARTIDO", ok.stderr)
+        self.assertIn("ajeno.txt", ok.stderr)
+        # Y el sello lo DICE: deja de mentir por omision.
+        ev = json.loads(next((Path(self.tmp.name) / "T1" / "evidence").glob("EV-*.json")).read_text())
+        self.assertTrue(any("ajeno.txt" in x for x in ev.get("shared_tree_dirty", [])), ev)
+
+        # Lo que SI sigue frenando: ensuciar un archivo de ESTA tarea.
+        (repo / "mio.txt").write_text("v3 sin commitear")
+        malo = self.run_ev_in(repo)
+        self.assertEqual(malo.returncode, 3, malo.stderr)
+        self.assertIn("SIN COMMITEAR", malo.stderr)
+        self.assertIn("mio.txt", malo.stderr)
+
+    def test_un_worktree_de_tarea_NO_es_arbol_compartido(self):
+        # La contra-mitad: en el arbol de una tarea la exigencia no se toca.
+        repo = Path(self.tmp.name) / "worktrees" / "T1" / "r"
+        repo.mkdir(parents=True)
+        run = lambda *a: subprocess.run(["git", "-C", str(repo), *a],
+                                        capture_output=True, text=True)
+        run("init", "-q", "."); run("config", "user.email", "t@t"); run("config", "user.name", "t")
+        (repo / "a.txt").write_text("v1")
+        run("add", "-A"); run("commit", "-qm", "base\n\nTask: T1")
+        (repo / "b.txt").write_text("x"); run("add", "b.txt"); run("commit", "-qm", "b\n\nTask: T1")
+        (repo / "a.txt").write_text("sucio")          # ajeno al ultimo commit
+        r = self.run_ev_in(repo)
+        self.assertEqual(r.returncode, 3,
+                         "en un worktree de tarea la limpieza se sigue exigiendo entera")
+        self.assertNotIn("COMPARTIDO", r.stderr)
+
     def run_ev_in(self, repo):
         # evidence.py ya NO crea task-dirs: el fixture lo crea con un marker,
         # como haría worktree-task.sh en una instancia real.

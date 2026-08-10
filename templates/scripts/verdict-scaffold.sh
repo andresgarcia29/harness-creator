@@ -87,10 +87,37 @@ ok_id "$REVIEWER" || { echo "❌ reviewer inválido: '$REVIEWER'"; exit 1; }
 command -v jq >/dev/null || { echo "❌ jq requerido"; exit 1; }
 
 WS="$(cd "$(dirname "$0")/.." && pwd)"
+
+# ── EL REPO DE LA INSTANCIA NO TIENE WORKTREE, Y NUNCA VA A TENERLO (#135) ──
+# `docs/`, `specs/`, los ADR y el answers viven en el repo de la INSTANCIA, que
+# se publica desde su propio árbol por `instance-ship.sh`: no hay `repos/<repo>`
+# ni `worktrees/<task>/<repo>` que crear, y `worktree-task.sh` se niega con
+# "repo desconocido". Hasta acá esta línea clavaba la ruta del worktree, así que
+# toda tarea que tocara docs o specs llegaba al final con el reviewer habiendo
+# emitido juicio completo y SIN NINGÚN LUGAR DONDE SELLARLO, y la remediación
+# que este script imprimía tampoco existía.
+#
+# El nombre se compara contra `instance.repo` del answers y no se infiere de
+# "no existe el worktree": un repo mal tipeado tiene que seguir dando error, no
+# apuntar en silencio a la raíz del workspace.
+# El helper es COMPARTIDO (scripts/instance-repo.sh): instance-ship.sh hace la
+# misma pregunta, y dos lecturas del mismo campo divergen justo cuando una tarea
+# queda sin veredicto. Fail-open: sin el archivo, este script se comporta como
+# antes y el repo de la instancia sigue sin camino (no inventa uno).
+# shellcheck source=/dev/null
+[ -f "$WS/scripts/instance-repo.sh" ] && . "$WS/scripts/instance-repo.sh" \
+  || instance_repo_slug() { :; }
+
 WT="$WS/worktrees/$TASK/$REPO"
+ES_INSTANCIA=""
+if [ ! -d "$WT" ] && [ -n "$(instance_repo_slug)" ] && [ "$REPO" = "$(instance_repo_slug)" ]; then
+  WT="$WS"; ES_INSTANCIA=1
+fi
 [ -d "$WS/tasks/$TASK" ] || { echo "❌ no existe tasks/$TASK (¿typo?)"; exit 1; }
 HEAD="$(git -C "$WT" rev-parse HEAD 2>/dev/null)" \
   || { echo "❌ no existe el worktree $WT"; echo "   ↳ remediación: scripts/worktree-task.sh $TASK $REPO"; exit 2; }
+[ -n "$ES_INSTANCIA" ] && echo "ℹ️  $REPO es el repo de la INSTANCIA: sello contra su propio árbol ($WS)," \
+  && echo "   que es COMPARTIDO entre tareas. El commit revisado es el que manda, no el árbol."
 
 OUT="$WS/tasks/$TASK/verdict-$REPO.json"
 
@@ -287,10 +314,38 @@ merge_qa() {
       and .id == $id and .commit == .commit_after' "$bev" >/dev/null \
       || { echo "❌ el baseline $bid no es un EV sano de esta tarea/repo"; exit 3; }
     bcommit="$(jq -r '.commit // ""' "$bev")"
-    git -C "$WT" merge-base --is-ancestor "$bcommit" "$vc" 2>/dev/null || {
+    # ── EL ANCESTRO ERA UNA REGLA IMPOSIBLE PARA UN TEST NUEVO (#146) ──
+    # Las dos reglas del harness se excluían: `evidence.py` se niega a sellar un
+    # árbol sucio, así que para MEDIR un test nuevo sobre la base hay que
+    # COMMITEARLO sobre la base; y ese commit (`base + test`) nunca es ancestro
+    # del revisado (`base + fix`), porque son HERMANOS. O sea que el mecanismo
+    # que #53 creó para destrabar el rojo primero no se podía cumplir justo en
+    # el caso que #53 quería destrabar.
+    #
+    # Lo que la regla quiere decir de verdad es "este baseline prueba el PASADO
+    # de ESTE cambio", y eso tiene dos formas legítimas, no una:
+    #   (a) el baseline ES un punto de la historia del cambio (ancestro), o
+    #   (b) el baseline SALE DEL MISMO punto de partida (mismo merge-base con
+    #       la trunk) y NO contiene el cambio revisado.
+    # Un commit ajeno (otra rama, otro punto de partida, o uno que ya incluye el
+    # fix) sigue sin pasar, que es lo único que este chequeo protege.
+    baseline_valido() {  # baseline_valido <bcommit> <commit-revisado>
+      git -C "$WT" merge-base --is-ancestor "$1" "$2" 2>/dev/null && return 0
+      # El baseline no puede CONTENER el cambio revisado: eso ya no es "antes".
+      git -C "$WT" merge-base --is-ancestor "$2" "$1" 2>/dev/null && return 1
+      local trunk mb_rev mb_base
+      trunk="$(git -C "$WT" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null)"
+      [ -n "$trunk" ] || return 1          # sin trunk no se puede probar (b): fail-closed
+      mb_rev="$(git -C "$WT" merge-base "$trunk" "$2" 2>/dev/null)" || return 1
+      mb_base="$(git -C "$WT" merge-base "$trunk" "$1" 2>/dev/null)" || return 1
+      [ -n "$mb_rev" ] && [ "$mb_rev" = "$mb_base" ]
+    }
+    baseline_valido "$bcommit" "$vc" || {
       echo "❌ el baseline $bid está sellado sobre ${bcommit:0:12}, que NO es ancestro"
-      echo "   del commit revisado (${vc:0:12})"
+      echo "   del commit revisado (${vc:0:12}) NI sale de su mismo punto de partida"
       echo "   ↳ un baseline prueba el PASADO de este cambio; un commit ajeno no prueba nada"
+      echo "   ↳ si es el 'base + el test nuevo' (el rojo primero), commitealo SOBRE el"
+      echo "     merge-base de tu rama con la trunk: ahí sí queda como hermano válido"
       exit 3; }
     base_ids="$base_ids $bid"
   done

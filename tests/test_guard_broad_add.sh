@@ -122,4 +122,35 @@ assert_contains "$(cat "$ROOT/templates/settings.json.tmpl")" "guard-broad-add.s
 assert_contains "$(cat "$ROOT/skills/harness-init/SKILL.md")" "guard-broad-add.sh" \
   "y la tabla de generación lo declara (un template sin fila ahí no se instala)"
 
+echo
+echo "── #134: el arbol de la INSTANCIA es compartido y no tiene DAG"
+# El accidente entra por otra puerta: no hace falta un add amplio. Basta con que
+# otra tarea haya dejado algo en el index; un `git commit` sin pathspec se lo
+# lleva aunque vos hayas agregado por nombre. Medido: 158 lineas de otra tarea.
+INST="$WS/instancia"; mkdir -p "$INST"
+git init -q "$INST"
+( cd "$INST" && git config user.email t@t && git config user.name t \
+  && printf 'x\n' > base.txt && git add -A && git commit -qm base )
+printf 'de otra tarea\n' > "$INST/ajeno.txt"
+git -C "$INST" add ajeno.txt
+
+inst_hook() {  # inst_hook <comando> → salida+exit del hook desde el arbol de la instancia
+  printf '{"tool_input":{"command":%s},"cwd":"%s"}' "$(jq -Rn --arg c "$1" '$c')" "$INST" \
+    | CLAUDE_PROJECT_DIR="$INST" bash "$HOOK" 2>&1
+  return $?
+}
+out="$(inst_hook 'git commit -m "mis docs"')"; rc=$?
+assert_eq 2 "$rc" "#134: commit SIN pathspec con index ajeno: bloquea"
+assert_contains "$out" "COMPARTIDO" "y dice por que"
+assert_contains "$out" "ajeno.txt" "nombrando lo que se iba a colar"
+assert_contains "$out" "git commit -m '<msg>' -- <ruta>" "con la remediacion exacta"
+
+out="$(inst_hook 'git commit -m "mis docs" -- docs/a.md docs/b.md')"; rc=$?
+assert_eq 0 "$rc" "#134: con pathspec explicito pasa (es la forma auditable)"
+
+# Y sin nada en el index no hay nada que arrastrar: el hook no molesta.
+git -C "$INST" reset -q
+out="$(inst_hook 'git commit --amend --no-edit')"; rc=$?
+assert_eq 0 "$rc" "#134: index vacio (amend del rebase que estampa trailers): pasa"
+
 t_done

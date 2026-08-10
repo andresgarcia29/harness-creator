@@ -103,12 +103,47 @@ inside_child_repo() {
   done
   return 1
 }
-# ¿el ancestro existente de $1 está bajo repos/ o worktrees/ (territorio shimeable del harness)?
+# ¿el ancestro existente de $1 está DENTRO DEL WORKSPACE (territorio shimeable)?
+#
+# ── POR QUÉ EL TERRITORIO ES EL WORKSPACE Y NO SOLO repos//worktrees/ (#133) ──
+# La guarda pedía que el shim cayera bajo `repos/` o `worktrees/`, y hay un
+# layout entero que no puede cumplirlo: un repo cuyo `pyproject.toml` declara
+# `../../packages/<x>` sale DOS niveles desde `repos/<repo>`, o sea a la raíz
+# del workspace. Medido en aegis: los dos path-deps caían ahí, no se plantaba
+# ningún shim, y el loop interno nativo de Python (Ley 9) simplemente NO EXISTÍA
+# para ese repo: ni `sync`, ni `pytest`, ni `ruff`. El workaround era `ruff`
+# standalone, que no resuelve dependencias, así que `pytest` no tenía salida.
+#
+# Lo que la guarda protege de verdad es plantar symlinks FUERA del workspace
+# (en $HOME, en un hermano del árbol) y DENTRO de un repo hijo, que es
+# escribirle a un clon ajeno. Lo primero se sigue cumpliendo acá; lo segundo lo
+# comprueba `inside_child_repo`, que corre antes y no cambió.
+#
+# Lo que sí cambia y hay que decirlo: un shim en la raíz deja un archivo sin
+# trackear en el ÁRBOL DE LA INSTANCIA, que es compartido. Por eso se avisa con
+# la línea de .gitignore lista para pegar, en vez de dejar que aparezca como
+# suciedad anónima en el próximo `git status` de otra tarea.
 in_harness_territory() {
   local p="$1"
   while [ ! -d "$p" ]; do p="$(dirname "$p")"; done
   p="$(cd "$p" && pwd -P)"
-  case "$p" in "$REPOS_DIR"|"$REPOS_DIR"/*|"$WT_DIR"|"$WT_DIR"/*) return 0 ;; *) return 1 ;; esac
+  case "$p" in "$WS"|"$WS"/*) return 0 ;; *) return 1 ;; esac
+}
+
+# ¿el shim quedó fuera de repos//worktrees/, o sea en el árbol de la instancia?
+# La ruta se CANONIZA antes de comparar: la que llega trae los `../..` sin
+# resolver (`repos/aegis/../../packages/x`), y esa cadena empieza con
+# `$REPOS_DIR/`, así que un `case` sobre el texto crudo contesta al revés.
+# Se canoniza el DIRECTORIO QUE CONTIENE al shim, no el shim: para cuando esto
+# corre el symlink ya existe, y canonizarlo a él resuelve al DESTINO (que sí
+# vive bajo repos/), o sea que la pregunta se contestaría sobre el lugar
+# equivocado y el aviso no saldría nunca.
+fuera_de_repos_y_worktrees() {
+  local p
+  p="$(dirname "$1")"
+  while [ ! -d "$p" ]; do p="$(dirname "$p")"; done
+  p="$(cd "$p" && pwd -P)"
+  case "$p" in "$REPOS_DIR"|"$REPOS_DIR"/*|"$WT_DIR"|"$WT_DIR"/*) return 1 ;; *) return 0 ;; esac
 }
 
 # ── shims: recorre en fixpoint el árbol de path-deps. Base de resolución = ubicación LÓGICA
@@ -165,7 +200,7 @@ $base"
     real="$(lookup_name "$name")"
     if [ -z "$real" ]; then warn "path-dep '$name' ($rel) roto y sin match en el workspace — uv reportará el error"; continue; fi
     if inside_child_repo "$resolved"; then warn "el shim de '$name' caería dentro de un repo hijo ($resolved) — no lo toco"; continue; fi
-    if ! in_harness_territory "$resolved"; then warn "el shim de '$name' caería fuera de repos//worktrees/ ($resolved) — no lo toco"; continue; fi
+    if ! in_harness_territory "$resolved"; then warn "el shim de '$name' caería FUERA del workspace ($resolved) — no lo toco"; continue; fi
     if [ -e "$resolved" ] && [ ! -L "$resolved" ]; then warn "'$resolved' ya existe y no es symlink — no lo piso"; continue; fi
     linkdir="$(dirname "$resolved")"
     mkdir -p "$linkdir"
@@ -173,6 +208,15 @@ $base"
     ln -sfn "$tgt" "$resolved"
     SHIMS="${SHIMS}${resolved} -> ${tgt}
 "
+    # Un shim en la raíz del workspace es un archivo sin trackear en el árbol
+    # COMPARTIDO de la instancia. No se esconde: se nombra, con la línea de
+    # .gitignore lista, porque suciedad anónima en ese árbol es exactamente lo
+    # que termina colándose en el commit de otra tarea.
+    if fuera_de_repos_y_worktrees "$resolved"; then
+      warn "el shim de '$name' quedó en el árbol de la instancia (${resolved#"$WS"/}), que es COMPARTIDO"
+      warn "  ↳ agregalo al .gitignore del workspace para que no ensucie el status de otras tareas:"
+      warn "     echo '${resolved#"$WS"/}' >> .gitignore"
+    fi
     process_pp "$real/pyproject.toml" "$resolved" # fixpoint: el paquete real puede traer sus propias path-deps
   done <<EOF
 $srcs

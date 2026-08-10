@@ -60,6 +60,10 @@ if ! git remote get-url origin >/dev/null 2>&1; then
   exit 2
 fi
 
+# shellcheck source=/dev/null
+[ -f "$WS/scripts/instance-repo.sh" ] && . "$WS/scripts/instance-repo.sh" \
+  || instance_repo_slug() { :; }
+
 BB="${HARNESS_BASE_BRANCH:-$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')}"
 [ -n "$BB" ] || BB=main
 
@@ -294,8 +298,70 @@ if [ -x "$WS/scripts/doctor.sh" ]; then
 fi
 
 # ── push (vive DENTRO del script sancionado: el hook no aplica acá) ───
+# El rango se captura ANTES del push: después, `origin/$BB..HEAD` está vacío y
+# los trailers ya no se pueden leer de ahí.
+RANGO_TRAILERS="$(git log --format='%(trailers:key=Task,valueonly)' "origin/$BB..HEAD" 2>/dev/null \
+  | tr -d ' ' | grep -v '^$' | sort -u || true)"
 git push origin "HEAD:$BB"
 echo "🟢 instancia publicada: $n commit(s) a origin/$BB"
 [ -f "$WS/scripts/emit.sh" ] && bash "$WS/scripts/emit.sh" ship \
   "repo de la instancia publicado: $n commit(s) a origin/$BB" "" "" >/dev/null 2>&1 || true
+
+# ── LA FASE LA MUEVE EL HECHO, NO QUIEN INVOCA (#135) ─────────────────
+# `ship.sh` registra `review → ship` él mismo tras cada push, justamente porque
+# era la transición que el orquestador se olvidaba. Este script publicaba igual
+# de bien y NO la registraba, así que una tarea cuyo cambio ya estaba en main
+# quedaba clavada en `phase=review` para siempre, y de ahí no llegaba ni a
+# deploy ni a archive. Las dos salidas que el mensaje de policy ofrece son
+# FALSAS para este repo: `ship.sh` sale 2 (no es un repo de repos/) y
+# `repos --remove` sería mentir, porque el repo participó y shippeó.
+#
+# La tarea sale de los trailers `Task:` del rango publicado, que ya son
+# obligatorios: no hace falta un argumento nuevo ni que nadie se acuerde. Con
+# más de una tarea en el rango no se elige por nosotros: se dicen las dos y se
+# deja el registro al humano, porque adivinar cuál avanza sería peor que no
+# registrar nada.
+registrar_fase() {  # registrar_fase <task-id> <sha>
+  local tarea="$1" sha="$2" out rc=0 repo
+  [ -f "$WS/tasks/$tarea/state.json" ] || return 0
+  # PRIMERO ship.log, DESPUÉS la transición, y ese orden no es cosmético: el
+  # gate que decide es `POLICY-SHIP-004`, que cuenta repos con ship registrado.
+  # Sin esta línea, la transición se niega con "faltan repos por shippear:
+  # <repo>" sobre un repo que acaba de shippear, que es exactamente el mensaje
+  # que el reporte trae. El formato es el MISMO que escribe ship.sh: un lector
+  # (deploy-watch, la policy, el panel) no tiene por qué saber quién publicó.
+  repo="$(instance_repo_slug)"; [ -n "$repo" ] || repo="$(basename "$WS")"
+  printf '{"repo":"%s","sha":"%s","short":"%s","shipped_at":"%s"}\n' \
+    "$repo" "$sha" "$(git rev-parse --short "$sha" 2>/dev/null)" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$WS/tasks/$tarea/ship.log"
+  out="$(python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" \
+          transition "$WS/tasks/$tarea" ship --actor instance-ship 2>&1)" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "📍 $tarea: fase registrada tras el push (review → ship)"
+    return 0
+  fi
+  case "$out" in
+    *POLICY-SHIP-004*)
+      echo "   fase: sigue en review, faltan otros repos por shippear (es lo correcto)" ;;
+    *POLICY-TRANSITION-001*)
+      echo "   fase: ya estaba avanzada, no la muevo" ;;
+    *)
+      # No es un rojo del push: el cambio YA está en main. El motivo va delante.
+      echo "⚠️  publiqué, pero la transición a ship no prosperó. El cambio YA está en origin/$BB."
+      printf '%s\n' "$out" | sed 's/^/   /' ;;
+  esac
+}
+
+if [ -z "$RANGO_TRAILERS" ]; then
+  echo "ℹ️  ningún commit del rango trae trailer 'Task:': no hay fase que mover."
+elif [ "$(printf '%s\n' "$RANGO_TRAILERS" | grep -c .)" -gt 1 ]; then
+  # Con dos tareas en el rango no se elige por nadie: adivinar cuál avanza sería
+  # peor que no registrar. Se nombran las dos y se deja el comando servido.
+  echo "⚠️  el rango publicado mezcla varias tareas: no registro la fase de ninguna."
+  printf '%s\n' "$RANGO_TRAILERS" | sed 's/^/   · /'
+  echo "   ↳ registrá la que corresponda a mano (ship.log primero, si falta):"
+  echo "     python3 scripts/harness-policy.py transition tasks/<id> ship --actor humano"
+else
+  registrar_fase "$RANGO_TRAILERS" "$(git rev-parse HEAD)"
+fi
 exit 0

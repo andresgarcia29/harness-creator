@@ -24,8 +24,22 @@ rules:
       console.log en código de producción. Remediación: usa el logger del
       proyecto o elimínalo antes de shippear.
     pattern: console.log(...)
+    # El tooling de TERMINAL queda fuera, y no por comodidad: ahí stdout ES la
+    # interfaz, así que `console.log` es la salida del programa y no un resto de
+    # debug. La lista arranca con las tres formas que aparecen en todos lados
+    # (`scripts/`, `tools/`, `bin/`); cada instancia AGREGA las suyas, porque el
+    # nombre del directorio es una convención local y este archivo se genera una
+    # sola vez. Medido: dos instancias distintas tuvieron el mismo rodeo (`qa/`
+    # en una, `design-review/` en otra) y en las dos el gate `security` del
+    # precheck quedó rojo para CUALQUIER cambio del repo por findings
+    # preexistentes que nadie iba a arreglar.
     paths:
-      exclude: ["*.test.ts", "*.spec.ts", "**/scripts/**"]
+      exclude:
+        - "*.test.ts"
+        - "*.spec.ts"
+        - "**/scripts/**"
+        - "**/tools/**"
+        - "**/bin/**"
 
   - id: no-sleep-en-tests
     languages: [go, python, typescript]

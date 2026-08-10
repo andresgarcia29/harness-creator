@@ -47,6 +47,26 @@ se lo pida.
 **Fail-closed en gates**: ausente o inválido = rojo. (Lo contrario del bus,
 que es fail-open a propósito: telemetría, no control.)
 
+### 4b. Si tu paso CREA beads, escribí el id de vuelta en el veredicto
+
+Un paso custom que registra beads a partir de los `non_blocking` del veredicto
+**tiene que reescribir esa entrada al formato `{text, bead}`**, con el id que
+acaba de crear (o el que encontró ya existente):
+
+```json
+"non_blocking": [{"text": "resolvePlatform no cachea", "bead": "workspace-j3rrg"}]
+```
+
+No es cosmético: `POLICY-ARCHIVE-002` obliga a correr `scripts/verdict-beads.sh`
+antes de archivar, y ese script crea un bead por cada entrada que **no** trae el
+campo `bead`. Dejarla como string plano después de haberle creado uno significa
+que se va a crear OTRO. Medido: dos beads duplicados en una sola tarea, sobre
+hallazgos que ya tenían bead y ticket, y hubo que cerrarlos a mano.
+
+El atajo de que `verdict-beads.sh` busque por TEXTO en `bd` es peor y por eso no
+existe: el texto del hallazgo se recorta al crear el bead, así que no es una
+clave estable. El id sí lo es, y quien lo tiene en la mano es tu paso.
+
 ## 5. gate vs advisory
 
 - `gate: true` + rojo → `pipeline-steps.sh` registra la parada

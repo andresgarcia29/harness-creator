@@ -327,6 +327,42 @@ out="$(bash "$WS/scripts/verdict-scaffold.sh" --merge-qa T1 atlas 2>&1)"; rc=$?
 assert_eq 3 "$rc" "baseline de un commit ajeno (no ancestro): exit 3"
 assert_contains "$out" "NO es ancestro" "y lo dice: probar el pasado de ESTE cambio es el punto"
 
+# ── ISSUE #146: el baseline de un TEST NUEVO es un HERMANO, no un ancestro ──
+# Las dos reglas del harness se excluian: evidence.py se niega a sellar un arbol
+# sucio, o sea que para MEDIR un test nuevo sobre la base hay que COMMITEARLO
+# sobre la base; y ese commit (base + test) nunca es ancestro del revisado
+# (base + fix), porque son hermanos. El mecanismo que #53 creo para destrabar el
+# rojo primero no se podia cumplir justo en el caso que #53 queria destrabar.
+git -C "$WT1" update-ref refs/remotes/origin/main "$PARENT"
+git -C "$WT1" symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+HERMANO="$(git -C "$WT1" commit-tree "$PARENT^{tree}" -p "$PARENT" -m "base + el test nuevo")"
+jq -n --arg id EV-TEST-hermano001 --arg c "$HERMANO" \
+  '{schema:1, id:$id, task_id:"T1", repo:"atlas", kind:"test", runner:"qa",
+    commit:$c, commit_after:$c, exit_code:1,
+    output:("evidence/"+$id+".log"), output_sha256:"deadbeef"}' \
+  > "$WS/tasks/T1/evidence/EV-TEST-hermano001.json"
+jq -n --arg c "$HEADQ" '{schema:1, task_id:"T1", repo:"atlas", qa:"pass", commit:$c,
+  evidence:["EV-TEST-qa000000001"], evidence_baseline:["EV-TEST-hermano001"]}' \
+  > "$WS/tasks/T1/qa-atlas.json"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --merge-qa T1 atlas 2>&1)"; rc=$?
+assert_eq 0 "$rc" "#146: el hermano 'base + test' sale del MISMO punto de partida: se acepta"
+assert_contains "$(jq -c '.evidence_baseline' "$V")" "EV-TEST-hermano001" \
+  "y queda citado en el veredicto, que es para lo que existe el campo"
+
+# La contra-mitad, que es la que sostiene la regla: un baseline que YA CONTIENE
+# el cambio revisado no prueba el pasado de nada.
+DESCENDIENTE="$(git -C "$WT1" commit-tree "$HEADQ^{tree}" -p "$HEADQ" -m "despues del fix")"
+jq -n --arg id EV-TEST-despues001 --arg c "$DESCENDIENTE" \
+  '{schema:1, id:$id, task_id:"T1", repo:"atlas", kind:"test", runner:"qa",
+    commit:$c, commit_after:$c, exit_code:1,
+    output:("evidence/"+$id+".log"), output_sha256:"deadbeef"}' \
+  > "$WS/tasks/T1/evidence/EV-TEST-despues001.json"
+jq -n --arg c "$HEADQ" '{schema:1, task_id:"T1", repo:"atlas", qa:"pass", commit:$c,
+  evidence:["EV-TEST-qa000000001"], evidence_baseline:["EV-TEST-despues001"]}' \
+  > "$WS/tasks/T1/qa-atlas.json"
+out="$(bash "$WS/scripts/verdict-scaffold.sh" --merge-qa T1 atlas 2>&1)"; rc=$?
+assert_eq 3 "$rc" "#146: un baseline que CONTIENE el cambio revisado no prueba el pasado"
+
 # exclusión de flags y qa:"fail" también mecánico
 out="$(bash "$WS/scripts/verdict-scaffold.sh" --merge-qa --force T1 atlas 2>&1)"; rc=$?
 assert_eq 1 "$rc" "--merge-qa --force: exit 1"

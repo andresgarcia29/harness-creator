@@ -55,6 +55,44 @@ contra una instalación real).
   línea escrita.
 
 ### Corregido
+- **El repo de la INSTANCIA ya tiene camino en el pipeline (#135, #137, #134).**
+  `docs/`, `specs/`, los ADR y el answers viven en un repo sin `repos/<repo>` ni
+  worktree, y con UN árbol compartido entre tareas: cuatro artefactos le exigían
+  algo que por construcción no podía tener. Ahora `verdict-scaffold.sh` sella
+  contra el árbol del workspace cuando el repo es el de la instancia (antes el
+  reviewer emitía juicio completo y no tenía dónde ponerlo); `instance-ship.sh`
+  registra `review → ship` tras el push y escribe su línea de `ship.log`, que es
+  lo que `POLICY-SHIP-004` mira (antes la tarea quedaba clavada en `review` para
+  siempre con el cambio YA en main); `evidence.py` parte la suciedad del árbol
+  compartido en propia (sigue siendo rechazo) y ajena (no bloquea y queda
+  ESCRITA en el manifiesto); y `guard-broad-add` bloquea un `git commit` sin
+  pathspec cuando el index trae trabajo de otra tarea (medido: 158 líneas
+  ajenas en un commit). La pregunta "¿cuál es el repo de la instancia?" vive en
+  un solo archivo nuevo, `scripts/instance-repo.sh`.
+- **`evidence_baseline[]` ya se puede cumplir para un test NUEVO (#146).** Las
+  dos reglas se excluían: `evidence.py` obliga a commitear para sellar, así que
+  medir un test nuevo sobre la base produce `base + test`, que NUNCA es ancestro
+  de `base + fix` porque son hermanos. El predicado pasa a aceptar las dos formas
+  legítimas de "probar el pasado de ESTE cambio": ser ancestro, o salir del mismo
+  merge-base sin contener el cambio revisado. Un commit ajeno, o uno que ya
+  incluye el fix, siguen sin pasar.
+- **`py.sh` shimea los path-deps que caen en la raíz del workspace (#133).** La
+  guarda exigía `repos/` o `worktrees/`, y un `pyproject.toml` que declara
+  `../../packages/<x>` sale dos niveles desde `repos/<repo>`: no se plantaba
+  ningún shim y el loop interno nativo de Python NO EXISTÍA para ese repo (ni
+  `sync`, ni `pytest`, ni `ruff`). El territorio pasa a ser el workspace; salir
+  de él se sigue vetando, y un shim en la raíz se DICE con su línea de
+  `.gitignore`, porque ese árbol es compartido.
+- **La regla `no-console-log` del semgrep generado excluye el tooling de
+  terminal (#132).** Nacía con `scripts/` solamente, y dos instancias distintas
+  tuvieron el mismo rodeo (`qa/` en una, `design-review/` en otra): findings
+  preexistentes dejaban el gate `security` del precheck rojo para CUALQUIER
+  cambio del repo. Ahora arranca con `scripts/`, `tools/` y `bin/`, y dice que
+  la instancia agrega los suyos.
+- **`docs/pipeline-steps.md` declara el contrato de los beads (#145).** Un paso
+  custom que crea beads a partir de los `non_blocking` tiene que reescribir la
+  entrada a `{text, bead}`: si la deja como string plano, `verdict-beads.sh`
+  crea OTRO al archivar (medido: dos duplicados en una tarea, cerrados a mano).
 - **El eximido de costo ya puede cubrir su propio breach (#119, #122, #123,
   #124, #125, #126, #128).** `cost-waive` decía "aceptado", el eximido quedaba
   en `state.json` con EL MISMO valor que el gate reportaba, y la transición

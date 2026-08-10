@@ -118,8 +118,20 @@ assert_eq "" "$(git -C "$WS/worktrees/T-1/atlas" status --porcelain)" \
   "y limpio: ningún gate va a medir un árbol a medias"
 
 echo
+echo "── un commit POSTERIOR al coalesce no se tira: la marca no alcanza"
+# La marca dice "esto se coalescio", no "no quedo nada". Un implementer que
+# siguio commiteando en el nodo despues del coalesce tiene trabajo sin publicar,
+# y `branch -D` lo destruiria sin preguntar (el cherry-pick cambia el sha, asi
+# que git lo ve como "sin mergear" y `-d` no sirve de red). Se le pregunta a git
+# si queda algo por PARCHE.
+( cd "$WS/worktrees/T-1/atlas@T2" && printf 'tarde\n' >> b.txt \
+  && git add -A && git commit -qm "T2: algo despues del coalesce" )
+
+echo
 echo "── --rm entiende los worktrees de nodo (si no, el repo queda trabado)"
 out="$(wt --rm T-1)"
+assert_contains "$(git -C "$WS/repos/atlas" branch --list 'task/T-1@T2')" "task/T-1@T2" \
+  "la rama del nodo con trabajo NUEVO se CONSERVA, aunque tenga marca de coalescida"
 assert_no_file "$WS/worktrees/T-1/atlas@T1" "el worktree del nodo se fue"
 assert_contains "$out" "removido" "lo dice"
 # La rama de T1 se coalesció: sus commits viven en task/T-1 con OTRO sha, así

@@ -211,10 +211,18 @@ if [ "${1:-}" = "--rm" ]; then
     # que git los ve como "sin mergear" y la rama del nodo nunca se limpiaría.
     # `dag-coalesce.sh` deja la marca de lo que ya coalesció; sin marca, se
     # conserva (misma ley: un árbol limpio no significa trabajo publicado).
+    # `-D` y no `-d` porque el cherry-pick cambia el sha: git ve esos commits
+    # como "sin mergear" aunque su PARCHE ya viva en `task/<id>`. Por eso la
+    # condición no es la marca sola: se le pregunta a git si queda algo del nodo
+    # que NO esté ya adentro (comparando por parche). Un implementer que siguió
+    # commiteando en el nodo DESPUÉS del coalesce tiene trabajo sin publicar, y
+    # ese es exactamente el caso que `-D` destruiría sin preguntar.
     if [ "$branch" != "task/$TASK" ] \
-       && [ -f "$WS/tasks/$TASK/.coalesced-${dirname_wt}" ]; then
+       && [ -f "$WS/tasks/$TASK/.coalesced-${dirname_wt}" ] \
+       && [ -z "$(git -C "$WS/repos/$repo" rev-list --cherry-pick --right-only \
+                    "task/$TASK...$branch" 2>/dev/null)" ]; then
       git -C "$WS/repos/$repo" branch -D "$branch" >/dev/null 2>&1 \
-        && echo "   🧹 rama $branch borrada (coalescida en task/$TASK)"
+        && echo "   🧹 rama $branch borrada (coalescida entera en task/$TASK)"
     elif git -C "$WS/repos/$repo" branch -d "$branch" 2>/dev/null; then
       echo "   🧹 rama $branch borrada (su trabajo ya está publicado)"
     elif git -C "$WS/repos/$repo" show-ref --verify --quiet "refs/heads/$branch"; then

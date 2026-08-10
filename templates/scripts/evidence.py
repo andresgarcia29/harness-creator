@@ -682,6 +682,65 @@ def change_id(cwd: Path) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def _arbol_compartido(cwd: Path) -> bool:
+    """¿Este árbol es COMPARTIDO entre tareas? (#137)
+
+    La pregunta se contesta por ESTRUCTURA y no por configuración: un árbol de
+    tarea vive bajo `<ws>/worktrees/<task>/`, y cualquier otro (el repo de la
+    instancia, un clon canónico) lo comparten todas. No hace falta leer el
+    answers ni conocer el nombre del repo, así que no hay un segundo lugar
+    donde la respuesta pueda divergir."""
+    return "/worktrees/" not in f"{cwd.resolve()}/"
+
+
+def _partir_suciedad(cwd: Path, porcelain: str, task_id: str) -> "tuple[str, list]":
+    """Parte `git status --porcelain` en (lo de esta tarea, lo ajeno).
+
+    "De esta tarea" son las rutas que sus PROPIOS commits tocaron: los que
+    llevan el trailer `Task: <id>`, que el harness ya exige. Esa definición es
+    verificable desde afuera y no depende de que nadie declare nada.
+
+    Fail-CLOSED en la duda: si no se puede resolver la lista de commits de la
+    tarea (repo raro, sin trunk, git que no contesta), TODA la suciedad se
+    considera propia y el chequeo se comporta como antes. Aflojar ante un error
+    de lectura sería comprar el sello con un `git` que falló."""
+    # `git()` MUERE si el comando falla, y acá fallar es normal: un repo sin
+    # `origin` no tiene `refs/remotes/origin/HEAD`. Se usa una variante que
+    # devuelve vacío, porque este helper no puede tumbar el sello.
+    def git_ok(*args: str) -> str:
+        try:
+            out = subprocess.run(["git", *args], cwd=cwd, text=True,
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                 check=False)
+        except OSError:
+            return ""
+        return out.stdout.strip() if out.returncode == 0 else ""
+
+    mias: set = set()
+    trunk = git_ok("symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    rango = f"{trunk}..HEAD" if trunk else "HEAD"
+    shas = git_ok("log", "--format=%H %(trailers:key=Task,valueonly)", rango)
+    if not shas:
+        return porcelain, []
+    for line in shas.splitlines():
+        partes = line.split()
+        if len(partes) < 2 or partes[1].strip() != task_id:
+            continue
+        for f in git_ok("show", "--name-only", "--format=", partes[0]).splitlines():
+            if f.strip():
+                mias.add(f.strip())
+    if not mias:
+        # La tarea todavía no commiteó nada acá: no hay con qué distinguir, y
+        # entonces la suciedad se le cobra entera (la conducta de siempre).
+        return porcelain, []
+    propias, ajenas = [], []
+    for line in porcelain.splitlines():
+        ruta = line[3:].strip() if len(line) > 3 else ""
+        ruta = ruta.split(" -> ")[-1]            # renombres: manda el destino
+        (propias if ruta in mias else ajenas).append(line)
+    return "\n".join(propias), ajenas
+
+
 def command_run(args: argparse.Namespace) -> int:
     cwd = Path(args.cwd).resolve()
     task_dir = Path(args.task_dir).resolve()
@@ -710,6 +769,31 @@ def command_run(args: argparse.Namespace) -> int:
     # que el commit contiene, y refusar por un artefacto de build sería
     # inservible. Si los hay, se avisan y quedan anotados en el manifiesto.
     tracked_dirty = git(cwd, "status", "--porcelain", "-uno")
+    # ── UN ÁRBOL COMPARTIDO NO PUEDE ESTAR LIMPIO, Y NO ES CULPA DE NADIE (#137)
+    # El repo de la INSTANCIA (specs, ADRs, docs, answers) no tiene worktree por
+    # tarea: es UN árbol para todas. Exigirle limpieza total es una precondición
+    # INALCANZABLE por construcción, y sin escape: medido, ninguna prueba se
+    # podía sellar justo en el repo que contiene los gates de todos los demás, y
+    # el veredicto quedaba sin `evidence[]`.
+    #
+    # Lo que este chequeo protege sigue en pie y no se afloja: que lo que corrió
+    # sea lo que el sello dice. Por eso la suciedad se PARTE en dos y cada mitad
+    # recibe lo que merece:
+    #   · lo que tocó ESTA tarea sucio → sigue siendo rechazo (es exactamente el
+    #     caso "sellé antes de commitear", que no cambia);
+    #   · lo ajeno (trabajo en vuelo de otra tarea) → no bloquea y queda ESCRITO
+    #     en el manifiesto, con nombre y apellido. El sello deja de mentir por
+    #     omisión: dice contra qué commit corrió Y qué más había en el árbol.
+    foreign_dirty: list = []
+    if tracked_dirty and _arbol_compartido(cwd):
+        mios, foreign_dirty = _partir_suciedad(cwd, tracked_dirty, task_dir.name)
+        tracked_dirty = mios
+        if foreign_dirty:
+            print(f"EVIDENCE: árbol COMPARTIDO con {len(foreign_dirty)} archivo(s) "
+                  "sucios de OTRAS tareas; no bloquean y quedan anotados en el "
+                  "manifiesto:", file=sys.stderr)
+            for line in foreign_dirty[:10]:
+                print(f"  {line}", file=sys.stderr)
     if tracked_dirty:
         print("EVIDENCE: el árbol tiene cambios SIN COMMITEAR:", file=sys.stderr)
         for line in tracked_dirty.splitlines()[:10]:
@@ -811,6 +895,17 @@ def command_run(args: argparse.Namespace) -> int:
     # jamás degrada a un sello con asterisco. Un sello que miente sobre qué
     # probó es peor que no tener sello.
     dirty_after = git(cwd, "status", "--porcelain", "-uno")
+    # El mismo reparto que antes de correr (#137): en un árbol COMPARTIDO, lo
+    # que otra tarea toque mientras esto corre no es "el árbol se ensució
+    # durante mi comando", y cobrárselo dejaría el repo de la instancia sin
+    # poder sellar por una razón distinta pero con el mismo final. Lo que ESTA
+    # tarea ensucie sigue siendo rechazo, que es lo que el gate protege.
+    if dirty_after and _arbol_compartido(cwd):
+        mios_after, ajenos_after = _partir_suciedad(cwd, dirty_after, task_dir.name)
+        dirty_after = mios_after
+        for line in ajenos_after:
+            if line not in foreign_dirty:
+                foreign_dirty.append(line)
     if dirty_after:
         print("EVIDENCE: el árbol se ENSUCIÓ mientras corría el comando:",
               file=sys.stderr)
@@ -856,11 +951,17 @@ def command_run(args: argparse.Namespace) -> int:
         # Informativo, NO parte de lo que verify exige: sumarlo al contrato
         # invalidaría de golpe toda la evidencia ya emitida. Sirve para que un
         # humano o un reviewer vean en qué condiciones se selló.
+        # `tree_clean` sigue significando lo mismo que siempre: nada de ESTA
+        # tarea sin commitear. En un árbol compartido puede haber suciedad
+        # AJENA y por eso viaja aparte, con nombre: el sello dice contra qué
+        # commit corrió Y qué más había en el árbol (#137).
         "tree_clean": True,
         "untracked_files": untracked_n,
         "output": f"evidence/{evidence_id}.log",
         "output_sha256": sha256(log_path),
     }
+    if foreign_dirty:
+        manifest["shared_tree_dirty"] = foreign_dirty[:50]
     if patch_id:
         manifest["patch_id"] = patch_id
     if contention:

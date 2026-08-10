@@ -112,4 +112,54 @@ run_py app3 T1 >/dev/null 2>&1
 assert_eq "../../../../repos/dep" "$(readlink "$PY/worktrees/T1/app3/vendored/dep" 2>/dev/null)" \
   "un symlink DENTRO de un repo hijo no se re-apunta (ni siquiera con otro ganador en el índice)"
 
+echo
+echo "── ISSUE #133: un path-dep que escapa a la RAIZ del workspace sí se shimea"
+# El pyproject de un repo puede declarar `../../packages/<x>`, o sea DOS niveles
+# arriba desde repos/<repo>: cae en la raiz del workspace, fuera de repos/ y de
+# worktrees/. La guarda vieja lo vetaba, no se plantaba ningun shim, y el loop
+# interno nativo de Python NO EXISTIA para ese repo (ni sync, ni pytest, ni
+# ruff). Medido en aegis, con dos path-deps asi.
+# El paquete real vive indexado (bajo repos/), y aegis lo declara por una ruta
+# que NO existe y que cae en la raiz: ese es el caso de campo exacto.
+mkdir -p "$PY/repos/aegis" "$PY/repos/corvux-llm"
+cat > "$PY/repos/corvux-llm/pyproject.toml" <<'EOF'
+[project]
+name = "corvux-llm"
+version = "0.1.0"
+EOF
+cat > "$PY/repos/aegis/pyproject.toml" <<'EOF'
+[project]
+name = "aegis"
+version = "0.1.0"
+
+[tool.uv.sources]
+corvux-llm = { path = "../../packages/corvux-llm", editable = true }
+EOF
+out="$(run_py aegis)"
+assert_eq "1" "$([ -L "$PY/repos/aegis/../../packages/corvux-llm" ] && echo 1 || echo 0)"   "#133: el path-dep de la raiz ya no queda sin shim"
+assert_not_contains "$out" "no lo toco" "y no se veta"
+# Pero un shim en la raiz ensucia el arbol COMPARTIDO de la instancia: se dice.
+assert_contains "$out" "COMPARTIDO" "#133: avisa que quedo en el arbol de la instancia"
+assert_contains "$out" ".gitignore" "con la linea lista para pegar"
+
+echo
+echo "── lo que la guarda SIGUE protegiendo: fuera del workspace, jamas"
+mkdir -p "$PY/repos/fuga" "$PY/repos/ajeno"
+cat > "$PY/repos/ajeno/pyproject.toml" <<'EOF'
+[project]
+name = "ajeno"
+version = "0.1.0"
+EOF
+cat > "$PY/repos/fuga/pyproject.toml" <<'EOF'
+[project]
+name = "fuga"
+version = "0.1.0"
+
+[tool.uv.sources]
+ajeno = { path = "../../../ajeno", editable = true }
+EOF
+out="$(run_py fuga)"
+assert_contains "$out" "FUERA del workspace" "un path-dep que sale del workspace se sigue vetando"
+assert_eq "0" "$([ -e "$PY/../ajeno" ] && echo 1 || echo 0)" "y no se planta nada afuera"
+
 t_done

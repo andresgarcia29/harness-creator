@@ -98,10 +98,53 @@ fi
 cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // empty')"
 [ -n "$cmd" ] || exit 0
 sanitized="$(sanitize "$cmd")" || sanitized="$cmd"
-es_amplio "$sanitized" || exit 0
 
 root="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 cwd="$(printf '%s' "$input" | jq -r '.cwd // empty')"
+
+# ── EL ÁRBOL DE LA INSTANCIA TAMBIÉN ES COMPARTIDO, Y NO TIENE DAG (#134) ──
+# `docs/`, `specs/` y los ADR viven en el repo de la INSTANCIA, que es UN árbol
+# para todas las tareas concurrentes: no cuelga de `worktrees/` y no hay
+# `dag.json` que consultar, así que todo lo de abajo no lo miraba nunca.
+#
+# Y ahí el accidente entra por otra puerta: no hace falta un `add` amplio. Basta
+# con que OTRA tarea haya dejado algo en el index; un `git commit` sin pathspec
+# se lo lleva aunque vos hayas agregado por nombre. Medido: un commit se llevó
+# `specs/frontends/spec.md` (158 líneas de otra tarea) junto a los dos archivos
+# propios. `guard-broad-add` no lo veía (el add fue por nombre) y el gate 1 de
+# `instance-ship.sh` tampoco (mira sucio contra saliente, no index ajeno).
+#
+# La regla acá es simple y verificable: en ESE árbol, un commit dice QUÉ commitea.
+es_commit_sin_pathspec() {  # → 0 si es `git commit` sin `--` ni rutas
+  printf '%s' "$1" | grep -Eq \
+    '(^|[;&|(])[[:space:]]*(sudo[[:space:]]+)?git([[:space:]]+-C[[:space:]]+[^[:space:]]+)*[[:space:]]+commit([[:space:]]|$)' || return 1
+  # `--` es la forma explícita, y `--amend` sobre un index vacío es el camino
+  # del rebase que estampa trailers: ninguno de los dos arrastra nada ajeno.
+  printf '%s' "$1" | grep -q -- ' -- ' && return 1
+  return 0
+}
+if [ -z "$(tarea_de "$cwd")" ] && es_commit_sin_pathspec "$sanitized" \
+   && [ -d "$root/.git" ] && { [ "$cwd" = "$root" ] || [ -z "$cwd" ]; }; then
+  staged="$(git -C "$root" diff --cached --name-only 2>/dev/null || true)"
+  if [ -n "$staged" ]; then
+    echo "⛔ 'git commit' SIN pathspec en el árbol de la INSTANCIA, que es COMPARTIDO." >&2
+    echo "   Hay $(printf '%s\n' "$staged" | grep -c .) archivo(s) en el index:" >&2
+    printf '%s\n' "$staged" | sed 's/^/     · /' >&2
+    echo "   En este repo las tareas concurrentes comparten UN solo árbol, así que" >&2
+    echo "   el index puede traer trabajo de otra: un commit sin pathspec se lo lleva" >&2
+    echo "   aunque vos hayas agregado por nombre (pasó: 158 líneas de otra tarea)." >&2
+    echo "   ↳ remediación: nombrá lo tuyo, que además deja el commit auditable:" >&2
+    echo "     git commit -m '<msg>' -- <ruta> <ruta>" >&2
+    exit 2
+  fi
+fi
+
+# El resto de este hook es sobre `add` amplio en un worktree: lo que no lo sea
+# ya no tiene nada que ver acá. (El early-exit vive DEBAJO del bloque de la
+# instancia a propósito: un `git commit` pelado no es "amplio" y salía antes de
+# que nadie mirara el index compartido.)
+es_amplio "$sanitized" || exit 0
+
 task=""
 for cand in $sanitized; do
   case "$cand" in *worktrees/*) task="$(tarea_de "$cand")"; [ -n "$task" ] && break ;; esac

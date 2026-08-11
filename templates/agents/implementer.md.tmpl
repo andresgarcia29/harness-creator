@@ -59,7 +59,11 @@ coalesce.
    El precheck ahora lo exige, y su remediación es un amend: temprano no
    cuesta nada, tarde mueve HEAD y te invalida evidencia y veredicto.
 5. **Commitea primero, y después corre `scripts/ship.sh --precheck
-   <task-id> <repo>` con el árbol limpio.** Son los MISMOS gates mecánicos
+   <task-id> <repo>` con el árbol limpio.** Si tu árbol es el de un NODO
+   (`worktrees/<id>/<repo>@<Tn>`), el precheck se pide con ESE nombre:
+   `scripts/ship.sh --precheck <task-id> <repo>@<Tn>`. Verifica TU commit y deja
+   su propio sello (`precheck-<repo>@<Tn>.json`), así que los hermanos no se
+   pisan; pedirlo con el repo pelado prechequearía el árbol de otro nodo. Son los MISMOS gates mecánicos
    del ship (build, tests, lint, gitleaks, tests-no-debilitados, y ahora
    también trailer y carril) sobre tu worktree, sin veredicto y sin push.
    - Rojo lo arreglas tú AHÍ: cuesta segundos y cero tokens, mientras que

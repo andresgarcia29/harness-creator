@@ -17,7 +17,10 @@
 # (aviso_evidencia_desalineada: observador, no gate, jamás pone rojo).
 #
 # Opera sobre el WORKTREE de la tarea (worktrees/<task>/<repo>), nunca
-# sobre el clon canónico. Serie solo lo que tiene orden real:
+# sobre el clon canónico. Con nodos paralelos del DAG el árbol se nombra
+# `<repo>@<Tn>` y el sello se llama igual (precheck-<repo>@<Tn>.json), para que
+# los hermanos no se pisen el archivo; el árbol coalescido conserva el nombre
+# pelado, que es el que /review y el ship consumen. Serie solo lo que tiene orden real:
 # rebase → trailer → carril. Después, los gates independientes corren EN
 # PARALELO (lenguaje+buf ∥ gitleaks+semgrep ∥ tests-no-debilitados ∥
 # veredicto+evidencia+policy) y se reportan TODOS los rojos juntos — un
@@ -76,17 +79,52 @@ case "${1:-}" in
   # existe en un checkout de CI, y fingirlo seria inventar.
   --ci)         CI_MODE=1; shift ;;
 esac
+NODE=""          # el sufijo @<Tn> del árbol por nodo; vacío en CI y en el modo normal
 if [ "$CI_MODE" -eq 1 ]; then
   TASK="${HARNESS_CI_TASK:-ci}"
   REPO="${1:-$(basename "$(pwd)")}"
   WS="$(cd "$(dirname "$0")/.." && pwd)"
   WT="$(pwd)"
 else
-TASK="${1:?uso: ship.sh [--precheck|--ci] <task-id> <repo>}"
-REPO="${2:?uso: ship.sh [--precheck] <task-id> <repo>}"
+TASK="${1:?uso: ship.sh [--precheck|--ci] <task-id> <repo>[@<Tn>]}"
+REPO="${2:?uso: ship.sh [--precheck] <task-id> <repo>[@<Tn>]}"
 WS="$(cd "$(dirname "$0")/.." && pwd)"
-WT="$WS/worktrees/$TASK/$REPO"
+# ── EL ÁRBOL DE UN NODO DEL DAG SE PUEDE NOMBRAR (#149, #150) ─────────
+# Con `dag.json` schema 2, dos tareas del mismo repo con `files[]` disjuntos
+# corren en paralelo, cada una en `worktrees/<task>/<repo>@<Tn>`. Esta línea
+# componía la ruta con el repo PELADO, y la validación contra manifest.yaml
+# rechazaba `agora@T2`, así que el nodo no tenía forma de nombrar su árbol.
+#
+# Lo que pasaba en cambio, medido dos veces en campo: el precheck corría sobre
+# el árbol de OTRO nodo, 20 minutos de gates y 253 archivos de test sobre código
+# que ese implementer no escribió, y sellaba `precheck-<repo>.json` con un
+# commit que su nodo nunca produjo. Los tres hermanos escribían el MISMO sello y
+# ganaba el último: un verde que afirma "verificado: completo" sobre otro
+# commit es peor que no tener sello, y el paso 5 del contrato del implementer
+# quedaba inejecutable.
+#
+# El `@<Tn>` se parte acá: el sufijo es del ÁRBOL, no del repo. `REPO` sigue
+# siendo la identidad (manifest.yaml, `repos/<repo>`, el lock, el veredicto, la
+# evidencia) y `NODE` viaja aparte, a la ruta del worktree y al nombre del sello.
+NODE=""
+case "$REPO" in
+  *@*) NODE="${REPO##*@}"; REPO="${REPO%@*}" ;;
+esac
+case "$NODE" in
+  *[!A-Za-z0-9_-]*)
+    echo "❌ nodo inválido: '$NODE' (solo letras, números, guion y guion bajo)"
+    echo "   La forma es <repo>@<Tn>, igual que el directorio del worktree."
+    exit 2 ;;
+esac
+WT="$WS/worktrees/$TASK/$REPO${NODE:+@$NODE}"
 fi
+
+# La clave con la que se nombran los artefactos que son DEL ÁRBOL y no del repo:
+# el sello del precheck y el marcador de gates de lenguaje. Con nodos paralelos
+# los hermanos compartían los dos nombres y se los pisaban, así que ganaba el
+# último en correr (#149, #150). El veredicto, la evidencia y el lock siguen
+# siendo del REPO: esos sí son uno por repo, y se juntan tras el coalesce.
+ARTEFACTO="$REPO${NODE:+@$NODE}"
 
 BASE="$WS/repos/$REPO"
 # ── DOS PRESUPUESTOS QUE NO TIENEN NADA QUE VER ───────────────────────
@@ -150,7 +188,30 @@ if [ ! -d "$WS/repos/$REPO/.git" ] && [ "$CI_MODE" -ne 1 ]; then
   echo "     Para un repo de producto: clónalo bajo repos/ y regístralo en manifest.yaml"
   exit 2
 fi
-[ -d "$WT" ] || { echo "❌ no existe el worktree $WT"; echo "   ↳ remediación: scripts/worktree-task.sh $TASK $REPO"; exit 2; }
+# ── UN NODO SE VERIFICA, PERO NO PUBLICA ──────────────────────────────
+# El árbol de un nodo tiene SOLO su parte del trabajo, y la rama `task/<id>@<Tn>`
+# no es la que aterriza: `dag-coalesce.sh` junta los nodos en `task/<id>` y ESE
+# árbol es el que se revisa y se shippea. Publicar desde un nodo saltearía el
+# coalesce y mandaría a main una tarea a medias, así que el sufijo se acepta en
+# `--precheck` (verificar temprano es justamente para lo que existe) y se
+# rechaza en el camino de publicación, con el comando que falta delante.
+if [ -n "$NODE" ] && [ "$PRECHECK" -ne 1 ] && [ "$LANG_ONLY" -ne 1 ]; then
+  echo "❌ '$REPO@$NODE' es el árbol de un NODO del DAG: desde ahí no se publica."
+  echo "   Un nodo tiene solo su parte del trabajo, y su rama (task/$TASK@$NODE)"
+  echo "   no es la que aterriza."
+  echo "   ↳ juntá los nodos primero y shippeá el árbol coalescido:"
+  echo "     bash scripts/dag-coalesce.sh $TASK $REPO"
+  echo "     bash scripts/ship.sh $TASK $REPO"
+  exit 2
+fi
+[ -d "$WT" ] || {
+  echo "❌ no existe el worktree $WT"
+  if [ -n "$NODE" ]; then
+    echo "   ↳ remediación: scripts/worktree-task.sh --node $NODE $TASK $REPO"
+  else
+    echo "   ↳ remediación: scripts/worktree-task.sh $TASK $REPO"
+  fi
+  exit 2; }
 # En CI no hay clon canonico: el checkout ES el repo, y de ahi salen tanto el
 # diff como la baseline de buf. Exigir repos/<repo> ahi seria pedir un layout
 # de workspace que un runner de CI no tiene por que tener.
@@ -457,7 +518,7 @@ CURRENT_GATE="preflight"; LOCK_HELD=""; _G0=$SECONDS
 # ya ocurrió; en un rojo el motivo lo da el gate que falló, no este campo. Queda
 # DICHO para que nadie lo lea como "en el rojo tampoco corrió nada".
 precheck_verificado() {  # → completo | ninguno | desconocido
-  local m="$WS/tasks/$TASK/.langseen-$REPO" v
+  local m="$WS/tasks/$TASK/.langseen-$ARTEFACTO" v
   # El marcador lo escribe el trap de la corrida `--lang-gates` con el valor de
   # TESTS_RAN: 1 = algún tramo compiló o testeó de verdad, 0 = ninguno.
   if [ ! -r "$m" ]; then printf 'desconocido'; return 0; fi
@@ -490,7 +551,7 @@ stamp_precheck() {  # stamp_precheck <ok:true|false>: sello que /review lee
   printf '{"schema":1,"task_id":"%s","repo":"%s","commit":"%s","ok":%s,"verificado":"%s","at":"%s"%s}\n' \
     "$TASK" "$REPO" "$head" "$ok" "$verificado" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     "$(known_bug_frag)" \
-    > "$WS/tasks/$TASK/precheck-$REPO.json"
+    > "$WS/tasks/$TASK/precheck-$ARTEFACTO.json"
 }
 # ── LA EVIDENCIA DEL REPO, ¿MIRA AL COMMIT QUE ESTOY SELLANDO? ────────
 # Caso de campo, dos veces en la misma sesión: el precheck selló ok:true sobre
@@ -645,7 +706,7 @@ on_exit() {
   # corren igual y la funcion devuelve 0. Reproducido: el precheck imprimia
   # "verde" con la suite rota Y sellaba evidencia con exit_code 0.
   if [ "${LANG_ONLY:-0}" -eq 1 ]; then
-    printf '%s' "${TESTS_RAN:-0}" > "$WS/tasks/$TASK/.langseen-$REPO" 2>/dev/null || true
+    printf '%s' "${TESTS_RAN:-0}" > "$WS/tasks/$TASK/.langseen-$ARTEFACTO" 2>/dev/null || true
   fi
   [ -n "$LOCK_HELD" ] && rm -rf "$LOCKDIR"
   if [ "$rc" -eq 0 ]; then
@@ -1878,7 +1939,7 @@ run_lang_gates_sealed() {
       emit assumption "$REPO sin evidencia de test: ninguna suite llegó a correr"
     else
       echo "⚠️  NO sello evidencia de $REPO: no hay rastro de si algo corrió."
-      echo "   Falta el marcador tasks/$TASK/.langseen-$REPO que deja la corrida"
+      echo "   Falta el marcador tasks/$TASK/.langseen-$ARTEFACTO que deja la corrida"
       echo "   --lang-gates: no pude escribirlo, o lo borró otro precheck del"
       echo "   mismo task+repo corriendo a la vez. No sé si probó algo, así que"
       echo "   no lo certifico: un sello es una afirmación, no un default."
@@ -3358,7 +3419,7 @@ gate_fresh_evidence() {
   want="$(python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" \
     evidence-policy --field require_fresh_evidence 2>/dev/null || echo true)"
   [ "$want" = "true" ] || return 0
-  [ "$(cat "$WS/tasks/$TASK/.langseen-$REPO" 2>/dev/null || echo 1)" != "0" ] || {
+  [ "$(cat "$WS/tasks/$TASK/.langseen-$ARTEFACTO" 2>/dev/null || echo 1)" != "0" ] || {
     echo "⚠️  el árbol integrado de $REPO NO se pudo verificar: su stack no lo"
     echo "   reconoce ningún gate de lenguaje, así que no hay suite que correr"
     echo "   sobre el merge con los commits ajenos que aterrizaron."
@@ -3739,13 +3800,13 @@ if [ "$PRECHECK" -eq 1 ]; then
   # otra corrida), en vez de pisar en silencio lo ajeno.
   if [ -d "$LOCKDIR" ]; then
     echo "⚠️  hay un ship de '$REPO' en vuelo (lock $LOCKDIR): NO borro el marcador"
-    echo "   tasks/$TASK/.langseen-$REPO, que mientras dure ese ship es SUYO."
+    echo "   tasks/$TASK/.langseen-$ARTEFACTO, que mientras dure ese ship es SUYO."
     echo "   El campo 'verificado' de este sello puede venir de esa corrida y no"
     echo "   de esta: no lo leas como que ESTOS gates compilaron y testearon."
     echo "   ↳ re-corré el precheck cuando el ship termine si querés el dato limpio."
     emit assumption "precheck de $REPO: marcador conservado, hay un ship en vuelo con el lock"
   else
-    rm -f "$WS/tasks/$TASK/.langseen-$REPO"
+    rm -f "$WS/tasks/$TASK/.langseen-$ARTEFACTO"
   fi
   git fetch origin --quiet 2>/dev/null || true   # fail-open: sin red, compara contra el origin/$BASE_REF local
   echo "══ precheck $REPO (task $TASK) ══"
@@ -3772,7 +3833,16 @@ if [ "$PRECHECK" -eq 1 ]; then
   else
     stamp_precheck true
     emit gate "precheck de $REPO verde, listo para review" true
-    echo "✅ precheck verde. Sello: tasks/$TASK/precheck-$REPO.json"
+    echo "✅ precheck verde. Sello: tasks/$TASK/precheck-$ARTEFACTO.json"
+    if [ -n "$NODE" ]; then
+      # Un verde de nodo NO es el verde que habilita review ni ship: verifica el
+      # trabajo de ESE nodo temprano y barato. El árbol que review consume es el
+      # coalescido, y tiene su propio precheck. Decirlo acá evita que alguien lea
+      # este verde como "listo para review" y se saltee el coalesce.
+      echo "   Es el verde de un NODO ($REPO@$NODE): verifica su commit, no la tarea."
+      echo "   ↳ cuando terminen los hermanos: scripts/dag-coalesce.sh $TASK $REPO"
+      echo "     y después el precheck del árbol coalescido: scripts/ship.sh --precheck $TASK $REPO"
+    fi
     # La ÚLTIMA LÍNEA es la que alguien lee, así que no puede afirmar más de lo
     # que el sello dice. Verde con verificado != completo sigue siendo verde (no
     # bloquea), pero no es un verde verificado, y callarlo acá volvería a

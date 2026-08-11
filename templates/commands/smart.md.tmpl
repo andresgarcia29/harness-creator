@@ -410,9 +410,15 @@ Reglas del ledger, en orden de precedencia:
    - **Sin `files[]` no hay paralelo.** `POLICY-DAG-011` es fail-closed: lo que
      no se declara se serializa. No inventes los archivos para habilitarlo; si
      no sabés qué toca un nodo, ese nodo va en serie.
-   - **Precheck, review, QA y ship siguen operando sobre el árbol base**
-     (`worktrees/<id>/<repo>`), DESPUÉS del coalesce. El paralelo es de la
-     implementación, no de la verificación.
+   - **Cada nodo prechequea SU árbol** (`ship.sh --precheck <id> <repo>@<Tn>`):
+     es la verificación temprana y barata de ese commit, con sello propio
+     (`precheck-<repo>@<Tn>.json`). Ese verde NO habilita review ni ship.
+   - **Review, QA y ship operan sobre el árbol base** (`worktrees/<id>/<repo>`),
+     DESPUÉS del coalesce, y ese árbol tiene su PROPIO precheck: es otro commit
+     y nadie lo verificó todavía. El paralelo es de la implementación, no de la
+     verificación.
+   - **Desde un nodo no se publica.** Su rama (`task/<id>@<Tn>`) no es la que
+     aterriza; `ship.sh` lo rechaza y te manda al coalesce.
    - **Un conflicto en el coalesce no es un rojo**: `dag-coalesce.sh` aborta ese
      cherry-pick, deja el árbol como estaba y sale 3 nombrando el nodo. Ese nodo
      se re-implementa EN SERIE sobre el árbol coalescido y se sigue. Es el

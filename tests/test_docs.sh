@@ -79,10 +79,18 @@ assert_contains "$(cat "$root/templates/docs/intake.md.tmpl")" "enrichment" \
 # de terminal "──" (U+2500) son otro carácter y no cuentan.
 # El tope es el conteo REAL del día, sin holgura: dejarlo por encima (487 con
 # 447 medidos) regala 40 guiones largos gratis y el ratchet deja de morder.
+#
+# Y cuenta SOLO ARCHIVOS VERSIONADOS (`git ls-files`), no lo que haya en el
+# directorio. El walk del filesystem contaba cualquier cosa que otra herramienta
+# dejara al lado (pasó: un `.atl/skill-registry.md` de un runtime local sumó uno
+# y puso el gate rojo), y entonces el mensaje "tu cambio AÑADE em dashes" era
+# falso: no era un cambio, ni era de este repo. Un gate que mide otra cosa que
+# la que dice medir se apaga solo, porque el primero que lo vea mentir deja de
+# creerle. En CI daba verde, además, así que discrepaban las dos mitades.
 EMDASH_MAX=434
-emdash_now=$(grep -ro "—" --include="*.md" --include="*.tmpl" --include="*.yaml" \
-  --include="*.sh" --include="*.py" --include="*.json" "$root" 2>/dev/null \
-  | grep -v "/\.git/" | grep -v "templates/ui/dist" | wc -l | tr -d ' ')
+emdash_now=$( (cd "$root" && git ls-files -z -- '*.md' '*.tmpl' '*.yaml' '*.sh' '*.py' '*.json' 2>/dev/null \
+    | xargs -0 grep -o "—" 2>/dev/null) \
+  | grep -v "templates/ui/dist" | wc -l | tr -d ' ')
 if [ "$emdash_now" -le "$EMDASH_MAX" ]; then
   pass "ratchet de guion largo: $emdash_now ≤ $EMDASH_MAX (solo baja)"
 else

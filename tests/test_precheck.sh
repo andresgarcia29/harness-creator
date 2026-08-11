@@ -47,6 +47,48 @@ sello="$(cat "$WS/tasks/T1/precheck-svc.json")"
 assert_contains "$sello" '"ok":true' "sello verde"
 assert_contains "$sello" "$head" "el sello ata al HEAD revisado (un commit nuevo lo invalida)"
 
+echo
+echo "── ISSUES #149/#150: el precheck del ÁRBOL DE UN NODO del DAG"
+# Con dag.json schema 2, dos tareas del mismo repo con files[] disjuntos corren
+# en paralelo, cada una en worktrees/<task>/<repo>@<Tn>. El precheck componía la
+# ruta con el repo PELADO y validaba <repo>@<Tn> contra manifest.yaml, así que:
+# el nodo no podía nombrar su árbol, el precheck corría sobre el árbol del
+# vecino (medido: 253 archivos de test, 283s, sobre el commit de otro nodo) y
+# los hermanos se pisaban el mismo precheck-<repo>.json.
+cp -R "$WS/repos/svc" "$WS/worktrees/T1/svc@T2"
+( cd "$WS/worktrees/T1/svc@T2"; echo "solo de T2" > t2.txt; git add .
+  git commit -qm "feat de T2
+
+Task: T1" )
+head_t2="$( cd "$WS/worktrees/T1/svc@T2" && git rev-parse HEAD )"
+stub_gitleaks 'exit 0'
+out="$( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/ship.sh --precheck T1 'svc@T2' 2>&1 )"; rc=$?
+assert_eq 0 "$rc" "#149: el precheck del nodo corre (antes: 'no está en repos/', exit 2)"
+assert_file "$WS/tasks/T1/precheck-svc@T2.json" "#149: sella con SU nombre, no con el del repo pelado"
+sello_t2="$(cat "$WS/tasks/T1/precheck-svc@T2.json")"
+assert_contains "$sello_t2" "$head_t2" "#149: y ata el commit DEL NODO, no el del árbol de la tarea"
+assert_not_contains "$sello_t2" "$head" "#150: no es el commit del vecino (ese era el silencio caro)"
+assert_contains "$out" "verde de un NODO" "#149: y dice que este verde no habilita review"
+assert_contains "$out" "dag-coalesce.sh T1 svc" "con el paso que falta delante"
+# El sello del árbol de la tarea sigue siendo el suyo: el del nodo no lo pisó.
+assert_contains "$(cat "$WS/tasks/T1/precheck-svc.json")" "$head" \
+  "#149: el sello del árbol de la tarea quedó intacto"
+
+echo
+echo "── un nodo verifica, pero NO publica"
+# Su rama (task/<id>@<Tn>) no es la que aterriza: publicar desde ahí saltearía
+# el coalesce y mandaría a main una tarea a medias.
+out="$( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/ship.sh T1 'svc@T2' 2>&1 )"; rc=$?
+assert_eq 2 "$rc" "#149: el ship desde un nodo se rechaza"
+assert_contains "$out" "desde ahí no se publica" "y dice por qué"
+assert_contains "$out" "dag-coalesce.sh T1 svc" "con el comando que falta"
+
+echo
+echo "── un sufijo inválido no se convierte en una ruta"
+out="$( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/ship.sh --precheck T1 'svc@../otro' 2>&1 )"; rc=$?
+assert_eq 2 "$rc" "un nodo con '..' no pasa"
+assert_contains "$out" "nodo inválido" "y lo dice por su nombre"
+
 echo "── precheck rojo"
 stub_gitleaks 'echo "leak: token en app.txt"; exit 1'
 out="$(run_precheck)"; rc=$?
@@ -383,8 +425,8 @@ clasifica() {  # clasifica <contenido-del-marcador>|--sin-marcador → veredicto
   local probe="$WS/probe" fn="$WS/pv.sh" runner="$WS/pv-run.sh"
   rm -rf "$probe"
   mkdir -p "$probe/tasks/TP"
-  if [ "$1" != "--sin-marcador" ]; then printf '%s' "$1" > "$probe/tasks/TP/.langseen-svc"; fi
-  WS="$probe" TASK=TP REPO=svc PV_FN="$fn" bash "$runner"
+  if [ "$1" != "--sin-marcador" ]; then printf '%s' "$1" > "$probe/tasks/TP/.langseen-${2:-svc}"; fi
+  WS="$probe" TASK=TP REPO=svc ARTEFACTO="${2:-svc}" PV_FN="$fn" bash "$runner"
 }
 assert_eq "ninguno"     "$(clasifica '00')"  "'00' es solo ceros: ninguno (antes: completo)"
 assert_eq "completo"    "$(clasifica '10')"  "'10' trae un dígito 1-9: completo"
@@ -395,6 +437,14 @@ assert_eq "desconocido" "$(clasifica '')"    "vacío: desconocido"
 assert_eq "desconocido" "$(clasifica '--sin-marcador')" "sin marcador: desconocido"
 assert_eq "ninguno"     "$(clasifica '0')"   "el caso de siempre no se movió: '0' es ninguno"
 assert_eq "completo"    "$(clasifica '1')"   "ni el otro: '1' es completo"
+
+# ISSUES #149/#150: con nodos paralelos del DAG, el marcador y el sello son del
+# ARBOL, no del repo. Con la clave pelada los tres hermanos escribian el mismo
+# archivo y ganaba el ultimo: un verde que afirma "verificado: completo" sobre
+# un commit que ese nodo nunca produjo.
+assert_eq "completo"    "$(clasifica '1' 'svc@T2')" "#149: el marcador del nodo se lee por su propia clave"
+assert_eq "desconocido" "$(clasifica '--sin-marcador' 'svc@T3')" \
+  "#149: y el hermano sin marcador NO hereda el verde del vecino"
 
 echo
 echo "── el sello declara el bug conocido del harness, y solo cuando lo hubo"
@@ -417,9 +467,9 @@ sella_kb() {  # sella_kb <valor-de-KNOWN_BUG_USED> → ruta del sello escrito
   # garantizado, y este test no se juega en una sutileza de expansion).
   local probe="$WS/kbprobe" fn="$WS/kb.sh" runner="$WS/kb-run.sh"
   rm -rf "$probe"; mkdir -p "$probe/tasks/TK"
-  WS="$probe" TASK=TK REPO=svc WT="$probe/sin-worktree" KNOWN_BUG_USED="$1" \
-    KB_FN="$fn" bash "$runner"
-  printf '%s' "$probe/tasks/TK/precheck-svc.json"
+  WS="$probe" TASK=TK REPO=svc ARTEFACTO="${2:-svc}" WT="$probe/sin-worktree" \
+    KNOWN_BUG_USED="$1" KB_FN="$fn" bash "$runner"
+  printf '%s' "$probe/tasks/TK/precheck-${2:-svc}.json"
 }
 sello_kb="$(sella_kb "tests=https://github.com/anthropics/harness-creator/issues/77")"
 jq -e '.known_bug.url == "https://github.com/anthropics/harness-creator/issues/77"' "$sello_kb" >/dev/null \
@@ -437,6 +487,13 @@ sello_kb="$(sella_kb "")"
 jq -e 'has("known_bug") | not' "$sello_kb" >/dev/null \
   && pass "sin knob, el sello NO trae la clave known_bug" \
   || fail "el sello declara un bug conocido que nadie declaro: $(cat "$sello_kb" 2>/dev/null)"
+
+# #149/#150: el sello de un nodo lleva su sufijo, asi que no pisa al del vecino
+# ni al del arbol coalescido (que es el que /review y el ship consumen).
+sello_nodo="$(sella_kb "" "svc@T2")"
+assert_file "$sello_nodo" "#149: el sello del nodo se llama precheck-<repo>@<Tn>.json"
+assert_no_file "$(dirname "$sello_nodo")/precheck-svc.json" \
+  "#149: y NO escribe el del arbol de la tarea, que es otro commit"
 
 echo
 echo "── un test nuevo que pasa SIN el cambio: el precheck lo caza, de punta a punta"

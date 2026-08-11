@@ -61,6 +61,21 @@ python3 "$root/templates/scripts/harness-policy.py" --policy "$tmp/pol.json" \
   || fail "el ejemplo de schema 2 de /rfc no pasa el validador"
 
 echo
+echo "── #149/#150: el nodo del DAG puede prechequear SU árbol, y el prompt lo dice"
+# El hueco fue exactamente al reves del habitual: el prompt pedia un paso (el
+# precheck del paso 5) que la herramienta no podia hacer para un arbol por nodo.
+imp="$(cat "$root/templates/agents/implementer.md.tmpl")"
+ship_tmpl="$(cat "$root/templates/scripts/ship.sh.tmpl")"
+assert_contains "$imp" '--precheck <task-id> <repo>@<Tn>' \
+  "el implementer sabe pedir el precheck de SU nodo"
+assert_contains "$ship_tmpl" 'NODE="${REPO##*@}"' \
+  "y ship.sh parte ese sufijo en vez de rechazarlo"
+assert_contains "$ship_tmpl" 'precheck-$ARTEFACTO.json' \
+  "con sello por arbol, para que los hermanos no se pisen"
+assert_contains "$(cmd smart)" 'ship.sh --precheck <id> <repo>@<Tn>' \
+  "/smart lo declara en el flujo del paralelo intra-repo"
+
+echo
 echo "── la máquina de fases: el flujo manual también tiene que moverla"
 # /smart y /review la movían; feature, rfc, implement, ship y archive no la
 # mencionaban ni una vez, así que el flujo manual moría en policy con un

@@ -55,6 +55,18 @@ contra una instalación real).
   línea escrita.
 
 ### Corregido
+- **El precheck ya puede verificar el árbol de un NODO del DAG (#149, #150).**
+  Regresión de los worktrees por nodo: `ship.sh` componía la ruta con el repo
+  pelado y validaba `<repo>@<Tn>` contra manifest.yaml, así que el nodo no podía
+  nombrar su árbol. Lo que pasaba en cambio, medido dos veces en campo: el
+  precheck corría 20 minutos de gates (253 archivos de test, 283 s) sobre el
+  árbol de OTRO nodo y sellaba `precheck-<repo>.json` con un commit que ese nodo
+  nunca produjo; los hermanos se pisaban el mismo sello y ganaba el último. Un
+  verde que afirma "verificado: completo" sobre otro commit es peor que no tener
+  sello, y el paso 5 del contrato del implementer quedaba inejecutable. Ahora el
+  sufijo se parte (el `@<Tn>` es del ÁRBOL, no del repo), el sello y el marcador
+  de gates de lenguaje se nombran por árbol, y publicar desde un nodo se rechaza
+  mandando al coalesce: su rama no es la que aterriza.
 - **El repo de la INSTANCIA ya tiene camino en el pipeline (#135, #137, #134).**
   `docs/`, `specs/`, los ADR y el answers viven en un repo sin `repos/<repo>` ni
   worktree, y con UN árbol compartido entre tareas: cuatro artefactos le exigían

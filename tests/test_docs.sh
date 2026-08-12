@@ -30,6 +30,25 @@ done
 skill_gi="$(grep '^| `.gitignore`' "$root/skills/harness-init/SKILL.md")"
 assert_contains "$skill_gi" "gitignore.tmpl" "la tabla de generación apunta al template, no a una lista inline"
 
+# ── El bloque `env` del settings de la instancia es un CONTRATO, no un adorno.
+# Lo que se declara ahí es lo único que llega al entorno de los hooks y al del
+# `claude -p` que orchestrator-watch.sh levanta por tarea (verificado end-to-end
+# con un hook que volcó su propio entorno). Una perilla que vive solo en el
+# template es una perilla que nadie encuentra: el valor se elige por una razón
+# medida y esa razón vive en la tabla de generación, o vuelve a ser un string
+# mágico que el próximo lector cambia a ciegas.
+sj_env="$(python3 -c "import json;print(json.dumps(json.load(open('$root/templates/settings.json.tmpl')).get('env',{})))")"
+pony="$(printf '%s' "$sj_env" | python3 -c "import json,sys;print(json.load(sys.stdin).get('PONYTAIL_DEFAULT_MODE',''))")"
+case "$pony" in
+  off|lite|full|ultra) pass "settings.json.tmpl fija PONYTAIL_DEFAULT_MODE en un modo válido ($pony)" ;;
+  "") fail "settings.json.tmpl perdió PONYTAIL_DEFAULT_MODE del bloque env" ;;
+  *)  fail "PONYTAIL_DEFAULT_MODE='$pony' no es un modo de ponytail (off|lite|full|ultra)" ;;
+esac
+skill_sj="$(grep '^| `.claude/settings.json`' "$root/skills/harness-init/SKILL.md")"
+assert_contains "$skill_sj" "PONYTAIL_DEFAULT_MODE" \
+  "la tabla de generación nombra la perilla, no la deja como string mágico"
+assert_contains "$skill_sj" "off" "la tabla dice cuál es el valor que de verdad ahorra tokens"
+
 # ── Ley 15: la recomendada es la duradera, nunca la rápida.
 # Caso real: un agente marcó "editar state.json a mano (recomendado)" porque no
 # había vuelta atrás por CLI. Era lo rápido, violaba una ley del propio

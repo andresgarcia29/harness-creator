@@ -52,6 +52,39 @@ Queda en `history[]` como `{"kind": "rollback", ...}` con actor y motivo, y
 **no cobra ronda de review**: deshace un movimiento que nunca ocurrió, y
 cobrarlo castigaría a quien corrige el error.
 
+### Tareas estancadas (`stale`)
+
+Una tarea puede quedarse en una fase no terminal **con el trabajo hecho y sin
+pausa**: no está bloqueada ni esperando a nadie, está detenida y contada como si
+avanzara. Desde afuera se ve idéntica a una que progresa, así que el modo de
+falla es silencioso y su costo es reloj que nadie contabiliza (caso medido:
+12h46m en `implement`, descubierto a mano mirando timestamps).
+
+```bash
+scripts/harness-policy.py stale tasks     # exit 0 = ninguna; 1 = hay alguna
+```
+
+Compara `phase_since` (que `set_phase` ya estampa en todo movimiento) contra
+ahora, con un techo **por fase**, porque el trabajo no dura lo mismo: un
+`implement` de 40 minutos es normal y un `ship` de 40 no.
+
+| fase | techo | fase | techo |
+|---|---|---|---|
+| `intake` | 30 min | `review` | 90 min |
+| `rfc` | 90 min | `ship` | 30 min |
+| `implement` | 120 min | `deploy` | 60 min |
+
+`blocked` y `archive` están exentas: una es una parada registrada esperando a un
+humano, la otra terminó. Una tarea sin `phase_since` legible se avisa igual: no
+poder mirar no es verde.
+
+Lo corre `orchestrator-watch.sh` en cada pasada (`status`, `once` y `daemon`), y
+avisa **una vez por fase** por el bus. Avisa y nada más: no pausa ni relanza. Una
+tarea puede llevar tres horas en una fase por buenos motivos, y el que relanza es
+el vigilante, que ya sabe hacerlo. La señal es distinta de la suya: aquélla mide
+**silencio de bus** y caza al agente que murió callado; ésta mide **tiempo en
+fase** y caza a la que sigue emitiendo sin terminar nunca.
+
 ## Carriles
 
 Las transiciones válidas dependen del carril: `quick` y `express` permiten

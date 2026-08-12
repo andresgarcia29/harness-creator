@@ -51,6 +51,54 @@ rm -f "$WS/.claude/pipeline/e2e.md" "$WS/tasks/T1/pipeline/e2e.json"
 printf '{"schema":1,"step":"adv","ok":false,"summary":"solo avisa"}' > "$WS/tasks/T1/pipeline/adv.json"
 (cd "$WS" && bash scripts/pipeline-steps.sh gate T1 ship >/dev/null 2>&1) && pass "advisory rojo: continúa" || fail "advisory rojo paró"
 
+echo "── el gate CORRE los pasos 'run:' que no dejaron result (#154)"
+# Caso de campo: un paso determinista salió verde, su result quedó en disco con
+# ok:true, y el gate paró la tarea con "sin resultado". El gate había mirado
+# ANTES de que el paso escribiera: el orden vivía en la prosa de /smart, no en
+# código. Ahora el gate no confía en el orden, lo corre él y después juzga.
+rm -f "$WS/.claude/pipeline/"*.md "$WS/tasks/T1/pipeline/"*.json
+printf '#!/usr/bin/env bash\nexit 0\n' > "$WS/scripts/paso-verde.sh"
+printf '#!/usr/bin/env bash\necho "el detalle del rojo"; exit 1\n' > "$WS/scripts/paso-rojo.sh"
+printf '#!/usr/bin/env bash\nmkdir -p "tasks/$HARNESS_TASK/pipeline"\nprintf %%s "{\\"schema\\":1,\\"step\\":\\"propio\\",\\"ok\\":true,\\"summary\\":\\"sin duplicados en 7 specs\\"}" > "tasks/$HARNESS_TASK/pipeline/propio.json"\n' > "$WS/scripts/paso-propio.sh"
+
+printf -- '---\nstep: verde\nafter: ship\ngate: true\nrun: scripts/paso-verde.sh\n---\n' > "$WS/.claude/pipeline/verde.md"
+(cd "$WS" && bash scripts/pipeline-steps.sh gate T1 ship >/dev/null 2>&1) \
+  && pass "paso 'run:' sin result: el gate lo corre y NO para la tarea sana" \
+  || fail "el gate paró un paso 'run:' verde por no haberlo corrido"
+assert_eq "true" "$(jq -r .ok "$WS/tasks/T1/pipeline/verde.json")" "y deja el result derivado del exit code (el contrato que la doc prometía)"
+
+# Un paso que SÍ se escribe su result manda: trae summary y evidencia propios.
+rm -f "$WS/.claude/pipeline/"*.md "$WS/tasks/T1/pipeline/"*.json
+printf -- '---\nstep: propio\nafter: ship\ngate: true\nrun: scripts/paso-propio.sh\n---\n' > "$WS/.claude/pipeline/propio.md"
+(cd "$WS" && bash scripts/pipeline-steps.sh gate T1 ship >/dev/null 2>&1) || fail "el gate paró un paso que se escribió su propio result verde"
+assert_eq "sin duplicados en 7 specs" "$(jq -r .summary "$WS/tasks/T1/pipeline/propio.json")" "el result propio del paso manda: el gate no lo pisa con el derivado"
+
+# Y un rojo REAL sigue parando: el backstop mide, no perdona.
+rm -f "$WS/.claude/pipeline/"*.md "$WS/tasks/T1/pipeline/"*.json
+printf -- '---\nstep: rojo\nafter: ship\ngate: true\nrun: scripts/paso-rojo.sh\n---\n' > "$WS/.claude/pipeline/rojo.md"
+out="$(cd "$WS" && bash scripts/pipeline-steps.sh gate T1 ship 2>&1)"; rc=$?
+assert_eq 3 "$rc" "paso 'run:' que sale rojo al correrlo: exit 3 (para, como debe)"
+assert_contains "$out" "el detalle del rojo" "y muestra lo que el paso imprimió, no solo el exit code"
+assert_eq "false" "$(jq -r .ok "$WS/tasks/T1/pipeline/rojo.json")" "con el result derivado en ok:false"
+python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" resume "$WS/tasks/T1" --actor human >/dev/null
+
+# El fail-closed del paso AGÉNTICO no se toca: ése no tiene qué correr.
+rm -f "$WS/.claude/pipeline/"*.md "$WS/tasks/T1/pipeline/"*.json
+printf -- '---\nstep: agentico\nafter: ship\ngate: true\n---\n' > "$WS/.claude/pipeline/agentico.md"
+(cd "$WS" && bash scripts/pipeline-steps.sh gate T1 ship >/dev/null 2>&1); rc=$?
+assert_eq 3 "$rc" "paso agéntico sin result: sigue rojo (un agente que se calla no pasa un gate)"
+python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" resume "$WS/tasks/T1" --actor human >/dev/null
+
+# Higiene de la ruta: el backstop NO ejecuta lo que no está bajo scripts/.
+rm -f "$WS/.claude/pipeline/"*.md "$WS/tasks/T1/pipeline/"*.json
+printf '#!/usr/bin/env bash\ntouch "$WS_MARCA"\n' > "$WS/fuera.sh"
+printf -- '---\nstep: fuera\nafter: ship\ngate: true\nrun: ../fuera.sh\n---\n' > "$WS/.claude/pipeline/fuera.md"
+(cd "$WS" && WS_MARCA="$WS/corrio-lo-que-no-debia" bash scripts/pipeline-steps.sh gate T1 ship >/dev/null 2>&1); rc=$?
+assert_eq 3 "$rc" "run: con traversal: no se ejecuta, y sin result el gate sigue siendo rojo"
+assert_no_file "$WS/corrio-lo-que-no-debia" "y de verdad no corrió nada fuera de scripts/"
+python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" resume "$WS/tasks/T1" --actor human >/dev/null
+rm -f "$WS/.claude/pipeline/"*.md "$WS/tasks/T1/pipeline/"*.json
+
 echo "── doctor: caza needs_mcp ausente en un playbook"
 
 # workspace mínimo para que el doctor arranque

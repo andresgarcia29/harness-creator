@@ -208,7 +208,7 @@ mi-workspace/
 │   ├── bootstrap.sh          ← onboarding: deps + token + secretos + doctor
 │   ├── doctor.sh             ← salud total, cada fallo con remediación
 │   ├── ship.sh               ← LA única puerta a main (gates)
-│   ├── harness-policy.py     ← el motor de fases: transition, rollback, pause, validate-ship
+│   ├── harness-policy.py     ← el motor de fases: transition, rollback, pause, stale, validate-ship
 │   ├── verdict-scaffold.sh   ← esqueleto determinista del veredicto (+ --rebase)
 │   ├── evidence.py           ← corre y sella evidencia atada a un commit exacto
 │   ├── harness-version.sh    ← make version: ¿al día? + estado de las tareas

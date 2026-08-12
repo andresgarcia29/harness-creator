@@ -273,6 +273,19 @@ pass_once() {  # pass_once <act 0|1>
       rm -rf "${CLAIMS:?}/orch-$task.lock.d" 2>/dev/null || true
     fi
   done
+  # ── LA OTRA SEÑAL: tiempo EN FASE, no silencio de bus (#155) ────────
+  # Las dos son ortogonales y hacen falta las dos. El silencio de arriba caza a
+  # la tarea cuyo agente murió callado. NO caza a la que sigue emitiendo (o cuyo
+  # daemon no corre) y aun así lleva 12 horas en `implement` con el trabajo hecho
+  # y el precheck verde: eso es lo que pasó tres veces el mismo día y lo detectó
+  # un humano mirando timestamps a mano.
+  # La cuenta vive en harness-policy.py, que es LA autoridad sobre state.json;
+  # acá solo se la corre. Fail-open: el detector no puede tumbar al vigilante.
+  python3 "$WS/scripts/harness-policy.py" stale "$WS/tasks" 2>/dev/null \
+    | while IFS="$(printf '\t')" read -r t p m resto; do
+        [ -n "$t" ] || continue
+        echo "🐢 $t ($p): ${m} min en la misma fase $resto"
+      done
   echo "── $vistas tarea(s) en fase no terminal · $varadas varada(s)"
 }
 

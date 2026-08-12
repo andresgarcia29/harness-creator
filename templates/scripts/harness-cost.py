@@ -405,12 +405,22 @@ def scan(path: str, window_ts=None):
     `row["window"]`, y es None cuando el agente no ejecutó nada en la ventana."""
     total = _acc()
     win = _acc() if window_ts is not None else None
+    menciones = collections.Counter()
     try:
         with open(path, "r", errors="replace") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
                     continue
+                # ── A QUÉ TAREA pertenece este transcript (#153) ──
+                # Se cuenta sobre la línea CRUDA, antes del filtro de turnos:
+                # las rutas aparecen en el prompt del Task, en los file_path de
+                # Read, en los `cd worktrees/...` de Bash y en los tool results,
+                # o sea sobre todo en las líneas que NO son del asistente.
+                if "worktrees/" in line or "tasks/" in line:
+                    for t in _TASK_EN_RUTA.findall(line):
+                        if t != "archive":
+                            menciones[t] += 1
                 try:
                     rec = json.loads(line)
                 except Exception:
@@ -447,6 +457,7 @@ def scan(path: str, window_ts=None):
         return None
     row["windowed"] = win is not None
     row["window"] = _finish(win, path) if win is not None else None
+    row["menciones"] = menciones
     return row
 
 
@@ -474,6 +485,49 @@ def role_of(agent_path: str) -> str:
         if desc.startswith(r) or f"{r}:" in desc or f" {r} " in f" {desc} ":
             return r
     return at or "sin-rol"
+
+
+# Las rutas por las que un transcript confiesa en qué tarea estuvo trabajando.
+# `worktrees/<id>/<repo>` es contrato del implementer, y `tasks/<id>/` es donde
+# vive TODO el estado de una tarea, así que cualquier agente que trabajó en una
+# las nombra decenas de veces.
+_TASK_EN_RUTA = re.compile(r"(?:worktrees|tasks)/([A-Za-z0-9][A-Za-z0-9._-]*)/")
+
+# Qué tan dominante tiene que ser una tarea para quedarse con una SESIÓN entera.
+# Un orquestador mono-tarea que de paso ojea la tarea vecina sigue siendo suyo;
+# un barrido que reparte su trabajo entre cuatro no es de ninguna.
+_DOMINIO_MIN = 0.7
+
+
+def tarea_dominante(menciones, minimo=0.0) -> str:
+    """La tarea más nombrada, si pasa el umbral de dominio. '' si no hay."""
+    if not menciones:
+        return ""
+    total = sum(menciones.values())
+    task, n = max(menciones.items(), key=lambda kv: (kv[1], kv[0]))
+    if minimo and total and (n / total) < minimo:
+        return ""
+    return task
+
+
+def menciona(path: str, needle: str) -> bool:
+    """¿El archivo nombra este id? Sonda de bytes, sin parsear JSON.
+
+    Es la poda barata de `task_filter`: reemplaza al descarte por puntero, que
+    era justo lo que descartaba las sesiones de las tareas hermanas."""
+    pat = needle.encode()
+    try:
+        with open(path, "rb") as fh:
+            cola = b""
+            while True:
+                chunk = fh.read(1 << 20)
+                if not chunk:
+                    return False
+                if pat in cola + chunk:
+                    return True
+                cola = chunk[-len(pat):]
+    except Exception:
+        return False
 
 
 def session_task_map() -> dict:
@@ -504,6 +558,28 @@ def collect(project_dir: str, since_days=None, task_filter=None, window_ts=None)
 
     `window_ts` recorta lo que evalúan las bandas de tasa, no lo que se reporta:
     cada fila llega entera y con su sub-fila `window`.
+
+    LA TAREA SALE DEL TRANSCRIPT, NO DEL PUNTERO (#153)
+    ---------------------------------------------------
+    El puente `sid→tarea` de track-read.sh es UN archivo por sesión y el último
+    en escribir gana. Eso es correcto para lo que el hook hace (evidencia de
+    lecturas), y era una premisa falsa acá: un orquestador de `/smart-main`
+    lanza VARIAS tareas en una sesión, así que la última tocada se llevaba el
+    gasto de todas y las hermanas quedaban en cero. Medido: una tarea express de
+    12 líneas de diff con 477 turnos de orquestador, un architect que nunca
+    corrió para ella y ocho implementers ajenos, mientras las cuatro tareas que
+    hicieron el trabajo real reportaban "sin transcripts atribuidos". El gate de
+    presupuesto frenaba a la barata (y hacían falta tres eximidos para
+    destrabarla) y era ciego para la cola cara, que es justo lo que existe para
+    cortar.
+
+    Los transcripts ya dicen la tarea: los agentes trabajan por contrato en
+    `worktrees/<id>/<repo>` y el estado vive en `tasks/<id>/`, y esas rutas
+    aparecen literales decenas de veces. Es un dato INMUTABLE, así que además
+    sobrevive al borrado del puntero en SessionEnd, que es por qué
+    `harness-sink.py push` no escribía métricas de una tarea ya cerrada.
+
+    El puntero queda de respaldo para el transcript que no nombra ninguna ruta.
     """
     s2t = session_task_map()
     cutoff = time.time() - since_days * 86400 if since_days else None
@@ -511,25 +587,49 @@ def collect(project_dir: str, since_days=None, task_filter=None, window_ts=None)
     for path in sorted(glob.glob(os.path.join(project_dir, "*.jsonl"))):
         if cutoff and os.path.getmtime(path) < cutoff:
             continue
-        if task_filter is not None:
-            sid_early = os.path.basename(path)[: -len(".jsonl")]
-            if s2t.get(sid_early) != task_filter:
-                continue
-        r = scan(path, window_ts=window_ts)
-        if not r:
-            continue
         sid = os.path.basename(path)[: -len(".jsonl")]
-        r.update(sid=sid, kind="orquestador", role="orquestador",
-                 task=s2t.get(sid, ""))
-        rows.append(r)
-        subs = os.path.join(project_dir, sid, "subagents", "agent-*.jsonl")
-        for sp in sorted(glob.glob(subs)):
+        subs = sorted(glob.glob(
+            os.path.join(project_dir, sid, "subagents", "agent-*.jsonl")))
+        # La poda de `task_filter` sigue siendo barata, pero ya no puede confiar
+        # en el puntero: la sonda de bytes es la que evita abrir y parsear el
+        # 95% de los transcripts sin descartar a las hermanas. Y mira TAMBIÉN a
+        # los subagentes: el trabajo de una tarea hermana vive ahí abajo, en una
+        # sesión cuyo transcript principal puede no nombrarla nunca.
+        mira_padre = True
+        if task_filter is not None and s2t.get(sid) != task_filter:
+            mira_padre = menciona(path, task_filter)
+            if not mira_padre and not any(menciona(sp, task_filter) for sp in subs):
+                continue
+        sess_task = ""
+        if mira_padre:
+            r = scan(path, window_ts=window_ts)
+            if r:
+                # Una SESIÓN es de una tarea solo si esa tarea DOMINA lo que
+                # hizo. Un barrido reparte su trabajo entre varias y no es de
+                # ninguna: mejor sin tarea (visible en `day`, invisible para el
+                # budget de cualquiera) que cargada entera a la que salió
+                # sorteada, que es el bug. El puntero solo entra si el
+                # transcript no nombra NINGUNA ruta de tarea: donde sí las
+                # nombra, preguntarle al puntero es volver a la señal rota.
+                sess_task = (tarea_dominante(r["menciones"], _DOMINIO_MIN)
+                             if r["menciones"] else s2t.get(sid, ""))
+                r.update(sid=sid, kind="orquestador", role="orquestador",
+                         task=sess_task)
+                rows.append(r)
+        for sp in subs:
             sr = scan(sp, window_ts=window_ts)
             if not sr:
                 continue
+            # Un subagente sí trabaja en UNA tarea (es el contrato), así que acá
+            # alcanza con la más nombrada: un reviewer que ojea la vecina pierde
+            # por conteo.
             sr.update(sid=sid, kind="subagente", role=role_of(sp),
-                      task=s2t.get(sid, ""))
+                      task=tarea_dominante(sr["menciones"]) or sess_task)
             rows.append(sr)
+    if task_filter is not None:
+        # La sonda deja pasar la sesión entera; acá se queda solo lo que es de
+        # esta tarea. Sin esto, pedir una tarea traería a sus hermanas de vuelta.
+        rows = [r for r in rows if r["task"] == task_filter]
     return rows
 
 
@@ -605,8 +705,9 @@ def cmd_task(args) -> int:
     rows = collect(pd, task_filter=args.task)
     if not rows:
         print(f"sin transcripts atribuidos a {args.task}.", file=sys.stderr)
-        print("el puente sid→tarea lo escribe track-read.sh: si la tarea corrió "
-              "sin ese hook, no hay a quién atribuirle el gasto.", file=sys.stderr)
+        print("la tarea sale de las rutas que el transcript nombra "
+              "(worktrees/<id>/, tasks/<id>/): un agente que jamás pisó ninguna "
+              "no tiene cómo atribuirse.", file=sys.stderr)
         return EXIT_NODATA
     print(f"== {args.task} ==")
     print_rows(rows)

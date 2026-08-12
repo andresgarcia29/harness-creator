@@ -190,6 +190,27 @@ assert_contains "$out" "kill switch" "y lo dice"
 rm -f "$WS/.harness/orch-watch.off"
 
 echo
+echo "── la tarea que emite y NO avanza: la otra señal (#155)"
+# El hueco de bus caza al agente que murió callado. NO caza a la que sigue
+# emitiendo y lleva 12h en la misma fase con el trabajo hecho: eso es lo que
+# pasó tres veces el mismo día y lo detectó un humano mirando timestamps.
+rm -f "$WS/relanzamientos.txt"; rm -rf "$WS/.harness/claims" "$WS/.harness/orch-watch" "$WS/tasks" "$WS/.harness/stale"
+nueva_tarea PEGADA implement
+python3 - "$WS/tasks/PEGADA/state.json" <<'PY'
+import datetime as dt, json, sys
+p = sys.argv[1]
+s = json.load(open(p))
+s["phase_since"] = (dt.datetime.now(dt.timezone.utc)
+                    - dt.timedelta(minutes=766)).strftime("%Y-%m-%dT%H:%M:%SZ")
+json.dump(s, open(p, "w"))
+PY
+evento PEGADA tool 5          # emitiendo AHORA: para el hueco de bus está sana
+out="$(corre status)"; reposa
+assert_contains "$out" "PEGADA" "la nombra aunque el bus esté fresco"
+assert_contains "$out" "min en la misma fase" "y dice de qué señal habla (tiempo en fase, no silencio)"
+assert_eq 0 "$(relanzos)" "avisar no es relanzar: la decisión sigue siendo del hueco de bus"
+
+echo
 echo "── sin CLI de claude no se inventa un relanzamiento"
 rm -rf "$WS/.harness/claims" "$WS/.harness/orch-watch"
 nopath="$(t_path_without claude)"

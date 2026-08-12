@@ -198,6 +198,26 @@ class Push(SinkBase):
         self.assertTrue((self.ws / "docs/metrics/COR-42.jsonl").is_file(),
                         "perdio el archivo por culpa de la base")
 
+    def test_con_el_puntero_borrado_sigue_habiendo_filas(self):
+        # El síntoma hermano de #153: SessionEnd borra .harness/session-task/<sid>,
+        # así que al archivar (que es JUSTO cuando se hace el push) el puente ya
+        # no existía y el sink daba "sin filas" para todas. El transcript sí dice
+        # la tarea, y es inmutable.
+        self.setup_ok()
+        toca = json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result",
+                 "content": "worktrees/COR-42/atlas/internal/server.go"}]}})
+        p = self.proj / f"{self.sid}.jsonl"
+        p.write_text(p.read_text() + "\n".join([toca] * 10) + "\n")
+        (self.ws / ".harness" / "session-task" / self.sid).unlink()
+        r = self.run_sink("push", "COR-42")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        out = self.ws / "docs" / "metrics" / "COR-42.jsonl"
+        self.assertTrue(out.is_file(), r.stdout + r.stderr)
+        self.assertEqual(json.loads(out.read_text().splitlines()[0])["tarea"], "COR-42")
+
     def test_tarea_sin_transcripts_no_frena_el_archivado(self):
         self.setup_ok()
         (self.ws / "tasks" / "SIN-DATOS").mkdir()

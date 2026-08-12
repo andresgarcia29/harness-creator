@@ -2213,5 +2213,108 @@ class CostGateTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
+class StaleTest(unittest.TestCase):
+    """`stale`: quién se da cuenta de que una tarea dejó de avanzar (#155).
+
+    El caso de campo: 12h46m en `implement`, con el trabajo hecho, el precheck
+    verde y SIN pausa. No estaba bloqueada ni esperando a un humano; estaba
+    detenida y contada como si avanzara. La encontró un humano mirando
+    timestamps de archivos, tres veces el mismo día.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ws = Path(self.tmp.name)
+        self.tasks = self.ws / "tasks"
+        self.tasks.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def task(self, name, phase, minutos_atras, con_since=True):
+        d = self.tasks / name
+        d.mkdir()
+        state = {"phase": phase}
+        if con_since:
+            since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=minutos_atras)
+            state["phase_since"] = since.strftime("%Y-%m-%dT%H:%M:%SZ")
+        (d / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        return d
+
+    def stale(self):
+        return subprocess.run(
+            ["python3", str(SCRIPT), "stale", str(self.tasks)],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+
+    def test_caza_la_tarea_del_reporte(self):
+        self.task("AUTO-muse", "implement", 766)   # 12h46m, el caso exacto
+        r = self.stale()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("AUTO-muse", r.stdout)
+        self.assertIn("implement", r.stdout)
+
+    def test_una_fase_en_curso_normal_no_se_avisa(self):
+        self.task("AUTO-sana", "implement", 5)
+        r = self.stale()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.strip(), "")
+
+    def test_el_techo_es_por_fase(self):
+        # 45 min es normal en implement y no lo es en ship, que es mecánico.
+        self.task("AUTO-implement", "implement", 45)
+        self.task("AUTO-ship", "ship", 45)
+        r = self.stale()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("AUTO-ship", r.stdout)
+        self.assertNotIn("AUTO-implement", r.stdout)
+
+    def test_blocked_y_archive_estan_exentas(self):
+        # Una pausa REGISTRADA no es una tarea perdida: alguien ya sabe.
+        self.task("AUTO-blocked", "blocked", 5000)
+        self.task("AUTO-archive", "archive", 5000)
+        r = self.stale()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_sin_phase_since_se_avisa_igual(self):
+        # No poder mirar no es verde: es justo lo que daría un state.json de una
+        # versión vieja del harness, y ahí el silencio sería el mismo bug.
+        self.task("AUTO-vieja", "review", 0, con_since=False)
+        r = self.stale()
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+        self.assertIn("AUTO-vieja", r.stdout)
+        self.assertIn("sin phase_since", r.stdout)
+
+    def test_el_bus_se_avisa_una_vez_por_fase(self):
+        # El vigilante pasa cada 120s: un aviso cada dos minutos durante 12 horas
+        # es ruido que se aprende a ignorar, o sea el mismo silencio con más pasos.
+        scripts = self.ws / "scripts"
+        scripts.mkdir()
+        (scripts / "emit.sh").write_text(
+            '#!/usr/bin/env bash\nprintf "%s\\n" "$2" >> "$(dirname "$0")/../bus.log"\n',
+            encoding="utf-8")
+        d = self.task("AUTO-muse", "implement", 766)
+        self.assertEqual(self.stale().returncode, 1)
+        self.assertEqual(self.stale().returncode, 1)
+        bus = (self.ws / "bus.log").read_text(encoding="utf-8").strip().splitlines()
+        self.assertEqual(len(bus), 1, bus)
+        self.assertIn("implement", bus[0])
+        # …y cuando la tarea SE MUEVE, el aviso se rearma.
+        state = json.loads((d / "state.json").read_text(encoding="utf-8"))
+        state["phase_since"] = (dt.datetime.now(dt.timezone.utc)
+                                - dt.timedelta(minutes=900)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        (d / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        self.assertEqual(self.stale().returncode, 1)
+        bus = (self.ws / "bus.log").read_text(encoding="utf-8").strip().splitlines()
+        self.assertEqual(len(bus), 2, bus)
+
+    def test_un_directorio_inexistente_no_es_verde(self):
+        r = subprocess.run(
+            ["python3", str(SCRIPT), "stale", str(self.ws / "no-existe")],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("POLICY-STALE-001", r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

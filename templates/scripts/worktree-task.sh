@@ -358,6 +358,16 @@ done
 # fallback). Best-effort — no-op limpio si no hay módulos Go (Ley 9).
 bash "$WS/scripts/gowork.sh" "$TASK" >/dev/null 2>&1 || true
 
+# Y el árbol de un NODO necesita el SUYO (#152): comparte module-path con el árbol
+# base y con sus hermanos, y un go.work no admite el mismo módulo dos veces, así que
+# el de la tarea no puede nombrarlo. Sin este archivo el implementer del nodo corre
+# `go test` contra el código del árbol BASE y el verde no dice nada de su cambio.
+if [ -n "$NODE" ]; then
+  for repo in "$@"; do
+    bash "$WS/scripts/gowork.sh" "$TASK" "$repo@$NODE" >/dev/null 2>&1 || true
+  done
+fi
+
 # Y con el go.work ya escrito se sabe QUÉ clones va a compilar esta tarea: se
 # refrescan ahora, no cuando el compilador se queje de un símbolo (#76).
 refresh_gowork_deps "$TASK" "$@"

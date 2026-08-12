@@ -55,6 +55,75 @@ contra una instalación real).
   línea escrita.
 
 ### Corregido
+- **Ahora algo detecta una tarea ESTANCADA (#155).** Una tarea podía pasar
+  12h46m en `implement`, con el trabajo hecho, el precheck verde y sin pausa, y
+  no lo detectaba nadie: la encontró un humano mirando timestamps de archivos, y
+  pasó tres veces el mismo día. Desde afuera se ve idéntica a una que avanza, así
+  que el modo de falla es silencioso y su costo es reloj que nadie contabiliza.
+  El watchdog documentado (~3 min sin tool call) es una regla del ORQUESTADOR y
+  solo aplica mientras el orquestador esté mirando; si está esperando una
+  notificación que nunca llega, no hay quien la aplique. `harness-policy.py
+  stale` compara `phase_since` (que `set_phase` ya estampaba) contra ahora, con
+  techo POR FASE porque el trabajo no dura lo mismo: 120 min en `implement`, 30
+  en `ship`. `blocked` y `archive` exentas; sin `phase_since` legible se avisa
+  igual. Lo corre `orchestrator-watch.sh` en cada pasada y avisa una vez por fase
+  por el bus. Es la señal ortogonal a la que ya tenía: aquélla mide silencio de
+  bus y caza al agente que murió callado, ésta mide tiempo en fase y caza a la
+  que sigue emitiendo sin terminar nunca. Avisa, no relanza.
+- **El costo se atribuye por TAREA y no por sesión (#153).** El puente
+  `sid→tarea` de `track-read.sh` es un archivo por sesión, último-gana, y la
+  báscula lo tomaba como libro contable. Con un orquestador que lanza N tareas
+  (que es lo que hace un barrido de `/smart-main`), UNA se llevaba todo y las
+  hermanas quedaban en cero: medido, una tarea express de 12 líneas de diff con
+  477 turnos de orquestador, un architect que nunca corrió para ella y ocho
+  implementers ajenos, mientras las cuatro que hicieron el trabajo real (12
+  tickets, 4 repos, todos shippeados) reportaban "sin transcripts atribuidos".
+  El gate frenaba a la barata (tres eximidos para destrabarla, o sea el gate
+  desensibilizado) y era ciego para la cola cara, que es justo la que existe para
+  cortar. Ahora la tarea sale de las rutas que el transcript nombra
+  (`worktrees/<id>/`, `tasks/<id>/`), que es dato inmutable: un subagente se
+  atribuye a la tarea que más pisó, y una SESIÓN solo si esa tarea domina lo que
+  hizo. Un barrido queda sin tarea (visible en `day`, fuera del budget de todas)
+  en vez de cargado entero a la que salió sorteada; repartirlo exigiría rebanar
+  turnos por intercalado y queda pendiente. De paso arregla el síntoma hermano:
+  `harness-sink.py push` ya escribe `docs/metrics/<id>.jsonl` aunque SessionEnd
+  haya borrado el puntero, que es exactamente cuando se archiva.
+- **`gowork.sh` ya nombra los árboles de nodo `<repo>@<Tn>` (#152).** Familia de
+  #149/#150: el hermano que quedó sin auditar. Los árboles de nodo, sus hermanos
+  y el árbol base comparten module-path (son el mismo repo) y un `go.work` no
+  admite el mismo módulo dos veces, así que colapsaban a una entrada y el ganador
+  lo decidía readdir. Medido: con dos árboles de nodo en disco, el `go.work` de
+  la tarea nombraba el BASE y ninguno de los dos entraba, así que el implementer
+  de un nodo corría `go test` contra código ajeno: el mismo falso verde que #43 y
+  #75 cerraron para `gate_test_muerde`, y justo en el camino que `smart.md`
+  recomienda por rápido. Ahora cada árbol de nodo recibe SU `go.work`
+  (`gowork.sh <task> <repo>@<Tn>`, simétrico al pin del reviewer), los hermanos
+  se podan del ajeno, y `worktree-task.sh --node` lo genera al crear el árbol.
+- **Un paso custom VERDE ya no bloquea la tarea con "sin resultado" (#154).** Un
+  paso determinista salió verde, su result quedó en disco con `ok:true`, y el
+  gate paró la tarea con `custom_step_failed`. El detail era la evidencia: "sin
+  resultado" es el default que solo sobrevive si el archivo NO EXISTÍA al mirar,
+  no un JSON a medio escribir. O sea el gate corrió antes que el paso, y podía
+  hacerlo porque el orden "ejecuta, DESPUÉS gatea" vivía solo en la prosa de
+  `/smart`, contra la promesa del propio script de que la lógica vive en código.
+  Un retry con backoff sería un parche a una ventana arbitraria; ahora el gate
+  deja de confiar en el orden y MIDE: si un paso `run:` del workspace no dejó
+  result, lo corre él, sincrónico, y recién entonces juzga. De paso implementa el
+  contrato que la doc ya prometía ("su exit code define ok"), que no tenía dueño,
+  y escribe el result con tmp + `mv`. El fail-closed del paso agéntico no se toca.
+- **El tramo de kargo deja de estar ciego, por el camino que no pasa por su CLI
+  (#112).** La hipótesis del `-o json` quedó DESCARTADA con auth: los dos modos
+  fallan idéntico, y `kargo version` (un comando que ni acepta `-o`, sobre un
+  tipo sin relación con promotions) falla con el mismo error, o sea que es el
+  cliente v1.10.9 contra ese servidor y ningún flag lo esquiva. Las Promotions
+  son CRDs, así que se leen con `kubectl` contra el API de Kubernetes: mismo
+  patrón que este script ya usa para las Applications de ArgoCD, y el CR es la
+  misma forma que el jq existente ya parsea. La cadena del CLI se conserva (un
+  CLI compatible sigue valiendo, y kubectl puede no tener RBAC), y con los tres
+  caminos rotos degrada exactamente como hoy: ceguera declarada y health de
+  ArgoCD. Lo que se recupera es la verificación del freight, que es la que
+  distingue "ArgoCD está sano" de "sano CON MI imagen": medido en campo, un verde
+  de `Synced + Healthy` con la imagen vieja corriendo y la migración sin aplicar.
 - **El precheck ya puede verificar el árbol de un NODO del DAG (#149, #150).**
   Regresión de los worktrees por nodo: `ship.sh` componía la ruta con el repo
   pelado y validaba `<repo>@<Tn>` contra manifest.yaml, así que el nodo no podía

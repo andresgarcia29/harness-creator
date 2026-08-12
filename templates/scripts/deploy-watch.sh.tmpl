@@ -1638,6 +1638,22 @@ elif [ "$DRIVER" = "gitops" ] && [ -z "$VERIFIED_CLUSTER" ]; then
 else
   emit deploy "$REPO verificado ($DRIVER): $VERIFIED_PARTS" true
   say "🟢 deploy de $REPO verificado por driver=$DRIVER: $VERIFIED_PARTS"
+  # ── EL RELEVO DE LA ESPERA (una fase, una sesión) ────────────────────
+  # Esta espera son hasta 2820s por ship, y hasta acá los pagaba el
+  # orquestador VIVO, con su contexto entero cargado y sin usarlo para nada:
+  # medido, 39.6h de una tarea de 45.4h fueron sesión de orquestador sola.
+  # Este proceso es bash a cero tokens, así que la espera no necesita ninguna
+  # sesión: el orquestador cierra su turno al lanzarnos, y el marcador que
+  # dejamos acá es lo que hace que `orchestrator-watch.sh` despierte una
+  # sesión NUEVA para archivar. Fail-open: sin marcador, la tarea cae en la
+  # regla de silencio de bus de siempre.
+  if [ -d "$WS/tasks/$TASK" ]; then
+    printf '{"schema":1,"phase":"deploy","at":"%s","from_session":"deploy-watch"}\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      > "$WS/tasks/$TASK/handoff.json.tmp" 2>/dev/null \
+      && mv "$WS/tasks/$TASK/handoff.json.tmp" "$WS/tasks/$TASK/handoff.json" 2>/dev/null \
+      || rm -f "$WS/tasks/$TASK/handoff.json.tmp" 2>/dev/null || true
+  fi
   # ── EL MANIFIESTO ATERRIZO, PERO NADIE INTERROGO AL ARTEFACTO ────────
   # Sigue siendo VERDE a proposito: degradarlo a ceguera se llevaria puesto
   # todo repo gitops sin verify_cmd, y un aviso que muerde de mas es un aviso

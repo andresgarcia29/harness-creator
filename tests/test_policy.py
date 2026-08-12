@@ -553,9 +553,13 @@ class PolicyTest(unittest.TestCase):
         """El aviso tiene que decir QUIEN verifica de verdad y CON QUE criterio.
 
         Si solo dijera "ojo, infra", el agente no sabria si seguir; nombrando a
-        gate_lane y el criterio (lo que el diff TOCA) la decision es tomable."""
+        gate_lane y el criterio (lo que el diff TOCA) la decision es tomable.
+
+        Va sobre express: en quick el mismo caso es rechazo duro desde que
+        /smart clasifica ese carril solo (ver el test de abajo)."""
         task = self.ws_task()
-        r = self.run_policy("init", task, "--lane", "quick", "--repos", "net-live")
+        r = self.run_policy("init", task, "--lane", "express", "--repos", "net-live")
+        self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("gate_lane", r.stderr)
         self.assertIn("precheck", r.stderr)
         self.assertIn("TOCA", r.stderr)
@@ -1238,16 +1242,35 @@ class PolicyTest(unittest.TestCase):
         self.assertEqual(created.returncode, 0, created.stderr)
         self.assertEqual(json.loads((task / "state.json").read_text())["repos"], ["atlas"])
 
-    def test_quick_with_infra_repo_only_warns_too(self):
-        # mismo criterio que express (#71): lo que decide si un cambio es de
-        # infra es lo que TOCA, no en que repo vive. El freno vive en gate_lane.
+    def test_quick_con_repo_de_infra_es_rechazo_duro(self):
+        """#71 lo bajó a aviso con razón; el router lo devuelve a rechazo.
+
+        Lo que cambió no es el criterio de infra, es QUIÉN elige el carril.
+        quick dejó de ser una promesa que solo el humano podía hacer: /smart lo
+        clasifica solo. Un carril que una máquina elige, y encima el más corto
+        de la escalera, necesita un piso que no dependa de que la máquina haya
+        juzgado bien, porque el backstop (gate_lane) recién mira el diff en el
+        precheck, después de que el implementer trabajó.
+
+        express y triado siguen AVISANDO: ésos no los clasifica el router
+        solo."""
         task = self.ws_task()
-        avisado = self.run_policy("init", task, "--lane", "quick",
-                                  "--repos", "net-live")
-        self.assertEqual(avisado.returncode, 0, avisado.stderr)
-        self.assertIn("POLICY-LANE-004", avisado.stderr)
-        self.assertIn("quick", avisado.stderr)
-        self.assertIn("net-live", avisado.stderr)
+        r = self.run_policy("init", task, "--lane", "quick", "--repos", "net-live")
+        self.assertEqual(r.returncode, 3, r.stderr)
+        self.assertIn("POLICY-LANE-004", r.stderr)
+        self.assertIn("net-live", r.stderr)
+        self.assertIn("express", r.stderr)          # la remediación nombra el carril
+        self.assertFalse((task / "state.json").exists())   # sin estado a medias
+
+    def test_express_con_repo_de_infra_sigue_pasando_con_aviso(self):
+        # El otro lado del cambio de arriba: endurecer quick no puede
+        # reintroducir el bug de #71, que dejaba un cambio de dos líneas en un
+        # repo con terraform al lado sin ningún carril rápido (20 de 31 repos
+        # del workspace son infra-* por eso).
+        task = self.ws_task()
+        r = self.run_policy("init", task, "--lane", "express", "--repos", "net-live")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("POLICY-LANE-004", r.stderr)
         self.assertTrue((task / "state.json").exists())
 
     def test_escalate_from_quick_lands_where_the_new_lane_can_move(self):
@@ -2211,6 +2234,115 @@ class CostGateTest(unittest.TestCase):
         self.write_subagente("implementer", 4, 10_000, 90_000)
         r = self.transition("implement")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+
+class RelevoDeSesion(unittest.TestCase):
+    """Una fase, una sesión: la transición estampa quién la manejó y pide relevo.
+
+    Medido sobre una tarea de UN repo con dos rondas de review: el orquestador
+    fue UNA sesión de 45.3h sobre 45.4h de reloj, 688 turnos, 440k de contexto
+    medio. El trabajo real de los subagentes fueron 5.8h. Y el contexto es cosa
+    de FASE (el eximido de ctx ya se ata a la fase): la sesión no lo era.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.task = Path(self.tmp.name) / "AUTO-20260812-relevo"
+        self.task.mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_policy(self, *args, sid=None):
+        env = os.environ.copy()
+        if sid is not None:
+            env["HARNESS_SESSION_ID"] = sid
+        return subprocess.run(
+            ["python3", str(SCRIPT), "--policy", str(POLICY), *map(str, args)],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            check=False, env=env)
+
+    def state(self):
+        return json.loads((self.task / "state.json").read_text())
+
+    def test_la_transicion_estampa_la_sesion(self):
+        self.assertEqual(self.run_policy("init", self.task, "--lane", "express",
+                                         "--repos", "atlas").returncode, 0)
+        r = self.run_policy("transition", self.task, "implement",
+                            "--actor", "orchestrator", sid="sesion-uno")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.state()["session_id"], "sesion-uno")
+
+    def test_dos_fases_con_la_misma_sesion_quedan_a_la_vista(self):
+        # Es la prueba de que el relevo NO ocurrió, y se ve en state.json sin
+        # tener que leer transcripts a posteriori.
+        self.assertEqual(self.run_policy("init", self.task, "--lane", "express",
+                                         "--repos", "atlas").returncode, 0)
+        self.run_policy("transition", self.task, "implement",
+                        "--actor", "orchestrator", sid="la-misma")
+        primera = self.state()["session_id"]
+        self.run_policy("transition", self.task, "review",
+                        "--actor", "orchestrator", sid="la-misma")
+        self.assertEqual(primera, self.state()["session_id"])
+        # …y con relevo de verdad, cambia.
+        self.run_policy("transition", self.task, "review", "--actor",
+                        "orchestrator", "--repo", "atlas", sid="otra")
+        self.assertEqual(self.state()["session_id"], "otra")
+
+    def test_el_puntero_inverso_del_hook_alcanza(self):
+        # El id de sesión solo existe en el payload de los hooks: track-read.sh
+        # lo deja en tasks/<id>/.session y la policy lo lee de ahí.
+        self.assertEqual(self.run_policy("init", self.task, "--lane", "express",
+                                         "--repos", "atlas").returncode, 0)
+        (self.task / ".session").write_text("desde-el-hook\n")
+        r = self.run_policy("transition", self.task, "implement",
+                            "--actor", "orchestrator")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.state()["session_id"], "desde-el-hook")
+
+    def test_avanzar_de_fase_pide_relevo(self):
+        self.assertEqual(self.run_policy("init", self.task, "--lane", "express",
+                                         "--repos", "atlas").returncode, 0)
+        self.run_policy("transition", self.task, "implement",
+                        "--actor", "orchestrator", sid="uno")
+        marca = self.task / "handoff.json"
+        self.assertTrue(marca.is_file(), "no dejó el marcador de relevo")
+        payload = json.loads(marca.read_text())
+        self.assertEqual(payload["phase"], "implement")
+        self.assertEqual(payload["from_session"], "uno")
+
+    def test_otra_ronda_del_mismo_review_NO_pide_relevo(self):
+        # `review → review` con --repo es la MISMA fase: relevar ahí sería pagar
+        # un arranque por ronda.
+        self.assertEqual(self.run_policy("init", self.task, "--lane", "express",
+                                         "--repos", "atlas").returncode, 0)
+        self.run_policy("transition", self.task, "implement", "--actor", "orchestrator")
+        self.run_policy("transition", self.task, "review", "--actor", "orchestrator")
+        (self.task / "handoff.json").unlink()
+        r = self.run_policy("transition", self.task, "review",
+                            "--actor", "orchestrator", "--repo", "atlas")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse((self.task / "handoff.json").exists())
+
+    def test_quick_no_se_releva(self):
+        # quick es UNA sesión corta de punta a punta: relevarlo por fase sería
+        # pagar arranques para ahorrar un contexto que nunca crece.
+        self.assertEqual(self.run_policy("init", self.task, "--lane", "quick",
+                                         "--repos", "atlas").returncode, 0)
+        r = self.run_policy("transition", self.task, "implement",
+                            "--actor", "orchestrator")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse((self.task / "handoff.json").exists())
+
+    def test_una_tarea_en_vuelo_sin_hook_no_se_rompe(self):
+        # Compatibilidad: sin puntero inverso y sin variable, no hay id que
+        # estampar. No se inventa uno y la transición pasa igual.
+        self.assertEqual(self.run_policy("init", self.task, "--lane", "express",
+                                         "--repos", "atlas").returncode, 0)
+        r = self.run_policy("transition", self.task, "implement",
+                            "--actor", "orchestrator", sid="")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("session_id", self.state())
 
 
 class StaleTest(unittest.TestCase):

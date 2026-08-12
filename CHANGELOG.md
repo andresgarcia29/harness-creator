@@ -8,6 +8,66 @@ contra una instalación real).
 ## No publicado
 
 ### Añadido
+- **Que arreglar un ticket sea BARATO y RÁPIDO: cuatro cambios, mismos gates.**
+  Medido sobre `docs/metrics/*.jsonl` de una instancia real (32 tareas). Costo
+  por carril: express $35 (4 agentes) · standard $119 (12) · triado $132 (13) ·
+  full $399 (41). El caso peor, una tarea de UN repo con UNA migración y dos
+  rondas de review: **$953 con 92 agentes**, y 45.4h de reloj de las cuales
+  39.6h fueron el orquestador SOLO (688 turnos, 440k de contexto medio, 758k de
+  pico), contra 5.8h de trabajo real de subagentes. Nada de esto afloja un gate:
+  es cuántos agentes, cuánto contexto y cuánta espera.
+  - **`general-purpose` prohibido en el pipeline.** Era el rubro más caro de esa
+    tarea: 34 agentes, 3134 turnos, $357. Ningún prompt del harness lo nombraba
+    nunca (`grep -rli general-purpose .claude/` daba cero): se usaba porque es
+    el default del tool Agent y nada decía otra cosa. Ahora `/smart` trae la
+    tabla de qué usar en su lugar (`graphify query` cross-repo, `semble search`
+    semántico, Serena a nivel símbolo, y `Explore` cuando de verdad hace falta
+    un agente: en esa misma tarea resolvió lo suyo en 33 turnos y $2). Y tiene
+    diente: `harness-cost.py` dejó de lavar `general-purpose` con la descripción
+    del agente (una descripción amable lo contabilizaba como implementer) y lo
+    marca `general-purpose PROHIBIDO` en el reporte, así el criterio se verifica
+    solo.
+  - **Los agentes se CONTINÚAN, no se re-spawnean.** 25 implementers y 16
+    reviewers para dos rondas en un repo, donde correspondían del orden de 2 y
+    2: $237 de re-lectura. La regla ya existía ("el reviewer es PERSISTENTE", en
+    dos archivos) y no se cumplía, y la causa no era el escape por contexto
+    lleno: **ningún prompt nombraba nunca la herramienta**, así que el único
+    camino ejecutable escrito era relanzar. Ahora `SendMessage` se nombra en
+    `/smart` y en `/review`, los ids se anotan en `tasks/<id>/agents.json` (sin
+    registro no hay a quién mandarle nada), la regla se extiende al implementer,
+    y relanzar es una excepción declarada con motivo en el ledger y en el
+    reporte final.
+  - **Una fase, una sesión: el RELEVO.** `transition` estampa `session_id` en
+    `state.json` (dos fases con el mismo id son la prueba de que el relevo no
+    ocurrió, visible sin leer transcripts) y deja `tasks/<id>/handoff.json`.
+    **Quién ejecuta el corte, que es lo que no podía quedar ambiguo**: un prompt
+    no puede terminarse a sí mismo ni relanzarse, así que lo ejecuta
+    `orchestrator-watch.sh`, que ya sabe lanzar `/smart <id>` con contexto
+    fresco; el orquestador solo cierra su turno. El vigilante espera una quietud
+    mínima (`HARNESS_ORCH_HANDOFF`, 60 s) para no poner dos sesiones sobre la
+    misma tarea. No relevan: otra ronda del mismo review (misma fase), `quick`
+    (una sesión corta de punta a punta), `archive` (no hay siguiente) y
+    `ship → deploy`: ese marcador lo escribe `deploy-watch.sh` AL TERMINAR, así
+    que durante los hasta 2820 s de espera no hay ninguna sesión viva, que es
+    justamente el punto. El id de sesión solo existe en el payload de los hooks,
+    así que `track-read.sh` deja el puntero inverso en `tasks/<id>/.session`.
+    Compatible con tareas en vuelo: sin marcador, todo se comporta como antes.
+  - **Router de carril en el intake: `/smart` ya clasifica `quick`.** Revierte a
+    conciencia la decisión de que quick era una promesa que solo el humano podía
+    hacer, y actualiza los tres lugares que la sostenían. Lo que la dio vuelta es
+    el número: standard cuesta $119 y express $35, y buena parte de lo que
+    entraba por standard eran cambios mecánicos de un repo, o sea que la tarea
+    que el humano no clasificó pagaba la ceremonia completa. Mecanismo escrito
+    explícitamente: `init --lane quick` + el flujo de `/quick` **inline en esta
+    sesión**, que es lo que quick ya es. **Y el límite va escrito con el
+    backstop de verdad, no con uno supuesto**: `gate_lane` frena contratos,
+    migraciones e infra por patrón de archivo y `POLICY-LANE-005` rechaza el
+    segundo repo, pero NINGÚN gate frena un cruce de ownership dentro de un
+    mismo repo, así que clasificar quick exige evidencia positiva de que el
+    cambio no escribe datos de otro servicio; sin ella, express. Para que el
+    piso no dependa de un juicio, `POLICY-LANE-004` vuelve a ser **rechazo duro
+    solo en `quick`** (en express y triado sigue siendo aviso, que es lo que
+    #71 arregló y no se toca).
 - **`orchestrator-watch.sh`: el watchdog de la SESIÓN PRINCIPAL, cero tokens
   (COR-1034, fase 1).** Medido sobre 37 corridas de `/smart-main` con 30.067
   eventos de bus fechados: el 51% del reloj (34,4 h de 67,9 h) son huecos de

@@ -52,6 +52,40 @@ Queda en `history[]` como `{"kind": "rollback", ...}` con actor y motivo, y
 **no cobra ronda de review**: deshace un movimiento que nunca ocurrió, y
 cobrarlo castigaría a quien corrige el error.
 
+### Una fase, una sesión (el relevo)
+
+Cada `transition` estampa en `state.json` el campo **`session_id`**: quién
+manejó esa fase. Dos fases seguidas con el mismo id son la prueba de que el
+orquestador arrastró una sesión, y se ve sin leer un solo transcript.
+
+Medido sobre una tarea de un repo, una migración y dos rondas de review: el
+orquestador fue UNA sesión durante 45.3h de las 45.4h de reloj de la tarea, con
+688 turnos, 440k de contexto medio y 758k de pico. El trabajo real de todos los
+subagentes fueron 5.8h. El contexto ya se modelaba como cosa de FASE (el eximido
+de `ctx` se ata a la fase en que se autorizó); la sesión no, y hubo tareas que
+firmaron cuatro eximidos del mismo `COST-CTX`, uno por fase.
+
+Cuando la fase avanza de verdad, la transición deja **`tasks/<id>/handoff.json`**.
+El orquestador cierra su turno ahí; **quien ejecuta el corte es
+`orchestrator-watch.sh`**, que toma el marcador y lanza `/smart <id>` con
+contexto fresco. Tiene que ser algo de afuera: un prompt no puede terminarse a sí
+mismo ni relanzarse. El vigilante espera una quietud mínima
+(`HARNESS_ORCH_HANDOFF`, 60 s) antes de tomarlo, para no poner una segunda
+sesión encima de una que siguió trabajando.
+
+No dejan marcador, a propósito:
+
+| Caso | Por qué |
+|---|---|
+| `review → review --repo` | es la misma fase: relevar por ronda pagaría un arranque por ronda |
+| carril `quick` | una sesión corta de punta a punta; su contexto nunca crece |
+| `archive` | no hay fase siguiente |
+| `ship → deploy` | lo escribe `deploy-watch.sh` al terminar: durante los hasta 2820 s de espera no hay ninguna sesión viva, que es justamente el punto |
+
+Sin marcador todo se comporta como antes (regla de silencio de bus), así que una
+tarea en vuelo no cambia de conducta y `session_id` ausente no significa nada
+malo: significa que esa fase corrió con una versión anterior.
+
 ### Tareas estancadas (`stale`)
 
 Una tarea puede quedarse en una fase no terminal **con el trabajo hecho y sin

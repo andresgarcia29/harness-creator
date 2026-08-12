@@ -33,6 +33,49 @@ frase en el chat.
 
 Tú orquestas: JAMÁS implementas ni editas código tú mismo.
 
+## `general-purpose` está PROHIBIDO en este pipeline
+
+No es una preferencia de estilo, es el rubro más caro medido. En una tarea de
+UN repo y UNA migración: 34 subagentes `general-purpose`, 3134 turnos y $357 de
+los $953 totales. El único `Explore` de esa misma tarea resolvió lo suyo en 33
+turnos y $2. Ningún prompt del harness lo nombraba nunca: se usaba porque es el
+default del tool Agent y nada decía otra cosa.
+
+**Una pregunta sobre el código no es trabajo para un agente: es una consulta.**
+
+| Lo que querés saber | Con qué se contesta |
+|---|---|
+| dónde está X, quién llama a Y, qué depende de Z | `graphify query` (cross-repo, estructura) |
+| dónde se dice algo parecido a esto | `semble search` (semántica, local) |
+| el cuerpo de un símbolo, sus referencias, editarlo | Serena |
+| barrido de MUCHOS archivos donde solo importa la conclusión | `Explore` |
+
+Un agente cuesta su contexto de arranque más todos sus turnos; una consulta
+cuesta una tool call. Lanzá `Explore` cuando de verdad haga falta un agente, y
+nunca `general-purpose`. Esto se verifica solo: `harness-cost.py` marca
+`general-purpose PROHIBIDO` en el reporte de la tarea.
+
+## Continuá agentes, no los re-spawnees
+
+El mismo número, por el otro lado: esa tarea tuvo **25 implementers y 16
+reviewers** para 2 rondas de review en UN repo. Deberían haber sido del orden de
+2 y 2. La diferencia es re-lectura pura: un agente nuevo vuelve a pagar el
+contexto que el anterior ya tenía.
+
+La regla ya existía en prosa ("el reviewer es PERSISTENTE") y no se cumplía,
+porque **nunca se nombró la herramienta**: continuar un agente es `SendMessage`
+al id que devolvió su lanzamiento. Sin eso, el escape ("si no podés continuar,
+relanzá sin memoria") era el único camino escrito, y se tomaba siempre.
+
+- **Anotá el id en cuanto lances**: `tasks/<id>/agents.json`, un objeto
+  `{"<rol>:<repo>[@<Tn>]": "<agent-id>"}`. Es el registro que sobrevive a que
+  vos pierdas el hilo, y lo que hace que la continuación sea ejecutable y no una
+  intención.
+- **Ronda ≥2 es un `SendMessage` a ese id**, jamás un lanzamiento nuevo.
+- **Re-spawnear es una EXCEPCIÓN DECLARADA**: solo si el agente murió, el
+  watchdog lo mató o su contexto se llenó de verdad. Va al ledger con el motivo
+  y sale en el reporte final. Un re-spawn silencioso es el bug.
+
 ## Paso 0 — Normaliza la entrada (dos formas, un solo camino)
 
 Decide la forma leyendo $ARGUMENTS, sin preguntar:
@@ -90,6 +133,7 @@ al blast radius, no al revés. Clasifica con señales DETERMINISTAS
 
 | Carril | Señales (todas deben cumplirse) | Pipeline |
 |---|---|---|
+| **quick** | **1 repo** · sin proto/migraciones/infra · 1 dominio de ownership **con evidencia positiva** (ver abajo) · sin decisión de arquitectura · **y el cambio es mecánico** (un archivo, o dos triviales) | Lo ejecutás VOS en esta sesión, de punta a punta, como `/quick`: sin enrichment, sin plan, sin implementer. Verificación idéntica |
 | **express** | 1 dominio de ownership · sin proto/migraciones/infra · sin decisión de arquitectura · **y el delta de CADA repo es chico** (orden de un archivo o dos, cambio mecánico) | Salta RFC: TÚ escribes el mini-plan y el delta-spec (abajo) → 1 implementer por repo → review → ship |
 | **triado** | **1 repo** · sin proto/migraciones/infra · **y CADA defecto ya viene con evidencia `archivo:símbolo` de un triage read-only** (el ticket la trae, no la inventás vos) | Salta la SESIÓN del architect, no sus artefactos: TÚ escribís plan multi-tarea + delta-spec + `dag.json` → implementers → review → ship |
 | **standard** | un solo dominio, o dominios NO cruzados · sin breaking · **y hay algo que decidir de verdad en al menos un repo** | RFC con architect, SIN abogados (no hay frontera que defender) |
@@ -107,14 +151,37 @@ repos. Y `gate_lane` sigue verificando hacia arriba: un express cuyo diff toque
 contratos, migraciones o infra no pasa, tenga los repos que tenga. La señal de
 tamaño ABRE express a multi-repo trivial; no afloja ni un gate.
 
-- **`quick` existe y /smart NO lo elige por su cuenta.** Es el carril más
-  corto de la escalera (quick → express → standard → full) y su entrada es
-  `/quick`, porque quick es una PROMESA DEL HUMANO ("esto es trivial"), no una
-  clasificación que puedas derivar de inventory.json: recortar deliberación con
-  tu criterio es justo la parte que él no delegó. Lo tuyo es SUGERIRLO en el
-  reporte final cuando la corrida haya resultado trivial (ver abajo). Si una
-  tarea entró como quick y `gate_lane` la devolvió, llega acá escalada a
-  express y sigue el camino normal.
+- **`quick` SÍ lo elegís vos, y esto cambió: leé por qué y con qué límite.**
+  Hasta acá quick era una promesa que solo el humano podía hacer, con el
+  argumento de que recortar deliberación con tu criterio era justo la parte que
+  él no delegó. Lo que dio vuelta la decisión es un número: el carril standard
+  cuesta $119 por tarea y el express $35, y una porción grande de lo que entra
+  por standard son cambios mecánicos de un repo. Obligar a que un humano
+  escriba `/quick` para conseguir el carril barato significa que la tarea que
+  el humano no clasificó paga la ceremonia completa, y esa tarea es la mayoría.
+
+  **El backstop es PARCIAL, y de eso depende cómo clasificás.** `gate_lane`
+  frena contratos, migraciones e infra por PATRÓN DE ARCHIVO
+  (`.proto`, `/migrations/`, `.sql`, `/helm/`, `/terraform/`, `.tf`,
+  `openapi`…), y `POLICY-LANE-005` rechaza un segundo repo en el acto. Lo que
+  NINGÚN gate frena es un cruce de OWNERSHIP dentro de un mismo repo: un quick
+  que escribe tablas de otro servicio (Ley 3) pasa todos los gates. Por eso la
+  regla es asimétrica y no la puedas leer como "equivocarse hacia abajo es
+  gratis":
+
+  > Para clasificar `quick` necesitás **evidencia positiva** de que el cambio no
+  > escribe datos de otro servicio (`docs/architecture/map.md` de ownership, y
+  > el grafo). Sin esa evidencia, clasificá `express`.
+
+  Lo que sí se endureció para sostener esto: un repo de kind `infra-*` en
+  `quick` volvió a ser **rechazo duro** (`POLICY-LANE-004`), porque un carril
+  que elige una máquina no puede tener su piso en un juicio. En `express` y
+  `triado` sigue siendo aviso, que es lo correcto ahí.
+
+  Y `/quick` no desaparece ni cambia: sigue siendo la entrada del humano que ya
+  dimensionó el trabajo. Lo que cambia es que ya no es la ÚNICA. Si una tarea
+  entró como quick y `gate_lane` la devolvió, llega acá escalada a express y
+  sigue el camino normal.
 - En duda entre dos carriles: PRIMERO resuélvela con evidencia
   (inventory.json y el grafo: ¿los archivos que tocarás cruzan frontera
   de verdad?); solo si la evidencia no decide, el MAYOR. La prudencia
@@ -127,6 +194,21 @@ tamaño ABRE express a multi-repo trivial; no afloja ni un gate.
   `gate_lane` te bloquea: `scripts/harness-policy.py escalate tasks/<id>
   --to <carril> --actor orchestrator` y entra por `/rfc`. El worktree y
   los commits se conservan; solo se recupera la deliberación saltada.
+
+**El carril `quick`, cuando lo clasificás vos** (el mecanismo, que no es
+ambiguo): `scripts/harness-policy.py init tasks/<id> --lane quick --repos <repo>
+--delivery review` y después **ejecutás el flujo de `/quick` EN ESTA SESIÓN**,
+que es lo que quick ya es: sin enrichment, sin plan, sin delta-spec, sin
+implementer, sin sub-orquestador. Editás vos en el worktree, corrés el precheck,
+lanzás reviewer y QA, y shippeás. Seguí `/quick` para el detalle; lo que no
+cambia ni una coma es la VERIFICACIÓN: worktree, trailer `Task:`, precheck,
+todos los gates de `ship.sh`, reviewer independiente y QA determinista. El
+carril recorta deliberación, jamás verificación.
+
+Si al empezar a editar descubrís que el cambio no cabe en la promesa, es la
+misma regla que ya rige en express: escalá (`harness-policy.py escalate
+tasks/<id> --to express --actor orchestrator`), no lo hagas entrar a la fuerza.
+El trabajo del worktree se conserva.
 
 **El mini-plan express** (lo escribes tú, sin lanzar architect ni abogados:
 ya tienes todo el contexto en esta sesión). Es corto a propósito y NO lleva
@@ -188,7 +270,7 @@ Lo que el carril recorta es UNA SESIÓN LLM, jamás un artefacto ni un gate:
 ## Paso 0.2 — Estado ejecutable (la prosa no mueve fases)
 
 Toda tarea nueva se inicializa una sola vez con
-`scripts/harness-policy.py init tasks/<id> --lane <express|triado|standard|full>
+`scripts/harness-policy.py init tasks/<id> --lane <quick|express|triado|standard|full>
 --repos <repo1,repo2> --delivery review [--budget-usd <valor-del-panel>]`.
 
 **`--delivery review` no es un default tuyo: es lo que declara ESTE comando**, y
@@ -229,6 +311,40 @@ avance se solicita con `scripts/harness-policy.py transition tasks/<id> <fase>
 --actor orchestrator`. Una transición rechazada es un gate: no edites
 `state.json` a mano. (El carril express permite `intake → implement`; los
 demás exigen pasar por `rfc`.)
+
+## Paso 0.3 · Una fase, una sesión: el RELEVO
+
+**Cuando la transición prospera, tu turno TERMINA.** No sigas a la fase
+siguiente en esta misma sesión: cerrá dejando el estado completo en
+`tasks/<id>/` y decilo en una línea. La sesión que sigue la arranca
+`orchestrator-watch.sh`, que ve el marcador `tasks/<id>/handoff.json` que la
+propia transición dejó y lanza `/smart <id>` con contexto fresco.
+
+Por qué, medido sobre una tarea de un repo y una migración: el orquestador fue
+UNA sesión durante 45.3h de las 45.4h de reloj de la tarea, con 688 turnos, 440k
+de contexto medio y 758k de pico. El trabajo real de todos los subagentes fueron
+5.8h. El resto es una sesión sola arrastrando contexto que ya no usa, cada turno
+más caro y más lento que el anterior. El harness ya trata el contexto como cosa
+de FASE (el eximido de `ctx` se ata a la fase en que se autorizó); esto hace que
+la sesión también lo sea. Otra tarea de la misma instancia tuvo que firmar
+CUATRO eximidos del mismo `COST-CTX`, uno por fase, por no hacerlo.
+
+Lo que hace barato el relevo es que el estado ya vive en disco: `state.json`,
+`plan.md`, los veredictos, el ledger, `agents.json`. Si algo solo vive en tu
+conversación, no está: volcalo antes de cerrar. Esa es la misma disciplina que
+ya exige la compactación, aplicada a propósito en vez de por accidente.
+
+Tres cosas que NO son relevo:
+- **otra ronda del mismo review** (`review → review --repo`): misma fase, seguís
+  vos;
+- **el carril `quick`**: es una sesión corta de punta a punta, y relevarlo por
+  fase pagaría arranques para ahorrar un contexto que nunca crece;
+- **`archive`**: no hay fase siguiente.
+
+Y si el vigilante no está corriendo (`make orch-watch`), el relevo no se pierde:
+el marcador queda y lo toma la próxima pasada, o la regla de silencio de bus de
+siempre. Nada de esto rompe una tarea en vuelo: sin marcador, todo se comporta
+como antes.
 
 ## Paso 0.4 — Preferencias del panel (si task.md trae `source: panel`)
 
@@ -444,8 +560,16 @@ Reglas del ledger, en orden de precedencia:
    la misma lectura en TU ventana, que es la grande.
    **Lo tuyo es PUBLICAR**: en cuanto un reviewer te devuelva un `blocking` que
    NO sea específico de su repo, `scripts/finding.sh publish <id> <repo>
-   "<texto>"`. Deduplica, redacta secretos y acota el largo, todo solo; el
-   próximo implementer lo lee al arrancar (docs/harness/rationale.md).
+   "<texto>"`. Deduplica, redacta secretos y acota el largo, todo solo; los
+   implementers lo leen con `scripts/finding.sh read` (docs/harness/rationale.md).
+   **El implementer de un nodo es UNO y se CONTINÚA.** El fix de una ronda de
+   review vuelve al MISMO agente por `SendMessage` a su id de
+   `tasks/<id>/agents.json`, con los blocking y el comando del delta: él ya
+   tiene el árbol, el plan y lo que decidió, y un agente nuevo vuelve a pagar
+   todo eso para cambiar tres líneas. Medido: 25 implementers para lo que
+   necesitaba del orden de uno por nodo. Re-spawnear es la excepción declarada
+   (murió, lo mató el watchdog, o llenó su contexto), va al ledger con el
+   motivo, y ahí sí el que entra lee los findings al arrancar.
    **El test se escribe para que FALLE sin el fix (rojo primero), y eso va en
    su contexto**: el precheck lo comprueba con `gate_test_muerde` corriendo
    cada test nuevo contra el árbol base, y un test que pasa en los dos árboles
@@ -468,8 +592,8 @@ Reglas del ledger, en orden de precedencia:
    y limita. El re-review es INCREMENTAL: el reviewer re-evalúa el diff desde
    su veredicto anterior + los blocking, no el cambio completo otra vez, y QA
    solo se repite si el delta tocó su `surface[]`. El reviewer es PERSISTENTE
-   por (tarea, repo): la ronda ≥2 es un mensaje al mismo agente con el delta
-   que imprime el scaffold, no un lanzamiento nuevo (ver /review).
+   por (tarea, repo): la ronda ≥2 es un `SendMessage` al mismo agente con el
+   delta que imprime el scaffold, no un lanzamiento nuevo (ver /review).
    Toda prueba que sustenta un pass usa `scripts/evidence.py run`.
    **El loop de rondas NO lo llevás vos: lo lleva un sub-orquestador de contexto
    fresco por (tarea, repo).** Lanzalo como subagente con una consigna corta:
@@ -479,6 +603,13 @@ Reglas del ledger, en orden de precedencia:
    el scaffold), así que ese loop no necesita TU historia; lo que hacía era
    acumularla. El reviewer persistente NO cambia: sigue siendo el mismo agente
    entre rondas, con su memoria, que es donde esa memoria sí vale.
+   **Ese sub-orquestador es el dueño de sus agentes mientras vive**: lanza al
+   reviewer y al implementer, anota sus ids en `tasks/<id>/agents.json` y los
+   CONTINÚA por `SendMessage` ronda a ronda. Si el sub-orquestador cae, el que
+   entra relanza con la MISMA identidad y en modo sin memoria (reviewer.md sabe
+   reconstruir su base desde `rebased_from`), y eso va al ledger: un agente no
+   se puede continuar desde una sesión que no lo lanzó, y esa es la razón por la
+   que el loop entero vive en UN sub-orquestador y no se reparte.
 5. **Checkpoint** (SOLO si `autonomy: checkpoint` en harness-answers.yaml): un
    resumen de 10 líneas antes del PRIMER ship a main y esperas un "go". Con
    `autonomy: full` este paso no existe.
@@ -530,8 +661,11 @@ Reglas del ledger, en orden de precedencia:
      HEAD (los ancestros van incluidos). Medido: una familia de 13 lotes del
      mismo repo pagó 13 ciclos de deploy que UNO cubría. Al verde, el log
      aterriza en las tareas cubiertas.
-   - **Verde**: dispara `/archive` de esa tarea. **Rojo**: te interrumpe, y la
-     política no cambia una coma: rollback PRIMERO, diagnóstico después.
+   - **Verde**: el watcher deja el marcador de relevo y una sesión NUEVA
+     archiva. Vos no te quedás esperando: lanzalo, pedí `ship → deploy` y
+     cerrá tu turno. La espera es de un proceso de bash a cero tokens, no de
+     una sesión con contexto cargado. **Rojo**: te interrumpe, y la política no
+     cambia una coma: rollback PRIMERO, diagnóstico después.
    - La CEGUERA (ni verde ni rojo) sigue siendo el tercer estado: se declara,
      no se convierte en verde por estar en background.
    - Un rojo coalescido atribuye peor (varias tareas comparten diagnóstico): el
@@ -745,7 +879,7 @@ Reglas:
 
 ## Reporte final (lo único que el humano lee)
 
-**Una pantalla, y arranca por el estado.** Seis puntos, una o dos líneas
+**Una pantalla, y arranca por el estado.** Siete puntos, una o dos líneas
 cada uno. Si algo necesita más, va a un archivo y acá va el link: un reporte
 que no se lee no existe, y la decisión se toma igual pero peor informada
 (Ley 14).
@@ -761,11 +895,17 @@ que no se lee no existe, y la decisión se toma igual pero peor informada
    que dice si el plan estuvo bien hecho: un plan bueno se ve como
    tareas de una sola ronda.
 5. Costo (`ccusage`) y aprendizajes (`mem_save`).
-6. **Si la tarea resultó trivial, sugiere `/quick` para la próxima**: un solo
-   repo, sin RFC, una sola ronda de review y un diff chico. Una línea, y es el
-   único lugar del harness donde el carril quick se propone: no lo eliges tú,
-   se lo ofreces al humano con la evidencia de esta corrida delante. Si no dio
-   trivial, ni lo menciones.
+6. **Si la corrida resultó más barata de lo que el carril prometía, decilo en
+   una línea**: un solo repo, sin RFC, una sola ronda de review y un diff chico
+   significa que el router pudo haber clasificado más abajo. Con el router en
+   el paso 0.1 esto dejó de ser una sugerencia para el humano y pasó a ser
+   material de `/promote`: la evidencia de esta corrida es lo que afina la
+   clasificación de la próxima. Si el carril estuvo bien elegido, ni lo
+   menciones.
+7. **Agentes re-spawneados y por qué** (si los hubo). Un implementer o un
+   reviewer relanzado en vez de continuado es re-lectura que se pagó: si la
+   lista no está vacía, cada línea lleva su motivo (murió, watchdog, contexto
+   lleno). Vacío es lo esperable.
 
 ### El bloque de entrega (obligatorio con `delivery: review`)
 

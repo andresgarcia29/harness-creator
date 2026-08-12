@@ -436,7 +436,8 @@ assert_contains "$pipe" "harness-policy.json" "declarando que los techos son dat
 assert_contains "$pipe" "QA determinista" "quick conserva la verificacion completa"
 assert_contains "$pipe" "escalate --to express" "el diff que excede la promesa tiene escape nombrado"
 assert_contains "$pipe" "quick → express → standard → full" "la escalera de carriles esta completa y en orden"
-assert_contains "$pipe" "jamás lo elige" "quick es promesa del humano: /smart no lo elige solo"
+assert_contains "$pipe" "lo clasifica \`/smart\` solo" \
+  "quick dejó de ser solo promesa del humano: el router lo clasifica (ver el bloque del router)"
 # Las tres puertas de entrada al harness tienen que nombrarlo: un comando que
 # solo existe en una de ellas es un comando que la mitad de las herramientas
 # no sabe que puede correr.
@@ -826,5 +827,59 @@ assert_contains "$pol" "POLICY-SHIP-004" \
   "policy.md explica por qué la fase no avanza con repos sin shippear"
 assert_contains "$pol" "ship.sh" \
   "y quién es el dueño de la transición review a ship"
+
+echo
+echo "── el router de carril: quick ya lo clasifica /smart, y con qué límite"
+# La decisión ANTERIOR (quick es promesa del humano, /smart no lo elige) estaba
+# escrita con fundamento en tres lugares. Revertirla sin actualizarlos dejaba el
+# template contradiciéndose solo, así que el contrato es que los tres digan lo
+# mismo.
+assert_contains "$smart" "| **quick** |" "la tabla de carriles del paso 0.1 incluye quick"
+assert_contains "$smart" "evidencia positiva" \
+  "y exige evidencia positiva de ownership para clasificarlo"
+assert_not_contains "$smart" "/smart NO lo elige por su cuenta" \
+  "el fundamento viejo no sobrevive al cambio"
+assert_not_contains "$smart" "no lo eliges tú" \
+  "ni su eco en el reporte final"
+assert_contains "$smart" "init tasks/<id> --lane quick" \
+  "el MECANISMO es explícito: init con el carril y el flujo de /quick inline"
+pipe_doc="$(cat "$root/templates/docs/pipeline.md.tmpl")"
+assert_not_contains "$pipe_doc" "quick es promesa del humano, no clasificación" \
+  "el doc del pipeline no queda contradiciendo al comando"
+assert_contains "$pipe_doc" "POLICY-LANE-004" \
+  "y nombra el piso que sostiene la clasificación automática"
+# El límite honesto: gate_lane NO frena cruces de ownership dentro de un repo.
+assert_contains "$smart" "cruce de OWNERSHIP dentro de un mismo repo" \
+  "el backstop se declara PARCIAL, que es lo que hace segura la regla"
+
+echo
+echo "── continuar agentes en vez de re-spawnearlos: la herramienta se NOMBRA"
+# La regla existía en prosa ("el reviewer es PERSISTENTE") y no se cumplía: 16
+# reviewers en una tarea de un repo con dos rondas. Ningún prompt nombraba nunca
+# la herramienta, así que el único camino ejecutable escrito era el escape.
+rev_cmd="$(cat "$root/templates/commands/review.md.tmpl")"
+assert_contains "$smart" "SendMessage" "smart nombra la herramienta que continúa un agente"
+assert_contains "$rev_cmd" "SendMessage" "y review también, que es donde vive el loop de rondas"
+assert_contains "$smart" "agents.json" "con el registro de ids que la vuelve ejecutable"
+assert_contains "$rev_cmd" "agents.json" "en los dos lados"
+assert_contains "$rev_cmd" "EXCEPCIÓN DECLARADA" \
+  "y relanzar queda como excepción declarada, no como default silencioso"
+
+echo
+echo "── general-purpose prohibido, con la alternativa al lado"
+assert_contains "$smart" "general-purpose" "smart nombra al agente prohibido"
+assert_contains "$smart" "PROHIBIDO" "y lo prohíbe explícitamente"
+for herramienta in "graphify query" "semble search" "Serena" "Explore"; do
+  assert_contains "$smart" "$herramienta" "y ofrece la alternativa: $herramienta"
+done
+
+echo
+echo "── una fase, una sesión: el relevo tiene dueño escrito"
+# Lo que no puede quedar ambiguo es QUIÉN ejecuta el corte: un prompt no puede
+# terminarse a sí mismo ni relanzarse. Sin dueño, esto es prosa aspiracional.
+assert_contains "$smart" "handoff.json" "smart nombra el marcador del relevo"
+assert_contains "$smart" "orchestrator-watch.sh" "y quién ejecuta el corte"
+assert_contains "$pol" "handoff.json" "policy.md documenta el relevo"
+assert_contains "$pol" "session_id" "y el campo que lo hace auditable"
 
 t_done

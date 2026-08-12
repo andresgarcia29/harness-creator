@@ -92,6 +92,7 @@ assert_contains "$smart" "| **triado** |" "está en la tabla de carriles"
 assert_contains "$smart" "archivo:símbolo" "con la señal que lo habilita"
 assert_contains "$smart" "El carril \`triado\`" "y su sección con lo que escribe el orquestador"
 assert_contains "$smart" "validate-dag" "que incluye el DAG: triado planifica N tareas, no una"
-assert_contains "$smart" "--lane <express|triado|standard|full>" "y el init lo ofrece"
+assert_contains "$smart" "--lane <quick|express|triado|standard|full>" \
+  "y el init lo ofrece (con quick, que el router ya clasifica solo)"
 
 t_done

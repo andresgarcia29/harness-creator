@@ -49,9 +49,11 @@ El paso deja `tasks/$HARNESS_TASK/pipeline/<step>.json`:
 ```json
 {"schema":1, "ok":true, "summary":"14/14 e2e verdes", "evidence":"ruta/al/log"}
 ```
-Un paso `run:` lo deriva de su exit code (0 = ok). Un paso agéntico lo escribe
-él. **Fail-closed en gates**: archivo ausente o `ok:false` = rojo (un agente
-que se calla no pasa un gate).
+Un paso `run:` lo deriva de su exit code (0 = ok): si al gatear no hay result,
+el gate corre el script él mismo, así que tu paso `run:` debe ser **idempotente**
+y, si se escribe su propio result, hacerlo con temporal + `mv` (rename atómico).
+Un paso agéntico lo escribe él. **Fail-closed en gates**: archivo ausente o
+`ok:false` = rojo (un agente que se calla no pasa un gate).
 
 ## Flujo de creación
 

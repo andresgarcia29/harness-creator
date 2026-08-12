@@ -14,6 +14,9 @@
 #   bash scripts/gowork.sh <task-id> <repo>
 #                                      genera worktrees/<task-id>/.review-<repo>/go.work: el
 #                                       go.work PROPIO del árbol clavado del reviewer.
+#   bash scripts/gowork.sh <task-id> <repo>@<Tn>
+#                                      genera worktrees/<task-id>/<repo>@<Tn>/go.work: el
+#                                       go.work PROPIO del árbol de ESE nodo del DAG.
 #
 # ── Por qué el árbol clavado necesita SU archivo (caso de campo) ──
 # El pin `.review-<repo>` que clava verdict-scaffold tiene los MISMOS module-paths que el
@@ -27,6 +30,17 @@
 # Con un go.work DENTRO del pin, `go` lo encuentra subiendo desde el cwd antes que el de la
 # tarea y los dos árboles dejan de compartir archivo. En el pin gana el commit SELLADO; los
 # demás repos vivos de la tarea siguen entrando, porque son parte del mismo cambio.
+#
+# ── Y el árbol de un NODO del DAG es el MISMO problema (#152, familia de #149/#150) ──
+# Con `dag.json` schema 2, N tareas del mismo repo corren en paralelo, cada una en
+# `worktrees/<task>/<repo>@<Tn>`. Los hermanos y el árbol base comparten module-path por
+# definición: son el mismo repo. Este script no los conocía, así que colapsaban a UNA entrada
+# por module-path y el ganador lo decidía readdir. Medido en campo: NINGUNO de los dos árboles
+# de nodo entró al go.work de la tarea, que nombraba el árbol BASE. Consecuencia: el implementer
+# de un nodo corría `go test` contra el código del BASE, o sea el falso verde que #43 y #75
+# cerraron para gate_test_muerde, justo en el camino que smart.md recomienda por rápido.
+# El arreglo es el mismo que el del pin, porque el defecto es el mismo: cada árbol con
+# module-path duplicado necesita SU go.work, y se PODA del go.work ajeno (ver discover).
 #
 # ── Resultado del experimento de replaces (repos reales de un harness) ──
 # Los go.mod de los servicios suelen traer `replace <mod> => ../../pkg` (y proto) pensados
@@ -91,19 +105,27 @@ discover() { # $1=root  [$2=ruta absoluta a podar]
   # module-path que el worktree vivo. Sin podarlo, el go.work puede apuntar
   # el loop nativo al commit sellado en vez de a las ediciones vivas, y el
   # ganador lo decide el orden de readdir: no determinista (demostrado).
+  # `*@*` es el arbol de un NODO del DAG (worktree-task.sh --node), y es el
+  # MISMO caso por la MISMA razon (#152): comparte module-path con el arbol
+  # base y con sus hermanos. Podarlos deja el go.work de la TAREA determinista
+  # (gana siempre el arbol base) y saca a los hermanos del go.work de cualquier
+  # otro arbol. Cada nodo recibe el suyo por el modo `<repo>@<Tn>` de abajo.
   if [ -n "$extra" ]; then
     find "$root" \( -name .git -o -name vendor -o -name node_modules \
-                    -o -name .cache -o -name '.review-*' -o -path "$extra" \) \
+                    -o -name .cache -o -name '.review-*' -o -name '*@*' \
+                    -o -path "$extra" \) \
                     -prune -o -name go.mod -print
   else
     find "$root" \( -name .git -o -name vendor -o -name node_modules \
-                    -o -name .cache -o -name '.review-*' \) -prune -o -name go.mod -print
+                    -o -name .cache -o -name '.review-*' -o -name '*@*' \) \
+                    -prune -o -name go.mod -print
   fi
 }
 
-# ── el árbol clavado: su RAÍZ se llama .review-*, así que la poda de discover lo
-#    borraría entero. Acá se poda todo lo demás y el pin sí entra. ──
-discover_pin() { # $1=raíz del pin
+# ── el árbol PROPIO (el pin `.review-*` o el nodo `<repo>@<Tn>`): su RAÍZ matchea
+#    justo la poda de discover, que lo borraría entero. Acá se poda todo lo demás
+#    y el árbol propio sí entra. ──
+discover_pin() { # $1=raíz del árbol propio
   local root="$1"
   [ -d "$root" ] || return 0
   find "$root" \( -name .git -o -name vendor -o -name node_modules \
@@ -181,10 +203,37 @@ else
     collect < <(discover "$REPOS_DIR")                # canónico primero
     collect < <(discover "$wtroot")                   # worktree gana por module-path
   else
+    # El `@<Tn>` es del ÁRBOL, no del repo: se parte acá igual que en ship.sh
+    # (#149/#150), para que `repo` siga siendo la identidad y el sufijo viaje
+    # sólo a la ruta del worktree.
+    node=""
+    case "$repo" in *@*) node="${repo##*@}"; repo="${repo%@*}" ;; esac
+    case "$node" in
+      *[!A-Za-z0-9_-]*)
+        echo "❌ nodo inválido: '$node' (solo letras, números, guion y guion bajo)"
+        echo "   La forma es <repo>@<Tn>, igual que el directorio del worktree."
+        exit 1 ;;
+    esac
     case "$repo" in
       [A-Za-z0-9][A-Za-z0-9._-]*) ;;
       *) echo "❌ repo inválido '$repo'"; exit 1 ;;
     esac
+    if [ -n "$node" ]; then
+      # ── el árbol de ESE nodo del DAG (#152) ──
+      # Misma terna que el pin, por la misma razón: canónico de fondo, los OTROS
+      # repos vivos de la tarea (podando el árbol base de ESTE repo, que comparte
+      # module-path), y el árbol propio último para que gane. Los hermanos @Tm ya
+      # los podó discover.
+      nodedir="$wtroot/$repo@$node"
+      [ -d "$nodedir" ] || {
+        echo "❌ no existe el árbol del nodo ($nodedir)"
+        echo "   ↳ lo crea: scripts/worktree-task.sh --node $node $task $repo"
+        exit 1; }
+      workfile="$nodedir/go.work"; workdir="$nodedir"; donde=" [árbol del nodo $node]"
+      collect < <(discover "$REPOS_DIR")
+      collect < <(discover "$wtroot" "$wtroot/$repo")
+      collect < <(discover_pin "$nodedir")
+    else
     pin="$wtroot/.review-$repo"
     [ -d "$pin" ] || {
       echo "❌ no existe el árbol clavado del reviewer ($pin)"
@@ -194,6 +243,7 @@ else
     collect < <(discover "$REPOS_DIR")                # canónico primero
     collect < <(discover "$wtroot" "$wtroot/$repo")   # los OTROS repos vivos de la tarea
     collect < <(discover_pin "$pin")                  # el commit SELLADO gana
+    fi
   fi
 fi
 

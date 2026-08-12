@@ -40,6 +40,16 @@ bus() { cat "$WS/.harness/events.jsonl" 2>/dev/null; }
 
 echo "── kargo falla: el harness lo declara como supuesto, no lo entierra"
 
+# kubectl es el TERCER camino (#112) y por defecto acá tiene que fallar: si no,
+# el test se colgaría del cluster real de quien corre la suite y mediría otra
+# cosa. Los casos que lo ejercitan lo re-stubean.
+cat > "$WS/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+echo "The connection to the server localhost:8080 was refused" >&2
+exit 1
+STUB
+chmod +x "$WS/bin/kubectl"
+
 cat > "$WS/bin/kargo" <<'STUB'
 #!/usr/bin/env bash
 echo "Error: not authenticated: no token found" >&2
@@ -99,9 +109,11 @@ assert_not_contains "$(bus)" "assumption" "#112: sin supuesto: el tramo se verif
 # El JSON crudo no se vuelca: cinco lineas de objeto no dicen si promovio.
 assert_not_contains "$out" "creationTimestamp" "y no vuelca el objeto entero"
 
-# LA HIPOTESIS DEL REPORTE NO ESTA CONFIRMADA (falta auth de kargo), asi que lo
-# que se fija es que NINGUN resultado sea peor que el de hoy: si json tampoco
-# sirve, el tramo vuelve a declararse ciego, que es la conducta actual.
+# LA HIPOTESIS DEL -o json QUEDO DESCARTADA CON AUTH: los dos modos fallan
+# identico, y `kargo version` (que ni acepta -o, sobre un tipo sin relacion con
+# promotions) falla igual. Es el cliente v1.10.9 contra ese servidor, no el
+# renderer. El stub modela el reporte tal cual: el CLI revienta por los dos
+# caminos.
 cat > "$WS/bin/kargo" <<'STUB'
 #!/usr/bin/env bash
 echo "Error: list promotions: (*models.PromotionList) is not supported by the TextConsumer" >&2
@@ -110,9 +122,41 @@ STUB
 chmod +x "$WS/bin/kargo"
 : > "$WS/.harness/events.jsonl"
 out="$(run_kargo)"
-assert_contains "$out" "ni con -o json ni en texto" \
-  "#112: si json tampoco sirve, el motivo dice que se probaron los dos"
+assert_contains "$out" "ni con -o json, ni en texto, ni por kubectl" \
+  "#112: con los tres caminos rotos, el motivo dice por donde se intento"
 assert_contains "$(bus)" "Kargo NO verificada" "#112: y la ceguera declarada del diseno sigue intacta"
+
+# Y EL TERCER CAMINO, que es el arreglo: las Promotions son CRDs, asi que
+# kubectl las lee contra el API de Kubernetes y la incompatibilidad del CLI de
+# kargo no lo toca. Mismo patron que este script ya usa para las Applications de
+# ArgoCD. El CLI sigue reventando por los dos lados: el stub de arriba se queda.
+cat > "$WS/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+for a in "$@"; do case "$a" in promotions.kargo.akuity.io) exec cat "$KARGO_JSON" ;; esac; done
+echo "error: the server doesn't have a resource type" >&2
+exit 1
+STUB
+chmod +x "$WS/bin/kubectl"
+: > "$WS/.harness/events.jsonl"
+out="$(KARGO_JSON="$WS/promos.json" run_kargo)"
+assert_contains "$out" "kubectl" "#112: con el CLI roto por los dos lados, cae a kubectl"
+assert_contains "$out" "promo-nueva" "#112: y el tramo deja de estar ciego por el camino que NO pasa por el CLI"
+assert_contains "$out" "f-042" "nombrando el freight igual que por -o json"
+assert_not_contains "$(bus)" "assumption" "#112: sin supuesto: se verifico de verdad"
+assert_not_contains "$out" "creationTimestamp" "y sigue sin volcar el objeto entero"
+
+# El CR sale del mismo esquema que el -o json del CLI, asi que el jq no cambia;
+# el error del CLI igual queda en el LOG para poder decidir si pinnear version.
+assert_contains "$(cat "$WS/deploy.log")" "TextConsumer" \
+  "#112: el error del CLI se conserva en el log (es el diagnostico util)"
+
+# Vuelve a fallar para los casos de abajo: cada caso stubea lo suyo.
+cat > "$WS/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+echo "The connection to the server localhost:8080 was refused" >&2
+exit 1
+STUB
+chmod +x "$WS/bin/kubectl"
 
 # Un CLI que SI sabe hablar texto no se rompe por este arreglo: sigue el camino
 # de siempre, porque el json de un CLI viejo puede no existir.

@@ -34,6 +34,12 @@ se lo pida.
 - **`run:` presente** → DETERMINISTA: corre el script; su exit code define ok
   (0 = ok). El cuerpo del md es documentación. Sin secretos salvo que el
   script se envuelva en `scripts/with-secrets.sh`.
+  Si al gatear no hay result, **el gate corre el script él mismo** y deriva el
+  result de su exit code (solo CWD workspace). Por eso un paso `run:` tiene que
+  ser **idempotente**: puede correr dos veces si el orquestador ya lo lanzó y su
+  result todavía no aterrizó. Y si tu paso se escribe su propio result, escribilo
+  a un temporal y `mv` al destino (rename atómico): un result a medio escribir se
+  lee como rojo.
 - **`run:` ausente** → AGÉNTICO: el cuerpo del md es el prompt de un
   sub-agente con acceso al MCP declarado, a lectura y al worktree. Él escribe
   el result.
@@ -45,7 +51,9 @@ se lo pida.
 {"schema":1, "step":"e2e", "ok":true, "summary":"14/14 verdes", "evidence":"…"}
 ```
 **Fail-closed en gates**: ausente o inválido = rojo. (Lo contrario del bus,
-que es fail-open a propósito: telemetría, no control.)
+que es fail-open a propósito: telemetría, no control.) Para un paso `run:` del
+workspace eso ya no puede ser una carrera: el gate lo corre antes de juzgarlo,
+así que "sin resultado" significa un paso agéntico que se calló.
 
 ### 4b. Si tu paso CREA beads, escribí el id de vuelta en el veredicto
 

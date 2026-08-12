@@ -283,6 +283,98 @@ class Atribucion(CostBase):
         self.assertIn("sin-rol", r.stdout, r.stdout)
 
 
+class AtribucionPorTarea(CostBase):
+    """El gasto es de la TAREA, no de la sesión que la lanzó (#153).
+
+    El puente sid→tarea de track-read.sh es un archivo por sesión, último-gana.
+    Con un orquestador que lanza N tareas (que es lo que hace /smart-main en un
+    barrido), UNA se llevaba todo el gasto y las hermanas quedaban en cero:
+    medido, una tarea express de 12 líneas con 477 turnos de orquestador y ocho
+    implementers ajenos, mientras las cuatro que hicieron el trabajo real
+    reportaban "sin transcripts atribuidos". El gate frenaba a la barata y era
+    ciego para la cara.
+    """
+
+    def toca(self, task, cuantas=6):
+        """Líneas de transcript que nombran el worktree de una tarea, como las
+        deja cualquier agente que trabaja ahí (contrato del implementer)."""
+        return [json.dumps({
+            "type": "user",
+            "message": {"role": "user", "content": [
+                {"type": "tool_result",
+                 "content": f"worktrees/{task}/atlas/internal/server.go"}]},
+        }) for _ in range(cuantas)]
+
+    def subagente(self, nombre, rol, lineas):
+        subs = self.proj / self.sid / "subagents"
+        subs.mkdir(parents=True, exist_ok=True)
+        (subs / f"agent-{nombre}.jsonl").write_text("\n".join(lineas) + "\n")
+        (subs / f"agent-{nombre}.meta.json").write_text(
+            json.dumps({"agentType": rol, "description": f"{rol}:atlas"}))
+
+    def test_la_hermana_deja_de_estar_en_cero(self):
+        # Una sesión, dos tareas, el puntero nombra T1. T2 existía y medía cero.
+        self.write([self.turn(read=1_000)] + self.toca("T1"))
+        self.subagente("uno", "implementer",
+                       [self.turn(read=2_000_000)] + self.toca("T1"))
+        self.subagente("dos", "implementer",
+                       [self.turn(read=8_000_000)] + self.toca("T2"))
+        r2 = self.run_cost("task", "T2")
+        self.assertEqual(r2.returncode, 0, r2.stderr + r2.stdout)
+        self.assertIn("4.00", r2.stdout, r2.stdout)   # 8M x 0.50, los suyos
+        self.assertNotIn("1.00", r2.stdout, r2.stdout)
+
+    def test_la_tarea_no_carga_con_el_gasto_ajeno(self):
+        # El otro lado de la misma moneda, que es el que desensibiliza el gate:
+        # la tarea barata dejó de pagar los implementers de las hermanas.
+        self.write([self.turn(read=1_000)] + self.toca("T1"))
+        self.subagente("uno", "implementer",
+                       [self.turn(read=2_000_000)] + self.toca("T1"))
+        self.subagente("dos", "implementer",
+                       [self.turn(read=8_000_000)] + self.toca("T2"))
+        r1 = self.run_cost("task", "T1")
+        self.assertEqual(r1.returncode, 0, r1.stderr + r1.stdout)
+        self.assertIn("1.00", r1.stdout, r1.stdout)   # 2M x 0.50
+        self.assertNotIn("4.00", r1.stdout, r1.stdout)
+
+    def test_una_sesion_de_barrido_no_es_de_ninguna_tarea(self):
+        # Repartir el orquestador de un barrido entre las N exigiría rebanar
+        # turnos por intercalado. Cargárselo entero a la que salió sorteada es
+        # el bug. Sin tarea queda visible en `day` y fuera del budget de todas.
+        self.write([self.turn(read=10_000_000)] + self.toca("T1") + self.toca("T2"))
+        r = self.run_cost("task", "T1")
+        self.assertNotIn("5.00", r.stdout, r.stdout)
+
+    def test_una_sesion_mono_tarea_sigue_siendo_suya(self):
+        # Un vistazo a la vecina no le quita la sesión a su dueña: si esto
+        # fallara, el gate se quedaría ciego justo donde hoy funciona.
+        self.write([self.turn(read=10_000_000)] + self.toca("T1", 40)
+                   + self.toca("T2", 1))
+        r = self.run_cost("task", "T1")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("5.00", r.stdout, r.stdout)
+
+    def test_sobrevive_al_borrado_del_puntero(self):
+        # SessionEnd borra .harness/session-task/<sid>, y por eso `sink push` no
+        # escribía métricas de una tarea ya cerrada. El transcript es inmutable.
+        self.write([self.turn(read=10_000_000)] + self.toca("T1", 20))
+        (self.ws / ".harness" / "session-task" / self.sid).unlink()
+        r = self.run_cost("task", "T1")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("5.00", r.stdout, r.stdout)
+
+    def test_el_export_etiqueta_la_fila_con_su_tarea(self):
+        # Es la fila que lee harness-sink.py para escribir docs/metrics/<id>.
+        self.write([self.turn(read=1_000)] + self.toca("T1"))
+        self.subagente("dos", "implementer",
+                       [self.turn(read=8_000_000)] + self.toca("T2"))
+        r = self.run_cost("export", "--days", "3650")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        tareas = {json.loads(l)["tarea"] for l in r.stdout.splitlines() if l.strip()}
+        self.assertIn("T2", tareas)
+        self.assertIn("T1", tareas)
+
+
 class BandaConSalida(CostBase):
     """El termino que NO se puede remediar tiene que tener salida AUDITABLE.
 

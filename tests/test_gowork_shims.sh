@@ -188,6 +188,50 @@ out_np="$(bash "$GD/scripts/gowork.sh" T1 nopin 2>&1)"; rc_np=$?
 assert_eq 1 "$rc_np" "pin inexistente: exit 1, no un go.work en un dir inventado"
 assert_contains "$out_np" "verdict-scaffold.sh" "con la remediación exacta (quién clava el pin)"
 
+# ══ E. el ÁRBOL DE UN NODO del DAG: mismo defecto, misma cura (#152) ════════════
+# Con `dag.json` schema 2, N tareas del mismo repo corren en paralelo, cada una
+# en `worktrees/<task>/<repo>@<Tn>`. Los hermanos y el árbol base comparten
+# module-path (son el mismo repo), así que colapsaban a UNA entrada y el ganador
+# lo decidía readdir. Medido en campo: NINGUNO de los dos árboles de nodo entró
+# al go.work de la tarea, que nombraba el BASE. El implementer del nodo corría
+# `go test` contra código ajeno: el falso verde que #43 y #75 ya habían cerrado
+# para gate_test_muerde, y justo en el camino que smart.md recomienda por rápido.
+echo
+echo "── el árbol de un nodo del DAG y el árbol base no comparten go.work (#152)"
+mkdir -p "$GD/worktrees/T1/svc@T1" "$GD/worktrees/T1/svc@T2"
+printf 'module example.com/svc\n\ngo 1.22\n' > "$GD/worktrees/T1/svc@T1/go.mod"
+printf 'module example.com/svc\n\ngo 1.22\n' > "$GD/worktrees/T1/svc@T2/go.mod"
+
+bash "$GD/scripts/gowork.sh" T1 >/dev/null 2>&1 || true
+tarea_con_nodos="$(cat "$GWT")"
+assert_contains "$tarea_con_nodos" "./svc"          "el go.work de la tarea sigue apuntando al árbol BASE…"
+assert_not_contains "$tarea_con_nodos" "svc@T1"     "…y no a un árbol de nodo (module-path duplicado)"
+assert_not_contains "$tarea_con_nodos" "svc@T2"     "…ni al otro: el ganador dejó de decidirlo readdir"
+
+out_n1="$(bash "$GD/scripts/gowork.sh" T1 svc@T1 2>&1)" || true
+GWN1="$GD/worktrees/T1/svc@T1/go.work"
+assert_file "$GWN1" "gowork <task> <repo>@<Tn>: el nodo gana SU PROPIO go.work"
+assert_contains "$out_n1" "nodo T1"                 "y la salida dice de qué árbol habla"
+n1="$(cat "$GWN1")"
+assert_contains "$n1" "	."                          "el nodo se incluye a sí mismo (use .)"
+assert_not_contains "$n1" "../svc"$'\n'             "y NO al árbol base: adentro manda el código del nodo"
+assert_not_contains "$n1" "svc@T2"                  "ni al árbol del hermano"
+assert_contains "$n1" "../otro"                     "los otros repos vivos de la tarea sí entran"
+assert_contains "$n1" "repos/shared"                "con el fallback al canónico de siempre"
+
+# Misma regresión que COR-720, ahora entre hermanos: generar uno no toca al otro.
+bash "$GD/scripts/gowork.sh" T1 svc@T2 >/dev/null 2>&1 || true
+assert_eq "$n1" "$(cat "$GWN1")" "generar el go.work de un nodo no le pisa el 'use' al hermano"
+bash "$GD/scripts/gowork.sh" T1 >/dev/null 2>&1 || true
+assert_eq "$n1" "$(cat "$GWN1")" "y regenerar el de la tarea tampoco"
+
+out_nn="$(bash "$GD/scripts/gowork.sh" T1 svc@T9 2>&1)"; rc_nn=$?
+assert_eq 1 "$rc_nn" "árbol de nodo inexistente: exit 1, no un go.work en un dir inventado"
+assert_contains "$out_nn" "worktree-task.sh --node" "con la remediación exacta (quién crea el árbol)"
+out_ni="$(bash "$GD/scripts/gowork.sh" T1 'svc@../fuera' 2>&1)"; rc_ni=$?
+assert_eq 1 "$rc_ni" "nodo con charset inválido: exit 1 (es un componente de RUTA)"
+assert_contains "$out_ni" "nodo inválido"           "y lo dice como lo que es"
+
 
 echo
 echo "── gowork.sh --base: un go.work para un arbol FUERA del workspace (#75)"

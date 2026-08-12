@@ -145,6 +145,36 @@ def lock_state(task_dir: Path) -> None:
 # instancias viejas cuyo policy.json todavía no lo declara.
 DEFAULT_PHASE_ORDER = ["intake", "rfc", "implement", "review", "ship", "deploy", "archive"]
 
+# Cuántos minutos en una fase antes de que la tarea sea SOSPECHOSA (issue #155).
+#
+# POR QUÉ EXISTE: una tarea puede pasar 12h46m en `implement`, con su trabajo
+# hecho y su precheck verde, y nada del harness lo detecta. La encontró un humano
+# mirando timestamps de archivos. No estaba pausada ni bloqueada: estaba detenida
+# y contada como si avanzara, que es el peor modo de falla porque desde afuera se
+# ve IDÉNTICA a una tarea que progresa. Pasó tres veces el mismo día.
+#
+# El watchdog que ya existía (~3 min sin tool call) es una regla del ORQUESTADOR,
+# y solo funciona mientras el orquestador esté mirando; si está esperando una
+# notificación que nunca llega, no hay quien la aplique. Justo el caso.
+#
+# El dato ya estaba: `phase_since` lo estampa set_phase en TODO movimiento. Lo
+# único que faltaba era alguien que lo comparara contra ahora.
+#
+# Los umbrales son por fase porque el trabajo no dura lo mismo: un `implement` de
+# 40 minutos es normal, un `ship` de 40 no (ship.sh es mecánico: rebase, gates,
+# push). Van holgados a propósito: un falso positivo cuesta un evento de bus, y
+# el falso negativo medido costó 12h46m de reloj de nadie.
+# `blocked` y `archive` quedan exentas: una es una parada REGISTRADA esperando a
+# un humano, y la otra terminó.
+STALE_AFTER_MIN = {
+    "intake": 30,      # las preguntas de enrichment pausan a blocked; un intake activo son minutos
+    "rfc": 90,
+    "implement": 120,  # cadenas seriales medidas de 80 min; 2h es techo holgado
+    "review": 90,      # juicio de LLM, decenas de minutos; dos rondas caben
+    "ship": 30,        # mecánico de punta a punta
+    "deploy": 60,      # deploy-watch midió 39 min mirando UN deploy
+}
+
 
 def phase_order(policy: dict) -> list:
     order = policy.get("workflow", {}).get("phase_order")
@@ -1164,6 +1194,67 @@ def cmd_resume(args: argparse.Namespace) -> int:
     emit_bus(task_dir, "phase", f"reanuda en {destination}")
     print(f"▶️  {task_dir.name}: reanuda en {destination}")
     return 0
+
+
+def cmd_stale(args: argparse.Namespace) -> int:
+    """Las tareas detenidas en una fase no terminal, comparando phase_since con ahora.
+
+    Exit 0 = ninguna sospechosa. Exit 1 = hay al menos una (distinto del 3 de
+    fail(), que significa "no pude mirar"). Una línea por tarea en stdout:
+    `<task>\t<fase>\t<minutos>`, para que sea grepeable desde el vigilante.
+
+    NO pausa ni relanza: avisar y actuar son cosas distintas, y una tarea que
+    lleva mucho en una fase puede estar perfectamente viva (un test de 3h). El
+    que relanza es orchestrator-watch, que ya sabe hacerlo.
+
+    Sin `phase_since` legible la tarea se AVISA igual: no poder mirar no es
+    verde, y es exactamente lo que pasaría con un state.json de una versión
+    vieja del harness."""
+    tasks_root = Path(args.tasks_root).resolve()
+    if not tasks_root.is_dir():
+        fail("POLICY-STALE-001", f"no existe el directorio de tareas: {tasks_root}")
+    now = dt.datetime.now(dt.timezone.utc)
+    found = 0
+    for state_file in sorted(tasks_root.glob("*/state.json")):
+        task_dir = state_file.parent
+        try:
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue                      # un state ilegible ya lo grita todo lo demás
+        phase = state.get("phase", "")
+        limit = STALE_AFTER_MIN.get(phase)
+        if limit is None:                 # blocked, archive, o una fase que no conocemos
+            continue
+        since = parse_iso(state.get("phase_since"))
+        if since is None:
+            print(f"{task_dir.name}\t{phase}\t?\tsin phase_since legible")
+            found += 1
+            continue
+        minutes = int((now - since).total_seconds() // 60)
+        if minutes <= limit:
+            continue
+        found += 1
+        print(f"{task_dir.name}\t{phase}\t{minutes}\t(techo {limit}m)")
+        # El bus solo una vez por fase: el vigilante pasa cada 120s y un aviso
+        # repetido cada dos minutos durante 12 horas es ruido que se aprende a
+        # ignorar, o sea el mismo silencio con más pasos. El marcador guarda el
+        # phase_since ya avisado: cuando la tarea se mueve, el aviso se rearma.
+        marker = tasks_root.parent / ".harness" / "stale" / task_dir.name
+        stamp = state.get("phase_since", "")
+        already = ""
+        try:
+            already = marker.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
+        if already != stamp:
+            emit_bus(task_dir, "stop",
+                     f"{minutes}m en {phase} sin terminar (techo {limit}m): miralo o pausalo")
+            try:                          # fail-open: es un hint, no estado de la tarea
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text(stamp, encoding="utf-8")
+            except Exception:
+                pass
+    return 1 if found else 0
 
 
 def cmd_record_cost(args: argparse.Namespace) -> int:
@@ -2215,6 +2306,11 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("task_dir")
     resume.add_argument("--actor", required=True)
     resume.set_defaults(func=cmd_resume)
+    stale = sub.add_parser("stale",
+                           help="tareas detenidas en una fase no terminal "
+                                "(task<TAB>fase<TAB>minutos); exit 1 = hay alguna")
+    stale.add_argument("tasks_root", nargs="?", default="tasks")
+    stale.set_defaults(func=cmd_stale)
     cost = sub.add_parser("record-cost")
     cost.add_argument("task_dir")
     cost.add_argument("--total-usd", required=True, type=float)

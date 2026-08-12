@@ -77,7 +77,18 @@ ok_id() { case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; *) return 0 ;; esac; }
 
 remember_task() { ok_id "$sid" || return 0
   mkdir -p "$STATE_DIR" 2>/dev/null || return 0
-  printf '%s\n' "$1" > "$STATE_DIR/$sid" 2>/dev/null || true; }
+  printf '%s\n' "$1" > "$STATE_DIR/$sid" 2>/dev/null || true
+  # ── Y EL PUNTERO INVERSO: qué sesión maneja ESTA tarea ──
+  # El id de sesión solo existe acá, dentro del payload del hook. Sin el
+  # inverso, `harness-policy.py transition` no tiene forma de estampar en
+  # state.json quién manejó cada fase, y "el orquestador arrastró una sesión
+  # por toda la tarea" queda como algo que solo se puede ver leyendo
+  # transcripts a posteriori. Este archivo tiene UN escritor por tarea a la vez
+  # en la práctica, y si dos sesiones se la disputan gana la última, que es
+  # justamente la que está manejando.
+  ok_id "$1" || return 0
+  [ -d "$WS/tasks/$1" ] || return 0
+  printf '%s\n' "$sid" > "$WS/tasks/$1/.session" 2>/dev/null || true; }
 
 recall_task() { ok_id "$sid" || return 0
   head -1 "$STATE_DIR/$sid" 2>/dev/null; }

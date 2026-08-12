@@ -153,11 +153,22 @@ reporta el código de error.
    él ya tiene el contexto, juzga el delta. **Si el agente murió o el
    watchdog lo mató**: lanza uno NUEVO con la MISMA identidad (el campo
    `reviewer` del veredicto) y dile que opera SIN memoria: reviewer.md
-   sabe reconstruir su base desde `rebased_from`. Si tu runtime no puede
-   continuar a un agente terminado, el modo sin memoria es el camino:
-   correcto siempre, caro solo en tokens. Y si el reviewer reporta el
-   contexto casi lleno, retíralo y relanza en modo sin memoria (retiro
-   voluntario, no cuenta como muerte). **Nunca uses `--force` en el
+   sabe reconstruir su base desde `rebased_from`.
+   **Continuar es `SendMessage` al id del agente**, que anotaste en
+   `tasks/<task-id>/agents.json` (`{"reviewer:<repo>": "<agent-id>"}`) en cuanto
+   lo lanzaste. Va escrito acá porque la regla existía y NO se cumplía: 16
+   reviewers en una tarea de UN repo y DOS rondas, teniendo "el reviewer es
+   PERSISTENTE" en dos archivos. La causa fue que ningún prompt nombraba la
+   herramienta, así que el único camino ejecutable escrito era el escape de
+   abajo y se tomaba siempre. Sin el id anotado no hay a quién mandarle nada:
+   anotarlo es parte de lanzarlo.
+   **Relanzar es una EXCEPCIÓN DECLARADA**, con tres causas válidas: el agente
+   murió, el watchdog lo mató, o su contexto se llenó **y él lo reportó** (su
+   ronda 1 son 70-150k en campo, y eso es normal, no lleno: suponerlo vos
+   convierte el escape en la regla). Cada una va al ledger con su motivo y sale
+   en el reporte final. Si tu runtime no puede continuar a un agente terminado,
+   el modo sin memoria es el camino: correcto siempre, caro solo en tokens, y
+   también declarado. **Nunca uses `--force` en el
    loop de rework**: borra la matriz de compliance entera y te cobra un
    re-review completo por un fix de una línea. QA solo se repite si el fix
    tocó la `surface[]` que QA declaró, y eso ahora lo decide el scaffold, no

@@ -81,6 +81,54 @@ def set_phase(state: dict, phase: str) -> None:
     state["phase_since"] = utcnow()
 
 
+def current_session(task_dir: Path) -> str:
+    """Qué sesión está manejando ESTA tarea ahora mismo, o "" si no se sabe.
+
+    El id de sesión solo existe dentro del payload de los hooks, así que el
+    puente lo deja `track-read.sh` en `tasks/<id>/.session` cada vez que la
+    sesión toca algo de la tarea. `HARNESS_SESSION_ID` lo pisa, para los tests
+    y para cualquier runtime que sí lo exporte. Vacío significa "no se sabe", y
+    no saber no se inventa."""
+    env = (os.environ.get("HARNESS_SESSION_ID") or "").strip()
+    if env:
+        return env
+    try:
+        return (task_dir / ".session").read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def write_handoff(task_dir: Path, phase: str, from_session: str) -> None:
+    """Deja el marcador de RELEVO: esta fase la sigue una sesión nueva.
+
+    POR QUÉ EXISTE: medido sobre una tarea de un repo, una migración y dos
+    rondas de review, el orquestador fue UNA sola sesión de punta a punta
+    durante 45.3h de las 45.4h de reloj, con 688 turnos, 440k de contexto medio
+    y 294M de lectura de caché. El trabajo real de los subagentes fueron 5.8h:
+    el resto es una sesión sola, cada turno más lento y más caro cuanto más
+    contexto arrastra. Y el contexto es cosa de FASE, no de tarea: el propio
+    harness ya lo modela así (el eximido de `ctx` se ata a la fase en que se
+    autorizó), pero la sesión no lo hacía, así que hubo tareas que firmaron
+    CUATRO cost-waives del mismo COST-CTX, una por fase.
+
+    QUIÉN EJECUTA EL CORTE, que es la parte que no puede quedar ambigua: un
+    prompt no puede terminarse a sí mismo ni relanzarse, así que el corte lo
+    ejecuta `orchestrator-watch.sh`, que ya sabe lanzar `claude -p '/smart
+    <id>'` con contexto fresco. Esto solo deja el marcador; el orquestador
+    cierra su turno y el vigilante retoma. Sin marcador el vigilante se
+    comporta como siempre (regla de silencio de bus), así que una tarea en
+    vuelo de una versión anterior no cambia de conducta."""
+    payload = {"schema": 1, "phase": phase, "at": utcnow(),
+               "from_session": from_session}
+    try:
+        task_dir.mkdir(parents=True, exist_ok=True)
+        tmp = task_dir / "handoff.json.tmp"
+        tmp.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+        tmp.replace(task_dir / "handoff.json")
+    except Exception:
+        pass          # fail-open: el relevo es una optimización, no un gate
+
+
 def emit_bus(task_dir: Path, kind: str, summary: str) -> None:
     """Cuenta el movimiento de fase en el bus, que es lo que el humano mira.
 
@@ -714,6 +762,29 @@ def vet_repos_for_lane(lane: str, repos: list, ws: Path) -> None:
               file=sys.stderr)
     if lane in ("quick", "express", "triado"):
         infra = [r for r in repos if kinds.get(r) in ("infra-live", "infra-module")]
+        # ── EN `quick` VUELVE A SER RECHAZO DURO ──────────────────────────
+        # #71 lo degradó a aviso con razón: decidía por el KIND DEL REPO y no
+        # por el diff, y 20 de 31 repos del workspace son infra-* porque llevan
+        # su terraform al lado del código, así que un cambio de dos líneas se
+        # quedaba sin carril rápido.
+        #
+        # Lo que cambió desde entonces es QUIÉN elige el carril. `quick` dejó
+        # de ser una promesa que solo el humano podía hacer: /smart ahora lo
+        # clasifica solo (paso 0.1). Un carril que una máquina elige necesita
+        # un piso que no dependa de que la máquina haya juzgado bien, y el
+        # backstop que lo cubría (`gate_lane`) mira el diff RECIÉN en el
+        # precheck. Para express y triado el aviso sigue siendo correcto: ésos
+        # los sigue eligiendo un criterio con más evidencia delante.
+        if infra and lane == "quick":
+            fail("POLICY-LANE-004",
+                 f"quick con repos de infra: {', '.join(infra)} (kind "
+                 "infra-module/infra-live en manifest.yaml). quick es el único "
+                 "carril que /smart clasifica solo y el más corto de todos, así "
+                 "que su piso no puede depender de un juicio: acá se rechaza en "
+                 "el acto en vez de descubrirlo en gate_lane, después de que el "
+                 "implementer trabajó. Remediación: iniciá con --lane express, "
+                 "que sí acepta repos de infra y verifica lo mismo sobre el "
+                 "diff (gate_lane, en el precheck)")
         if infra:
             # ── AVISA, NO RECHAZA (#71) ────────────────────────────────
             # Esto rechazaba por el KIND DEL REPO, antes de que existiera un
@@ -1807,7 +1878,32 @@ def cmd_transition(args: argparse.Namespace) -> int:
     state["review_rounds"] = rounds
     if rounds_by_repo:
         state["review_rounds_by_repo"] = rounds_by_repo
+    # ── QUIÉN MANEJÓ ESTA FASE, escrito donde se pueda auditar ───────────
+    # Sin esto, "el orquestador arrastró una sesión por toda la tarea" solo se
+    # puede ver leyendo transcripts a posteriori. Con el id estampado en cada
+    # cambio de fase, dos fases seguidas con el MISMO id son la prueba de que
+    # el relevo no ocurrió, y se ve en el propio state.json.
+    sid = current_session(task_dir)
+    if sid:
+        state["session_id"] = sid
     atomic(path, state)
+    # El relevo se pide solo cuando la fase de verdad AVANZA. Un `review →
+    # review` de otro repo es la misma fase, y `archive` no tiene fase
+    # siguiente a la que relevar. `quick` queda afuera a propósito: es un
+    # carril de UNA sesión corta de punta a punta, y relevarlo por fase sería
+    # pagar arranques para ahorrar un contexto que nunca crece.
+    #
+    # Y `deploy` tampoco lo pide ACÁ, que es la parte contraintuitiva: la
+    # espera del deploy son hasta 2820s por ship (Actions 1800 + ArgoCD 900 +
+    # smoke 120) y relevar al entrar despertaría una sesión nueva para que se
+    # siente a esperar, o sea el mismo tiempo con otro contexto cargado. El
+    # relevo de deploy lo escribe `deploy-watch.sh` CUANDO TERMINA, que es un
+    # proceso de bash a cero tokens: durante la espera no hay ninguna sesión
+    # viva. Si el watcher muere sin escribirlo, la tarea cae en la regla de
+    # silencio de bus de siempre.
+    if args.phase != current and args.phase not in ("archive", "deploy") \
+            and state.get("lane") != "quick":
+        write_handoff(task_dir, args.phase, sid)
     detail = f" (repo {args.repo}: ronda {rounds_by_repo.get(args.repo)})" if args.repo and args.phase == "review" else ""
     # la ronda viaja al bus: el panel antes no tenía forma de contar rondas
     emit_bus(task_dir, "phase", f"{current} → {args.phase}"

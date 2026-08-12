@@ -190,6 +190,36 @@ assert_contains "$out" "kill switch" "y lo dice"
 rm -f "$WS/.harness/orch-watch.off"
 
 echo
+echo "── el relevo de fase: una fase, una sesión"
+# El corte no lo puede ejecutar el orquestador (un prompt no puede terminarse a
+# sí mismo ni relanzarse): la transición deja el marcador, el orquestador cierra
+# su turno y ESTE vigilante arranca la sesión nueva.
+rm -f "$WS/relanzamientos.txt"; rm -rf "$WS/.harness/claims" "$WS/.harness/orch-watch" "$WS/tasks"
+nueva_tarea RELEVO implement 300   # 5 min quieta: NO es un hueco (IDLE=720) pero pasó la gracia
+printf '{"schema":1,"phase":"implement","at":"2026-08-12T00:00:00Z","from_session":"vieja"}\n' \
+  > "$WS/tasks/RELEVO/handoff.json"
+evento RELEVO tool 300
+out="$(corre once)"; n="$(espera_relanzos 1)"
+assert_contains "$out" "relevo de fase" "toma el relevo sin esperar los 12 min del hueco de bus"
+assert_eq 1 "$n" "y arranca UNA sesión nueva"
+assert_no_file "$WS/tasks/RELEVO/handoff.json" "consume el marcador: un relanzamiento por relevo"
+
+# Y el guardarraíl que impide dos orquestadores sobre la misma tarea: si el
+# orquestador NO cerró su turno, sus eventos corren el reloj y el relevo espera.
+rm -f "$WS/relanzamientos.txt"; rm -rf "$WS/.harness/claims" "$WS/.harness/orch-watch" "$WS/tasks"
+nueva_tarea TRABAJANDO implement
+printf '{"schema":1,"phase":"implement","at":"2026-08-12T00:00:00Z","from_session":"viva"}\n' \
+  > "$WS/tasks/TRABAJANDO/handoff.json"
+evento TRABAJANDO tool 5        # emitiendo AHORA: la sesión vieja sigue trabajando
+out="$(corre once)"; reposa
+assert_eq 0 "$(relanzos)" "con la sesión vieja activa NO relanza: dos orquestadores son peores que uno"
+assert_file "$WS/tasks/TRABAJANDO/handoff.json" "y el relevo queda pendiente para la pasada siguiente"
+
+# status mira y no toca, también para el relevo.
+out="$(corre status)"; reposa
+assert_eq 0 "$(relanzos)" "status no toma relevos (es el modo por defecto)"
+
+echo
 echo "── la tarea que emite y NO avanza: la otra señal (#155)"
 # El hueco de bus caza al agente que murió callado. NO caza a la que sigue
 # emitiendo y lleva 12h en la misma fase con el trabajo hecho: eso es lo que

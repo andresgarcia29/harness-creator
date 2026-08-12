@@ -283,6 +283,64 @@ class Atribucion(CostBase):
         self.assertIn("sin-rol", r.stdout, r.stdout)
 
 
+class GeneralPurposeProhibido(CostBase):
+    """`general-purpose` está prohibido como subagente del pipeline.
+
+    Medido en UNA tarea de $953: 34 general-purpose, 3134 turnos y $357, el
+    rubro más caro de toda la tarea, contra 33 turnos y $2 del único Explore.
+    Ningún prompt del harness lo nombraba: el orquestador lo usaba porque es el
+    default del tool Agent y nada le decía otra cosa. Para que la regla se
+    verifique sola hace falta que el rol se VEA en el reporte.
+    """
+
+    def subagente(self, nombre, meta, lineas):
+        subs = self.proj / self.sid / "subagents"
+        subs.mkdir(parents=True, exist_ok=True)
+        (subs / f"agent-{nombre}.jsonl").write_text("\n".join(lineas) + "\n")
+        (subs / f"agent-{nombre}.meta.json").write_text(json.dumps(meta))
+
+    def test_se_marca_en_el_reporte(self):
+        self.write([self.turn(read=1_000)])
+        self.subagente("gp", {"agentType": "general-purpose",
+                              "description": "buscar donde esta X"},
+                       [self.turn(read=2_000_000)])
+        r = self.run_cost("task", "T1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("general-purpose", r.stdout, r.stdout)
+        self.assertIn("PROHIBIDO", r.stdout, r.stdout)
+
+    def test_una_descripcion_amable_ya_no_lo_lava(self):
+        # Estaba en la lista de tipos genéricos para caer al `<rol>:<repo>` de
+        # la descripción, así que un agente prohibido con una descripción
+        # amable se contabilizaba como implementer y no se veía nunca.
+        self.write([self.turn(read=1_000)])
+        self.subagente("gp", {"agentType": "general-purpose",
+                              "description": "implementer:atlas"},
+                       [self.turn(read=2_000_000)])
+        r = self.run_cost("task", "T1")
+        self.assertIn("general-purpose", r.stdout, r.stdout)
+        self.assertNotIn("implementer", r.stdout, r.stdout)
+
+    def test_Explore_no_se_marca(self):
+        # Explore es el agente legítimo cuando hace falta un agente de verdad:
+        # marcarlo sería empujar de vuelta al caro.
+        self.write([self.turn(read=1_000)])
+        self.subagente("ex", {"agentType": "Explore",
+                              "description": "reviewer:atlas"},
+                       [self.turn(read=2_000_000)])
+        r = self.run_cost("task", "T1")
+        self.assertNotIn("PROHIBIDO", r.stdout, r.stdout)
+        self.assertIn("reviewer", r.stdout, r.stdout)
+
+    def test_los_roles_de_verdad_no_se_marcan(self):
+        self.write([self.turn(read=1_000)])
+        self.subagente("imp", {"agentType": "implementer",
+                               "description": "implementer:atlas"},
+                       [self.turn(read=2_000_000)])
+        r = self.run_cost("task", "T1")
+        self.assertNotIn("PROHIBIDO", r.stdout, r.stdout)
+
+
 class AtribucionPorTarea(CostBase):
     """El gasto es de la TAREA, no de la sesión que la lanzó (#153).
 

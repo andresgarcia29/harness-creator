@@ -23,6 +23,7 @@
 #   HARNESS_ORCH_IDLE      720   sin eventos de bus = varado (12 min)
 #   HARNESS_ORCH_INTERVAL  120   cada cuánto mira el modo daemon
 #   HARNESS_ORCH_MAX       2     relanzamientos sin progreso antes del humano
+#   HARNESS_ORCH_HANDOFF   60    quietud mínima para tomar un relevo de fase
 #   HARNESS_ORCH_OFF             cualquier valor = no relanza nada (kill switch)
 #
 # El kill switch también es un ARCHIVO (.harness/orch-watch.off), porque quien
@@ -33,6 +34,7 @@ WS="$(cd "$(dirname "$0")/.." && pwd)"
 IDLE="${HARNESS_ORCH_IDLE:-720}"
 INTERVAL="${HARNESS_ORCH_INTERVAL:-120}"
 MAX_TRIES="${HARNESS_ORCH_MAX:-2}"
+HANDOFF_GRACE="${HARNESS_ORCH_HANDOFF:-60}"
 BUS="$WS/.harness/events.jsonl"
 CLAIMS="$WS/.harness/claims"
 STATE_DIR="$WS/.harness/orch-watch"
@@ -245,6 +247,35 @@ pass_once() {  # pass_once <act 0|1>
     terminal_phase "$phase" && continue
     vistas=$((vistas+1))
     idle_for=$(( $(now_epoch) - $(last_event_epoch "$task") ))
+    # ── EL RELEVO DE FASE: una fase, una sesión ─────────────────────────
+    # `harness-policy.py transition` deja `tasks/<id>/handoff.json` cuando la
+    # fase avanza. El orquestador cierra su turno ahí, y quien arranca la
+    # sesión siguiente es este vigilante: un prompt no puede terminarse a sí
+    # mismo ni relanzarse, así que el corte lo tiene que ejecutar algo de
+    # afuera, y esto ya sabe hacerlo.
+    #
+    # POR QUÉ CON GRACIA Y NO AL INSTANTE: si el orquestador NO cerró su turno
+    # (un prompt viejo, o un modelo que ignoró la instrucción), relanzar al
+    # instante deja DOS sesiones sobre la misma tarea, que es peor que el
+    # problema que vino a arreglar. Sus eventos de bus corren el reloj, así que
+    # con actividad el relevo no se toma; con el turno cerrado se toma en 60s
+    # en vez de los 12 minutos de la regla de silencio.
+    if [ "$act" = "1" ] && [ -f "$WS/tasks/$task/handoff.json" ] \
+       && [ "$idle_for" -ge "$HANDOFF_GRACE" ] && ! call_in_flight "$task"; then
+      if lease_taken "$task"; then
+        echo "   ⏳ $task ($phase): relevo pendiente, pero ya tiene dueño"
+      elif take_lease "$task"; then
+        # Se consume ANTES de relanzar: si el relanzamiento falla, la tarea
+        # cae en la regla de silencio de siempre. Un marcador que sobrevive es
+        # un relanzamiento por pasada.
+        rm -f "$WS/tasks/$task/handoff.json" 2>/dev/null || true
+        echo "🔁 $task: relevo de fase ($phase), arranco sesión nueva"
+        if relaunch "$task"; then
+          continue
+        fi
+        rm -rf "${CLAIMS:?}/orch-$task.lock.d" 2>/dev/null || true
+      fi
+    fi
     [ "$idle_for" -ge "$IDLE" ] || continue
     if call_in_flight "$task"; then
       echo "   ⏳ $task ($phase): ${idle_for}s sin eventos, pero hay una llamada EN VUELO, la dejo"

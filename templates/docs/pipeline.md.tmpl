@@ -90,9 +90,16 @@ carril declarado: la clasificación es propuesta, el gate es ley. Un diff
 que excede la promesa de quick es `gate_lane` en rojo, y la remediación
 que trae es escalar: `harness-policy.py escalate --to express`. La
 escalera (quick → express → standard → full) es barata y conserva el
-worktree. quick es promesa del humano, no clasificación: `/smart`
-jamás lo elige por su cuenta, solo lo SUGIERE en el reporte final si la
-tarea resultó trivial.
+worktree. **quick lo clasifica `/smart` solo** desde que el número mostró qué
+cuesta no hacerlo (standard $119 por tarea contra express $35, y buena parte de
+lo que entraba por standard eran cambios mecánicos de un repo). `/quick` sigue
+siendo la entrada del humano que ya dimensionó el trabajo, pero ya no es la
+única. Lo que sostiene esa clasificación automática: `POLICY-LANE-005` rechaza
+el segundo repo, `POLICY-LANE-004` volvió a ser **rechazo duro** para quick
+(un repo de infra no entra), y `gate_lane` frena contratos, migraciones e infra
+por patrón de archivo. Lo que NINGÚN gate frena es un cruce de ownership dentro
+de un mismo repo, así que clasificar quick exige evidencia positiva de que el
+cambio no escribe datos de otro servicio; sin ella, express.
 
 ## La entrega la declara la invocación (`delivery`)
 

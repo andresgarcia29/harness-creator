@@ -478,7 +478,16 @@ def role_of(agent_path: str) -> str:
     except Exception:
         return "sin-rol"
     at = (m.get("agentType") or "").strip()
-    if at and at not in ("general-purpose", "claude", "Explore"):
+    # ── `general-purpose` YA NO SE LAVA CON LA DESCRIPCIÓN ────────────────
+    # Estaba en esta lista de tipos "genéricos" para caer al `<rol>:<repo>` de
+    # la descripción, y el efecto era que un agente prohibido con una
+    # descripción amable se contabilizaba como implementer. Medido en UNA
+    # tarea: 34 general-purpose, 3134 turnos y $357, el rubro más caro de la
+    # tarea, contra 33 turnos y $2 del único Explore. Para que el criterio se
+    # verifique solo hace falta que el rol se vea, así que se devuelve tal cual
+    # y `band()` lo marca. `claude` y `Explore` siguen cayendo a la
+    # descripción: los dos son usos legítimos.
+    if at and at not in ("claude", "Explore"):
         return at
     desc = (m.get("description") or "").strip().lower()
     for r in ("architect", "implementer", "reviewer", "qa", "svc-agent"):
@@ -650,6 +659,13 @@ def band(r) -> str:
         flags.append(f"cache {r['cache_hit']*100:.0f}%{corto}")
     if r["ctx_avg"] > CTX_CEILING:
         flags.append(f"ctx {r['ctx_avg']/1000:.0f}k")
+    # `general-purpose` está PROHIBIDO como subagente del pipeline: las
+    # preguntas de "dónde está X" se contestan con herramienta (graphify query,
+    # semble search, Serena), y cuando hace falta un agente de verdad es
+    # `Explore`. No es un gate, es un flag: el criterio se verifica solo en el
+    # reporte, sin que nadie tenga que acordarse de mirarlo.
+    if r.get("role") == "general-purpose":
+        flags.append("general-purpose PROHIBIDO")
     return " ".join(flags)
 
 

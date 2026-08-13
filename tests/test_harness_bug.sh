@@ -190,15 +190,34 @@ for i in 1 2 3; do
   printf '{"ts":"x","epoch":%s,"fp":"deadbeef%s","file":"scripts/x.sh","url":"u","status":"creado"}\n' "$now" "$i" \
     >> "$WS/.harness/upstream-issues.jsonl"
 done
+# EL TOPE DIARIO YA NO BLOQUEA. Medido en campo: en UNA sesion freno dos
+# defectos reales y DISTINTOS, los dos terminaron reportados a mano y un tercero
+# se quedo sin reportar. No filtro ruido, perdio senal. El dedupe (arriba) es la
+# capa que evita el ruido de verdad: frena el MISMO defecto dos veces.
 out="$(cd "$WS" && $BUG report --title "bug nuevo del dia" --file scripts/emit.sh --repro repro.log --impact z --dry-run 2>&1)"; rc=$?
-assert_eq 5 "$rc" "cuota de 24h agotada: exit 5"
-assert_contains "$out" "harness-bug.sh record" "cuota agotada: enseña el camino de vuelta al ledger"
-# fuera de la ventana de 24h la cuota se libera
+assert_eq 0 "$rc" "tres reportes frescos y DISTINTOS: no se bloquea (defectos distintos son senal)"
+
+# …pero el ritmo se DICE. Con cinco, avisa sin cortar: una tormenta se ve en la
+# salida en vez de descubrirse por un canal cerrado.
+for i in 4 5; do
+  printf '{"ts":"x","epoch":%s,"fp":"deadbeef%s","file":"scripts/x.sh","url":"u","status":"creado"}\n' "$now" "$i" \
+    >> "$WS/.harness/upstream-issues.jsonl"
+done
+out="$(cd "$WS" && $BUG report --title "el sexto del dia" --file scripts/emit.sh --repro repro.log --impact z --dry-run 2>&1)"; rc=$?
+assert_eq 0 "$rc" "cinco reportes en 24h: sigue sin bloquear"
+assert_contains "$out" "reportes automáticos en 24h" "pero lo avisa"
+assert_contains "$out" "defectos DISTINTOS son señal" "y dice por que no corta"
+
+# Y el knob re-arma el tope viejo para quien lo quiera cerrar.
+out="$(cd "$WS" && HARNESS_BUG_QUOTA=3 $BUG report --title "con el knob puesto" --file scripts/emit.sh --repro repro.log --impact z --dry-run 2>&1)"; rc=$?
+assert_eq 5 "$rc" "HARNESS_BUG_QUOTA=3 re-arma el tope: exit 5"
+assert_contains "$out" "harness-bug.sh record" "y sigue ensenando el camino de vuelta al ledger"
+# fuera de la ventana de 24h el tope armado se libera igual que antes
 sed_tmp="$WS/.harness/l2.jsonl"
 awk -v old="$(( now - 200000 ))" '{sub(/"epoch":[0-9]+/, "\"epoch\":" old); print}' \
   "$WS/.harness/upstream-issues.jsonl" > "$sed_tmp" && mv "$sed_tmp" "$WS/.harness/upstream-issues.jsonl"
-out="$(cd "$WS" && $BUG report --title "bug nuevo del dia" --file scripts/emit.sh --repro repro.log --impact z --dry-run 2>&1)"; rc=$?
-assert_eq 0 "$rc" "reportes de hace >24h no consumen cuota"
+out="$(cd "$WS" && HARNESS_BUG_QUOTA=3 $BUG report --title "bug nuevo del dia" --file scripts/emit.sh --repro repro.log --impact z --dry-run 2>&1)"; rc=$?
+assert_eq 0 "$rc" "con el knob puesto, los de hace >24h no consumen tope"
 
 echo "── record: el issue abierto a mano entra al ledger y el dedupe lo ve"
 
@@ -222,8 +241,10 @@ for i in 1 2 3; do
   printf '{"ts":"x","epoch":%s,"fp":"cafe000%s","file":"scripts/x.sh","url":"https://github.com/x/y/issues/9%s","status":"manual"}\n' \
     "$now_m" "$i" "$i" >> "$WS/.harness/upstream-issues.jsonl"
 done
-out="$(cd "$WS" && $BUG report --title "bug nuevo con tres manuales frescos" --file scripts/emit.sh --repro repro.log --impact z --dry-run 2>&1)"; rc=$?
-assert_eq 0 "$rc" "tres filas manuales frescas no consumen cuota (solo 'creado' cuenta)"
+# Con el knob puesto, porque sin tope el caso seria vacuo: lo que se mide es que
+# 'manual' NO cuenta, y sin nada que contar no se mide nada.
+out="$(cd "$WS" && HARNESS_BUG_QUOTA=3 $BUG report --title "bug nuevo con tres manuales frescos" --file scripts/emit.sh --repro repro.log --impact z --dry-run 2>&1)"; rc=$?
+assert_eq 0 "$rc" "tres filas manuales frescas no consumen tope (solo 'creado' cuenta)"
 
 out="$(cd "$WS" && $BUG record --title "bug reportado a mano" --file scripts/emit.sh --url "https://github.com/x/y/issues/45" 2>&1)"; rc=$?
 assert_eq 0 "$rc" "record dos veces no es un error"
@@ -408,16 +429,21 @@ out="$(cd "$WS" && PATH="$WS/bin:$PATH" GH_FAKE_VERSION=0.99.0 \
   $BUG report --title "recuperado del claim ajeno" --file scripts/emit.sh --repro repro.log --impact z 2>&1)"
 assert_eq 3 "$(wc -l < "$WS/.harness/upstream-issues.jsonl" | tr -d ' ')" "el recuperado suma una tercera fila sin abrir ningún issue"
 
-out="$(cd "$WS" && $BUG report --title "el tercer bug del dia" --file scripts/emit.sh --repro repro.log --impact z --dry-run 2>&1)"; rc=$?
-assert_eq 0 "$rc" "tres filas pero UN issue abierto: la cuota consumida es 1, no 3"
+# La contabilidad se prueba CON EL KNOB PUESTO: sin tope no habria nada que
+# contar, y este bloque mide QUE se cuenta, no si se bloquea por defecto.
+out="$(cd "$WS" && HARNESS_BUG_QUOTA=3 $BUG report --title "el tercer bug del dia" --file scripts/emit.sh --repro repro.log --impact z --dry-run 2>&1)"; rc=$?
+assert_eq 0 "$rc" "tres filas pero UN issue abierto: el tope consumido es 1, no 3"
 
 now2="$(date +%s)"
 for i in 1 2; do
   printf '{"ts":"x","epoch":%s,"fp":"beefcafe%s","file":"scripts/x.sh","url":"u","status":"creado"}\n' "$now2" "$i" \
     >> "$WS/.harness/upstream-issues.jsonl"
 done
+out="$(cd "$WS" && HARNESS_BUG_QUOTA=3 $BUG report --title "el cuarto bug del dia" --file scripts/emit.sh --repro repro.log --impact z --dry-run 2>&1)"; rc=$?
+assert_eq 5 "$rc" "tres issues ABIERTOS de verdad y el knob puesto: ahí sí corta (exit 5)"
+# …y sin el knob, esos mismos tres issues abiertos NO cortan nada.
 out="$(cd "$WS" && $BUG report --title "el cuarto bug del dia" --file scripts/emit.sh --repro repro.log --impact z --dry-run 2>&1)"; rc=$?
-assert_eq 5 "$rc" "tres issues ABIERTOS de verdad: ahí sí corta (exit 5)"
+assert_eq 0 "$rc" "los mismos tres, sin knob: el canal queda abierto"
 
 echo "── el claim que no se pudo ni intentar es otro problema, con otro exit"
 

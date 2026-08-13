@@ -26,8 +26,9 @@
 #   · REDACTA ANTES DE PUBLICAR. El repro suele ser la salida de un comando,
 #     y esa salida trae tokens. La ley de secretos también aplica aquí, y
 #     aquí es peor: esto sale a un repo PÚBLICO.
-#   · CUOTA Y DEDUPE. Máximo 3 issues automáticos por 24h y jamás dos veces
-#     el mismo fingerprint. Tres capas, porque el dedupe es una CARRERA: claim
+#   · DEDUPE, y NO cuota. Jamás dos veces el mismo fingerprint; el ritmo se
+#     avisa pero no se bloquea (el tope diario perdía defectos DISTINTOS, que
+#     es la señal que este canal transporta). Tres capas, porque es una CARRERA: claim
 #     local atómico antes de tocar la red (misma máquina), búsqueda remota
 #     antes de crear, y reconciliación contra el forge después de crear (otra
 #     máquina que ganó por segundos: el número de issue menor sobrevive).
@@ -50,7 +51,7 @@ UPSTREAM_REPO="${HARNESS_UPSTREAM_REPO:-andresgarcia29/harness-creator}"
 WS="$(cd "$(dirname "$0")/.." && pwd)"
 LEDGER="$WS/.harness/upstream-issues.jsonl"
 CLAIMS="$WS/.harness/claims"
-QUOTA="${HARNESS_BUG_QUOTA:-3}"
+QUOTA="${HARNESS_BUG_QUOTA:-0}"   # 0 = sin tope. Ver el bloque 4 de report().
 RECON_LIMIT="${HARNESS_BUG_RECONCILE_LIMIT:-30}"
 
 die()  { echo "❌ $1" >&2; exit "${2:-1}"; }
@@ -414,17 +415,33 @@ cmd_report() {
     return 0
   fi
 
-  # 4 · cuota diaria (una tormenta de issues automáticos es spam, no señal)
-  # La cuota cuenta ISSUES QUE ABRÍ, no filas del ledger. Un solo evento deja
-  # varias filas: el `creado` y, si otra máquina ganó la carrera, el
-  # `reconciliado` del mismo bug; `recuperado` y `duplicado` ni siquiera
-  # abrieron nada. Contarlas todas cobraba el mismo reporte dos y tres veces y
-  # cerraba el canal con la cuota a medio gastar.
+  # 4 · el ritmo se DICE, no se bloquea
+  # La cuota diaria (tope 3) existía contra una tormenta de issues automáticos.
+  # Lo que hizo, medido en campo en una sola sesión: bloqueó DOS defectos reales
+  # y distintos. Los dos terminaron reportados a mano, uno de ellos con varias
+  # horas de demora, y un tercero se quedó sin reportar. O sea que no filtró
+  # ruido: perdió señal, que es el fallo caro de este canal y no el barato.
+  #
+  # La capa que de verdad evita el ruido es el DEDUPE, y sigue entera arriba:
+  # frena el MISMO defecto dos veces. La cuota frenaba defectos DISTINTOS, que
+  # es justo lo que este canal existe para transportar. Bloquear por ritmo
+  # confunde "muchos bugs" con "mucho spam", y cuando el harness está cambiando
+  # rápido lo primero es lo esperable.
+  #
+  # Se conserva el aviso, porque un ritmo raro sigue siendo un dato: si de
+  # verdad hay una tormenta, se ve en la salida en vez de descubrirse por un
+  # canal cerrado. Y HARNESS_BUG_QUOTA sigue armando el tope viejo para el que
+  # quiera cerrarlo (0 o vacío = sin tope, que es el default).
   if [ -f "$LEDGER" ]; then
     local recent now; now="$(date +%s)"
     recent="$(jq -r --argjson now "$now" 'select((.epoch // 0) > ($now - 86400)) | select((.status // "") == "creado") | .fp' "$LEDGER" 2>/dev/null | wc -l | tr -d ' ')"
-    if [ "${recent:-0}" -ge "$QUOTA" ]; then
-      die "cuota de reportes automáticos agotada ($recent en 24h, tope $QUOTA): junta los hallazgos en UN issue o repórtalo a mano Y anótalo con: harness-bug.sh record --url <issue> --file $file --title '<el mismo título>'" 5
+    if [ -n "$QUOTA" ] && [ "$QUOTA" -gt 0 ] 2>/dev/null && [ "${recent:-0}" -ge "$QUOTA" ]; then
+      die "cuota de reportes automáticos agotada ($recent en 24h, tope $QUOTA por HARNESS_BUG_QUOTA): junta los hallazgos en UN issue o repórtalo a mano Y anótalo con: harness-bug.sh record --url <issue> --file $file --title '<el mismo título>'" 5
+    fi
+    if [ "${recent:-0}" -ge 5 ]; then
+      echo "ℹ️  van $recent reportes automáticos en 24h. No bloquea: el dedupe ya"
+      echo "   frena el mismo defecto dos veces, y defectos DISTINTOS son señal."
+      echo "   Si esto es una tormenta y no una racha, HARNESS_BUG_QUOTA=<n> la corta."
     fi
   fi
 

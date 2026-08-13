@@ -1155,6 +1155,45 @@ class PolicyTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.split(), ["proto", "atlas"])
 
+    def test_dag_nodes_emits_id_repo_and_depends_on(self):
+        # El contrato de las TRES columnas lo consumen dos scripts: dag-coalesce.sh
+        # toma $1 (el orden del cherry-pick) y worktree-task.sh --node toma $3 para
+        # decidir de dónde nace la rama del nodo (#162). Sin la tercera columna ese
+        # script leería dag.json por su cuenta, que es el segundo lector del mismo
+        # artefacto que load_dag_nodes existe para evitar.
+        self.mk_dag_items([
+            {"id": "T1", "repo": "atlas", "depends_on": []},
+            {"id": "T2", "repo": "proto", "depends_on": []},
+            {"id": "T3", "repo": "atlas", "depends_on": ["T2", "T1"]},
+        ])
+        result = self.run_policy("dag-nodes", self.task)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [line.split("\t") for line in result.stdout.splitlines() if line]
+        self.assertEqual(rows[-1], ["T3", "atlas", "T2,T1"])
+        # Y el nodo sin aristas trae la columna VACÍA, no ausente: el consumidor
+        # parte por TAB y una fila de dos campos le correría el índice.
+        self.assertIn(["T1", "atlas", ""], rows)
+        # T3 después de sus dos dependencias: el orden sigue siendo topológico.
+        ids = [row[0] for row in rows]
+        self.assertLess(ids.index("T1"), ids.index("T3"))
+        self.assertLess(ids.index("T2"), ids.index("T3"))
+
+    def test_dag_nodes_repo_filter_keeps_deps_of_other_repos(self):
+        # Con --repo se filtran las FILAS, no las aristas: T3 sigue declarando su
+        # dependencia de proto aunque la fila de proto no salga. worktree-task.sh
+        # necesita justamente eso para saber que esa dependencia NO vive en su
+        # repo y que por lo tanto no hay nada que heredar en este árbol.
+        self.mk_dag_items([
+            {"id": "T1", "repo": "atlas", "depends_on": []},
+            {"id": "T2", "repo": "proto", "depends_on": []},
+            {"id": "T3", "repo": "atlas", "depends_on": ["T2", "T1"]},
+        ])
+        result = self.run_policy("dag-nodes", self.task, "--repo", "atlas")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = [line.split("\t") for line in result.stdout.splitlines() if line]
+        self.assertEqual([row[0] for row in rows], ["T1", "T3"])
+        self.assertEqual(rows[-1][2], "T2,T1")
+
     def test_dag_order_cycle_fails(self):
         self.mk_dag_items([
             {"id": "T1", "repo": "atlas", "depends_on": ["T2"]},

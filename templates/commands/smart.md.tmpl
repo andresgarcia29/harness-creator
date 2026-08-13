@@ -518,6 +518,8 @@ Reglas del ledger, en orden de precedencia:
    scripts/worktree-task.sh --node T2 <id> <repo>   # worktrees/<id>/<repo>@T2
    # …los implementers trabajan en paralelo…
    scripts/dag-coalesce.sh <id> <repo>              # cherry-pick en orden del DAG sobre task/<id>
+   # y RECIÉN AHORA los nodos que dependían de T1/T2: su árbol nace de task/<id>
+   scripts/worktree-task.sh --node T3 <id> <repo>
    ```
 
    Por qué importa el número: cadenas medidas de 80 min por 6 tareas (50 por 4,
@@ -526,6 +528,13 @@ Reglas del ledger, en orden de precedencia:
    - **Sin `files[]` no hay paralelo.** `POLICY-DAG-011` es fail-closed: lo que
      no se declara se serializa. No inventes los archivos para habilitarlo; si
      no sabés qué toca un nodo, ese nodo va en serie.
+   - **El árbol de un nodo con `depends_on` se crea DESPUÉS de coalescer sus
+     dependencias.** Nace de `task/<id>` y no de la trunk, así que si lo creás
+     antes arranca SIN el trabajo del que depende, y el modo de falla no es un
+     rojo: el implementer que no encuentra su dependencia la re-implementa, y
+     eso aparece recién como conflicto en el coalesce con los tokens gastados.
+     `worktree-task.sh` avisa cuando pasa; el orden lo ponés vos: coalesce de la
+     ronda N, después los árboles de la ronda N+1.
    - **Cada nodo prechequea SU árbol** (`ship.sh --precheck <id> <repo>@<Tn>`):
      es la verificación temprana y barata de ese commit, con sello propio
      (`precheck-<repo>@<Tn>.json`). Ese verde NO habilita review ni ship.

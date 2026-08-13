@@ -128,6 +128,73 @@ echo "── un commit POSTERIOR al coalesce no se tira: la marca no alcanza"
   && git add -A && git commit -qm "T2: algo despues del coalesce" )
 
 echo
+echo "── ISSUE #162: el nodo DEPENDIENTE nace CON sus dependencias adentro"
+# worktree-task.sh --node hacía nacer TODA rama de nodo de la trunk. Para el
+# nodo independiente es correcto y deliberado (que no se dupliquen los commits
+# de los hermanos en el cherry-pick), pero con `depends_on` no vacío significa
+# nacer SIN aquello de lo que dependés. El modo de falla no es un rojo: el
+# implementer que no encuentra su dependencia la RE-IMPLEMENTA, y eso aparece
+# recién como conflicto en el coalesce, con los tokens ya gastados.
+mkdir -p "$WS/tasks/T-2"
+cat > "$WS/tasks/T-2/dag.json" <<'JSON'
+{"schema": 2,
+ "tasks": [{"id": "T1", "repo": "atlas", "depends_on": [],     "files": ["a.txt"]},
+           {"id": "T2", "repo": "atlas", "depends_on": ["T1"], "files": ["b.txt"]},
+           {"id": "T4", "repo": "atlas", "depends_on": [],     "files": ["e.txt"]},
+           {"id": "T5", "repo": "atlas", "depends_on": ["T4"], "files": ["f.txt"]},
+           {"id": "T9", "repo": "otro",  "depends_on": [],     "files": ["c.txt"]},
+           {"id": "T8", "repo": "atlas", "depends_on": ["T9"], "files": ["d.txt"]}]}
+JSON
+wt T-2 atlas >/dev/null                       # el árbol base, destino del coalesce
+
+# CONTRA-MITAD, y no es decorativa: sin ella este bloque pasaría igual con un
+# arreglo que mandara TODO nodo a nacer de task/<id>, que es justo la duplicación
+# que el diseño original evita.
+out="$(wt --node T1 T-2 atlas)"
+assert_not_contains "$out" "nace de task/T-2" \
+  "#162: sin depends_on, la rama sigue naciendo de la trunk"
+
+# T1 hace su trabajo y se coalesce: recién ahí task/T-2 lo tiene adentro.
+( cd "$WS/worktrees/T-2/atlas@T1" || exit 1
+  printf 'clave nueva\n' >> a.txt && git add -A && git commit -qm "T1: a.txt" )
+bash "$WS/scripts/dag-coalesce.sh" T-2 atlas >/dev/null 2>&1
+
+out="$(wt --node T2 T-2 atlas)"
+assert_contains "$out" "T2 depende de T1 en atlas" "#162: nombra la dependencia que hereda"
+assert_contains "$out" "nace de task/T-2" "#162: y de dónde nace la rama"
+assert_contains "$(cat "$WS/worktrees/T-2/atlas@T2/a.txt")" "clave nueva" \
+  "#162: el árbol del nodo dependiente TRAE el trabajo del que depende"
+
+# Y heredar NO reintroduce la duplicación: el coalesce compara por parche, así
+# que lo que ya es ancestro no se vuelve a aplicar.
+( cd "$WS/worktrees/T-2/atlas@T2" || exit 1
+  printf 'de T2\n' >> b.txt && git add -A && git commit -qm "T2: b.txt" )
+bash "$WS/scripts/dag-coalesce.sh" T-2 atlas >/dev/null 2>&1
+assert_eq 3 "$(git -C "$WS/worktrees/T-2/atlas" rev-list --count HEAD)" \
+  "#162: base + T1 + T2 y nada más: heredar no duplicó el commit de T1"
+
+# Una dependencia en OTRO repo no se hereda acá: el árbol de atlas no tiene nada
+# que traer de un nodo de otro repo, y anunciar que sí sería la misma mentira.
+out="$(wt --node T8 T-2 atlas)"
+assert_not_contains "$out" "nace de task/T-2" \
+  "#162: una dependencia en otro repo no cambia de dónde nace este árbol"
+
+# Declarada pero SIN coalescer: que la rama exista no prueba que la dependencia
+# esté adentro. Se dice, que es lo único que evita el trabajo duplicado.
+out="$(wt --node T5 T-2 atlas)"
+assert_contains "$out" "T4 todavía no se coalesció" \
+  "#162: avisa que la dependencia declarada no está en la rama todavía"
+assert_contains "$out" "dag-coalesce.sh T-2 atlas" "con el comando que falta"
+
+# Y sin árbol base no se inventa la rama: se avisa que nace sin sus dependencias.
+mkdir -p "$WS/tasks/T-3"
+sed 's/T-2/T-3/' "$WS/tasks/T-2/dag.json" > "$WS/tasks/T-3/dag.json"
+out="$(wt --node T2 T-3 atlas)"
+assert_contains "$out" "no existe la rama task/T-3" "#162: sin árbol base lo dice"
+assert_contains "$out" "SIN el trabajo del que depende" "y qué significa eso"
+assert_contains "$out" "worktree-task.sh T-3 atlas" "con la remediación en orden"
+
+echo
 echo "── --rm entiende los worktrees de nodo (si no, el repo queda trabado)"
 out="$(wt --rm T-1)"
 assert_contains "$(git -C "$WS/repos/atlas" branch --list 'task/T-1@T2')" "task/T-1@T2" \

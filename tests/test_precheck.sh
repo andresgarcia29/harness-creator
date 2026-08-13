@@ -84,6 +84,50 @@ assert_contains "$out" "desde ahí no se publica" "y dice por qué"
 assert_contains "$out" "dag-coalesce.sh T1 svc" "con el comando que falta"
 
 echo
+echo "── ISSUES #158/#159: los gates de lenguaje del NODO corren en el ÁRBOL DEL NODO"
+# El precheck del nodo delega los gates a un hijo `ship.sh --lang-gates`, y ese
+# llamado pasaba el repo PELADO. El hijo recomponía su worktree sin el sufijo y
+# hacía `cd` al árbol de la TAREA, que existe siempre (es el destino del
+# coalesce): la suite corría sobre código que ese nodo no escribió. De paso el
+# marcador de "verifiqué algo" quedaba bajo la clave pelada mientras el padre lo
+# lee bajo la del nodo, así que los N hermanos se pisaban UN archivo y todos
+# sellaban `verificado: desconocido` con los gates en verde.
+#
+# El árbol del nodo es Rust y el de la tarea NO: es la única diferencia entre
+# los dos, y decide sola en cuál corrió el hijo. Sin este contraste el test
+# pasaría igual con el bug puesto.
+mkdir -p "$WS/tasks/T16" "$WS/worktrees/T16/svc" "$WS/worktrees/T16/svc@T1"
+cp -R "$WS/repos/svc/." "$WS/worktrees/T16/svc/"
+# `cd || exit 1` y no `cd;`: si el destino no existe, un `cd` pelado deja el
+# subshell en el repo DE QUIEN CORRE EL TEST y el `git add -A; git commit` de la
+# línea siguiente aterriza ahí. Pasó mientras se escribía este bloque.
+( cd "$WS/worktrees/T16/svc" || exit 1; echo "del árbol de la tarea" > base.txt; git add -A
+  git commit -qm "árbol de la tarea, sin stack
+
+Task: T16" )
+cp -R "$WS/repos/svc/." "$WS/worktrees/T16/svc@T1/"
+( cd "$WS/worktrees/T16/svc@T1" || exit 1; : > Cargo.toml; git add -A
+  git commit -qm "el nodo T1 sí es Rust
+
+Task: T16" )
+printf '#!/bin/sh\nexit 0\n' > "$WS/bin/cargo"; chmod +x "$WS/bin/cargo"
+stub_gitleaks 'exit 0'
+out="$( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/ship.sh --precheck T16 'svc@T1' 2>&1 )"; rc=$?
+rm -f "$WS/bin/cargo"
+assert_eq 0 "$rc" "#158: el precheck del nodo sale verde"
+assert_contains "$out" "gate: rust" "#158: corrió el stack DEL NODO (con el bug: el árbol de la tarea, sin stack)"
+assert_file "$WS/tasks/T16/.langseen-svc@T1" "#159: el marcador se escribe con la clave del NODO"
+assert_no_file "$WS/tasks/T16/.langseen-svc" \
+  "#159: y NO con la pelada, que los cuatro hermanos se pisaban entre sí"
+assert_not_contains "$out" "no hay rastro de si algo corrió" \
+  "#158: el padre encuentra el marcador que dejó su propio hijo"
+assert_contains "$(cat "$WS/tasks/T16/precheck-svc@T1.json")" '"verificado":"completo"' \
+  "#158: y el sello afirma lo que de verdad se verificó, no 'desconocido'"
+ls "$WS/tasks/T16/evidence/"EV-*.json >/dev/null 2>&1 \
+  && pass "#158: la evidencia del nodo queda sellada (antes se acuñaba y se tiraba)" \
+  || fail "#158: sin EV-TEST el implementer tiene que re-correr la suite a mano"
+
+echo
 echo "── un sufijo inválido no se convierte en una ruta"
 out="$( cd "$WS" && PATH="$WS/bin:$PATH" bash scripts/ship.sh --precheck T1 'svc@../otro' 2>&1 )"; rc=$?
 assert_eq 2 "$rc" "un nodo con '..' no pasa"

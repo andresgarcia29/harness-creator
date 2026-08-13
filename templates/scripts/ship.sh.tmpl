@@ -2618,11 +2618,17 @@ muerde_go_base_compila() {  # muerde_go_base_compila <paquete>
 # Vive en una función porque tiene DOS llamadores (muerde_node y gate_qa) y dos
 # copias divergirían justo en la definición de "puede mirar", que es la que
 # decide si el gate existe para este repo.
-tiene_runner_navegador() {  # → 0 si el worktree puede correr Playwright
+tiene_runner_navegador() {  # 0 puede correrlo · 1 no lo declara · 2 declarado SIN instalar
   [ -f "$WT/package.json" ] || return 1
   jq -e '.devDependencies["@playwright/test"] // .dependencies["@playwright/test"]' \
-     "$WT/package.json" >/dev/null 2>&1 \
-    && [ -x "$WT/node_modules/.bin/playwright" ]
+     "$WT/package.json" >/dev/null 2>&1 || return 1
+  # El 2 se separa del 1 porque son cosas distintas y una de ellas hay que
+  # DECIRLA: "este repo no hace UI" es una respuesta, y "este repo hace UI pero
+  # el árbol no puede correrla" es un tramo sin mirar. Para muerde_node los dos
+  # son igual de inservibles (un `if` los trata a ambos como falso), pero el
+  # gate de QA tiene que declarar el segundo en vez de desaparecer.
+  [ -x "$WT/node_modules/.bin/playwright" ] || return 2
+  return 0
 }
 muerde_node() {  # → MUERDE_NODE_RUNNERS con los runners declarados E instalados
   local pkg="$WT/package.json" unit=""
@@ -3360,7 +3366,21 @@ check_verdict() {
   # Solo donde hay con qué mirar: un repo con Playwright instalado PUEDE
   # ejercitar la interfaz, y ese es el único dato mecánico que distingue "no se
   # miró" de "no había con qué". Donde no lo hay, este gate no existe.
-  if tiene_runner_navegador; then
+  # `|| nav_rc=$?` y no `; nav_rc=$?`: bajo set -e una función que devuelve != 0
+  # como comando suelto mata el script antes de llegar al if.
+  local nav_rc=0
+  tiene_runner_navegador || nav_rc=$?
+  if [ "$nav_rc" -eq 2 ]; then
+    # Declarado pero sin binario. No se puede exigir que el QA ejercite la
+    # interfaz en un árbol que no puede correrla, pero desaparecer en silencio
+    # sería este mismo hueco con otra forma. Se declara el tramo sin mirar,
+    # igual que hace el gate ts con el package.json fuera de la raíz.
+    echo "   ⚠️  $REPO declara @playwright/test pero falta node_modules/.bin/playwright:"
+    echo "      el gate de QA por navegador NO se aplicó. No es un verde de QA,"
+    echo "      es un tramo que no pude mirar."
+    emit assumption "$REPO: gate de QA por navegador no aplicado (playwright declarado sin instalar)"
+  fi
+  if [ "$nav_rc" -eq 0 ]; then
     local qa_nav=0 qa_modo="" qa_motivo=""
     # La prueba determinista de que alguien miró: una evidencia de runner=qa
     # cuyo comando invoca al runner de navegador. `command` es un argv, así que

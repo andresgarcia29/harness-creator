@@ -2176,6 +2176,17 @@ assert_contains "$out" "por decisión declarada: cambio interno de util" \
 out="$(QA_WT="$WS/front" QA_JSON='{"schema":1,"qa":"pass","qa_mode":"determinista"}' \
        run_check_verdict "$VERDE")"
 assert_eq 3 $? "qa_mode determinista SIN motivo: no es un waiver"
+
+# DECLARADO PERO SIN INSTALAR: el gate no puede exigir lo que el arbol no puede
+# correr, pero desaparecer en silencio seria este mismo hueco con otra forma.
+# Es el unico camino por el que el gate no se aplica sin que nadie lo decida,
+# asi que tiene que DECIRSE.
+mkdir -p "$WS/front-sin-deps"
+printf '{"devDependencies":{"@playwright/test":"1.4.0"}}' > "$WS/front-sin-deps/package.json"
+out="$(QA_WT="$WS/front-sin-deps" run_check_verdict "$VERDE")"
+assert_eq 0 $? "playwright declarado sin instalar: no bloquea (no se puede exigir lo imposible)"
+assert_contains "$out" "NO se aplicó" "pero lo DICE: no desaparece en silencio"
+assert_contains "$out" "tramo que no pude mirar" "y encuadra que no es un verde de QA"
 rm -f "$WS/tasks/T9/evidence/EV-TEST-qa2.json"
 
 echo

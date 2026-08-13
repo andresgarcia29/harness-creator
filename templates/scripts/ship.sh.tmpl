@@ -2630,6 +2630,40 @@ tiene_runner_navegador() {  # 0 puede correrlo · 1 no lo declara · 2 declarado
   [ -x "$WT/node_modules/.bin/playwright" ] || return 2
   return 0
 }
+# ── ¿ESTA CORRIDA EJERCITÓ EL NAVEGADOR? ──────────────────────────────
+# NO se infiere del texto del comando. Caso de campo (#166), medido con 22 tests
+# de Chromium sellados: `bun run test:e2e` corre Playwright y la palabra
+# "playwright" no aparece en ningún lado del argv, porque evidence.py envuelve en
+# build-slot.sh y el binario lo resuelve el gestor de paquetes por dentro. El
+# gate reconocía la forma que él mismo sugiere (`npx playwright test`) y no la
+# que el repo define en su package.json.
+#
+# Eso no era un rojo cualquiera: de las tres salidas, al QA honesto le quedaba
+# más a mano firmar `qa_mode: determinista` ("decidí que no hacía falta mirar"),
+# que es FALSO y además ensucia el registro para quien audite después. Un gate
+# que empuja a declarar lo contrario de lo que pasó es peor que no tenerlo.
+#
+# El nombre del script es del REPO, no del harness: puede ser `e2e`, `browser`,
+# `integration` o cualquier cosa, y mantener esa lista acá sería cambiar un
+# falso negativo por una familia de falsos negativos que aparecen de a uno. Se
+# RESUELVE por el package.json, que es exactamente lo que hace el gestor de
+# paquetes.
+#
+# ponytail: resuelve UN nivel. Un script que delega en otro script que sí llama
+# a playwright no se detecta; ese caso conserva la salida 2 (`qa_mode:
+# navegador` con surface[]), que es honesta. Si aparece en campo, el arreglo es
+# el cierre transitivo sobre .scripts.
+corrida_de_navegador() {  # corrida_de_navegador <argv-junto> → 0 si ejercitó el navegador
+  case "$1" in *playwright*) return 0 ;; esac
+  [ -f "$WT/package.json" ] || return 1
+  local s
+  for s in $(jq -r '(.scripts // {}) | to_entries[]
+                    | select(.value | test("playwright")) | .key' \
+               "$WT/package.json" 2>/dev/null); do
+    case " $1 " in *" $s "*) return 0 ;; esac
+  done
+  return 1
+}
 muerde_node() {  # → MUERDE_NODE_RUNNERS con los runners declarados E instalados
   local pkg="$WT/package.json" unit=""
   MUERDE_NODE_RUNNERS=""
@@ -3381,13 +3415,16 @@ check_verdict() {
     emit assumption "$REPO: gate de QA por navegador no aplicado (playwright declarado sin instalar)"
   fi
   if [ "$nav_rc" -eq 0 ]; then
-    local qa_nav=0 qa_modo="" qa_motivo=""
+    local qa_nav=0 qa_modo="" qa_motivo="" ev cmd
     # La prueba determinista de que alguien miró: una evidencia de runner=qa
-    # cuyo comando invoca al runner de navegador. `command` es un argv, así que
-    # se junta antes de mirarlo.
-    qa_nav="$(jq -s '[.[] | select(.runner == "qa")
-                          | select(((.command // []) | join(" ")) | test("playwright"))]
-                     | length' "$WS/tasks/$TASK/evidence/"EV-*.json 2>/dev/null || echo 0)"
+    # cuya corrida ejercitó el navegador. `command` es un argv, así que se junta
+    # antes de mirarlo.
+    for ev in "$WS/tasks/$TASK/evidence/"EV-*.json; do
+      [ -f "$ev" ] || continue
+      jq -e '.runner == "qa"' "$ev" >/dev/null 2>&1 || continue
+      cmd="$(jq -r '(.command // []) | join(" ")' "$ev" 2>/dev/null || true)"
+      if corrida_de_navegador "$cmd"; then qa_nav=1; break; fi
+    done
     if [ -f "$qa_file" ]; then
       qa_modo="$(jq -r '.qa_mode // ""' "$qa_file" 2>/dev/null || true)"
       qa_motivo="$(jq -r '.motivo // ""' "$qa_file" 2>/dev/null || true)"

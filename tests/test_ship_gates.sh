@@ -2024,9 +2024,9 @@ echo "── check_verdict: cada rechazo nombra su causa y su remediación"
 # tiene_runner_navegador viaja con check_verdict: el gate de QA la llama para
 # decidir si este repo PUEDE ejercitar la interfaz, y sin ella la funcion
 # extraida muere con "command not found" en vez de probar nada.
-{ extract check_verdict; extract tiene_runner_navegador; } > "$WS/check_verdict.sh"
+{ extract check_verdict; extract tiene_runner_navegador; extract corrida_de_navegador; } > "$WS/check_verdict.sh"
 grep -q 'qa_state' "$WS/check_verdict.sh" || { echo "no pude extraer check_verdict"; exit 1; }
-grep -q 'playwright' "$WS/check_verdict.sh" || { echo "no pude extraer tiene_runner_navegador"; exit 1; }
+grep -q 'corrida_de_navegador()' "$WS/check_verdict.sh" || { echo "no pude extraer corrida_de_navegador"; exit 1; }
 
 run_check_verdict() {  # run_check_verdict <verdict-json> [sin-qa] — salida + exit
   mkdir -p "$WS/tasks/T9"
@@ -2155,6 +2155,29 @@ printf '{"schema":1,"runner":"qa","kind":"test","command":["npx","playwright","t
 out="$(QA_WT="$WS/front" run_check_verdict "$VERDE")"
 assert_eq 0 $? "evidencia de una corrida de playwright: pasa"
 rm -f "$WS/tasks/T9/evidence/EV-TEST-qa3.json"
+
+# ISSUE #166: y la MISMA corrida invocada por el script del repo tambien.
+# `bun run test:e2e` corre Playwright y la palabra no aparece en el argv:
+# evidence.py envuelve en build-slot.sh y el binario lo resuelve el gestor de
+# paquetes. Medido con 22 tests de Chromium sellados que el gate no veia. El
+# nombre del script es del REPO, asi que se RESUELVE por su package.json en vez
+# de mantener una lista de nombres aca.
+printf '{"devDependencies":{"@playwright/test":"1.4.0"},"scripts":{"test:e2e":"playwright test","build":"vite build"}}' \
+  > "$WS/front/package.json"
+printf '{"schema":1,"runner":"qa","kind":"test","command":["bash","/ws/scripts/build-slot.sh","/opt/bin/bun","run","test:e2e"]}' \
+  > "$WS/tasks/T9/evidence/EV-TEST-qa4.json"
+out="$(QA_WT="$WS/front" run_check_verdict "$VERDE")"
+assert_eq 0 $? "#166: corrida por el script del repo (bun run test:e2e): pasa"
+
+# CONTRA-MITAD: un script del repo que NO corre playwright no cuenta. Sin esto,
+# el arreglo podria ser "cualquier script del package.json vale", que aceptaria
+# un `bun run build` como si fuera QA de navegador.
+printf '{"schema":1,"runner":"qa","kind":"test","command":["bash","/ws/scripts/build-slot.sh","/opt/bin/bun","run","build"]}' \
+  > "$WS/tasks/T9/evidence/EV-TEST-qa4.json"
+out="$(QA_WT="$WS/front" run_check_verdict "$VERDE")"
+assert_eq 3 $? "#166: un script que NO corre playwright sigue sin contar"
+rm -f "$WS/tasks/T9/evidence/EV-TEST-qa4.json"
+printf '{"devDependencies":{"@playwright/test":"1.4.0"}}' > "$WS/front/package.json"
 
 # 2. el agente qa declara que miro, con la superficie que ejercito
 out="$(QA_WT="$WS/front" QA_JSON='{"schema":1,"qa":"pass","qa_mode":"navegador","surface":["/login"]}' \

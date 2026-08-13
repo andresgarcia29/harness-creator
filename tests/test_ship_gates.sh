@@ -1496,8 +1496,10 @@ echo "── gate ts: un gate que no puede correr NO reporta rojo"
 extract run_lang_gates > "$WS/lang.sh"
 grep -q 'node_modules' "$WS/lang.sh" || { echo "no pude extraer run_lang_gates"; exit 1; }
 
-run_lang() {  # run_lang <dir>: corre run_lang_gates ahí, con la toolchain stubbeada
-  ( set -u; cd "$1"; WT="$1"; REPO=fe; TASK=T1; BASE_REF=main
+run_lang() {  # run_lang <dir> [artefacto]: corre run_lang_gates ahí, con la toolchain stubbeada
+  # ARTEFACTO es <repo>[@<Tn>]: la identidad del ÁRBOL, que es lo que fe.sh
+  # resuelve. Por defecto el repo pelado, como en una tarea sin nodos.
+  ( set -u; cd "$1"; WT="$1"; REPO=fe; ARTEFACTO="${2:-fe}"; TASK=T1; BASE_REF=main
     gate() { :; }; emit() { :; }
     npx() { :; }; npm() { :; }   # la toolchain real no se ejercita aquí
     . "$WS/lang.sh"; run_lang_gates ) 2>&1
@@ -1520,6 +1522,15 @@ assert_eq 3 "$rc" "sin node_modules: el gate se niega (exit 3)"
 assert_contains "$out" "NO PUEDE CORRER" "sin node_modules: dice que no puede correr"
 assert_contains "$out" "fantasma" "sin node_modules: avisa que los errores serían fantasma"
 assert_contains "$out" "fe.sh 'install'" "sin node_modules: da la remediación exacta"
+
+# ISSUE #158: y con el árbol de un NODO del DAG, la remediación nombra ESE árbol.
+# fe.sh resuelve worktrees/<task>/<arg>, así que con el repo pelado el install
+# aterrizaba en el árbol de la tarea mientras este gate corre en el del nodo: el
+# chequeo de abajo volvía a fallar sobre un install que sí había funcionado, en
+# otro directorio.
+out="$(run_lang "$WS/fe1" 'fe@T3')"
+assert_contains "$out" "fe.sh 'install' fe@T3" \
+  "#158: la remediación del nodo nombra el árbol del nodo, no el de la tarea"
 
 # 2. Astro sin los tipos generados → se niega citando astro sync
 mk_fe "$WS/fe2"; mkdir -p "$WS/fe2/node_modules"; touch "$WS/fe2/astro.config.mjs"
@@ -1561,7 +1572,7 @@ assert_contains "$out" "sin tocar archivos versionados" "declara que respetó la
 mk_fe "$WS/fe9"; touch "$WS/fe9/astro.config.mjs"
 cd "$WS/fe9" && git add -A && git commit -qm astro && cd "$WS"
 mk_fe_stub "$WS/fe9" 'mkdir -p node_modules'
-out="$( ( cd "$WS/fe9"; WT="$WS/fe9"; REPO=fe; TASK=T1; WS="$WS"
+out="$( ( cd "$WS/fe9"; WT="$WS/fe9"; REPO=fe; ARTEFACTO=fe; TASK=T1; WS="$WS"
           gate() { :; }; npm() { :; }
           npx() { if [ "$*" = "astro sync" ]; then mkdir -p .astro && touch .astro/types.d.ts; fi; }
           . "$WS/lang.sh"; run_lang_gates ) 2>&1 )"; rc=$?
@@ -1585,6 +1596,19 @@ mk_fe_stub "$WS/fe11" 'exit 0'
 out="$(run_lang "$WS/fe11")"; rc=$?
 assert_eq 3 "$rc" "prep que miente (exit 0 sin instalar): el gate no le cree"
 assert_contains "$out" "no pude instalar" "verifica el resultado, no el exit code"
+
+# 13. ISSUE #158: la preparación va al árbol DEL NODO, no al de la tarea.
+# fe.sh resuelve worktrees/<task>/<arg>, así que con el repo pelado el install
+# aterrizaba en el árbol de la tarea mientras este gate corre en el del nodo: el
+# chequeo de arriba volvía a fallar sobre un install que sí había funcionado, en
+# otro directorio. Se mide el LLAMADO, no el mensaje: el gate lo manda a
+# /dev/null, así que el stub anota sus argumentos en un archivo.
+mk_fe "$WS/fe12"
+mk_fe_stub "$WS/fe12" "printf '%s\\n' \"\$*\" > '$WS/fe-args'; mkdir -p node_modules"
+rm -f "$WS/fe-args"
+run_lang "$WS/fe12" 'fe@T3' >/dev/null 2>&1 || true
+assert_eq "install fe@T3 T1" "$(cat "$WS/fe-args" 2>/dev/null)" \
+  "#158: el install se pide para el árbol del nodo, no para el de la tarea"
 
 cd "$WS"
 

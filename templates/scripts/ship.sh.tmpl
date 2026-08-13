@@ -596,7 +596,7 @@ aviso_evidencia_desalineada() {
   echo "      Si entregás así, verdict-scaffold.sh lo caza DESPUÉS, con la ronda pagada."
   echo "      ↳ remediación: re-sellá la prueba sobre este HEAD:"
   echo "        python3 scripts/evidence.py run --task-dir tasks/$TASK --repo $REPO \\"
-  echo "          --runner <implementer> --kind test --cwd worktrees/$TASK/$REPO -- <comando de test>"
+  echo "          --runner <implementer> --kind test --cwd worktrees/$TASK/$ARTEFACTO -- <comando de test>"
   emit assumption "precheck de $REPO: $viejas evidencia(s) de otro commit y ninguna del HEAD sellado"
 }
 # ── Procedencia: qué harness, de qué máquina, con qué gates ───────────
@@ -1109,14 +1109,18 @@ run_lang_gates() {
       before="$(git status --porcelain -uno -- . | sort)"
       if [ ! -d node_modules ]; then
         echo "→ preparo la toolchain: faltan node_modules (worktree recién creado)"
-        bash "$WS/scripts/fe.sh" 'install' "$REPO" "$TASK" >/dev/null 2>&1 || true
+        # $ARTEFACTO y no $REPO: fe.sh resuelve worktrees/<task>/<arg>, así que
+        # con el repo pelado instalaba node_modules en el árbol de la TAREA
+        # mientras este gate corre en el del nodo, y el chequeo de abajo volvía
+        # a fallar sobre un install que sí funcionó, en otro directorio.
+        bash "$WS/scripts/fe.sh" 'install' "$ARTEFACTO" "$TASK" >/dev/null 2>&1 || true
         # Verifico que la preparación FUNCIONÓ. Dar por hecho que un comando
         # hizo lo suyo es la misma fe ciega que este gate existe para evitar.
         if [ ! -d node_modules ]; then
           echo "⛔ el gate ts NO PUEDE CORRER: no pude instalar las dependencias de $REPO."
           echo "   Sin ellas los errores de tipos serían fantasma (faltan los .d.ts"
           echo "   de las deps), no deuda real del cambio."
-          echo "   ↳ remediación: bash scripts/fe.sh 'install' $REPO $TASK"
+          echo "   ↳ remediación: bash scripts/fe.sh 'install' $ARTEFACTO $TASK"
           exit 3
         fi
       fi
@@ -1899,10 +1903,21 @@ run_lang_gates_sealed() {
   # salida del hijo, que se imprime completa.
   CURRENT_GATE="gates de lenguaje de $REPO"
   local out evrc=0
+  # ── EL HIJO CORRE EN EL ÁRBOL DEL NODO, NO EN EL DE LA TAREA (#158, #159) ──
+  # Este llamado pasaba el repo PELADO, así que el hijo recomponía `WT` sin el
+  # sufijo y hacía `cd` al árbol BASE, que existe siempre (es el destino del
+  # coalesce). O sea que los gates de lenguaje de un nodo corrían sobre código
+  # que ese nodo no escribió, y el marcador de "verifiqué algo" quedaba bajo la
+  # clave pelada mientras el padre lo lee bajo la del nodo: los cuatro hermanos
+  # se pisaban UN archivo y todos sellaban `verificado: desconocido`.
+  #
+  # `--repo` sigue pelado a propósito: la EVIDENCIA es del repo (se junta tras
+  # el coalesce). Lo que lleva el sufijo es lo que es del ÁRBOL: el `--cwd` y
+  # el argumento del hijo, que es de donde salen la corrida y el marcador.
   out="$(python3 "$WS/scripts/evidence.py" run \
     --task-dir "$WS/tasks/$TASK" --repo "$REPO" --runner "$runner" \
     --kind test --cwd "$WT" \
-    -- bash "$WS/scripts/ship.sh" --lang-gates "$TASK" "$REPO" 2>&1)" || evrc=$?
+    -- bash "$WS/scripts/ship.sh" --lang-gates "$TASK" "$ARTEFACTO" 2>&1)" || evrc=$?
 
   # ── UN SELLO QUE NO PROBÓ NADA ES PEOR QUE NO TENER SELLO ───────────
   # Si run_lang_gates no reconoció el stack, no compiló ni testeó NADA, y aun

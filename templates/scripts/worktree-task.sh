@@ -273,6 +273,33 @@ TASK="${1:?uso: worktree-task.sh [--node <Tn>] <task-id> <repo> [repo...]}"; shi
 wt_dir()    { printf '%s' "$WS/worktrees/$TASK/$1${NODE:+@$NODE}"; }
 wt_branch() { printf '%s' "task/$TASK${NODE:+@$NODE}"; }
 
+# ── LAS DEPENDENCIAS DEL NODO, SEGÚN EL DAG (#162) ────────────────────
+# El orden y las aristas se le PREGUNTAN al policy engine, que ya valida el DAG
+# (ciclos, ids inexistentes) y ya es el único lector de dag.json. Un awk acá
+# sería un segundo lector del mismo artefacto.
+#
+# Best-effort a propósito: sin dag.json (carriles quick/express) o sin poder
+# leerlo, DAG_ROWS queda vacío y todo se comporta como antes. Un árbol que no se
+# crea es peor que un árbol que nace de la trunk, que es lo que pasaba siempre.
+DAG_ROWS=""
+if [ -n "$NODE" ] && [ -f "$WS/tasks/$TASK/dag.json" ]; then
+  DAG_ROWS="$(python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" \
+                dag-nodes "$WS/tasks/$TASK" 2>/dev/null || true)"
+fi
+
+# deps_en_repo <repo> → las dependencias de $NODE que viven EN ESE repo.
+# Filtrar por repo no es un detalle: un nodo de `proto` que depende de uno de
+# `atlas` no tiene nada que heredar en el árbol de proto, y anunciar que sí
+# heredó algo sería la misma clase de mentira que este arreglo viene a cerrar.
+deps_en_repo() {
+  # El índice numérico y no `for (i in d)`: el orden de un for-in de awk no está
+  # definido, y una lista de deps que cambia de orden entre corridas es un
+  # mensaje que no se puede leer dos veces igual.
+  printf '%s\n' "$DAG_ROWS" | awk -F'\t' -v n="$NODE" -v r="$1" '
+    { repo[$1] = $2; if ($1 == n) k = split($3, d, ",") }
+    END { for (i = 1; i <= k; i++) if (d[i] != "" && repo[d[i]] == r) printf "%s ", d[i] }'
+}
+
 # ── Lock de CREACIÓN por (task, repo) ─────────────────────────────────
 # Caso de campo: /smart lanza este script en paralelo y dos procesos pasaron
 # juntos el chequeo "ya existe": el segundo moría a mitad del bucle con un
@@ -338,17 +365,60 @@ for repo in "$@"; do
   # offline o dirty NO bloquea: el worktree nace de la rama trunk igual gracias al fetch.
   bb="$(base_branch "$base")"
   refresh_canonical "$repo" "$base" "$bb"
+  # ── DE DÓNDE NACE LA RAMA DE UN NODO ────────────────────────────────
+  # Por defecto de la trunk, NO de `task/<id>`: el coalesce hace cherry-pick de
+  # cada nodo sobre `task/<id>`, y si el nodo ya llevara adentro los commits de
+  # sus HERMANOS, ese cherry-pick los aplicaría dos veces.
+  #
+  # Eso es correcto para el nodo INDEPENDIENTE y era el único caso contemplado
+  # (#162): con `depends_on` no vacío, nacer de la trunk significa nacer SIN
+  # aquello de lo que dependés. Y el modo de falla no es un rojo: un implementer
+  # que no encuentra lo que necesita lo RE-IMPLEMENTA, y eso recién aparece como
+  # conflicto en el coalesce, con los tokens del nodo ya gastados. Medido: cuatro
+  # nodos que habrían re-abierto por su cuenta las 176 claves de i18n que su
+  # dependencia acababa de abrir.
+  #
+  # Nacer de `task/<id>` NO reintroduce la duplicación que el párrafo de arriba
+  # evita: dag-coalesce.sh selecciona con `rev-list --cherry-pick --right-only`,
+  # que compara por PARCHE, así que lo que ya es ancestro no se vuelve a aplicar.
+  start="origin/$bb"
+  if [ -n "$NODE" ]; then
+    deps="$(deps_en_repo "$repo")"
+    if [ -n "$deps" ]; then
+      if git -C "$base" show-ref --verify --quiet "refs/heads/task/$TASK"; then
+        start="task/$TASK"
+        echo "→ $NODE depende de ${deps% } en $repo: su rama nace de task/$TASK, no de la trunk"
+        # Que la rama exista no prueba que las dependencias estén DENTRO. El
+        # marcador lo deja dag-coalesce.sh por nodo aplicado, así que es el
+        # único dato que distingue "ya lo trae" de "todavía no".
+        faltan=""
+        for d in $deps; do
+          [ -f "$WS/tasks/$TASK/.coalesced-${repo}@${d}" ] || faltan="$faltan$d "
+        done
+        if [ -n "$faltan" ]; then
+          echo "  ⚠️  pero ${faltan% } todavía no se coalesció en $repo: este árbol NO trae su trabajo."
+          echo "     ↳ bash scripts/dag-coalesce.sh $TASK $repo y re-creá este árbol,"
+          echo "       o el implementer va a re-implementar lo que su dependencia ya hizo."
+        fi
+      else
+        # No se inventa la rama: se dice. Un árbol que nace de la trunk cuando
+        # debía heredar es exactamente el silencio que este bloque cierra.
+        echo "⚠️  $NODE depende de ${deps% } en $repo, pero no existe la rama task/$TASK:"
+        echo "   este árbol nace de la trunk, SIN el trabajo del que depende."
+        echo "   ↳ creá el árbol base y coalescé las dependencias primero:"
+        echo "     bash scripts/worktree-task.sh $TASK $repo"
+        echo "     bash scripts/dag-coalesce.sh $TASK $repo"
+      fi
+    fi
+  fi
   # Sin 2>/dev/null: silenciar el primer intento convertía cualquier colisión
   # (rama ya tomada por otro worktree, index.lock ajeno) en una muerte muda a
   # mitad del bucle multi-repo. El fallback aplica SOLO al caso legítimo: la
   # rama de la tarea ya existe (retoma) y ningún worktree la tiene.
-  # La rama del NODO nace de la trunk, NO de `task/<id>`: el coalesce hace
-  # cherry-pick de cada nodo sobre `task/<id>`, y si el nodo ya llevara adentro
-  # los commits de sus hermanos, ese cherry-pick los aplicaría dos veces.
   if git -C "$base" show-ref --verify --quiet "refs/heads/$branch"; then
     git -C "$base" worktree add "$wt" "$branch"
   else
-    git -C "$base" worktree add -b "$branch" "$wt" "origin/$bb"
+    git -C "$base" worktree add -b "$branch" "$wt" "$start"
   fi
   echo "✅ worktree: $wt (rama $branch)"
   release_create_lock

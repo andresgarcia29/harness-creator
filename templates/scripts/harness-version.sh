@@ -398,6 +398,49 @@ sha_de() {  # sha_de <archivo> → sha256, portable macOS/Linux
   else sha256sum "$1" 2>/dev/null | awk '{print $1}'; fi
 }
 
+# ── UN JSON NO SE COMPARA POR LÍNEAS ─────────────────────────────────
+# Falso positivo medido en campo: `.claude/settings.json` con los 17 hooks
+# registrados y CORRIENDO, reportado como 17 líneas ausentes. La causa no es
+# drift: es que el archivo pasó por un re-serializador (Claude Code reescribe
+# settings.json cuando cambian permisos), y `{ "type": "command", ... }` en una
+# línea del template queda en cuatro en la instancia. Byte a byte todo cambió;
+# semánticamente no cambió NADA.
+#
+# Eso no es un detalle cosmético: un verificador que grita con un archivo
+# legítimo es un verificador que alguien apaga, que es peor que el hueco. Este
+# archivo ya declara ese principio para los .tmpl; los JSON tenían el mismo
+# problema por otra vía.
+#
+# Se compara por HOJAS (`ruta=valor`), no por líneas, y la ruta va SIN los
+# índices de array a propósito: agregar un hook local al principio no puede
+# correr todo lo demás y convertirlo en drift. La propiedad que se verifica es
+# la misma que para los .tmpl, dicha en la estructura en vez de en el texto:
+# todo lo que el template declara tiene que estar en la instancia. Lo que la
+# instancia agregue de más es suyo, como siempre.
+json_hojas() {  # stdin: JSON → "ruta-sin-índices=valor" por línea, ordenado
+  jq -r 'paths(scalars) as $p
+         | "\([$p[] | select(type == "string")] | join("."))=\(getpath($p) | tostring)"' \
+    2>/dev/null | sort -u
+}
+
+json_faltan() {  # json_faltan <template> <instancia> → nº de hojas ausentes; 1 si no se puede
+  command -v jq >/dev/null 2>&1 || return 1
+  jq -e . "$2" >/dev/null 2>&1 || return 1     # instancia ilegible: que hable el chequeo viejo
+  local t i
+  # Los placeholders se neutralizan ANTES de parsear, en dos pasadas porque hay
+  # dos posiciones: `{{X}}` como valor entero (policy.json.tmpl: `"max_review_rounds": {{LOOP_BUDGET}}`,
+  # que sin comillas NO es JSON) y `{{X}}` dentro de un string ya citado.
+  t="$(sed -E -e 's/([:[,][[:space:]]*)\{\{[^}]*\}\}/\1"HARNESS_PH"/g' \
+               -e 's/\{\{[^}]*\}\}/HARNESS_PH/g' "$1" | json_hojas)"
+  [ -n "$t" ] || return 1
+  i="$(json_hojas < "$2")"
+  [ -n "$i" ] || return 1
+  # Las hojas que vienen de un placeholder NO se verifican: lo que el generador
+  # sustituyó ahí no lo sabe este repo.
+  printf '%s\n' "$t" | grep -v HARNESS_PH \
+    | grep -F -x -v -f <(printf '%s\n' "$i") 2>/dev/null | grep -c . || true
+}
+
 dueno_de() {  # dueno_de <ruta absoluta en la instancia> → plugin|compartido
   case "${1#"$WS"/}" in
     scripts/*|.claude/hooks/*|.claude/commands/*|.claude/agents/*) echo plugin ;;
@@ -414,7 +457,7 @@ verificar_archivos() {  # → 0 todo al día · 1 drift en algo del plugin · 2 
     echo "⚠️  sin templates del plugin en disco: no puedo comparar archivo por archivo"
     return 2
   fi
-  local idx tpl rel base render cands n inst esperado real faltan podar
+  local idx tpl rel base render cands n inst esperado real faltan podar njson
   local rojos=0 avisos=0 dudosos=0 vistos=0
   # El PLUGIN se poda del índice: si vive bajo el workspace, cada template
   # aparecería como candidato de sí mismo, habría dos archivos con el mismo
@@ -449,6 +492,16 @@ verificar_archivos() {  # → 0 todo al día · 1 drift en algo del plugin · 2 
       [ "${faltan:-0}" -eq 0 ] && continue
       faltan="$faltan línea(s) del template no están"
     fi
+    # Los dos chequeos de arriba son TEXTUALES, y para un JSON eso da falsos
+    # rojos por re-serialización. Se pregunta de nuevo, por estructura. Va acá y
+    # no antes para no pagar jq cuando el archivo ya coincidía byte a byte.
+    case "$base" in
+      *.json)
+        if njson="$(json_faltan "$tpl" "$inst")"; then
+          [ "$njson" -eq 0 ] && continue
+          faltan="$njson clave(s) del template no están"
+        fi ;;
+    esac
     if [ "$(dueno_de "$inst")" = plugin ]; then
       echo "   ❌ ${inst#"$WS"/}: $faltan"
       rojos=$((rojos+1))

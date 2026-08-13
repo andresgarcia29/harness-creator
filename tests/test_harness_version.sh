@@ -350,6 +350,64 @@ assert_contains "$out" "scripts/gowork.sh" "nombra el script del plugin que difi
 assert_eq 1 "$(verify_rc)" "y ESO si sale 1: scripts/ es propiedad del plugin"
 cp "$WS/plugin/templates/scripts/gowork.sh" "$WS/scripts/gowork.sh"
 
+# ── UN JSON RE-SERIALIZADO NO ES DRIFT ──────────────────────────────
+# Falso positivo medido en campo: .claude/settings.json con los 17 hooks
+# registrados y CORRIENDO, reportado como 17 lineas ausentes. Claude Code
+# reescribe ese archivo cuando cambian los permisos, y `{ "type": "command",
+# ... }` en UNA linea del template queda en cuatro en la instancia: byte a byte
+# cambio todo, semanticamente no cambio nada. Un verificador que grita con un
+# archivo legitimo es un verificador que alguien apaga.
+mkdir -p "$WS/plugin/templates" "$WS/.claude"
+cat > "$WS/plugin/templates/settings.json.tmpl" <<'JSON'
+{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/uno.sh" },
+          { "type": "command", "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/dos.sh" }
+        ] }
+    ]
+  },
+  "env": { "PROYECTO": "{{PROJECT_SLUG}}" }
+}
+JSON
+# La instancia: MISMO contenido, re-serializado por otra herramienta (indent 2,
+# un campo por linea, claves ordenadas) y con el placeholder ya sustituido.
+python3 - "$WS/plugin/templates/settings.json.tmpl" "$WS/.claude/settings.json" <<'PY'
+import json, sys, re
+src = re.sub(r"\{\{[^}]*\}\}", "acme", open(sys.argv[1]).read())
+json.dump(json.loads(src), open(sys.argv[2], "w"), indent=2, sort_keys=True)
+PY
+assert_eq 0 "$(verify_rc)" "settings.json re-serializado: NO es drift (los hooks estan)"
+out="$(verify)"
+assert_not_contains "$out" "settings.json" "y ni siquiera se lo nombra"
+
+# CONTRA-MITAD: si de verdad le falta un hook que el template declara, SI es
+# drift, y settings.json es propiedad del plugin, asi que pone rojo.
+python3 - "$WS/.claude/settings.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+g = d["hooks"]["PreToolUse"][0]["hooks"]
+d["hooks"]["PreToolUse"][0]["hooks"] = [h for h in g if "dos.sh" not in h["command"]]
+json.dump(d, open(sys.argv[1], "w"), indent=2)
+PY
+out="$(verify)"
+assert_contains "$out" ".claude/settings.json" "le falta un hook del template: se nombra"
+assert_contains "$out" "clave(s) del template no están" "y se dice en claves, no en lineas"
+assert_eq 1 "$(verify_rc)" "y sale 1: settings.json es propiedad del plugin"
+
+# Y un hook LOCAL de mas no es drift: lo que la instancia agrega es suyo.
+python3 - "$WS/.claude/settings.json" "$WS/plugin/templates/settings.json.tmpl" <<'PY'
+import json, sys, re
+src = re.sub(r"\{\{[^}]*\}\}", "acme", open(sys.argv[2]).read())
+d = json.loads(src)
+d["hooks"]["PreToolUse"][0]["hooks"].insert(0, {"type": "command", "command": "mio.sh"})
+json.dump(d, open(sys.argv[1], "w"), indent=2)
+PY
+assert_eq 0 "$(verify_rc)" "un hook local AGREGADO al principio: sigue sin ser drift"
+rm -f "$WS/plugin/templates/settings.json.tmpl" "$WS/.claude/settings.json"
+
 # Sin poder ubicar el archivo no se afirma nada, ni verde ni rojo.
 rm -f "$WS/docs/harness/pipeline.md"
 out="$(verify)"

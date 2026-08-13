@@ -125,13 +125,13 @@ Semanal: `/promote` (memoria → ley). Roles: `.claude/agents/`.
 
 - CLIs ruidosos (kubectl logs, gh run view, gcloud) SIEMPRE vía
   `scripts/quiet.sh <cmd>`: head+tail y dump completo en `.cache/quiet/`.
-- Preguntas cross-repo → grafo (`graphify query`), no grep masivo.
-  "¿Dónde está X?" → `semble` (búsqueda semántica local) si está
-  instalado; abrir 20 archivos para ubicar uno es el anti-patrón.
-- Docs de librerías → MCP context7, no web-search repetido.
-- Implementación → edición simbólica (Serena), no archivos enteros.
-- Estado en archivos, no en conversación: sesión corta y desechable por
-  tarea. Audita gasto: `ccusage`.
+- Preguntas del código → HERRAMIENTA, jamás un agente: `graphify query`
+  (cross-repo), `semble` (semántica local), Serena (símbolo). `Explore` si
+  hace falta un agente; `general-purpose` PROHIBIDO (medido: $357 en 1 tarea).
+- Docs de librerías → context7. Implementación: edición simbólica.
+- Estado en archivos: UNA sesión por FASE (el relevo lo ejecuta
+  orchestrator-watch) y los agentes se CONTINÚAN (`SendMessage`), no se
+  relanzan. Audita gasto: `ccusage`.
 
 ## Memoria
 

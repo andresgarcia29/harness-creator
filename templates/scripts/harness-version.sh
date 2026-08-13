@@ -353,6 +353,118 @@ if [ "$MODE" = "full" ] && command -v "$GENERATOR_BIN" >/dev/null 2>&1; then
   generador_check || true
 fi
 
+# ── 1c0 · LA COMPARACIÓN ARCHIVO POR ARCHIVO ──────────────────────────
+# POR QUÉ HACE FALTA, y es un hueco del propio verificador: el chequeo de
+# templates de más abajo compara el string que el UPDATE escribió en
+# `.harness-templates` contra el digest del MANIFEST del tag. O sea confirma
+# "copié del set correcto", que es lo que el update DECLARA, no "cada archivo
+# de la instancia coincide con ese set". Es autoatestación: solo caza al que se
+# olvida de mentir consistente, y el modo de falla que el mensaje anuncia
+# atrapar ("el número quedó bien y el CONTENIDO no") es justo el que la
+# autoatestación no puede atrapar, porque el número ES la declaración.
+#
+# Medido en campo: `docs/harness/pipeline.md` estuvo SEMANAS congelado en una
+# versión vieja con `--verify` en verde, y lo encontró un humano comparando a
+# mano. Un verificador que se pierde eso no verifica: acompaña.
+#
+# CÓMO, sin inventar un mapeo que no existe: qué template aterriza en qué ruta
+# de la instancia lo sabe el generador, no este repo. Así que no se deduce, se
+# BUSCA por nombre de archivo dentro del workspace (podando repos/, worktrees/
+# y demás ruido). Cero candidatos o más de uno = no se puede afirmar nada, y se
+# cuenta aparte: "no pude comprobarlo" jamás se disfraza de verde.
+#
+# Y hay DOS clases de archivo, que no se pueden verificar igual:
+#   · copiado tal cual (los que no terminan en .tmpl) → sha256 exacto contra el
+#     manifiesto. Una diferencia es una diferencia.
+#   · renderizado (.tmpl) → su sha JAMÁS va a coincidir, porque el generador
+#     sustituye `{{CLAVE}}` con las respuestas del answers, y una sola clave
+#     puede expandirse a muchas líneas (medido: `secrets.sh` diverge 162 líneas
+#     por expansión de listas, y es correcto). Hashearlos sería una máquina de
+#     falsos rojos, y un verificador que grita con un archivo legítimo es un
+#     verificador que alguien apaga: peor que el hueco. Lo que SÍ vale para
+#     ellos: toda línea del template que NO tiene placeholder tiene que estar
+#     en el archivo de la instancia. Si el template ganó secciones que la
+#     instancia no tiene, está atrasada. Es exactamente lo que se encontró a
+#     mano con pipeline.md, hecho por máquina.
+#
+# ROJO solo donde la propiedad es del PLUGIN (scripts, hooks, comandos,
+# agentes, settings, policy y las skills upstream): ahí una diferencia es
+# siempre drift. En lo compartido (docs, README, los mapas) se AVISA con el
+# archivo nombrado y no se pone rojo, porque lo local puede ganar legítimamente
+# (/harness-update lo clasifica así). Avisar ya es todo lo que faltaba: nadie
+# sabía que pipeline.md estaba congelado.
+sha_de() {  # sha_de <archivo> → sha256, portable macOS/Linux
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+  else sha256sum "$1" 2>/dev/null | awk '{print $1}'; fi
+}
+
+dueno_de() {  # dueno_de <ruta absoluta en la instancia> → plugin|compartido
+  case "${1#"$WS"/}" in
+    scripts/*|.claude/hooks/*|.claude/commands/*|.claude/agents/*) echo plugin ;;
+    .claude/settings.json|harness-policy.json) echo plugin ;;
+    .claude/skills/skill-creator/*|.claude/skills/pipeline-step-creator/*) echo plugin ;;
+    .claude/skills/harness-bug-report/*|.claude/skills/custom-*/*) echo plugin ;;
+    *) echo compartido ;;
+  esac
+}
+
+verificar_archivos() {  # → 0 todo al día · 1 drift en algo del plugin · 2 no pude
+  local mdir="$PLUGIN_ROOT/templates" man="$PLUGIN_ROOT/templates/MANIFEST.sha256"
+  if [ ! -f "$man" ] || [ ! -d "$mdir" ]; then
+    echo "⚠️  sin templates del plugin en disco: no puedo comparar archivo por archivo"
+    return 2
+  fi
+  local idx tpl rel base render cands n inst esperado real faltan podar
+  local rojos=0 avisos=0 dudosos=0 vistos=0
+  # El PLUGIN se poda del índice: si vive bajo el workspace, cada template
+  # aparecería como candidato de sí mismo, habría dos archivos con el mismo
+  # nombre y todo quedaría "sin ubicar". Comparar el plugin contra el plugin no
+  # dice nada de la instancia.
+  podar="${PLUGIN_ROOT:-$WS/.este-path-no-existe}"
+  idx="$(find "$WS" \( -name .git -o -name repos -o -name worktrees \
+                       -o -name tasks -o -name node_modules -o -name .cache \
+                       -o -name .venv -o -path "$podar" \) -prune \
+                    -o -type f -print 2>/dev/null)"
+  while IFS= read -r tpl; do
+    [ -n "$tpl" ] || continue
+    rel="${tpl#"$mdir"/}"
+    base="${rel##*/}"
+    render=0
+    case "$base" in *.tmpl) base="${base%.tmpl}"; render=1 ;; esac
+    cands="$(printf '%s\n' "$idx" | awk -F/ -v b="$base" '$NF==b')"
+    n="$(printf '%s\n' "$cands" | grep -c . || true)"
+    if [ "$n" -ne 1 ]; then dudosos=$((dudosos+1)); continue; fi
+    inst="$cands"
+    vistos=$((vistos+1))
+    if [ "$render" -eq 0 ]; then
+      esperado="$(awk -v p="templates/$rel" '$2==p{print $1; exit}' "$man")"
+      [ -n "$esperado" ] || { dudosos=$((dudosos+1)); continue; }
+      real="$(sha_de "$inst")"
+      [ "$real" = "$esperado" ] && continue
+      faltan="sha distinto"
+    else
+      # Las líneas del template SIN placeholder tienen que estar todas.
+      faltan="$(grep -v '{{' "$tpl" | grep -v '^[[:space:]]*$' \
+                | grep -F -x -v -f "$inst" 2>/dev/null | grep -c . || true)"
+      [ "${faltan:-0}" -eq 0 ] && continue
+      faltan="$faltan línea(s) del template no están"
+    fi
+    if [ "$(dueno_de "$inst")" = plugin ]; then
+      echo "   ❌ ${inst#"$WS"/}: $faltan"
+      rojos=$((rojos+1))
+    else
+      echo "   ⚠️  ${inst#"$WS"/}: $faltan (propiedad compartida: puede ser local)"
+      avisos=$((avisos+1))
+    fi
+  done <<EOF
+$(find "$mdir" -type f 2>/dev/null | sort)
+EOF
+  echo "   ── $vistos archivo(s) comparados · $rojos del plugin con drift · ${avisos} aviso(s) · $dudosos sin ubicar"
+  [ "$dudosos" -gt 0 ] && echo "   (sin ubicar = 0 o >1 archivos con ese nombre en la instancia: no afirmo nada)"
+  [ "$rojos" -gt 0 ] && return 1
+  return 0
+}
+
 # ── 1c · --verify: DESPUÉS de actualizar, ¿aterrizó donde dijo? ───────
 # Un update que termina diciendo "listo" no es evidencia de nada: el modo de
 # fallo que este harness ya pagó es un generador que escribió la versión nueva
@@ -418,7 +530,20 @@ if [ "$MODE" = "verify" ]; then
     echo "   ↳ volvé a correr /harness-update y aplicá los diffs que queden."
     vrc=1
   fi
-  [ "$vrc" -eq 0 ] && echo "✅ el update aterrizó: instancia == ${UP_TAG:-upstream} en número y contenido"
+  # ── Y AHORA LOS ARCHIVOS, que es lo que los tres chequeos de arriba NO
+  # miran: los tres comparan NÚMEROS que el update declaró. Esto compara
+  # contenido. Solo corre si el plugin en disco es el tag, porque es la
+  # referencia: contra un plugin viejo, comparar archivo por archivo diría
+  # que la instancia está mal cuando la desactualizada es la referencia.
+  echo
+  echo "── ¿y cada archivo? ──"
+  if [ -n "$PLUGIN_ROOT" ] && [ "${disk_ver:-}" = "$up_ver" ]; then
+    verificar_archivos || { [ "$?" -eq 1 ] && vrc=1; }
+  else
+    echo "⚠️  sin un plugin en disco al día no hay contra qué comparar los archivos."
+    [ "$vrc" -eq 0 ] && vrc=2
+  fi
+  [ "$vrc" -eq 0 ] && echo "✅ el update aterrizó: instancia == ${UP_TAG:-upstream} en número, contenido y archivo por archivo"
   exit "$vrc"
 fi
 

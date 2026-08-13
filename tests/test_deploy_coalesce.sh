@@ -62,16 +62,26 @@ assert_no_file "$WS/.harness/deploy-pending/atlas.lock.d" "y el lock"
 echo
 echo "── con un watcher VIVO, el segundo ship se anota y sale en el acto"
 mkdir -p "$WS/.harness/deploy-pending"
-# Un dueño vivo de verdad: un proceso que duerme y cuyo pid está en el lock.
-sleep 30 & VIVO=$!
+# Un dueño vivo de verdad, y sin reloj: el pid de ESTE test.
+#
+# Antes era `sleep 30 &`, y eso metía un plazo donde no hacía falta ninguno: el
+# bloque de arriba corre un ciclo de deploy REAL, así que en una máquina cargada
+# tarda más de 30 segundos y el dueño llegaba muerto a esta aserción. El watcher
+# entonces hacía lo correcto (no hay dueño vivo: arranco) y el test lo leía como
+# rojo. Medido: la corrida entera son ~2 min, y con el sleep en 600 las 15
+# aserciones pasan. O sea que medía la carga de la máquina, no la coalescencia.
+# El pid del propio test está vivo por definición mientras el test corre, que es
+# exactamente la propiedad que la aserción necesita.
+VIVO=$$
 mkdir -p "$WS/.harness/deploy-pending/atlas.lock.d"
 echo "$VIVO" > "$WS/.harness/deploy-pending/atlas.lock.d/pid"
 ship T-B "$SHA2"
 out="$(watch T-B --coalesce)"
 assert_contains "$out" "ya hay un watcher vivo" "no arranca un segundo ciclo de deploy"
-assert_contains "$out" "$(echo $VIVO)" "y dice quién lo está mirando"
+assert_contains "$out" "$VIVO" "y dice quién lo está mirando"
 assert_contains "$(reg)" "$SHA2" "pero deja anotado su sha: coalescer no es ignorar"
-kill "$VIVO" 2>/dev/null; wait "$VIVO" 2>/dev/null
+# El dueño se retira borrando su lock, no matando el proceso (que es este test).
+rm -rf "$WS/.harness/deploy-pending/atlas.lock.d"
 
 echo
 echo "── el watcher vivo RE-APUNTA al sha más nuevo (y solo si desciende)"

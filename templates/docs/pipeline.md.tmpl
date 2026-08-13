@@ -173,8 +173,21 @@ compiló o testeó, `ninguno` si no corrió ninguno, `desconocido` si no se
 pudo saber. Un `ok:true` con `verificado` distinto de `completo` no es un
 verde verificado y /review lo declara en el veredicto) ·
 `verdict-<repo>.json` (reviewer+qa) · `ship.log` ·
-`deploy-<repo>.log`. Estado en ARCHIVOS, no en conversación: cualquier
-sesión puede retomar (`/smart <task-id>`).
+`deploy-<repo>.log` · `agents.json` (los ids con los que se CONTINÚA un
+agente en vez de relanzarlo) · `handoff.json` (el relevo de fase). Estado
+en ARCHIVOS, no en conversación: cualquier sesión puede retomar
+(`/smart <task-id>`).
+
+Y eso es lo que hace barato el **relevo**: una fase, una sesión. Cuando la
+fase avanza de verdad, `transition` estampa `session_id` en `state.json` y
+deja `handoff.json`; el orquestador cierra su turno y quien arranca la
+sesión siguiente, con contexto fresco, es `orchestrator-watch.sh`. Tiene
+que ejecutarlo algo de afuera: un prompt no puede terminarse a sí mismo ni
+relanzarse. No relevan otra ronda del mismo review (es la misma fase),
+`quick` (una sesión corta de punta a punta) ni `archive`; el de
+`ship → deploy` lo escribe `deploy-watch.sh` al TERMINAR, así que durante
+la espera del deploy no hay ninguna sesión viva. Detalle y umbrales:
+`docs/harness/policy.md`.
 
 ### El ledger de supuestos (`assumptions.md`)
 

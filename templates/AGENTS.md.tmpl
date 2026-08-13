@@ -77,17 +77,15 @@ Estas dos no se numeran (en `CLAUDE.md` viven como sección) y el doctor caza
 al que les invente un número: mandaría a la ley equivocada.
 
 - **Secretos**: sus valores jamás tocan chat, commits ni logs. Solo
-  `scripts/with-secrets.sh <cmd>` inyecta; `.secrets` no se lee ni se
-  imprime.
+  `scripts/with-secrets.sh <cmd>` inyecta; `.secrets` no se lee ni se imprime.
 - **Fases y entrega de la tarea**: las mueve `scripts/harness-policy.py`
-  (`transition`, `pause`, `escalate`, `rollback`, `delivery`); el estado vive
-  en `tasks/<id>/state.json` y no se edita a mano. ¿Avanzaste una fase por
-  error? El camino de vuelta es
-  `harness-policy.py rollback <task-dir> <fase> --actor <quien> --reason <por qué>`:
-  solo va hacia atrás, no cobra una ronda de review y deja registro en
-  `history[]`. Editarlo a mano no es "lo mismo pero rápido": `validate-ship`
-  compara `phase` contra el último movimiento registrado y una fase que nadie
-  declaró muere en `POLICY-STATE-003`.
+  (`transition`, `pause`, `escalate`, `rollback`, `delivery`, `stale`); el estado
+  vive en `tasks/<id>/state.json` y no se edita a mano. ¿Avanzaste una fase por
+  error? `harness-policy.py rollback <task-dir> <fase> --actor <quien> --reason
+  <por qué>`: solo va hacia atrás, no cobra ronda y deja registro en `history[]`.
+  Editarlo a mano no es "lo mismo pero rápido": `validate-ship` compara `phase`
+  contra el último movimiento y una fase que nadie declaró muere en
+  `POLICY-STATE-003`.
 
 ⚠️ **Enforcement por herramienta**: en Claude Code, hooks locales (`.claude/hooks/`)
 bloquean el push directo y la edición de `repos/` ANTES de que ocurran. En otras
@@ -101,23 +99,25 @@ Los "comandos" de `.claude/commands/*.md` son **playbooks en markdown**: si
 tu herramienta no soporta slash-commands, abre el archivo y sigue sus pasos.
 
 - `smart.md`: el pipeline completo (ticket o prompt → producción): intake →
-  carril → [rfc] → implement → review → ship → deploy → archive. El `auto.md`
-  que sobrevive un ciclo solo redirige aquí: está deprecado.
+  carril → [rfc] → implement → review → ship → deploy → archive, UNA sesión por
+  FASE. El `auto.md` que sobrevive un ciclo solo redirige aquí: deprecado.
 - La ENTREGA la declara la invocación (`delivery` en `state.json`): `smart.md` no
-  publica, `smart-pr.md` deja rama y PR, `smart-main.md` aterriza en main. El go
-  posterior es `harness-policy.py delivery <task-dir> --to prs|trunk`; pedir permiso
-  para commitear o publicar está PROHIBIDO. Sin campo, ship usa el `flow` del workspace.
-- `rfc.md`, `implement.md`, `review.md`, `ship.md`, `archive.md`: las
-  fases sueltas. `feature.md` = intake con humano.
-- `quick.md`: carril quick (1 repo, cambio chico): cero deliberación, mismos gates.
+  publica, `smart-pr.md` deja rama y PR, `smart-main.md` aterriza en main. El go es
+  `harness-policy.py delivery --to prs|trunk`; pedir permiso está PROHIBIDO.
+- `rfc.md`, `implement.md`, `review.md`, `ship.md`, `archive.md`: las fases
+  sueltas. `feature.md` = intake con humano.
+- `quick.md`: carril quick (1 repo, cambio chico): cero deliberación, mismos
+  gates; `smart.md` también lo clasifica solo, con evidencia de ownership.
 
-Los roles de `.claude/agents/*.md` (architect, implementer, reviewer,
-qa, abogados `svc-*`) son definiciones de agente de Claude Code; en
-otras herramientas úsalas como **system prompts** del rol equivalente.
+Los roles de `.claude/agents/*.md` (architect, implementer, reviewer, qa,
+abogados `svc-*`) son definiciones de agente de Claude Code; en otras
+herramientas úsalas como **system prompts** del rol equivalente. Fuera de esa
+lista, `Explore`; `general-purpose` PROHIBIDO. Y un agente se CONTINÚA
+(`SendMessage` al id de `tasks/<id>/agents.json`): relanzar es excepción.
 
 Las **skills** de `.claude/skills/` son procedimientos empaquetados del
-workspace (también markdown puro): consúltalas cuando su `description`
-matchee tu tarea. `skill-creator/SKILL.md` es la guía para crear nuevas.
+workspace (también markdown puro): consúltalas cuando su `description` matchee
+tu tarea. `skill-creator/SKILL.md` es la guía para crear nuevas.
 
 ## Modelos: una sola perilla
 

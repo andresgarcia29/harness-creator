@@ -81,7 +81,10 @@ Y para lo trivial que ya dimensionaste, `/quick "<qué>"`: carril quick,
 un repo y cambio chico (techos en `harness-policy.json`), cero
 deliberación y los mismos gates. Si el diff se pasa del techo,
 `gate_lane` lo para y la salida te da el escape:
-`harness-policy.py escalate --to express`.
+`harness-policy.py escalate --to express`. `/smart` también clasifica
+este carril solo, así que no hace falta que lo pidas para conseguirlo:
+esta entrada es para cuando vos ya sabés y querés saltarte hasta esa
+clasificación.
 
 **Por qué no da vueltas** (las tres reglas que recortan iteraciones):
 el plan se piensa en modo `ultrathink` y pasa `make plan-lint TASK=<id>`

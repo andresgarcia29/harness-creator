@@ -296,6 +296,69 @@ assert_eq 0 "$(verify_rc)" "y sale 0"
 # MANIFEST del plugin: si lo hiciera, este caso sano saldria rojo.
 
 echo
+echo "── --verify: y AHORA compara archivo por archivo, que es lo que faltaba"
+# EL HUECO QUE ESTE BLOQUE CIERRA: los tres chequeos de arriba comparan el
+# string que el UPDATE escribio en .harness-templates contra el digest del tag.
+# O sea confirman "copie del set correcto", que es lo que el update DECLARA, no
+# "cada archivo coincide". Es autoatestacion, y el modo de falla que el propio
+# mensaje anuncia atrapar ("el numero quedo bien y el CONTENIDO no") es justo el
+# que la autoatestacion no puede atrapar, porque el numero ES la declaracion.
+# Caso de campo: docs/harness/pipeline.md estuvo SEMANAS congelado con --verify
+# en verde, y lo encontro un humano comparando a mano.
+poblar_plugin() {  # deja templates de verdad en el plugin stub y su manifiesto
+  mkdir -p "$WS/plugin/templates/scripts" "$WS/plugin/templates/docs"
+  printf '#!/usr/bin/env bash\necho hola\n' > "$WS/plugin/templates/scripts/gowork.sh"
+  printf '# Pipeline de {{PROJECT_NAME}}\n\nla seccion vieja\n\nla seccion NUEVA\n' \
+    > "$WS/plugin/templates/docs/pipeline.md.tmpl"
+  { echo "plugin_version: 0.48.0"
+    printf '%s  templates/scripts/gowork.sh\n' \
+      "$( { shasum -a 256 "$WS/plugin/templates/scripts/gowork.sh" 2>/dev/null \
+            || sha256sum "$WS/plugin/templates/scripts/gowork.sh"; } | awk '{print $1}')"
+    echo "digest: $SET_A"; } > "$WS/plugin/templates/MANIFEST.sha256"
+}
+stub_gh "0.48.0" "$SET_A"; stub_plugin "0.48.0" "$SET_A"; poblar_plugin
+echo "0.48.0" > "$WS/.harness-version"; echo "$SET_A" > "$WS/.harness-templates"
+mkdir -p "$WS/docs/harness"
+# la instancia, AL DIA: el copiado identico y el renderizado con sus dos secciones
+cp "$WS/plugin/templates/scripts/gowork.sh" "$WS/scripts/gowork.sh"
+printf '# Pipeline de Acme\n\nla seccion vieja\n\nla seccion NUEVA\n' > "$WS/docs/harness/pipeline.md"
+out="$(verify)"
+assert_contains "$out" "archivo por archivo" "el modo declara que compara archivos"
+assert_eq 0 "$(verify_rc)" "instancia al dia archivo por archivo: sale 0"
+
+# EL CASO DE CAMPO: el renderizado se quedo atras (le falta la seccion nueva).
+# El digest y la version siguen coincidiendo, o sea que los tres chequeos
+# viejos siguen verdes y este es el unico que lo ve.
+printf '# Pipeline de Acme\n\nla seccion vieja\n' > "$WS/docs/harness/pipeline.md"
+out="$(verify)"
+assert_contains "$out" "docs/harness/pipeline.md" "nombra el archivo congelado"
+assert_contains "$out" "del template no están" "y dice que le faltan lineas del template"
+assert_contains "$out" "idénticos al tag" "aunque el digest declarado siga coincidiendo"
+
+# Un .tmpl NO se hashea: su sha jamas va a coincidir porque el generador
+# sustituye {{CLAVE}}, y una sola clave puede expandirse a muchas lineas
+# (secrets.sh diverge 162 lineas por eso, y es correcto). Un verificador que
+# grita con un archivo legitimo es un verificador que alguien apaga.
+printf '# Pipeline de Acme Corp SA\n\nla seccion vieja\n\nla seccion NUEVA\n\nun agregado local\n' \
+  > "$WS/docs/harness/pipeline.md"
+assert_eq 0 "$(verify_rc)" "placeholder sustituido y lineas locales de mas: NO es drift"
+
+# Propiedad del PLUGIN: ahi una diferencia es siempre drift, y pone rojo.
+printf '#!/usr/bin/env bash\necho otra cosa\n' > "$WS/scripts/gowork.sh"
+out="$(verify)"
+assert_contains "$out" "scripts/gowork.sh" "nombra el script del plugin que difiere"
+assert_eq 1 "$(verify_rc)" "y ESO si sale 1: scripts/ es propiedad del plugin"
+cp "$WS/plugin/templates/scripts/gowork.sh" "$WS/scripts/gowork.sh"
+
+# Sin poder ubicar el archivo no se afirma nada, ni verde ni rojo.
+rm -f "$WS/docs/harness/pipeline.md"
+out="$(verify)"
+assert_contains "$out" "sin ubicar" "0 candidatos: se cuenta aparte"
+assert_eq 0 "$(verify_rc)" "y no se disfraza de rojo (no pude mirar != esta mal)"
+rm -rf "$WS/plugin/templates/scripts" "$WS/plugin/templates/docs" "$WS/docs"
+rm -f "$WS/scripts/gowork.sh"
+
+echo
 echo "── --verify: el numero quedo bien y el CONTENIDO no"
 # EL fallo caro, y ya paso: '1 actualizado, 24 conflictos' con la version nueva
 # escrita sobre templates viejos. Ninguno de esos 24 traia los arreglos que el

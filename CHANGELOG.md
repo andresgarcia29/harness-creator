@@ -7,6 +7,81 @@ contra una instalación real).
 
 ## No publicado
 
+### Corregido
+- **`--verify` verificaba la DECLARACIÓN del update, no los archivos.** Comparaba
+  el string que el propio update escribió en `.harness-templates` contra el
+  digest del MANIFEST del tag, o sea confirmaba "copié del set correcto" y no
+  "cada archivo de la instancia coincide con ese set". Es autoatestación: solo
+  caza al que se olvida de mentir consistente, y el modo de falla que el propio
+  mensaje anuncia atrapar ("el número quedó bien y el CONTENIDO no") es justo el
+  que la autoatestación no puede atrapar, porque el número ES la declaración.
+  Medido en campo: `docs/harness/pipeline.md` estuvo semanas congelado en una
+  versión vieja con `--verify` en verde, y lo encontró un humano comparando a
+  mano. Ahora compara archivo por archivo contra los templates del plugin en
+  disco (que el mismo modo ya verifica que sean el tag, así que es una
+  referencia buena y no hace falta red). Tres decisiones que lo hacen usable:
+  - **Qué template aterriza dónde no se deduce, se busca.** Ese mapeo lo sabe el
+    generador y no este repo, así que inventarlo sería inventar; se localiza por
+    nombre de archivo dentro del workspace, podando `repos/`, `worktrees/`,
+    `tasks/` y el propio plugin. Cero candidatos o más de uno se cuenta aparte
+    como "sin ubicar": no poder mirar jamás se disfraza de verde.
+  - **Dos clases, dos criterios.** Los copiados tal cual (68 de las 114 entradas
+    del manifiesto) se comparan por sha256 exacto. Los `.tmpl` (46) NO se
+    hashean, porque el generador sustituye `{{CLAVE}}` y una sola clave puede
+    expandirse a muchas líneas: `secrets.sh` diverge 162 líneas por eso y es
+    correcto. Hashearlos sería una máquina de falsos rojos, y un verificador que
+    grita con un archivo legítimo es un verificador que alguien apaga, o sea
+    peor que el hueco. Para ellos el criterio es que toda línea del template SIN
+    placeholder esté en el archivo de la instancia, que es exactamente lo que se
+    encontró a mano con pipeline.md, hecho por máquina.
+  - **Rojo solo donde la propiedad es del plugin** (scripts, hooks, comandos,
+    agentes, settings, policy y las skills upstream). En lo compartido (docs,
+    README, los mapas) se avisa con el archivo nombrado y no se pone rojo,
+    porque lo local puede ganar legítimamente y así lo clasifica
+    `/harness-update`. Avisar ya era todo lo que faltaba: nadie sabía que
+    pipeline.md estaba congelado.
+- **`test_deploy_coalesce.sh` medía la carga de la máquina, no la coalescencia.**
+  Montaba el "dueño vivo" del lock con un `sleep 30 &`, y el bloque anterior corre
+  un ciclo de deploy REAL: en una máquina cargada el dueño llegaba muerto a la
+  aserción, el watcher hacía lo correcto (no hay dueño: arranco) y el test lo
+  leía como rojo. Medido: la corrida entera son ~2 min, y con el plazo en 600 las
+  15 aserciones pasan. Ahora el dueño vivo es el pid del propio test, que está
+  vivo por definición mientras el test corre: la propiedad que la aserción
+  necesita, sin reloj.
+
+### Documentación
+- **Los mapas y los README al día con v0.59.13 y v0.60.0.** Los cambios de las
+  dos versiones tocaron cosas que la documentación seguía contando como antes, y
+  una doc que envejece no rompe nada, que es justamente por qué envejece:
+  - `README.md` declaraba textualmente la decisión vieja de `quick` ("es el
+    único carril que no se clasifica: `/smart` jamás lo elige por su cuenta").
+    Ahora explica el router, por qué se dio vuelta (standard $119 contra express
+    $35, con buena parte de lo que entraba por standard siendo cambios mecánicos
+    de un repo) y sobre todo **el límite**: ningún gate frena un cruce de
+    ownership dentro de un mismo repo, así que clasificar quick exige evidencia
+    positiva y sin ella va `express`.
+  - `README.md` no mencionaba `orchestrator-watch.sh` en ninguna parte, siendo
+    el dueño del relevo de fase. Ahora está en el árbol de scripts y con su
+    párrafo propio: el segundo reloj, el de la sesión que orquesta, con los dos
+    mecanismos (hueco de bus y relevo) y por qué son señales ortogonales.
+  - El árbol de `tasks/<id>/` no listaba `agents.json` ni `handoff.json`, y
+    `state.json` ya no es solo fase y carril: también lleva la sesión.
+  - La fila de `harness-cost.py` decía cómo mide pero no a QUIÉN le atribuye:
+    ahora dice que la tarea sale de las rutas del transcript y no del puntero
+    por sesión, con el caso medido de la tarea que se llevaba el gasto de sus
+    hermanas.
+  - La sección de economía de tokens del README explica que esas herramientas
+    reemplazan AGENTES, con los números de `general-purpose` contra `Explore`.
+  - `CLAUDE.md.tmpl` y `AGENTS.md.tmpl` (los mapas que los agentes leen siempre)
+    incorporan la prohibición de `general-purpose`, la continuación por
+    `SendMessage` y una sesión por fase, **sin crecer**: los dos siguen en su
+    tope del ratchet (155 y 146 líneas), reescribiendo prosa existente en vez de
+    sumar párrafos, que es la política de la casa.
+  - `docs/harness/pipeline.md` documenta el relevo y los artefactos nuevos;
+    `docs/harness/policy.md` ya traía la tabla de qué releva y qué no.
+  - `README.en.md` espejado en todo lo anterior, y de paso recuperó el `stale`
+    del árbol de scripts, que se había quedado atrás en v0.59.13.
+
 ### Añadido
 - **Que arreglar un ticket sea BARATO y RÁPIDO: cuatro cambios, mismos gates.**
   Medido sobre `docs/metrics/*.jsonl` de una instancia real (32 tareas). Costo

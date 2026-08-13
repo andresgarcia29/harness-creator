@@ -800,7 +800,7 @@ extract muerde_limpia >> "$WS/gate_muerde.sh"
 for fn in delta_seccion declara_tests_nuevos muerde_pytest muerde_go \
           muerde_go_tags_de muerde_go_tags \
           muerde_go_base_compila muerde_tf muerde_tf_root muerde_tf_base_init \
-          muerde_node con_limite muerde_node_colecta_en muerde_node_colecta muerde_corre \
+          muerde_node tiene_runner_navegador con_limite muerde_node_colecta_en muerde_node_colecta muerde_corre \
           muerde_verde_vacio muerde_corre_grupo muerde_salto gate_test_muerde; do
   extract "$fn" >> "$WS/gate_muerde.sh"
 done
@@ -2021,21 +2021,33 @@ echo "── check_verdict: cada rechazo nombra su causa y su remediación"
 # corrige los items blocking", con blocking vacío. La remediación real era
 # correr la fase QA. Mensaje que manda a una lista vacía = ronda quemada.
 
-extract check_verdict > "$WS/check_verdict.sh"
+# tiene_runner_navegador viaja con check_verdict: el gate de QA la llama para
+# decidir si este repo PUEDE ejercitar la interfaz, y sin ella la funcion
+# extraida muere con "command not found" en vez de probar nada.
+{ extract check_verdict; extract tiene_runner_navegador; } > "$WS/check_verdict.sh"
 grep -q 'qa_state' "$WS/check_verdict.sh" || { echo "no pude extraer check_verdict"; exit 1; }
+grep -q 'playwright' "$WS/check_verdict.sh" || { echo "no pude extraer tiene_runner_navegador"; exit 1; }
 
 run_check_verdict() {  # run_check_verdict <verdict-json> [sin-qa] — salida + exit
   mkdir -p "$WS/tasks/T9"
   printf '%s' "$1" > "$WS/tasks/T9/verdict-svc.json"
   # Un qa:"pass" ahora exige artefacto (qa-<repo>.json o evidencia runner=qa).
   # El fixture lo provee salvo que el caso pruebe justamente su ausencia.
+  # QA_JSON deja que el caso escriba SU qa-<repo>.json: los casos de qa_mode
+  # se juegan justamente en el contenido de ese archivo, y el default de acá
+  # lo pisaba.
   if [ "${2:-}" = "sin-qa" ]; then rm -f "$WS/tasks/T9/qa-svc.json"
+  elif [ -n "${QA_JSON:-}" ]; then printf '%s' "$QA_JSON" > "$WS/tasks/T9/qa-svc.json"
   else printf '{"schema":1,"qa":"pass"}' > "$WS/tasks/T9/qa-svc.json"; fi
   # set -euo pipefail: el ENTORNO REAL de ship.sh. El issue #33 (grep -l sin
   # matches + pipefail = muerte muda) era invisible justo porque este runner
   # corría la función extraída sin pipefail: el test probaba otro shell.
+  # WT existe porque el gate de QA pregunta si ESTE arbol puede correr
+  # Playwright. Por defecto apunta a un arbol sin package.json, o sea "no hay
+  # con que mirar": el gate nuevo no aplica y los casos de siempre no se mueven.
   ( set -euo pipefail; WS="$WS"; TASK=T9; REPO=svc; BASE_REF=main
-    gate() { :; }
+    WT="${QA_WT:-$WS/sin-front}"
+    gate() { :; }; emit() { :; }
     . "$WS/check_verdict.sh"; check_verdict ) 2>&1
 }
 
@@ -2107,6 +2119,75 @@ printf '{"schema":1,"runner": "qa","kind":"test"}' > "$WS/tasks/T9/evidence/EV-T
 out="$(run_check_verdict '{"verdict":"pass","qa":"pass","blocking":[],"requirements_uncovered":0}' sin-qa)"
 assert_eq 0 $? "evidencia con runner=qa: alcanza como respaldo"
 rm -f "$WS/tasks/T9/evidence/EV-TEST-qa1.json"
+
+echo
+echo "── un QA que NO ejercito la interfaz, en un repo que PUEDE, se declara o no pasa"
+# El bloque de arriba cerro "qa:pass sin nada detras". Lo que quedaba abierto es
+# mas fino y costo un P1: `--runner qa -- npm test` es un artefacto valido que
+# RE-CORRE la suite que los gates de lenguaje ya corrieron. Cero informacion
+# nueva, y el gate lo tomaba como prueba de que alguien ejercito el
+# comportamiento. Caso de campo: cinco pantallas pre-login sin selector de
+# idioma, con un test de regresion VERDE que afirmaba sobre el layout
+# equivocado. Nadie abrio /login y nada dijo que nadie lo habia abierto.
+mkdir -p "$WS/front/node_modules/.bin" "$WS/tasks/T9/evidence"
+printf '{"devDependencies":{"@playwright/test":"1.4.0"}}' > "$WS/front/package.json"
+printf '#!/bin/sh\nexit 0\n' > "$WS/front/node_modules/.bin/playwright"
+chmod +x "$WS/front/node_modules/.bin/playwright"
+VERDE='{"verdict":"pass","qa":"pass","blocking":[],"requirements_uncovered":0}'
+
+# El QA de esta tarea: solo re-corrio la suite, que es el caso del P1.
+printf '{"schema":1,"runner":"qa","kind":"test","command":["npm","test"]}' \
+  > "$WS/tasks/T9/evidence/EV-TEST-qa2.json"
+
+# CONTRA-MITAD PRIMERO: sin Playwright instalado el gate NO existe. Sin esto,
+# todo el bloque pasaria igual con un gate que le pide navegador a un repo Go.
+out="$(run_check_verdict "$VERDE")"
+assert_eq 0 $? "repo SIN runner de navegador: el gate nuevo ni se activa"
+
+out="$(QA_WT="$WS/front" run_check_verdict "$VERDE")"
+assert_eq 3 $? "QA que re-corre la suite en un repo con Playwright: rechaza"
+assert_contains "$out" "no la ejercitó ni declaró por qué no" "nombra la causa exacta"
+assert_contains "$out" "qa_mode" "y da las tres salidas"
+
+# 1. evidencia sellada de una corrida de navegador: alcanza, sin firmar nada
+printf '{"schema":1,"runner":"qa","kind":"test","command":["npx","playwright","test"]}' \
+  > "$WS/tasks/T9/evidence/EV-TEST-qa3.json"
+out="$(QA_WT="$WS/front" run_check_verdict "$VERDE")"
+assert_eq 0 $? "evidencia de una corrida de playwright: pasa"
+rm -f "$WS/tasks/T9/evidence/EV-TEST-qa3.json"
+
+# 2. el agente qa declara que miro, con la superficie que ejercito
+out="$(QA_WT="$WS/front" QA_JSON='{"schema":1,"qa":"pass","qa_mode":"navegador","surface":["/login"]}' \
+       run_check_verdict "$VERDE")"
+assert_eq 0 $? "qa_mode navegador con surface[]: pasa"
+# …pero una superficie VACIA no cuenta: declarar que miraste sin decir que
+# abriste es la misma afirmacion sin respaldo que este gate cierra.
+out="$(QA_WT="$WS/front" QA_JSON='{"schema":1,"qa":"pass","qa_mode":"navegador","surface":[]}' \
+       run_check_verdict "$VERDE")"
+assert_eq 3 $? "qa_mode navegador con surface vacio: NO cuenta"
+
+# 3. el waiver: decidiste no mirar y lo firmas con el motivo
+out="$(QA_WT="$WS/front" QA_JSON='{"schema":1,"qa":"pass","qa_mode":"determinista","motivo":"cambio interno de util"}' \
+       run_check_verdict "$VERDE")"
+assert_eq 0 $? "waiver declarado con motivo: pasa"
+assert_contains "$out" "por decisión declarada: cambio interno de util" \
+  "y el motivo se DICE (un waiver que nadie lee es un default con mas pasos)"
+# …y sin motivo no es un waiver, es el mismo default invisible de antes.
+out="$(QA_WT="$WS/front" QA_JSON='{"schema":1,"qa":"pass","qa_mode":"determinista"}' \
+       run_check_verdict "$VERDE")"
+assert_eq 3 $? "qa_mode determinista SIN motivo: no es un waiver"
+
+# DECLARADO PERO SIN INSTALAR: el gate no puede exigir lo que el arbol no puede
+# correr, pero desaparecer en silencio seria este mismo hueco con otra forma.
+# Es el unico camino por el que el gate no se aplica sin que nadie lo decida,
+# asi que tiene que DECIRSE.
+mkdir -p "$WS/front-sin-deps"
+printf '{"devDependencies":{"@playwright/test":"1.4.0"}}' > "$WS/front-sin-deps/package.json"
+out="$(QA_WT="$WS/front-sin-deps" run_check_verdict "$VERDE")"
+assert_eq 0 $? "playwright declarado sin instalar: no bloquea (no se puede exigir lo imposible)"
+assert_contains "$out" "NO se aplicó" "pero lo DICE: no desaparece en silencio"
+assert_contains "$out" "tramo que no pude mirar" "y encuadra que no es un verde de QA"
+rm -f "$WS/tasks/T9/evidence/EV-TEST-qa2.json"
 
 echo
 echo "── issue #29: ruff y pytest son del PROYECTO, no del sistema"

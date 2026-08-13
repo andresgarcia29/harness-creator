@@ -104,7 +104,20 @@ reporta el código de error.
      una vez por ronda, ~20 veces en una corrida real.
    - QA (agente o determinista) → escribe su resultado en
      `tasks/<task-id>/qa-<repo>.json`: `{schema: 1, task_id, repo,
-     commit, qa: "pass|fail", evidence: [...], notes, surface: [...]}`.
+     commit, qa: "pass|fail", evidence: [...], notes, surface: [...],
+     qa_mode: "navegador|determinista", motivo}`.
+
+     **`qa_mode` es obligatorio en repos con Playwright instalado**, y el
+     gate de QA de `ship.sh` lo exige. No es ceremonia: un
+     `--runner qa -- npm test` re-corre la suite que los gates de lenguaje
+     ya corrieron, o sea que certifica "alguien ejercitó el comportamiento"
+     sin que nadie haya abierto una pantalla. Costó un P1 (cinco pantallas
+     pre-login sin selector de idioma, con un test de regresión VERDE que
+     afirmaba sobre el layout equivocado). Las tres salidas: evidencia
+     sellada de una corrida de Playwright, `qa_mode:"navegador"` con
+     `surface[]` no vacío, o `qa_mode:"determinista"` con `motivo`, que es
+     una AFIRMACIÓN firmada de que decidiste que no hacía falta mirar, no
+     un default.
 
      **Identidad del servidor antes de medir: exígila al lanzar QA.** Si
      QA (agente o determinista) mide o ejercita contra un puerto o un

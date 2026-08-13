@@ -1508,14 +1508,21 @@ def cmd_validate_dag(args: argparse.Namespace) -> int:
 
 
 def cmd_dag_nodes(args: argparse.Namespace) -> int:
-    """Los NODOS del DAG en orden topológico: `<id><TAB><repo>` por línea.
+    """Los NODOS del DAG en orden topológico: `<id><TAB><repo><TAB><deps>`.
 
     Existe para que `dag-coalesce.sh` no vuelva a implementar el orden del DAG
     en awk. El coalesce hace cherry-pick de la rama de cada nodo sobre
     `task/<id>`, y ese orden TIENE que ser el del DAG: aplicar T3 antes que T1
     cuando T3 depende de T1 produce un conflicto que no existe en el trabajo,
     solo en el orden en que se lo aplicó. Con `--repo` se filtra al repo que se
-    está coalesciendo (los nodos de otros repos tienen su propio árbol)."""
+    está coalesciendo (los nodos de otros repos tienen su propio árbol).
+
+    La TERCERA columna (`depends_on` separado por comas, vacía si no hay) la
+    agregó #162: `worktree-task.sh --node` tiene que saber si el nodo que está
+    creando depende de otro para decidir de dónde nace su rama, y leer el
+    dag.json por su cuenta sería un segundo lector del mismo artefacto, que es
+    justo lo que `load_dag_nodes` existe para evitar. Es ADITIVA: el consumidor
+    que ya había toma solo `$1`."""
     task_dir = Path(args.task_dir).resolve()
     dag_path = task_dir / "dag.json"
     if not dag_path.exists():
@@ -1538,7 +1545,7 @@ def cmd_dag_nodes(args: argparse.Namespace) -> int:
     for node in order:
         if args.repo and repos[node] != args.repo:
             continue
-        print(f"{node}\t{repos[node]}")
+        print(f"{node}\t{repos[node]}\t{','.join(nodes[node])}")
     return 0
 
 

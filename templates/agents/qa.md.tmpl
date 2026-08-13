@@ -31,6 +31,17 @@ por uno.
    si el árbol se movió durante la corrida, pero un build que no pasa
    por el runner no tiene esa red.
 
+   **Declará CÓMO miraste, en `qa_mode`.** Si ejercitaste la interfaz,
+   `qa_mode: "navegador"` y `surface[]` con lo que abriste (vacío no
+   cuenta). Si decidiste que este cambio no lo necesitaba, `qa_mode:
+   "determinista"` y `motivo` con el porqué. En un repo con Playwright
+   instalado el gate de `ship.sh` exige una de las dos, porque un QA que
+   re-corre la suite que los gates ya corrieron no agrega nada: afirma que
+   alguien ejercitó el comportamiento sin que nadie haya abierto una
+   pantalla. Caso de campo: cinco pantallas pre-login sin selector de
+   idioma, con un test de regresión verde que afirmaba sobre el layout
+   equivocado. Nadie abrió `/login`, y nada lo dijo.
+
    **Identidad del servidor ANTES de medir.** Contra un puerto o un
    servicio local, tu primer comando comprueba QUÉ está sirviendo ahí:
    `curl` de un marcador de build, de la versión, o de un contenido que

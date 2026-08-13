@@ -2610,6 +2610,26 @@ muerde_go_base_compila() {  # muerde_go_base_compila <paquete>
     if [ -n "${MUERDE_GO_TAGS:-}" ]; then go build -tags "$MUERDE_GO_TAGS" "$1"
     else go build "$1"; fi )
 }
+# ── ¿ESTE REPO PUEDE MIRAR LO QUE EL USUARIO VE? ──────────────────────
+# Declarado E instalado, las dos cosas: un `@playwright/test` en package.json
+# sin el binario no ejercita nada, y tratar esa declaración como capacidad
+# convertiría el gate de QA en un rojo imposible de satisfacer.
+#
+# Vive en una función porque tiene DOS llamadores (muerde_node y gate_qa) y dos
+# copias divergirían justo en la definición de "puede mirar", que es la que
+# decide si el gate existe para este repo.
+tiene_runner_navegador() {  # 0 puede correrlo · 1 no lo declara · 2 declarado SIN instalar
+  [ -f "$WT/package.json" ] || return 1
+  jq -e '.devDependencies["@playwright/test"] // .dependencies["@playwright/test"]' \
+     "$WT/package.json" >/dev/null 2>&1 || return 1
+  # El 2 se separa del 1 porque son cosas distintas y una de ellas hay que
+  # DECIRLA: "este repo no hace UI" es una respuesta, y "este repo hace UI pero
+  # el árbol no puede correrla" es un tramo sin mirar. Para muerde_node los dos
+  # son igual de inservibles (un `if` los trata a ambos como falso), pero el
+  # gate de QA tiene que declarar el segundo en vez de desaparecer.
+  [ -x "$WT/node_modules/.bin/playwright" ] || return 2
+  return 0
+}
 muerde_node() {  # → MUERDE_NODE_RUNNERS con los runners declarados E instalados
   local pkg="$WT/package.json" unit=""
   MUERDE_NODE_RUNNERS=""
@@ -2636,8 +2656,7 @@ muerde_node() {  # → MUERDE_NODE_RUNNERS con los runners declarados E instalad
   # Playwright CONVIVE con el runner de unit y no lo vuelve ambiguo: e2e/ y src/
   # son jurisdicciones distintas, y quién colecta cada archivo lo decide la
   # COLECCIÓN (muerde_node_colecta), no una elección a ciegas hecha acá.
-  if jq -e '.devDependencies["@playwright/test"] // .dependencies["@playwright/test"]' "$pkg" >/dev/null 2>&1 \
-     && [ -x "$WT/node_modules/.bin/playwright" ]; then
+  if tiene_runner_navegador; then
     MUERDE_NODE_RUNNERS="${MUERDE_NODE_RUNNERS:+$MUERDE_NODE_RUNNERS }playwright"
   fi
   if [ -z "$MUERDE_NODE_RUNNERS" ]; then
@@ -3326,6 +3345,82 @@ check_verdict() {
     echo "   Un pass de QA sin artefacto es la afirmación más cara del pipeline"
     echo "   sostenida por nada."
     exit 3
+  fi
+
+  # ── TENER ARTEFACTO NO ES HABER EJERCITADO NADA ─────────────────────
+  # El bloque de arriba cerró "qa:pass sin nada detrás". Lo que quedaba abierto
+  # es más fino y costó un P1: `--runner qa -- npm test` es un artefacto
+  # perfectamente válido que RE-CORRE la suite que los gates de lenguaje ya
+  # corrieron. Cero información nueva, y el gate lo aceptaba como prueba de que
+  # alguien ejercitó el comportamiento.
+  #
+  # Caso de campo: cinco pantallas pre-login sin selector de idioma, con un test
+  # de regresión VERDE que afirmaba sobre el layout equivocado (creía que el
+  # shell del onboarding era pre-login, y exige sesión). Nadie abrió /login, y
+  # nada en el pipeline dijo que nadie lo había abierto.
+  #
+  # Lo que NO se pretende: cazar que un test afirme sobre el componente
+  # equivocado. Eso es comprensión y ningún gate la tiene. Lo que sí se caza es
+  # "nadie miró lo que el usuario ve, y nadie declaró que decidió no mirarlo".
+  #
+  # Solo donde hay con qué mirar: un repo con Playwright instalado PUEDE
+  # ejercitar la interfaz, y ese es el único dato mecánico que distingue "no se
+  # miró" de "no había con qué". Donde no lo hay, este gate no existe.
+  # `|| nav_rc=$?` y no `; nav_rc=$?`: bajo set -e una función que devuelve != 0
+  # como comando suelto mata el script antes de llegar al if.
+  local nav_rc=0
+  tiene_runner_navegador || nav_rc=$?
+  if [ "$nav_rc" -eq 2 ]; then
+    # Declarado pero sin binario. No se puede exigir que el QA ejercite la
+    # interfaz en un árbol que no puede correrla, pero desaparecer en silencio
+    # sería este mismo hueco con otra forma. Se declara el tramo sin mirar,
+    # igual que hace el gate ts con el package.json fuera de la raíz.
+    echo "   ⚠️  $REPO declara @playwright/test pero falta node_modules/.bin/playwright:"
+    echo "      el gate de QA por navegador NO se aplicó. No es un verde de QA,"
+    echo "      es un tramo que no pude mirar."
+    emit assumption "$REPO: gate de QA por navegador no aplicado (playwright declarado sin instalar)"
+  fi
+  if [ "$nav_rc" -eq 0 ]; then
+    local qa_nav=0 qa_modo="" qa_motivo=""
+    # La prueba determinista de que alguien miró: una evidencia de runner=qa
+    # cuyo comando invoca al runner de navegador. `command` es un argv, así que
+    # se junta antes de mirarlo.
+    qa_nav="$(jq -s '[.[] | select(.runner == "qa")
+                          | select(((.command // []) | join(" ")) | test("playwright"))]
+                     | length' "$WS/tasks/$TASK/evidence/"EV-*.json 2>/dev/null || echo 0)"
+    if [ -f "$qa_file" ]; then
+      qa_modo="$(jq -r '.qa_mode // ""' "$qa_file" 2>/dev/null || true)"
+      qa_motivo="$(jq -r '.motivo // ""' "$qa_file" 2>/dev/null || true)"
+    fi
+    # Tres salidas, y la ausencia de las tres NO es una de ellas:
+    #  1. evidencia de navegador sellada (determinista, nadie la firma a mano)
+    #  2. el agente qa declara que miró, con la superficie que ejercitó
+    #  3. alguien declara que decidió NO mirar, y firma el motivo
+    if [ "${qa_nav:-0}" -eq 0 ] \
+       && ! { [ "$qa_modo" = navegador ] && jq -e '(.surface // []) | length > 0' "$qa_file" >/dev/null 2>&1; } \
+       && ! { [ "$qa_modo" = determinista ] && [ -n "$qa_motivo" ]; }; then
+      echo "❌ $REPO puede ejercitar la interfaz (Playwright instalado) y el QA de"
+      echo "   esta tarea no la ejercitó ni declaró por qué no."
+      echo "   Un QA que re-corre la suite que los gates ya corrieron no agrega"
+      echo "   nada: certifica 'alguien ejercitó el comportamiento' sin que nadie"
+      echo "   haya abierto una pantalla."
+      echo "   ↳ una de estas tres, y la tercera es una AFIRMACIÓN que se firma:"
+      echo "     1. sellá la corrida de navegador como evidencia:"
+      echo "        python3 scripts/evidence.py run --task-dir tasks/$TASK --repo $REPO \\"
+      echo "          --runner qa --kind test --cwd worktrees/$TASK/$REPO -- npx playwright test"
+      echo "     2. el agente qa miró: en qa-$REPO.json, \"qa_mode\":\"navegador\""
+      echo "        y \"surface\":[...] con lo que ejercitó (vacío no cuenta)"
+      echo "     3. decidiste que no hacía falta: en qa-$REPO.json,"
+      echo "        \"qa_mode\":\"determinista\" y \"motivo\":\"<por qué>\""
+      emit assumption "$REPO: QA sin ejercitar la interfaz y sin declarar por qué"
+      exit 3
+    fi
+    # Se DICE cuál de las tres fue: un waiver que nadie lee es un default con
+    # más pasos, y el punto entero era volver visible la decisión.
+    if [ "${qa_nav:-0}" -eq 0 ] && [ "$qa_modo" = determinista ]; then
+      echo "   ⚠️  QA sin navegador por decisión declarada: $qa_motivo"
+      emit assumption "$REPO: QA determinista declarado ($qa_motivo)"
+    fi
   fi
 
   # compliance: todo requirement del delta-spec cubierto por tests

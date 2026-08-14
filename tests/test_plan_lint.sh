@@ -258,4 +258,43 @@ printf '{"lane":"express"}\n' > "$WS/tasks/TRIV/state.json"
 out="$(bash "$WS/scripts/plan-lint.sh" TRIV 2>&1)"
 assert_not_contains "$out" "parece trivial" "en express no aplica (ya es el carril corto)"
 
+echo
+echo "── un criterio que nombra los gates los hace correr DOS veces por ronda"
+# implementer.md §5 prohibe re-correr la suite, y el formato de plan que este
+# mismo script bendice empuja a lo contrario: la forma natural de escribir un
+# criterio binario es nombrar los comandos de gate. Gana la que el implementer
+# tiene delante, que es el plan. Medido en una tarea de dos rondas del carril
+# express: ~8 de los 19 minutos de herramientas fueron esa duplicacion.
+mkdir -p "$WS/tasks/GATES"
+cat > "$WS/tasks/GATES/plan.md" <<'EOF'
+### T1 · web · agrega el selector de idioma
+- repo: web
+- req: UI-1
+- archivos: src/Header.tsx
+- criterios: `bash -c "cd <wt> && bun run typecheck"`, `bun run lint` y `bun run test` salen exit 0
+- complexity: low
+- deps: ninguna
+EOF
+printf '## ADDED Requirements
+- UI-1: el header DEBE traer selector de idioma.
+' > "$WS/tasks/GATES/delta-spec.md"
+printf '{"lane":"express"}
+' > "$WS/tasks/GATES/state.json"
+out="$(bash "$WS/scripts/plan-lint.sh" GATES 2>&1)"; rc=$?
+assert_eq 0 "$rc" "avisa, NO bloquea: el criterio no es incorrecto, es caro"
+assert_contains "$out" "nombran comandos de gate" "lo dice"
+assert_contains "$out" "ship.sh --precheck" "y nombra quien los corre de todas formas"
+assert_contains "$out" "la CONDUCTA que el cambio agrega" "con el criterio correcto delante"
+
+# Y el go de un criterio Go tambien se reconoce.
+sed -i.bak 's/- criterios:.*/- criterios: `go test .\/internal\/...` sale exit 0/' "$WS/tasks/GATES/plan.md"
+out="$(bash "$WS/scripts/plan-lint.sh" GATES 2>&1)"
+assert_contains "$out" "nombran comandos de gate" "tambien con go test"
+
+# CONTRA-MITAD: un criterio de CONDUCTA no dispara el aviso, aunque hable de tests.
+sed -i.bak 's/- criterios:.*/- criterios: responde 429 tras 100 req\/min por tenant (el test lo prueba)/' "$WS/tasks/GATES/plan.md"
+out="$(bash "$WS/scripts/plan-lint.sh" GATES 2>&1)"
+assert_not_contains "$out" "nombran comandos de gate" "un criterio de conducta no recibe el aviso"
+rm -f "$WS/tasks/GATES/plan.md.bak"
+
 t_done

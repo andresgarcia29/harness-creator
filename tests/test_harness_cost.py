@@ -81,6 +81,47 @@ class CostBase(unittest.TestCase):
                               stderr=subprocess.PIPE, check=False, env=env)
 
 
+
+class RelojPorRol(CostBase):
+    """El reloj que faltaba: `task` reportaba dolares, turnos y contexto, y NO
+    reportaba tiempo, asi que la latencia se diagnosticaba con la duracion que
+    informa el runtime. Ese numero es inconsistente para los agentes CONTINUADOS
+    (que es como el harness hace las rondas): medido en una sesion, el reviewer
+    devolvio duracion por ronda y el implementer la vida entera del agente con
+    el ocio adentro, 33,9 min contra 12,2 de trabajo real."""
+
+    def test_el_reporte_por_tarea_trae_activo_y_reloj(self):
+        # Tres turnos: dos seguidos (trabajo) y uno despues de un hueco largo
+        # (el agente esperando el mensaje siguiente).
+        self.write([
+            self.turn(out=10, ts="2026-08-05T12:00:00.000Z"),
+            self.turn(out=10, ts="2026-08-05T12:01:00.000Z"),
+            self.turn(out=10, ts="2026-08-05T12:30:00.000Z"),
+        ])
+        r = self.run_cost("task", "T1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("activo", r.stdout)
+        self.assertIn("reloj", r.stdout)
+        # activo = 1 min (el hueco de 29 min no es trabajo); reloj = 30 min.
+        self.assertIn("1.0m", r.stdout)
+        self.assertIn("30.0m", r.stdout)
+
+    def test_el_hueco_de_espera_no_se_cobra_como_trabajo(self):
+        # Un solo hueco enorme: activo tiene que ser ~0, no 120 minutos. Es
+        # exactamente el numero que hizo que una ronda de 12 min pareciera de 34.
+        self.write([
+            self.turn(out=10, ts="2026-08-05T10:00:00.000Z"),
+            self.turn(out=10, ts="2026-08-05T12:00:00.000Z"),
+        ])
+        r = self.run_cost("task", "T1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("120.0m", r.stdout)          # el reloj SI lo ve
+        self.assertNotIn("120.0m  reloj", r.stdout.replace("activo ", "activo "))
+        linea = [l for l in r.stdout.splitlines() if "activo" in l and "reloj" in l]
+        self.assertTrue(linea, r.stdout)
+        self.assertIn("activo       -", linea[-1])  # cero trabajo medible
+
+
 class Aritmetica(CostBase):
     def test_precio_base(self):
         # Opus 5: $5 input / $25 output por MTok. 1M de input y 1M de output

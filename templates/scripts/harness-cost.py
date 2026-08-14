@@ -334,6 +334,13 @@ def find_project_dir(workspace: str):
 
 
 # ── Lectura de un transcript ─────────────────────────────────────────────────
+# Un hueco entre turnos más largo que esto no es un turno lento: es el agente
+# esperando el mensaje siguiente. El default sale de la medición: los huecos de
+# trabajo de un subagente están muy por debajo, y los de espera arrancan en
+# minutos.
+HUECO_MAX_S = float(os.environ.get("HARNESS_COST_HUECO_MAX_S", "120"))
+
+
 def _acc() -> dict:
     """Un acumulador de usage.
 
@@ -341,7 +348,8 @@ def _acc() -> dict:
     aritméticas del mismo número es una oportunidad de divergir, y acá el número
     es el que decide si una transición pasa."""
     return {"t": collections.Counter(), "models": collections.Counter(),
-            "turns": 0, "tools": 0, "ctx": [], "first": None, "last": None}
+            "turns": 0, "tools": 0, "ctx": [], "first": None, "last": None,
+            "prev": None, "activo": 0.0}
 
 
 def _add(a: dict, model: str, u: dict, tools: int, ts) -> None:
@@ -371,6 +379,27 @@ def _add(a: dict, model: str, u: dict, tools: int, ts) -> None:
     a["tools"] += tools
     if ts:
         a["first"] = a["first"] or ts
+        # ── EL RELOJ QUE FALTABA, Y POR QUÉ SON DOS NÚMEROS ──────────────
+        # `harness-cost.py` reportaba dólares, turnos y contexto, y NO reportaba
+        # tiempo, así que la latencia se diagnosticaba con el único número
+        # disponible: la duración que el runtime informa al orquestador. Ese
+        # número es inconsistente para los agentes CONTINUADOS (SendMessage),
+        # que es como el harness hace las rondas: medido en una sesión, el
+        # reviewer devolvió duración POR RONDA (12,4 min) y el implementer, la
+        # vida entera del agente con el ocio adentro (33,9 min contra 12,2 de
+        # trabajo). Con ese número, el diagnóstico apuntó al lugar equivocado.
+        #
+        # Acá se miden los dos por separado, y la diferencia ES el dato: el
+        # `span` (de su primer turno al último) incluye lo que el agente pasó
+        # esperando el mensaje siguiente; el `activo` suma solo los huecos
+        # ENTRE TURNOS que son de trabajo. Un hueco largo no es un turno lento,
+        # es un agente esperando, y sumarlo al trabajo es lo que hace que una
+        # ronda de 12 minutos parezca de 34.
+        if a["prev"]:
+            d = (iso_epoch(ts) or 0) - (iso_epoch(a["prev"]) or 0)
+            if 0 < d <= HUECO_MAX_S:
+                a["activo"] += d
+        a["prev"] = ts
         a["last"] = ts
 
 
@@ -392,6 +421,8 @@ def _finish(a: dict, path: str):
         if (t["cache_read"] + t["cache_write_total"]) else 1.0,
         "first": a["first"],
         "last": a["last"],
+        "span_s": max(0.0, (iso_epoch(a["last"]) or 0) - (iso_epoch(a["first"]) or 0)),
+        "activo_s": a["activo"],
     }
 
 
@@ -647,6 +678,13 @@ def usd(v):
     return "       n/d" if v is None else f"{v:>10,.2f}"
 
 
+def mins(seg) -> str:
+    """Segundos → minutos, para las dos columnas de reloj."""
+    if not seg:
+        return "      -"
+    return f"{seg / 60:>6.1f}m"
+
+
 def band(r) -> str:
     """La etiqueta que hace escaneable el reporte: qué está fuera de banda.
 
@@ -672,12 +710,13 @@ def band(r) -> str:
 def print_rows(rows, limit=20):
     rows = sorted(rows, key=lambda r: -(r["cost"] or 0))[:limit]
     print(f"{'USD':>10} {'rol':<14} {'turnos':>7} {'tools':>6} "
-          f"{'ctx medio':>10} {'cache':>6}  fuera de banda")
-    print("-" * 78)
+          f"{'ctx medio':>10} {'cache':>6} {'activo':>7} {'reloj':>7}  fuera de banda")
+    print("-" * 94)
     for r in rows:
         print(f"{usd(r['cost'])} {r['role'][:14]:<14} {r['turns']:>7} "
               f"{r['tools']:>6} {r['ctx_avg']:>10,.0f} "
-              f"{r['cache_hit']*100:>5.0f}%  {band(r)}")
+              f"{r['cache_hit']*100:>5.0f}% {mins(r.get('activo_s'))} "
+              f"{mins(r.get('span_s'))}  {band(r)}")
 
 
 def totals(rows):
@@ -728,12 +767,20 @@ def cmd_task(args) -> int:
     print(f"== {args.task} ==")
     print_rows(rows)
     by_role = collections.defaultdict(float)
+    act_role = collections.defaultdict(float)
+    span_role = collections.defaultdict(float)
     for r in rows:
         by_role[r["role"]] += r["cost"] or 0
+        act_role[r["role"]] += r.get("activo_s") or 0
+        span_role[r["role"]] += r.get("span_s") or 0
     print()
-    print("por rol:")
+    # El tiempo va JUNTO al costo y no en otro comando: la pregunta "por qué
+    # tardó" y la pregunta "por qué costó" se hacen a la vez, y separarlas es
+    # como se termina diagnosticando la latencia con el único número que había.
+    print("por rol (activo = trabajo; reloj = de su primer turno al último, ocio incluido):")
     for role, c in sorted(by_role.items(), key=lambda x: -x[1]):
-        print(f"  {role:<16} ${c:>10,.2f}")
+        print(f"  {role:<16} ${c:>10,.2f}  activo {mins(act_role[role])}"
+              f"  reloj {mins(span_role[role])}")
     print_totals(rows)
     return EXIT_OK
 

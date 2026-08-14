@@ -788,3 +788,31 @@ ese script y hace falta el rastro para encontrarla.
   `$( )`, asi que sus `say` a stdout se convertian en ids de run y el watcher
   terminaba "vigilando" palabras sueltas de su propio diagnostico. Los mensajes
   van a stderr y hay una asercion que lo fija.
+||||||| parent of 7e5ffa0 (fix: el onboarding de secretos es de TU fuente, no de Vault (#174, #175))
+||||||| parent of b02dca4 (fix: el onboarding de secretos es de TU fuente, no de Vault (#174, #175))
+## Cerrado el 2026-08-14 (issues #174 y #175: el onboarding de secretos era de Vault, no tuyo)
+
+- [x] **`bootstrap.sh` aceptaba el token de Vault sin validarlo, y en silencio,
+  cuando el CLI `vault` no estaba.** Las dos ramas que hablan (`no hay token` y
+  `el token expiro`) quedaban sin tomar, `NEED_TOKEN` se quedaba en 0 y el
+  onboarding se declaraba terminado con un token que nunca se verifico contra
+  ningun servidor. La primera corrida al menos lo pide; de la segunda en
+  adelante, silencio. El sintoma aparece lejos: `secrets.sh pull` trae 0 claves
+  y el usuario culpa a sus policies o rota el token. Ahora la rama existe y
+  DICE que no pudo validar, con el comando para hacerlo a mano. Le pasa a
+  cualquier instancia donde la instalacion del CLI fallo por plataforma o por
+  red, no solo por el #23.
+- [x] **`bootstrap.sh` solo onboardeaba Vault: las otras 6 fuentes que
+  `secrets.sh` implementa quedaban sin paso de credencial.** Medido sobre las
+  siete: seis saltaban directo a `secrets.sh pull`, que falla sin decir como
+  autenticarse, y `TOKFILE` quedaba cableado a `vault-token` aunque la instancia
+  nunca hubiera elegido Vault. Con equipos que corren un harness por nube (uno
+  en GCP SM, otro en AWS SM) el onboarding no existia en ninguno. Ahora se
+  DESPACHA por fuente (regla 8): cada una comprueba su credencial con su propio
+  CLI (`gcloud auth application-default print-access-token`,
+  `aws sts get-caller-identity`, `doppler me`, `op whoami`, la llave age de
+  sops, el `.secrets` a mano de `env`) y, si falta, nombra el comando exacto de
+  login. Lo que el bootstrap NO hace es correr ese login: abren navegador o
+  piden datos interactivos, y encadenarlos a ciegas desde un bootstrap es como
+  se pierden sesiones ajenas. Sin el CLI de la fuente se declara ceguera, que es
+  la misma respuesta que da el resto del harness cuando no puede mirar.

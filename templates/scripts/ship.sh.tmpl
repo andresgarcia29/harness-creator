@@ -2366,6 +2366,9 @@ REPEOF
   echo "     bajo '## MODIFIED Requirements' o '## REMOVED Requirements' la entrada"
   echo "     debe NOMBRAR cada archivo de test afectado. Si no, arregla el CÓDIGO"
   echo "     hasta que el test pase como está."
+  echo "   ↳ el nombre vale en el TÍTULO de la subsección o en el cuerpo, pero"
+  echo "     siempre DEBAJO de ese '##': un basename suelto contra otro"
+  echo "     encabezado no declara nada, y ahí el gate sigue rojo con razón."
   exit 3
 }
 

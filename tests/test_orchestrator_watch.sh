@@ -257,6 +257,115 @@ assert_contains "$out" "min en la misma fase" "y dice de qué señal habla (tiem
 assert_eq 0 "$(relanzos)" "avisar no es relanzar: la decisión sigue siendo del hueco de bus"
 
 echo
+echo "── el techo del agregado: 125 sesiones agotaron la RAM de una maquina"
+# El 2026-08-14 este vigilante relanzo 125 sesiones en 71 minutos, 29 en UNA
+# sola pasada, sobre un backlog de tareas de dias atras que cruzaban el umbral
+# de silencio a la vez. Medido: 1,15 GB por sesion, o sea ~140 GB pedidos contra
+# 12 GB de RAM. Los limites que existian eran todos POR TAREA (lease y
+# MAX_TRIES) y ninguno miraba el agregado.
+tres_varadas() {  # deja tres tareas varadas y el estado limpio
+  rm -f "$WS/relanzamientos.txt"
+  rm -rf "$WS/.harness/claims" "$WS/.harness/orch-watch" "$WS/tasks" "$WS/.harness/events.jsonl"
+  for t in "$@"; do
+    nueva_tarea "$t" implement 1300
+    evento "$t" tool 1300
+  done
+}
+corre_tope() {  # corre_tope <var=val>... : una pasada con las perillas dadas
+  ( cd "$WS" && env HARNESS_ORCH_IDLE=720 HARNESS_ORCH_MAX=2 "$@" \
+      bash scripts/orchestrator-watch.sh once 2>&1 )
+}
+
+tres_varadas UNA DOS TRES
+out="$(corre_tope HARNESS_ORCH_MAX_PER_PASS=1)"; sleep 0.6
+assert_eq 1 "$(relanzos)" "tope por pasada: sube en rampa, no en escalon"
+assert_contains "$out" "rampa" "y dice por que dejo a las otras"
+
+# El tope de sesiones VIVAS: se cuentan los leases con PID vivo, que es dato que
+# el lease ya guardaba. Aca se falsifican dos con procesos propios de verdad.
+tres_varadas CUATRO CINCO
+mkdir -p "$WS/.harness/claims/orch-AJENA1.lock.d" "$WS/.harness/claims/orch-AJENA2.lock.d"
+for n in 1 2; do
+  sleep 30 & p=$!
+  echo "$p" > "$WS/.harness/claims/orch-AJENA$n.lock.d/pid"
+  if [ -r "/proc/$p/stat" ]; then
+    sed 's/.*) //' "/proc/$p/stat" | awk '{print $20}' > "$WS/.harness/claims/orch-AJENA$n.lock.d/pidid"
+  else
+    ps -o lstart= -p "$p" | tr -s ' ' | sed 's/^ *//;s/ *$//' > "$WS/.harness/claims/orch-AJENA$n.lock.d/pidid"
+  fi
+done
+out="$(corre_tope HARNESS_ORCH_MAX_LIVE=2)"; reposa
+assert_eq 0 "$(relanzos)" "con el tope de sesiones vivas alcanzado NO lanza ni una"
+assert_contains "$out" "tope 2" "y dice cuantas hay vivas y cual es el tope"
+kill %1 %2 2>/dev/null; wait 2>/dev/null
+
+# El piso de memoria es el fail-safe de verdad: un tope mal calibrado en una
+# maquina mas chica reproduce el incidente igual.
+tres_varadas SEIS
+out="$(corre_tope HARNESS_ORCH_MIN_FREE_MB=99999999)"; reposa
+if printf '%s' "$out" | grep -q "MB libres"; then
+  assert_eq 0 "$(relanzos)" "con la memoria por debajo del piso NO lanza"
+  assert_contains "$out" "piso" "y nombra el piso que no se cumple"
+else
+  pass "sin lector de memoria en este SO: fail-open declarado (no se puede medir)"
+  pass "y el vigilante sigue funcionando, que es lo que fail-open significa"
+fi
+
+echo
+echo "── una tarea de hace cinco dias no es una sesion que murio hace un rato"
+# Es el punto de diseno del incidente: casi todas las 83 varadas eran de dias
+# atras, o sea tareas ABANDONADAS. Relanzarlas no las va a terminar. Se escalan
+# por el camino que ya existe, que ademas las saca de la cola: pause deja la
+# fase en blocked, y blocked es terminal para este vigilante.
+tres_varadas VIEJA
+python3 - "$WS/tasks/VIEJA/state.json" <<'PY2'
+import datetime as dt, json, sys
+s = json.load(open(sys.argv[1]))
+s["phase_since"] = (dt.datetime.now(dt.timezone.utc)
+                    - dt.timedelta(hours=120)).strftime("%Y-%m-%dT%H:%M:%SZ")
+json.dump(s, open(sys.argv[1], "w"))
+PY2
+# Reescribir el state.json le movio el mtime, que es el PISO del reloj: sin
+# volver a envejecerlo la tarea se ve recien tocada y no llega ni a varada.
+envejece "$WS/tasks/VIEJA/state.json" 1300
+out="$(corre_tope HARNESS_ORCH_MAX_AGE_H=48)"; reposa
+assert_eq 0 "$(relanzos)" "una tarea abandonada NO se relanza"
+assert_contains "$out" "abandonada" "se escala a humano, con el motivo dicho"
+assert_eq "blocked" "$(jq -r '.phase' "$WS/tasks/VIEJA/state.json")" \
+  "y queda en blocked, o sea FUERA de la cola de la proxima pasada"
+out="$(corre_tope HARNESS_ORCH_MAX_AGE_H=48)"; reposa
+assert_not_contains "$out" "VIEJA" "la pasada siguiente ni la mira"
+
+echo
+echo "── el orden del tope es JUSTO: menos intentos primero"
+# Con el glob alfabetico, cuando el tope muerde los slots se los llevan siempre
+# las mismas tareas y la cola de atras no avanza nunca.
+tres_varadas AAA ZZZ
+mkdir -p "$WS/.harness/orch-watch"
+printf '{"task":"AAA","attempts":1,"fingerprint":"x","at":"2026-08-14T00:00:00Z"}\n' \
+  > "$WS/.harness/orch-watch/AAA.json"
+out="$(corre_tope HARNESS_ORCH_MAX_PER_PASS=1)"; sleep 0.6
+assert_contains "$(cat "$WS/relanzamientos.txt")" "/smart ZZZ" \
+  "gana la que menos intentos lleva, aunque el glob la ponga ultima"
+assert_not_contains "$(cat "$WS/relanzamientos.txt")" "/smart AAA" "y la otra espera su turno"
+
+echo
+echo "── un PID no es una identidad: los PIDs se reciclan tras un reinicio"
+# lease_taken decidia con kill -0, o sea "hay UN proceso con ese numero". Tras un
+# reinicio los PIDs se reasignan y un lease viejo puede apuntar a un proceso
+# ajeno del mismo usuario: la tarea queda con dueno para siempre. En la maquina
+# del incidente sobrevivieron 346 claims al reinicio.
+tres_varadas SIETE
+sleep 30 & ajeno=$!
+mkdir -p "$WS/.harness/claims/orch-SIETE.lock.d"
+echo "$ajeno" > "$WS/.harness/claims/orch-SIETE.lock.d/pid"
+printf 'arranque-de-otra-era\n' > "$WS/.harness/claims/orch-SIETE.lock.d/pidid"
+printf '%s\n' "$(( $(date -u +%s) - 99999 ))" > "$WS/.harness/claims/orch-SIETE.lock.d/at"
+out="$(corre_tope)"; sleep 0.6
+assert_eq 1 "$(espera_relanzos 1)" "el PID reciclado ya no reclama la tarea de otro"
+kill "$ajeno" 2>/dev/null; wait 2>/dev/null
+
+echo
 echo "── sin CLI de claude no se inventa un relanzamiento"
 rm -rf "$WS/.harness/claims" "$WS/.harness/orch-watch"
 nopath="$(t_path_without claude)"

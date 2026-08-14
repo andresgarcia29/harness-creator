@@ -591,6 +591,53 @@ def atomic_json(path: Path, value: dict) -> None:
             os.unlink(tmp_name)
 
 
+def artefactos_del_comando(cwd: Path, command: "list[str]") -> "list[str]":
+    """Los archivos REALES que el comando nombra, en el orden en que aparecen.
+
+    Se parte por espacios además de por argumento: la ruta puede venir dentro
+    de un `sh -c "pytest tests/x.py"`, que llega como UN token. Solo entra lo
+    que resuelve a un archivo existente, así que nada se apunta por parecerse
+    a una ruta."""
+    seen: set = set()
+    out = []
+    for token in [piece for arg in command for piece in arg.split()]:
+        if token.startswith("-") or "=" in token:
+            continue              # flags y asignaciones no son artefactos
+        base = token.split("::", 1)[0]
+        if not base or base in seen:
+            continue
+        candidate = Path(base) if os.path.isabs(base) else (cwd / base)
+        if not candidate.is_file():
+            continue
+        seen.add(base)
+        out.append(base)
+    return out
+
+
+def _fuera_del_commit(cwd: Path, ruta: str, top: Path) -> bool:
+    """¿Este archivo que el comando nombra NO está en el commit que se sella?
+
+    Dos cosas NO cuentan como fuera, y las dos son deliberadas:
+
+    · lo IGNORADO: node_modules, un venv o un binario del toolchain son la
+      herramienta, no el artefacto bajo prueba, y jamás viajan en un commit.
+    · lo que vive FUERA de este repo: el sello habla de UN commit de UN repo, y
+      un wrapper del workspace (`scripts/py.sh`, un runner compartido) no está
+      ni puede estar en él. Cobrárselos convertiría la guarda en un rojo
+      imposible de satisfacer justo donde el harness pide usarla."""
+    absoluta = (Path(ruta) if os.path.isabs(ruta) else (cwd / ruta))
+    try:
+        absoluta.resolve().relative_to(top)
+    except (ValueError, OSError):
+        return False
+    def rc(*args: str) -> int:
+        return subprocess.run(["git", *args], cwd=cwd, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, check=False).returncode
+    if rc("ls-files", "--error-unmatch", "--", ruta) == 0:
+        return False
+    return rc("check-ignore", "-q", "--", ruta) != 0
+
+
 def log_executed_artifacts(task_dir: Path, cwd: Path, command: "list[str]",
                            evidence_id: str) -> None:
     """Apunta en evidence.log los artefactos que este comando EJECUTÓ.
@@ -616,22 +663,8 @@ def log_executed_artifacts(task_dir: Path, cwd: Path, command: "list[str]",
     try:
         log = task_dir / "evidence.log"
         stamp = utc_now()
-        seen: set = set()
-        lines = []
-        # Se parte por espacios además de por argumento: la ruta puede venir
-        # dentro de un `sh -c "pytest tests/x.py"`, que llega como UN token.
-        tokens = [piece for arg in command for piece in arg.split()]
-        for token in tokens:
-            if token.startswith("-") or "=" in token:
-                continue          # flags y asignaciones no son artefactos
-            base = token.split("::", 1)[0]
-            if not base or base in seen:
-                continue
-            candidate = Path(base) if os.path.isabs(base) else (cwd / base)
-            if not candidate.is_file():
-                continue
-            seen.add(base)
-            lines.append(f"{stamp}\t{evidence_id}\tran-file\t{base}\n")
+        lines = [f"{stamp}\t{evidence_id}\tran-file\t{base}\n"
+                 for base in artefactos_del_comando(cwd, command)]
         if lines:
             task_dir.mkdir(parents=True, exist_ok=True)
             with open(log, "a", encoding="utf-8") as stream:
@@ -682,15 +715,31 @@ def change_id(cwd: Path) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
-def _arbol_compartido(cwd: Path) -> bool:
-    """¿Este árbol es COMPARTIDO entre tareas? (#137)
+def _arbol_compartido(cwd: Path, task_dir: Path) -> bool:
+    """¿Este árbol es el de la INSTANCIA, el único que no puede estar limpio? (#137)
 
-    La pregunta se contesta por ESTRUCTURA y no por configuración: un árbol de
-    tarea vive bajo `<ws>/worktrees/<task>/`, y cualquier otro (el repo de la
-    instancia, un clon canónico) lo comparten todas. No hace falta leer el
-    answers ni conocer el nombre del repo, así que no hay un segundo lugar
-    donde la respuesta pueda divergir."""
-    return "/worktrees/" not in f"{cwd.resolve()}/"
+    La pregunta se contesta por ESTRUCTURA y no por configuración: el repo de
+    la instancia (specs, ADRs, docs, answers) ES el árbol del workspace, y el
+    workspace es el padre de `tasks/<id>`. No hace falta leer el answers ni
+    conocer el nombre del repo, así que no hay un segundo lugar donde la
+    respuesta pueda divergir.
+
+    ── POR QUÉ NO ALCANZABA CON "NO CUELGA DE worktrees/" ────────────────
+    Esa era la regla anterior, y convertía en "compartido" a CUALQUIER árbol de
+    fuera del workspace, incluido el descartable que un verificador levanta en
+    /tmp para medir algo. Ahí la concesión del #137 (la suciedad que esta tarea
+    no commiteó no bloquea, se anota) deja de proteger nada y pasa a comprar
+    verdes: el sello nombra un commit y lo que corrió fue ese commit MÁS el
+    checkout que el verificador acababa de hacer encima. El caso de campo llegó
+    justo por ahí: un árbol sonda preparado para medir si unos tests muerden, y
+    un EV-TEST verde que parecía sostener la afirmación CONTRARIA.
+
+    La concesión sigue existiendo donde nació y solo ahí: un árbol para todas
+    las tareas, sin worktree posible, no puede exigirse limpio."""
+    try:
+        return cwd.resolve() == task_dir.resolve().parent.parent
+    except OSError:
+        return False
 
 
 def _partir_suciedad(cwd: Path, porcelain: str, task_id: str) -> "tuple[str, list]":
@@ -785,7 +834,7 @@ def command_run(args: argparse.Namespace) -> int:
     #     en el manifiesto, con nombre y apellido. El sello deja de mentir por
     #     omisión: dice contra qué commit corrió Y qué más había en el árbol.
     foreign_dirty: list = []
-    if tracked_dirty and _arbol_compartido(cwd):
+    if tracked_dirty and _arbol_compartido(cwd, task_dir):
         mios, foreign_dirty = _partir_suciedad(cwd, tracked_dirty, task_dir.name)
         tracked_dirty = mios
         if foreign_dirty:
@@ -834,6 +883,43 @@ def command_run(args: argparse.Namespace) -> int:
     # El comando que PIDIÓ el usuario, antes de que el semáforo lo envuelva:
     # es el que nombra los artefactos, y el wrapper solo nombraría build-slot.
     user_command = list(command)
+
+    # ── LO QUE SE CORRE TIENE QUE VIVIR EN EL COMMIT QUE EL SELLO NOMBRA ──
+    # Un archivo SIN TRACKEAR no bloquea por sí solo, y eso está bien: un
+    # artefacto de build no cambia lo que el commit contiene. Pero si el
+    # COMANDO lo nombra, ese archivo no es ruido del árbol: es lo que se está
+    # probando, y el sello diría "commit P" sobre una prueba que no está en P.
+    #
+    # Caso de campo, el más caro de su familia: un verificador levantó un árbol
+    # descartable con los fuentes de la base y los tests nuevos ENCIMA. Un test
+    # nuevo es un archivo nuevo, o sea sin trackear, así que ni el chequeo de
+    # limpieza ni el de "se movió mientras corría" tenían nada que decir, y
+    # quedó un EV-TEST verde que parecía sostener la afirmación CONTRARIA a la
+    # que se estaba midiendo. Quien lo cazó fue una persona, no un gate.
+    #
+    # Es la MISMA regla que ya se cobra a los archivos modificados ("commitea
+    # primero"), aplicada al caso en que el archivo todavía no existe en el
+    # índice. Fail-CLOSED, como sus dos hermanos.
+    top = Path(git(cwd, "rev-parse", "--show-toplevel")).resolve()
+    huerfanos = [a for a in artefactos_del_comando(cwd, user_command)
+                 if _fuera_del_commit(cwd, a, top)]
+    if huerfanos:
+        print("EVIDENCE: el comando nombra archivo(s) que NO están en el commit:",
+              file=sys.stderr)
+        for a in huerfanos[:10]:
+            print(f"  {a}", file=sys.stderr)
+        print(
+            f"\nEl sello diría '{args.repo}@{before[:12]}' y eso NO contiene lo que\n"
+            "se acaba de correr: la evidencia certificaría un commit cuyo código no\n"
+            "es el que se ejecutó, que es exactamente lo que un sello existe para\n"
+            "impedir.\n"
+            "  ↳ remediación: commitea esos archivos (con el trailer Task: <id>) y\n"
+            "    corre esto DESPUÉS. Si lo que querés es medir sobre un árbol que NO\n"
+            "    es el commit (comprobar que un test muerde sobre la base, por\n"
+            "    ejemplo), eso no es evidencia sellable: ese trabajo lo hace\n"
+            "    gate_test_muerde de ship.sh, y su resultado se cita como tal.",
+            file=sys.stderr)
+        return 3
 
     # ── Semáforo: la suite toma un slot del MISMO pool que los builds ────
     # Caso de campo: once vitest en seis núcleos (503s y rojo vs 106s y verde
@@ -900,7 +986,7 @@ def command_run(args: argparse.Namespace) -> int:
     # durante mi comando", y cobrárselo dejaría el repo de la instancia sin
     # poder sellar por una razón distinta pero con el mismo final. Lo que ESTA
     # tarea ensucie sigue siendo rechazo, que es lo que el gate protege.
-    if dirty_after and _arbol_compartido(cwd):
+    if dirty_after and _arbol_compartido(cwd, task_dir):
         mios_after, ajenos_after = _partir_suciedad(cwd, dirty_after, task_dir.name)
         dirty_after = mios_after
         for line in ajenos_after:

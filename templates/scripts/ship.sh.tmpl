@@ -2124,13 +2124,24 @@ semgrep_test_globs() {
 # La regla correcta es por NIVEL: un encabezado más PROFUNDO es una subsección
 # y no cierra nada; uno del mismo nivel o más superficial sí cierra.
 # Portable a awk de BSD: se cuentan los '#' a mano, sin match() ni RSTART.
+#
+# ── EL TÍTULO DE UNA SUBSECCIÓN ES CONTENIDO, NO SEPARADOR ────────────
+# Segundo caso de campo, misma familia: la subsección entraba pero su LÍNEA de
+# encabezado se tiraba igual, así que un `### PerfilPage.test.tsx` con el
+# nombre del archivo SOLO en el título dejaba a gate_tests_untouched sin verlo.
+# El delta-spec cumplía la regla a la vista de cualquier humano y el gate salía
+# rojo, con un mensaje que hablaba de si el nombre estaba y no de DÓNDE tenía
+# que estar. Costó una pasada entera de precheck.
+# El encabezado que ABRE la sección sigue sin imprimirse: es el separador, y
+# nombrar ahí un archivo no lo declara bajo sí mismo.
 delta_seccion() {  # delta_seccion <archivo> <regex-extendida> → contenido
   awk -v pat="$2" '
     /^#/ {
       d = 0
       while (substr($0, d + 1, 1) == "#") d++
-      if (toupper($0) ~ pat) { insec = 1; lvl = d }
-      else if (insec && d <= lvl) { insec = 0 }
+      if (toupper($0) ~ pat) { insec = 1; lvl = d; next }
+      if (insec && d <= lvl) { insec = 0; next }
+      if (insec) print
       next
     }
     insec { print }
@@ -2355,6 +2366,9 @@ REPEOF
   echo "     bajo '## MODIFIED Requirements' o '## REMOVED Requirements' la entrada"
   echo "     debe NOMBRAR cada archivo de test afectado. Si no, arregla el CÓDIGO"
   echo "     hasta que el test pase como está."
+  echo "   ↳ el nombre vale en el TÍTULO de la subsección o en el cuerpo, pero"
+  echo "     siempre DEBAJO de ese '##': un basename suelto contra otro"
+  echo "     encabezado no declara nada, y ahí el gate sigue rojo con razón."
   exit 3
 }
 
@@ -2758,6 +2772,28 @@ con_limite() {  # con_limite <segundos> <comando...>
 # del "no encontré", y quien la llama vuelve a preguntar sobre el árbol de la
 # rama para separar "este archivo no se colecta en ningún lado" de "no se
 # colecta EN LA BASE porque tu cambio toca la config del runner".
+# ── `list` ES UN SUBCOMANDO DESDE vitest 2.1, Y ANTES ERA UN FILTRO ───
+# En 1.6 `vitest list <archivo>` no falla: toma "list" como UN FILTRO MÁS y
+# corre otra selección de archivos, así que la salida no habla del archivo
+# preguntado y el grep del basename no lo encuentra. La sonda contestaba "no lo
+# colecta" sobre un archivo que sí muerde. Caso de campo: el gate marcó un
+# `.test.tsx` como "tramo sin red" y en la línea siguiente imprimió su propio
+# diagnóstico `vitest (exit 1): Tests 17 failed | 17 passed`, o sea la prueba de
+# que el runner había corrido tests. Verificado a mano sobre el árbol base: ese
+# archivo daba 17 failed | 7 passed.
+# La detección por texto del error NO alcanza y por eso no bastaba con la rama
+# de "Unknown command": 1.6 no se queja, hace otra cosa en silencio. La versión
+# se lee del package.json del propio paquete, sin arrancar node: una sonda para
+# elegir la sonda sería la tercera cosa que puede colgarse.
+muerde_vitest_lista() {  # 1 solo si SABEMOS que este vitest no tiene `list`
+  local v
+  v="$(jq -r '.version // ""' "$WT/node_modules/vitest/package.json" 2>/dev/null)"
+  # Sin versión legible no se cambia de conducta: preguntar con `list` es el
+  # statu quo, y la rama de "Unknown command" de abajo ya lo cubre cuando el
+  # runner se queja. Solo un número que DICE que es viejo apaga la sonda.
+  [ -n "$v" ] || return 0
+  [ "$(printf '%s\n2.1.0\n' "$v" | sort -V | head -1)" = "2.1.0" ]
+}
 muerde_node_colecta_en() {  # muerde_node_colecta_en <árbol> <archivo> → MUERDE_NODE_RUNNER
   local arbol="$1" f="$2" r out rc
   MUERDE_COLECTA_DIAG=""
@@ -2766,18 +2802,21 @@ muerde_node_colecta_en() {  # muerde_node_colecta_en <árbol> <archivo> → MUER
     out=""; rc=0
     case "$r" in
       vitest)
-        # En vitest >= 2.1 `list` es un subcomando y contesta al instante. En
-        # 1.6 es un filtro, así que corre ese archivo y tarda unos segundos:
-        # las dos ramas contestan lo mismo (la salida nombra el archivo si lo
-        # colecta), y la vieja solo paga tiempo.
-        out="$( cd "$arbol" && CI=true con_limite 120 \
-                 "$WT/node_modules/.bin/vitest" list --watch=false "$f" 2>&1 )" || rc=$?
-        # vitest < 2.1 no conoce `list`. "No pude preguntar" no es "no colecta":
-        # se cae a la invocación directa, que es el statu quo exacto de antes.
-        case "$out" in
-          *"Unknown command"*|*"unknown option"*|*"Unknown option"*)
-            MUERDE_NODE_RUNNER="vitest"; return 0 ;;
-        esac ;;
+        if muerde_vitest_lista; then
+          out="$( cd "$arbol" && CI=true con_limite 120 \
+                   "$WT/node_modules/.bin/vitest" list --watch=false "$f" 2>&1 )" || rc=$?
+          # Cinturón por si la versión miente (un fork, un alias del monorepo).
+          case "$out" in
+            *"Unknown command"*|*"unknown option"*|*"Unknown option"*)
+              MUERDE_NODE_RUNNER="vitest"; return 0 ;;
+          esac
+        else
+          # Este vitest NO tiene `list`, y preguntárselo igual es lo que
+          # producía el falso "sin red". Sin sonda posible se cae a la MISMA
+          # salida que la rama de "Unknown command": la invocación directa
+          # decide, que es el statu quo de este runner desde siempre.
+          MUERDE_NODE_RUNNER="vitest"; return 0
+        fi ;;
       jest)
         out="$( cd "$arbol" && CI=true con_limite 120 \
                  "$WT/node_modules/.bin/jest" --listTests "$f" 2>&1 )" || rc=$? ;;
@@ -2980,6 +3019,11 @@ muerde_corre_grupo() {  # muerde_corre_grupo <clase> <lista>: unidad por unidad
       tail -3 "$MUERDE_SALIDA" | sed 's/^/       /'
       continue
     fi
+    # Llegar acá es haber MEDIDO esta unidad: hay un veredicto sobre ella, sea
+    # vacua o muerda. Los `continue` de arriba son los tramos sin mirar, y la
+    # cuenta es lo que impide que el cierre del gate cante un ✅ cuando ninguna
+    # unidad llegó hasta este punto.
+    MUERDE_MEDIDOS=$((MUERDE_MEDIDOS + 1))
     if [ "$rc" -eq 0 ]; then
       echo "   ✗ $u: PASA sobre el árbol base"
       MUERDE_VACUOS="$MUERDE_VACUOS   · $u
@@ -3171,6 +3215,7 @@ SCOPEOF
   (
     MUERDE_TMP="$tmp"; MUERDE_WT=""; MUERDE_BASE="$tmp/base"
     MUERDE_SALIDA="$tmp/salida"; MUERDE_VACUOS=""; MUERDE_CIEGOS=""; MUERDE_SINRED=""
+    MUERDE_MEDIDOS=0
     MUERDE_GO_TAGS=""
     trap muerde_limpia EXIT
     if ! git -C "$WT" worktree add --detach --quiet "$MUERDE_BASE" "$mb"; then
@@ -3239,10 +3284,25 @@ CKEOF
       emit assumption "$REPO: tests nuevos NO verificados contra la base (ningún runner declarado los colecta)"
     fi
     if [ -z "$MUERDE_VACUOS" ]; then
-      if [ -z "$MUERDE_CIEGOS" ] && [ -z "$MUERDE_SINRED" ]; then
+      if [ "$MUERDE_MEDIDOS" -eq 0 ]; then
+        # ── UN GATE QUE NO MIDIÓ NADA NO PUEDE PONER UN ✅ ────────────────
+        # Este cierre decía "lo que SÍ pude correr falla sobre la base" aunque
+        # el "lo que sí pude correr" fuera CERO unidades, o sea el mensaje de un
+        # gate que verificó algo puesto por un gate que no verificó nada. Caso de
+        # campo: en un monorepo Go donde el árbol base no resuelve su grafo de
+        # módulos, TODO el alcance cae a ciego y el gate más caro del precheck
+        # cerraba en verde. Un vacuo y uno bueno recibían exactamente la misma
+        # respuesta, así que el operador no tenía cómo notar la diferencia.
+        # Sigue sin ser ROJO (no observamos un test malo, no observamos nada) y
+        # el supuesto ya viajó al bus arriba; lo que cambia es que el verde deja
+        # de existir, porque el verde es lo que se recuerda.
+        echo "   ⚠️  este gate NO verificó NINGÚN test: todo el alcance quedó sin mirar"
+        echo "      (ver los tramos declarados arriba). No es un verde ni un rojo,"
+        echo "      y ningún veredicto puede citarlo como verificación."
+      elif [ -z "$MUERDE_CIEGOS" ] && [ -z "$MUERDE_SINRED" ]; then
         echo "   ✅ todo el alcance falla sobre la base: estos tests prueban conducta nueva"
       else
-        echo "   ✅ lo que SÍ pude correr falla sobre la base; el resto queda declarado arriba"
+        echo "   ✅ lo que SÍ pude correr falla sobre la base ($MUERDE_MEDIDOS unidad/es); el resto queda declarado arriba"
       fi
       exit 0
     fi

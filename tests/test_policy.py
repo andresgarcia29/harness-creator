@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -478,6 +479,46 @@ class PolicyTest(unittest.TestCase):
         # veredicto re-emitido (más nuevo que el delta): pasa
         os.utime(self.task / "verdict-atlas.json", (base + 120, base + 120))
         self.assertEqual(self.transition("archive").returncode, 0)
+
+    def test_archive_sees_a_delta_amended_inside_the_qa_merge_window(self):
+        """El mtime lo derrota el propio flujo: fundir el campo `qa` en el
+        veredicto es un paso PRESCRITO por /review, o sea una escritura sobre el
+        veredicto POSTERIOR al juicio, en toda tarea. Caso de campo con 17
+        segundos de ventana: delta editado, veredicto refundido despues, gate en
+        verde, y el reviewer habia cerrado antes del texto nuevo.
+        Con el hash sellado, la ventana no existe."""
+        self.reach_deploy()
+        v = self.task / "verdict-atlas.json"
+        delta = self.task / "delta-spec.md"
+        delta.write_text("## ADDED\n- R1: lo que el reviewer SI vio\n")
+        datos = json.loads(v.read_text())
+        datos["delta_spec_sha256"] = hashlib.sha256(delta.read_bytes()).hexdigest()
+        v.write_text(json.dumps(datos))
+        base = 1_800_000_000
+        os.utime(v, (base, base)); os.utime(delta, (base - 60, base - 60))
+        self.assertEqual(self.transition("archive").returncode, 0,
+                         "el delta que el veredicto declara haber visto archiva")
+
+    def test_archive_refuses_a_delta_amended_after_the_sealed_hash(self):
+        # La ventana: el delta cambia y DESPUES se refunde el veredicto, asi que
+        # su mtime queda por delante. El hash sellado no se mueve.
+        self.reach_deploy()
+        v = self.task / "verdict-atlas.json"
+        delta = self.task / "delta-spec.md"
+        delta.write_text("## ADDED\n- R1: lo que el reviewer SI vio\n")
+        datos = json.loads(v.read_text())
+        datos["delta_spec_sha256"] = hashlib.sha256(delta.read_bytes()).hexdigest()
+        v.write_text(json.dumps(datos))
+        base = 1_800_000_000
+        delta.write_text("## ADDED\n- R1: enmendado despues del juicio\n")
+        os.utime(delta, (base + 60, base + 60))
+        datos["qa"] = "pass"
+        v.write_text(json.dumps(datos))       # la fusion mecanica del campo qa
+        os.utime(v, (base + 77, base + 77))
+        blocked = self.transition("archive")
+        self.assertEqual(blocked.returncode, 3, blocked.stderr)
+        self.assertIn("POLICY-ARCHIVE-001", blocked.stderr)
+        self.assertIn("hash", blocked.stderr)
 
     def test_archive_without_delta_spec_keeps_working(self):
         self.reach_deploy()

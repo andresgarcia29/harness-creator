@@ -122,6 +122,42 @@ class RelojPorRol(CostBase):
         self.assertIn("activo       -", linea[-1])  # cero trabajo medible
 
 
+
+class CtxWatch(CostBase):
+    """El aviso que llega cuando TODAVIA se puede actuar (issue #180).
+
+    El techo se cruzaba en silencio y el primer aviso era la transicion
+    frenada, o sea con todo ya gastado y ninguna decision disponible."""
+
+    def test_avisa_al_acercarse_al_techo(self):
+        # Sin harness-policy.json el techo del rol cae al general (150k), asi
+        # que 140k es el 93% y cae de lleno en la banda de aviso.
+        self.write_transcript_ctx(140_000)
+        r = self.run_cost("ctx-watch")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("T1", r.stdout)
+        self.assertIn("orquestador", r.stdout)
+
+    def test_no_avisa_por_debajo_del_umbral(self):
+        # CONTRA-MITAD obligatoria: un aviso que sale siempre es ruido, y el
+        # ruido se apaga justo antes del dia que importaba.
+        self.write_transcript_ctx(50_000)
+        r = self.run_cost("ctx-watch")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "")
+
+    def test_por_ENCIMA_del_techo_no_es_un_aviso_sino_el_termino(self):
+        # Arriba del techo ya no avisa: eso lo evalua el gate en la transicion,
+        # y repetirlo aca serian dos voces para el mismo hecho.
+        self.write_transcript_ctx(400_000)
+        r = self.run_cost("ctx-watch")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "")
+
+    def write_transcript_ctx(self, ctx):
+        self.write([self.turn(read=ctx, out=10) for _ in range(6)])
+
+
 class Aritmetica(CostBase):
     def test_precio_base(self):
         # Opus 5: $5 input / $25 output por MTok. 1M de input y 1M de output

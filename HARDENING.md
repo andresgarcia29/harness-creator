@@ -845,3 +845,50 @@ ese script y hace falta el rastro para encontrarla.
   `HARNESS_COST_HUECO_MAX_S`), y `reloj` va del primer turno al ultimo. El
   tiempo va junto al costo y no en otro comando: "por que tardo" y "por que
   costo" se preguntan a la vez.
+
+## Cerrado el 2026-08-14 (issue #180: la cura estaba detras del sintoma)
+
+- [x] **`COST-CTX` frenaba la transicion que ES su propia remediacion.** La
+  transicion de fase deja el marcador de relevo, el orquestador cierra su turno
+  y el vigilante levanta una sesion NUEVA con contexto limpio. El termino la
+  frenaba para exigir un perdon por el contexto que la transicion estaba por
+  tirar. Cobrarlo ahi no recupera un peso (ya se gasto) y no protege nada: lo
+  unico que el bloqueo evitaria, que la fase siguiente corra sobre la sesion
+  inflada, ya lo evita el relevo. Lo que producia era CEREMONIA: un eximido por
+  fase, concedido siempre, porque con la tarea verde y la plata gastada no hay
+  otra respuesta correcta. La evidencia estaba en el propio repo antes del
+  reporte: el comentario de `write_handoff` registra tareas que firmaron CUATRO
+  cost-waives del mismo `COST-CTX`, uno por fase. Y cinco reportes de campo
+  dando vueltas por el mismo cuarto: #90, #91 y #93 ("la salida que ofrece no
+  destraba"), #103 y #111 ("el perdon vence antes de escribirse"), y el #180 con
+  la tarea entera en verde y sin camino ejecutable.
+- [x] **Fail-CLOSED donde la sesion SI continua.** La exencion vale solo si el
+  relevo va a ocurrir de verdad: no a `archive` ni a `deploy`, carril distinto
+  de `quick`, y el vigilante encendido (`HARNESS_ORCH_OFF` /
+  `.harness/orch-watch.off`). Con el vigilante apagado el marcador se escribe y
+  no lo consume nadie, asi que quien sigue trabajando es la MISMA sesion con el
+  MISMO contexto y el termino frena como siempre. La exencion es ademas del
+  ORQUESTADOR y de nadie mas: el contexto de arranque de un subagente si lo
+  controla quien lo lanza, que es justo lo que la remediacion impresa pide.
+  Verificado por mutacion: sin el fail-closed caen 5 aserciones, y con la
+  exencion abierta a cualquier rol cae la del subagente.
+- [x] **El mensaje leia AL REVES al operador del caso mas frecuente.** Decia que
+  `cost-waive` es la salida "de un agente que YA CERRO", asi que quien tenia el
+  orquestador VIVO se deducia fuera de las dos ramas contempladas: no puede
+  recortar un arranque que ya ocurrio, y no califica como cerrado. Concluia, con
+  razon, que no tenia camino. El waive de `ctx` se ancla a la FASE justamente
+  porque el orquestador esta vivo por definicion al pedir la transicion (#103),
+  o sea que el camino existia y el mensaje lo escondia. Ahora lo nombra, da el
+  comando exacto con el task-id puesto, y dice que si esta frenando es porque
+  esta transicion no releva.
+- [x] **El techo se cruzaba en silencio.** El primer aviso era la transicion
+  frenada, con todo gastado y ninguna decision disponible. `harness-cost.py
+  ctx-watch` avisa al 80% del techo (`HARNESS_CTX_WARN_PCT`) y lo corre
+  `orchestrator-watch` en cada pasada, con UNA sola lectura de transcripts para
+  todas las tareas (igual que `stale`): N escaneos por pasada serian el gasto
+  que el aviso viene a evitar.
+- Lo que NO se hizo, y por que: el reporte pedia un comando `handoff` nuevo que
+  traspasara la tarea a un orquestador nuevo. Ya existe y es automatico
+  (`write_handoff` en cada transicion que releva); lo que faltaba era que la
+  transicion no estuviera bloqueada. Un comando mas seria un tercer camino al
+  mismo lugar.

@@ -538,6 +538,21 @@ CANDEOF
         [ -n "$t" ] || continue
         echo "🐢 $t ($p): ${m} min en la misma fase $resto"
       done
+  # ── LA TERCERA SEÑAL: el contexto que se acerca al techo (#180) ──────
+  # El techo se cruzaba en SILENCIO y el primer aviso era la transición
+  # frenada, o sea con todo ya gastado y ninguna decisión disponible: el
+  # contexto de una fase no se devuelve. Acá llega mientras todavía se puede
+  # cerrar la fase y dejar que el relevo entre, en vez de arrancar otro tramo
+  # de descubrimiento sobre una sesión que ya arrastra 400k.
+  # Una sola pasada sobre los transcripts para TODAS las tareas, igual que el
+  # `stale` de arriba: N escaneos por pasada serían el gasto que esto evita.
+  # Fail-open, como todo observador: no puede tumbar al vigilante.
+  python3 "$WS/scripts/harness-cost.py" ctx-watch 2>/dev/null \
+    | while IFS="$(printf '\t')" read -r t rol ctx techo; do
+        [ -n "$t" ] || continue
+        echo "🧠 $t: $rol va por $((ctx / 1000))k de contexto (techo $((techo / 1000))k):"
+        echo "     cerrá la fase y dejá que el relevo entre con contexto limpio."
+      done
   echo "── $vistas tarea(s) en fase no terminal · $varadas varada(s)"
 }
 

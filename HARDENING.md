@@ -713,3 +713,45 @@ cerrado con exit 3. Lo que si se arreglaron son los dos caminos verificables por
 los que ese sello podia salir verde igual (los dos de la entrada de
 `evidence.py`, arriba). Si el arbol de veras se restauro, la causa esta fuera de
 ese script y hace falta el rastro para encontrarla.
+
+## Cerrado el 2026-08-14 (issue #169: el vigilante sin techo)
+
+- [x] **`orchestrator-watch.sh daemon` relanzaba TODAS las varadas por pasada,
+  sin tope sobre cuántas sesiones quedan vivas.** Sus dos límites (`lease_taken`
+  y `MAX_TRIES`) son POR TAREA y ninguno miraba el agregado, así que con un
+  backlog de tareas viejas que cruzan el umbral de silencio a la vez no relanza
+  una sesión: relanza decenas, cada una con su flota MCP completa. Medido el
+  2026-08-14: 132 tareas en fase no terminal, 83 varadas, **125 relanzamientos
+  en 71 minutos** (29 en UNA sola pasada) a 1,15 GB por sesión, o sea ~140 GB
+  pedidos contra 12 de RAM y 8 de swap. No hay OOM-killer ni panic en el
+  journal: la maquina dejo de poder hacer nada y hubo que reiniciarla a mano, lo
+  cual vale decirlo porque buscar el rastro del incidente en el journal no
+  encuentra nada y eso hace pensar que no fue memoria. La eleccion hasta hoy era
+  "vigilante sin techo" o "sin vigilante" (el kill switch). Ahora hay cuatro
+  frenos, y cada uno cubre lo que los otros no: tope de sesiones VIVAS
+  (`HARNESS_ORCH_MAX_LIVE`, contando leases con PID vivo, dato que el lease ya
+  guardaba), tope POR PASADA (`HARNESS_ORCH_MAX_PER_PASS`, rampa en vez de
+  escalon), piso de memoria libre (`HARNESS_ORCH_MIN_FREE_MB`, el fail-safe de
+  verdad cuando el tope esta mal calibrado para la maquina) y techo de
+  antiguedad (`HARNESS_ORCH_MAX_AGE_H`). Cuando el tope muerde, el orden es
+  justo: menos intentos primero y desempate por mas tiempo callada, porque con
+  el glob alfabetico los slots se los llevaban siempre las mismas tareas.
+- [x] **Una tarea de hace cinco dias no es una sesion que murio hace un rato.**
+  Es el punto de diseno del incidente: casi todas las 83 varadas eran del 7 al
+  10 de agosto, o sea tareas ABANDONADAS, y relanzarlas no las va a terminar.
+  Por encima del techo de antiguedad se escalan por el camino que ya existe
+  (`escalate_to_human` → `pause` con `orchestrator_stalled`), que ademas las
+  saca de la cola para siempre: `blocked` es terminal para este vigilante. El
+  motivo viaja como DETALLE y no como codigo nuevo, para que toda instancia ya
+  instalada pueda registrar la pausa con su `allowed_pause_reasons` de hoy.
+- [x] **El lease no sobrevivia a un reinicio.** `lease_taken` decidia con
+  `kill -0 $pid`, que contesta "hay UN proceso con ese numero", no "sigue vivo
+  EL proceso que lance". Tras un reinicio los PIDs se reasignan desde abajo, asi
+  que un lease viejo puede apuntar a un proceso ajeno del mismo usuario y dar
+  "esta tarea tiene dueno" para siempre. En la maquina del incidente
+  sobrevivieron 346 directorios de claim, muchos con PIDs del rango de 2.000.000.
+  Ahora el lease guarda tambien el INSTANTE DE ARRANQUE del proceso (campo 22 de
+  `/proc/<pid>/stat` en Linux, `ps -o lstart` en BSD y macOS): un PID reciclado
+  arranca despues, asi que su marca no coincide. Los leases de la version
+  anterior (pid sin identidad) dejan de creerse por el numero pelado y pasan a
+  cobrar el TTL como cualquier lease sin dueno demostrable.

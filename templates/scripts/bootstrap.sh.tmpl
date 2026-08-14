@@ -94,6 +94,31 @@ _bs_brew_preflight() {
   done
 
   local cmd='/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+
+  # ── COMO ROOT NO HAY BREW, Y NO ES UN FLAG QUE SE PUEDA SALTAR ──────
+  # El instalador de Homebrew aborta con "Don't run this as root!" y no tiene
+  # override: es decision de upstream, no una comprobacion nuestra. Eso deja al
+  # caso mas comun del harness en Linux (un contenedor root-only: CI, devcontainer,
+  # una VM de dev que se usa como root) SIN ningun camino con brew.
+  #
+  # Se detecta aqui porque el mensaje de abajo, sin esto, es un callejon sin
+  # salida: manda a correr un comando que va a fallar siempre, y quien lo lea
+  # va a perder el rato averiguando por que. Un mensaje de error que no
+  # funciona es peor que no tener mensaje (regla 5: los errores son prompts).
+  if [ "$(id -u)" = "0" ]; then
+    warn "este bootstrap instala con 'brew', y Homebrew se NIEGA a correr como root"
+    echo "   ↳ el instalador aborta con \"Don't run this as root!\" y no admite override."
+    echo "     O sea: en esta máquina no hay camino con brew, ni instalándolo."
+    echo "     Las salidas, en orden de menos a más trabajo:"
+    echo "       1. correr el harness como usuario normal (con sudo donde haga falta)"
+    echo "       2. instalar cada CLI desde su fuente oficial (ver install_alt e"
+    echo "          install_linux en catalog/capabilities.yaml)"
+    echo "     Lo que NO sirve: reintentar el instalador de Homebrew."
+    [ "$CHECK" -eq 1 ] && return 1
+    echo "   ↳ se corta aquí en vez de encadenar $(grep -cE '^(ensure|require) .*[[:space:]]brew[[:space:]]' "$0") fallos sin explicación."
+    exit 1
+  fi
+
   if [ "${HARNESS_BOOTSTRAP_INSTALL_BREW:-0}" = "1" ] && [ "$CHECK" -eq 0 ]; then
     inst "Homebrew (declarado con HARNESS_BOOTSTRAP_INSTALL_BREW=1)"
     NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \

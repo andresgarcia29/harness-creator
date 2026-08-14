@@ -76,6 +76,19 @@ assert_eq "$h1" "$h2" "re-scaffold con --force: idéntico salvo reviewed_at"
 [ -n "$(jq -r '.patch_id // ""' "$V")" ] \
   && pass "el scaffold sella patch_id (identidad del cambio, sobrevive al rebase)" \
   || fail "sin patch_id: un rebase invalidaría el veredicto entero"
+# Sin delta-spec el campo NO existe: un hash vacio haria creer a policy que este
+# veredicto declara un delta, y el vacio no matchea nada.
+jq -e 'has("delta_spec_sha256")' "$V" >/dev/null 2>&1 \
+  && fail "sin delta-spec.md el campo delta_spec_sha256 no debería existir" \
+  || pass "sin delta-spec: el campo no se inventa"
+# Con delta-spec, el veredicto declara QUE TEXTO miró. POLICY-ARCHIVE-001
+# comparaba mtimes, y eso lo derrota la fusion mecanica del campo qa, que el
+# propio /review prescribe DESPUES del juicio del reviewer.
+printf '## ADDED Requirements\n- R1\n' > "$WS/tasks/T1/delta-spec.md"
+bash "$WS/scripts/verdict-scaffold.sh" --force T1 atlas revisor-1 >/dev/null 2>&1
+esperado="$(shasum -a 256 "$WS/tasks/T1/delta-spec.md" | awk '{print $1}')"
+assert_eq "$esperado" "$(jq -r '.delta_spec_sha256 // ""' "$V")" \
+  "el scaffold sella el hash del delta-spec que este veredicto mira"
 
 # 5. existente sin --force → exit 3 mostrando el commit previo
 out="$(bash "$WS/scripts/verdict-scaffold.sh" T1 atlas revisor-1 2>&1)"; rc=$?

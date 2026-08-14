@@ -1346,4 +1346,139 @@ assert_contains "$(bus)" '"ok":true' "y su deploy ok=true en el bus"
 assert_eq 0 "$rc" "y sale 0"
 rm -f "$WS/bin/kubectl"
 
+# ── y el cierre completo: Synced+Healthy con el ROLLOUT A MEDIAS no es verde ──
+# Es el caso de campo entero, de punta a punta: ArgoCD dice que el manifiesto
+# aterrizo (y es cierto) y el watcher cerraba 🟢 con un pod viejo sirviendo.
+mkdir -p "$WS/k8s"
+printf '{"status":{"resources":[{"kind":"Deployment","namespace":"prod","name":"apollo"}]}}\n' > "$WS/k8s/app.json"
+printf '%s\n' '{"metadata":{"generation":134},"spec":{"replicas":3,"selector":{"matchLabels":{"app":"apollo"}}},"status":{"observedGeneration":134,"updatedReplicas":2,"readyReplicas":3,"availableReplicas":2}}' > "$WS/k8s/deploy.json"
+printf '%s\n' '{"items":[]}' > "$WS/k8s/pods.json"
+cat > "$WS/bin/kubectl" <<STUB
+#!/usr/bin/env bash
+case "\$*" in
+  *"get application "*"-o jsonpath"*) printf 'Synced Healthy $SHA40' ;;
+  *"get application "*)  cat "$WS/k8s/app.json" ;;
+  *"get deployment"*)    cat "$WS/k8s/deploy.json" ;;
+  *"get pods"*)          cat "$WS/k8s/pods.json" ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "$WS/bin/kubectl"
+: > "$WS/.harness/events.jsonl"
+out="$(DEPLOY_ROLLOUT_TIMEOUT=1 run676)"; rc=$?
+assert_contains "$out" "Healthy + Synced" "el manifiesto SI aterrizo, y se dice"
+assert_not_contains "$out" "🟢" "pero con el rollout a medias NO hay verde"
+assert_contains "$out" "ROLLOUT NO terminó" "y el motivo es el rollout, no una ceguera de credenciales"
+assert_contains "$out" "updated=2" "con los contadores medidos delante"
+assert_not_contains "$(bus)" '"ok":true' "ni un deploy ok=true en el panel del humano"
+assert_not_contains "$out" "🔴" "no es rojo: nada esta enfermo, esta INCOMPLETO"
+
+# Y con el rollout COMPLETO vuelve a ser verde, y encima uno mas fuerte.
+printf '%s\n' '{"metadata":{"generation":134},"spec":{"replicas":2,"selector":{"matchLabels":{"app":"apollo"}}},"status":{"observedGeneration":134,"updatedReplicas":2,"readyReplicas":2,"availableReplicas":2}}' > "$WS/k8s/deploy.json"
+# Los pods nacen DESPUES del commit del fixture (que es de ahora mismo): esa es
+# justamente la mitad (b) de la condicion, y una fecha del pasado la falsearia.
+printf '%s\n' '{"items":[{"metadata":{},"spec":{"containers":[{"image":"apollo:2"}]},"status":{"startTime":"2099-01-01T00:00:00Z"}},{"metadata":{},"spec":{"containers":[{"image":"apollo:2"}]},"status":{"startTime":"2099-01-01T00:00:01Z"}}]}' > "$WS/k8s/pods.json"
+: > "$WS/.harness/events.jsonl"
+out="$(DEPLOY_ROLLOUT_TIMEOUT=1 run676)"; rc=$?
+assert_contains "$out" "🟢 deploy de apollo verificado" "rollout completo: verde legitimo"
+assert_contains "$out" "rollout completo en los pods" "y el verde dice que se miraron los PODS"
+assert_contains "$(bus)" '"ok":true' "ahi si, deploy ok=true"
+rm -f "$WS/bin/kubectl"
+
+echo
+echo "── el manifiesto no es el pod: el rollout se mira en los PODS"
+# Caso de campo: 🟢 declarado con gen=134 obsGen=134 replicas=3 updated=2
+# ready=3 available=2 y un pod viejo Running con la imagen ANTERIOR, o sea un
+# tercio del trafico contra el artefacto viejo con el deploy ya dado por bueno.
+# Segundo caso, hecho por el propio autor del vigilante: contadores 2/2/2 en
+# verde con los pods corriendo la imagen anterior porque el promotor todavia no
+# habia movido el tag. Un contador contesta "el rollout que hubiera termino", no
+# "mi cambio esta sirviendo".
+{ extract_fn rollout_workloads; extract_fn ship_commit_epoch; extract_fn check_rollout; } > "$WS/rollout.sh"
+grep -q 'observedGeneration' "$WS/rollout.sh" || { echo "no pude extraer check_rollout"; exit 1; }
+
+# kubectl de palo: contesta el Deployment y los Pods que le pidan, leyendo los
+# JSON que cada caso deja en $WS/k8s/.
+cat > "$WS/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+d="$(dirname "$0")/../k8s"
+for a in "$@"; do
+  case "$a" in
+    deployment) kind=deploy ;;
+    pods)       kind=pods ;;
+    application) kind=app ;;
+  esac
+done
+[ -f "$d/$kind.json" ] || exit 1
+cat "$d/$kind.json"
+STUB
+chmod +x "$WS/bin/kubectl"
+mkdir -p "$WS/k8s"
+printf '{"status":{"resources":[{"kind":"Deployment","namespace":"prod","name":"svc-demo"}]}}\n' > "$WS/k8s/app.json"
+
+corre_rollout() {  # corre_rollout → RC=<n> + lo que dijo
+  ( export PATH="$WS/bin:$PATH"
+    APP=svc-demo; REPO=svc-demo; WS="$WS"; LANDED_SHA=""; ROLLOUT_TIMEOUT=1
+    DEPLOY_POLL_SECS=1; ROLLOUT_INCOMPLETO=""
+    say() { echo "$1"; }
+    acota
+    . "$WS/rollout.sh"
+    check_rollout; echo "RC=$?"
+    printf '%s' "${ROLLOUT_INCOMPLETO:-}" )
+}
+
+# (1) el caso del reporte: contadores a medias. Ningun verde.
+printf '%s\n' '{"metadata":{"generation":134},"spec":{"replicas":3,"selector":{"matchLabels":{"app":"svc-demo"}}},"status":{"observedGeneration":134,"updatedReplicas":2,"readyReplicas":3,"availableReplicas":2}}' > "$WS/k8s/deploy.json"
+printf '%s\n' '{"items":[]}' > "$WS/k8s/pods.json"
+out="$(corre_rollout)"
+assert_contains "$out" "RC=1" "rollout a medias: NO es verde (updated=2 de 3)"
+assert_contains "$out" "updated=2" "y el diagnostico trae los contadores medidos"
+
+# (2) contadores completos pero DOS imagenes entre los pods: el pod viejo sigue
+#     sirviendo, y ningun contador lo dice.
+printf '%s\n' '{"metadata":{"generation":10},"spec":{"replicas":2,"selector":{"matchLabels":{"app":"svc-demo"}}},"status":{"observedGeneration":10,"updatedReplicas":2,"readyReplicas":2,"availableReplicas":2}}' > "$WS/k8s/deploy.json"
+printf '%s\n' '{"items":[{"metadata":{},"spec":{"containers":[{"image":"svc-demo:2.9.2"}]},"status":{"startTime":"2026-08-13T10:00:00Z"}},{"metadata":{},"spec":{"containers":[{"image":"svc-demo:2.9.3"}]},"status":{"startTime":"2026-08-13T11:00:00Z"}}]}' > "$WS/k8s/pods.json"
+out="$(corre_rollout)"
+assert_contains "$out" "RC=1" "dos imagenes entre los pods: hay uno viejo sirviendo"
+assert_contains "$out" "juegos de imagen distintos" "y lo dice con los dos juegos de imagen"
+
+# (3) todo completo y una sola imagen: verde de verdad.
+printf '%s\n' '{"items":[{"metadata":{},"spec":{"containers":[{"image":"svc-demo:2.9.3"}]},"status":{"startTime":"2026-08-13T11:00:00Z"}},{"metadata":{},"spec":{"containers":[{"image":"svc-demo:2.9.3"}]},"status":{"startTime":"2026-08-13T11:00:01Z"}}]}' > "$WS/k8s/pods.json"
+out="$(corre_rollout)"
+assert_contains "$out" "RC=0" "rollout completo con UNA imagen: verde"
+
+# (3b) sidecar: dos imagenes POR POD, iguales en todos. No es un rollout a
+#      medias, y mirar una lista suelta de imagenes lo declararia asi para
+#      siempre en cualquier instalacion con service mesh.
+printf '%s\n' '{"items":[{"metadata":{},"spec":{"containers":[{"image":"svc-demo:2.9.3"},{"image":"proxy:1.20"}]},"status":{"startTime":"2026-08-13T11:00:00Z"}},{"metadata":{},"spec":{"containers":[{"image":"proxy:1.20"},{"image":"svc-demo:2.9.3"}]},"status":{"startTime":"2026-08-13T11:00:01Z"}}]}' > "$WS/k8s/pods.json"
+out="$(corre_rollout)"
+assert_contains "$out" "RC=0" "sidecar identico en todos los pods: sigue siendo un rollout completo"
+
+# (4) contadores completos, UNA imagen, y aun asi los pods son ANTERIORES a mi
+#     commit: es el segundo caso de campo (2/2/2 en verde con el promotor sin
+#     mover el tag todavia). El rollout que hubiera termino, pero no es el mio.
+cat > "$WS/bin/git" <<'STUB'
+#!/usr/bin/env bash
+echo 4000000000      # un commit del futuro: ningun pod puede ser posterior
+STUB
+chmod +x "$WS/bin/git"
+out="$( export PATH="$WS/bin:$PATH"
+        APP=svc-demo; REPO=svc-demo; WS="$WS"; LANDED_SHA=abc123def456; ROLLOUT_TIMEOUT=1
+        DEPLOY_POLL_SECS=1; ROLLOUT_INCOMPLETO=""
+        say() { echo "$1"; }
+        acota
+        . "$WS/rollout.sh"
+        check_rollout; echo "RC=$?"
+        printf '%s' "${ROLLOUT_INCOMPLETO:-}" )"
+assert_contains "$out" "RC=1" "pods anteriores a mi commit: el rollout no es el mio"
+assert_contains "$out" "ningún pod nació después de tu commit" "y lo dice sin rodeos"
+rm -f "$WS/bin/git"
+
+# (5) sin poder mirar (la app no lista Deployments) es CEGUERA, no rojo: el
+#     verde se degrada al del manifiesto, que es la conducta de siempre.
+printf '{"status":{"resources":[]}}\n' > "$WS/k8s/app.json"
+out="$(corre_rollout)"
+assert_contains "$out" "RC=2" "sin workload que mirar: ceguera, no rojo"
+rm -f "$WS/bin/kubectl"
+
 t_done

@@ -559,13 +559,35 @@ if [ -z "$rows" ] && [ "$ALLOW_EMPTY" -ne 1 ]; then
   exit 3
 fi
 
+# ── LA IDENTIDAD DEL DELTA-SPEC QUE ESTE VEREDICTO MIRA ───────────────
+# POLICY-ARCHIVE-001 impide que /archive fusione a las specs maestras un delta
+# que ningún reviewer vio, y lo hacía comparando MTIMES. Esa señal la derrota el
+# propio flujo: fundir el campo `qa` en el veredicto es un paso PRESCRITO por
+# /review, o sea una escritura sobre el veredicto POSTERIOR al juicio, en TODA
+# tarea. Caso de campo, 17 segundos de ventana: delta-spec.md editado a las
+# 23:20:26, verdict-<repo>.json refundido a las 23:20:43, gate en verde, y el
+# reviewer había cerrado antes del texto nuevo.
+# Un hash del contenido no lo mueve ninguna escritura mecánica, y además
+# sobrevive a un `git checkout`, que también resetea mtimes.
+DELTA_SPEC="$WS/tasks/$TASK/delta-spec.md"
+DELTA_SHA=""
+if [ -f "$DELTA_SPEC" ]; then
+  if command -v shasum >/dev/null 2>&1; then
+    DELTA_SHA="$(shasum -a 256 "$DELTA_SPEC" 2>/dev/null | awk '{print $1}')"
+  else
+    DELTA_SHA="$(sha256sum "$DELTA_SPEC" 2>/dev/null | awk '{print $1}')"
+  fi
+fi
+
 tmp="$(mktemp "$WS/tasks/$TASK/.verdict-$REPO.XXXXXX")"
 printf '%s\n' "$rows" | jq -RnS --arg task "$TASK" --arg repo "$REPO" \
     --arg commit "$HEAD" --arg reviewer "$REVIEWER" \
+    --arg delta_sha "$DELTA_SHA" \
     --arg patch_id "$PATCH_ID" --arg reviewed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
   [inputs | select(length > 0) | split("|")] as $rows
   | { schema: 1, task_id: $task, repo: $repo, commit: $commit,
       patch_id: $patch_id, reviewed_at: $reviewed_at,
+      delta_spec_sha256: $delta_sha,
       reviewer: $reviewer,
       implementation_agents:
         ($rows | map(.[1])
@@ -583,7 +605,10 @@ printf '%s\n' "$rows" | jq -RnS --arg task "$TASK" --arg repo "$REPO" \
   # ADITIVO: sin EV bajo contención el campo NO existe, igual que known_bug. Un
   # campo vacío en cada veredicto entrena a saltearlo justo cuando aparezca.
   | (if (.evidence_under_contention | length) == 0
-     then del(.evidence_under_contention) else . end)' > "$tmp"
+     then del(.evidence_under_contention) else . end)
+  # Sin delta-spec no hay identidad que sellar, y un campo vacío haría creer a
+  # policy que este veredicto declara un delta (el vacío no matchea nada).
+  | (if .delta_spec_sha256 == "" then del(.delta_spec_sha256) else . end)' > "$tmp"
 
 # ── Arrastre del juicio (--rebase) ────────────────────────────────────
 # Se conserva compliance[], non_blocking[] y los flags del reviewer. NO se

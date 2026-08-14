@@ -1071,6 +1071,81 @@ class PolicyTest(unittest.TestCase):
         self.assertIn("POLICY-LIMIT-001", cuarta.stderr)
         self.assertNotIn("convergencia", cuarta.stdout)
 
+    def test_la_ronda_concedida_por_convergencia_SI_se_puede_shippear(self):
+        """ISSUE #182: dos autoridades, un numero, respuestas distintas.
+
+        `transition` conocia la excepcion por convergencia y su techo duro;
+        `validate-ship` comparaba contra el maximo pelado. Medido en campo: la
+        tarea cruzo a la ronda 5 porque el propio motor se la CONCEDIO
+        (bloqueantes 4 → 0 → 1 → 0, con su aviso al bus), el reviewer firmo
+        `pass` con cero requisitos sin cubrir, y el ship se nego con
+        POLICY-LIMIT-001. El mecanismo que existe para premiar al que converge
+        terminaba bloqueandolo: gasto una ronda que su propio harness autorizo y
+        no pudo publicarla."""
+        self.reach("rfc", "implement")
+        self.assertEqual(self.transition_repo("review", "atlas").returncode, 0)
+        for count in (4, 2):
+            self.assertEqual(self.review_round("atlas", count).returncode, 0)
+        cuarta = self.review_round("atlas", 1)          # ronda 4, sobre el techo 3
+        self.assertEqual(cuarta.returncode, 0, cuarta.stderr)
+        self.assertIn("convergencia", cuarta.stdout,
+                      "el motor tiene que CONCEDER la ronda para que el caso exista")
+        self.assertEqual(self.state()["review_rounds"], 4)
+
+        # Y ahora la otra mitad, que es la que fallaba: lo concedido se publica.
+        commit = "b" * 40
+        verdict = self.task / "verdict-atlas.json"
+        verdict.write_text(json.dumps({
+            "schema": 1, "commit": commit, "verdict": "pass", "qa": "pass",
+            "reviewer": "reviewer-atlas", "implementation_agents": ["impl-atlas"],
+        }))
+        r = self.run_policy("validate-ship", self.task, "--commit", commit,
+                            "--verdict", verdict)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_el_ship_NO_perdona_rondas_que_nadie_concedio(self):
+        # CONTRA-MITAD obligatoria: el techo duro solo se habilita con la serie
+        # que lo justifica. Sin convergencia, `validate-ship` corta en el maximo
+        # igual que siempre, y ahora lo DICE con el numero delante.
+        self.reach("rfc", "implement", "review")
+        state = json.loads((self.task / "state.json").read_text())
+        state["review_rounds"] = 5          # como si alguien lo hubiera editado
+        (self.task / "state.json").write_text(json.dumps(state))
+        commit = "c" * 40
+        verdict = self.task / "verdict-atlas.json"
+        verdict.write_text(json.dumps({
+            "schema": 1, "commit": commit, "verdict": "pass", "qa": "pass",
+            "reviewer": "reviewer-atlas", "implementation_agents": ["impl-atlas"],
+        }))
+        r = self.run_policy("validate-ship", self.task, "--commit", commit,
+                            "--verdict", verdict)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("POLICY-LIMIT-001", r.stderr)
+        self.assertIn("review_rounds=5", r.stderr, "el mensaje trae el numero")
+        self.assertIn("NO vienen bajando", r.stderr, "y por que el techo no se movio")
+
+    def test_el_techo_duro_tambien_manda_en_el_ship(self):
+        # La convergencia habilita el techo DURO, no barra libre: 2x el maximo
+        # sigue siendo el limite en los dos lados.
+        self.reach("rfc", "implement")
+        self.assertEqual(self.transition_repo("review", "atlas").returncode, 0)
+        for count in (4, 2):
+            self.assertEqual(self.review_round("atlas", count).returncode, 0)
+        self.assertEqual(self.review_round("atlas", 1).returncode, 0)
+        state = json.loads((self.task / "state.json").read_text())
+        state["review_rounds"] = 7          # por encima de 2*3, con serie que converge
+        (self.task / "state.json").write_text(json.dumps(state))
+        commit = "d" * 40
+        verdict = self.task / "verdict-atlas.json"
+        verdict.write_text(json.dumps({
+            "schema": 1, "commit": commit, "verdict": "pass", "qa": "pass",
+            "reviewer": "reviewer-atlas", "implementation_agents": ["impl-atlas"],
+        }))
+        r = self.run_policy("validate-ship", self.task, "--commit", commit,
+                            "--verdict", verdict)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("POLICY-LIMIT-001", r.stderr)
+
     def test_last_round_warns_with_repo_and_only_then(self):
         self.reach("rfc", "implement")
         first = self.transition_repo("review", "atlas")

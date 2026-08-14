@@ -1966,8 +1966,12 @@ def cmd_transition(args: argparse.Namespace) -> int:
                 seen.append(previous)
             blocking_by_repo[args.repo] = seen
             state["review_blocking_by_repo"] = blocking_by_repo
-            converging = len(seen) >= 2 and seen[-1] < seen[-2]
-            hard = 2 * maximum
+            # La regla del límite vive en UN solo lugar y los dos lados la
+            # consultan: acá para decidir el corte, y en validate-ship para
+            # comprobar el techo. Reimplementarla fue el #182 (una ronda
+            # concedida por convergencia que después no se podía shippear).
+            # Se llama DESPUÉS de guardar la serie, porque la serie es su dato.
+            _, hard, converging = limite_de_rondas(state, policy, args.repo)
             if this_repo > maximum:
                 if this_repo > hard:
                     fail("POLICY-LIMIT-001",
@@ -2369,6 +2373,45 @@ def cmd_evidence_policy(args: argparse.Namespace) -> int:
     return 0
 
 
+def limite_de_rondas(state: dict, policy: dict, repo: "str | None" = None):
+    """El límite de rondas de review: (máximo, techo duro, ¿converge?).
+
+    POR QUÉ EXISTE, y es todo el arreglo del #182: este número lo evaluaban DOS
+    lugares con reglas distintas. `transition` conocía la excepción por
+    convergencia y su techo duro (2× el máximo); `validate-ship` comparaba
+    contra el máximo pelado. Consecuencia medida: una tarea cruzó a la ronda 5
+    porque el propio motor se la CONCEDIÓ por convergencia (bloqueantes
+    4 → 0 → 1 → 0, aviso al bus incluido), el reviewer firmó `pass` con cero
+    requisitos sin cubrir, y el ship se negó con `POLICY-LIMIT-001`. O sea que
+    el mecanismo que existe para premiar al que converge terminaba bloqueándolo:
+    gastó una ronda que su propio harness autorizó y no pudo publicarla.
+
+    La regla vive acá y nadie la reimplementa. Quien la consulta decide QUÉ
+    hacer con ella (transition corta y explica por qué; validate-ship solo
+    comprueba el techo efectivo), pero el número y la condición son uno solo.
+
+    `repo=None` es la pregunta del ship, que mira la tarea entera: si ALGÚN
+    repo tiene la serie que habilita la excepción, el techo efectivo de la tarea
+    es el duro. Es la lectura correcta porque `review_rounds` es el MÁXIMO entre
+    repos (lo dice su propio comentario en transition), así que ese máximo puede
+    venir justo del repo al que se le concedió la ronda extra.
+
+    Sin serie legible no hay convergencia y el corte es el de siempre: no poder
+    mirar nunca habilita nada."""
+    maximum = policy.get("limits", {}).get("max_review_rounds", 3)
+    por_repo = state.get("review_blocking_by_repo")
+    if not isinstance(por_repo, dict):
+        por_repo = {}
+    series = [por_repo.get(repo)] if repo is not None else list(por_repo.values())
+    converge = False
+    for seen in series:
+        seen = [n for n in seen if isinstance(n, int)] if isinstance(seen, list) else []
+        if len(seen) >= 2 and seen[-1] < seen[-2]:
+            converge = True
+            break
+    return maximum, 2 * maximum, converge
+
+
 def cmd_validate_ship(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
     policy = load(Path(args.policy), "policy")
@@ -2398,9 +2441,27 @@ def cmd_validate_ship(args: argparse.Namespace) -> int:
              f"--to prs|trunk --actor <quien-autoriza>' y volvé a correr ship.sh. "
              f"Si nadie la promueve, la tarea termina en review y ese es el "
              f"resultado correcto")
-    maximum = policy.get("limits", {}).get("max_review_rounds", 3)
-    if not isinstance(state.get("review_rounds"), int) or state["review_rounds"] > maximum:
-        fail("POLICY-LIMIT-001", "review_rounds inválido o excedido")
+    # ── EL MISMO LÍMITE QUE `transition`, PORQUE LA REGLA ES UNA (#182) ──
+    maximum, hard, converge = limite_de_rondas(state, policy)
+    techo = hard if converge else maximum
+    rondas = state.get("review_rounds")
+    if not isinstance(rondas, int):
+        fail("POLICY-LIMIT-001",
+             f"review_rounds no es un número ({rondas!r}): state.json está "
+             "corrupto o editado a mano. Reconstruilo con "
+             "'harness-policy.py rollback|transition', que deja registro")
+    if rondas > techo:
+        # El mensaje ANTERIOR era "review_rounds inválido o excedido", que no
+        # decía el número, ni el techo, ni cuál de las dos cosas pasó, ni qué
+        # hacer. Los mensajes de este repo son prompts (regla 5).
+        extra = ("" if converge else
+                 f". El techo se queda en {maximum} porque los bloqueantes de "
+                 "esta tarea NO vienen bajando: sin esa serie no hay excepción "
+                 "por convergencia que aplicar")
+        fail("POLICY-LIMIT-001",
+             f"review_rounds={rondas} excede el techo {techo}{extra}. Un repo "
+             "que no converge en esa cantidad de rondas necesita un humano, no "
+             "otra vuelta: escalá con el historial de veredictos")
     verdict = load(Path(args.verdict), "veredicto")
     if verdict.get("schema") != 1:
         fail("POLICY-SHIP-002", "veredicto sin schema v1")

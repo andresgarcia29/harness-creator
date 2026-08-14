@@ -1481,4 +1481,87 @@ out="$(corre_rollout)"
 assert_contains "$out" "RC=2" "sin workload que mirar: ceguera, no rojo"
 rm -f "$WS/bin/kubectl"
 
+echo
+echo "── un push dispara VARIOS workflows: se elige el que construye, no el que termina antes"
+# Caso de campo: un push disparo `e2e` y `Deploy` con el mismo head sha. Se
+# tomaba `.[0]` de la lista, o sea el orden que devuelve la API, se eligio el
+# `e2e` (que termina antes) y el watcher canto "actions verde" con `Deploy`
+# todavia in_progress: el verde salio 7m41s ANTES de que la imagen existiera.
+{ extract_fn job_es_critico; extract_fn run_tiene_critico; extract_fn elige_runs; } > "$WS/elige.sh"
+grep -q 'job crítico' "$WS/elige.sh" || { echo "no pude extraer elige_runs"; exit 1; }
+
+mk_gh_runs() {  # mk_gh_runs: gh de palo con dos runs, uno con job critico
+  cat > "$WS/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"run view"*"111"*) echo "test-e2e" ;;          # el e2e: ningun job construye
+  *"run view"*"222"*) printf 'build
+deploy-app
+' ;;   # el que despliega
+  *) exit 1 ;;
+esac
+STUB
+  chmod +x "$WS/bin/gh"
+}
+mk_gh_runs
+corre_elige() {  # corre_elige [DEPLOY_WORKFLOW=...]
+  ( export PATH="$WS/bin:$PATH"
+    ORG=acme; REPO=svc-demo; CRITICAL_JOBS=build; LOG="$WS/e.log"
+    say() { :; }
+    answers_repo_key() { printf ''; }
+    acota
+    . "$WS/elige.sh"
+    elige_runs "111 e2e
+222 Deploy" )
+}
+out="$(corre_elige)"
+assert_eq "222" "$out" "elige el run con job critico, no el primero de la lista"
+
+# Y si el humano declaro el workflow, manda esa declaracion (mas explicita).
+out="$( export PATH="$WS/bin:$PATH"
+        ORG=acme; REPO=svc-demo; CRITICAL_JOBS=build; LOG="$WS/e.log"
+        say() { :; }; answers_repo_key() { printf ''; }
+        acota; . "$WS/elige.sh"
+        DEPLOY_WORKFLOW=e2e elige_runs "111 e2e
+222 Deploy" )"
+assert_eq "111" "$out" "con DEPLOY_WORKFLOW declarado, manda lo que dijo el humano"
+
+# Dos que construyen: se vigilan los DOS. Esperar a uno solo es el mismo azar.
+cat > "$WS/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"run view"*) printf 'build
+' ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "$WS/bin/gh"
+out="$(corre_elige)"
+assert_eq "111 222" "$out" "si dos runs construyen, se vigilan los dos"
+
+# Ninguno reconocible: no se elige a ciegas (la salida vacia dispara la ceguera).
+cat > "$WS/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"run view"*) printf 'lint
+typecheck
+' ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "$WS/bin/gh"
+out="$(corre_elige)"
+assert_eq "" "$out" "sin job critico en ningun run NO se adivina: se declara ceguera"
+# Y el diagnostico no puede ensuciar la salida: la funcion corre dentro de un
+# $( ), asi que un `say` a stdout se convierte en un id de run (paso de verdad
+# escribiendo este arreglo).
+out="$( export PATH="$WS/bin:$PATH"
+        ORG=acme; REPO=svc-demo; CRITICAL_JOBS=build; LOG="$WS/e.log"
+        say() { echo "RUIDO: $1"; }
+        answers_repo_key() { printf ''; }
+        acota; . "$WS/elige.sh"
+        elige_runs "111 e2e" 2>/dev/null )"
+assert_not_contains "$out" "RUIDO" "los mensajes van a stderr: stdout son SOLO ids"
+rm -f "$WS/bin/gh"
+
 t_done

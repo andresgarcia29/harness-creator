@@ -755,3 +755,36 @@ ese script y hace falta el rastro para encontrarla.
   arranca despues, asi que su marca no coincide. Los leases de la version
   anterior (pid sin identidad) dejan de creerse por el numero pelado y pasan a
   cobrar el TTL como cualquier lease sin dueno demostrable.
+||||||| parent of dc07889 (fix: el verde esperaba a quien termina primero, no a quien construye (#171))
+## Cerrado el 2026-08-14 (issue #171: verde 7 minutos antes de que la imagen exista)
+
+- [x] **`deploy-watch` elegia el run de Actions por sha, o sea al azar entre los
+  workflows del mismo push.** Se tomaba `.[0]` de la lista que devuelve la API.
+  Caso de campo: un push disparo `e2e` y `Deploy` con el mismo head sha, se
+  eligio el `e2e` (que termina antes) y el watcher canto "actions verde" con
+  `Deploy` todavia `in_progress`. El verde salio **7m41s antes de que la imagen
+  existiera** y 11m15s antes de que sirviera. Ahora: con UN solo run no hay
+  ambiguedad y se vigila; con varios se eligen los que tienen un job CRITICO
+  (la misma declaracion `critical_jobs` que el script ya usaba para decidir si
+  un skipped es rojo), se puede fijar con `DEPLOY_WORKFLOW` o
+  `deploy: <repo>: workflow:`, y si ninguno es reconocible se declara ceguera en
+  vez de adivinar. Si dos construyen, se vigilan los DOS: esperar a uno solo es
+  el mismo azar con otro disfraz.
+- [x] **La promocion vacia de Kargo no frenaba nada.** Tras el #112 kargo SI
+  responde, y cuando la lista viene vacia el script imprimia la sugerencia del
+  refresh del warehouse y seguia. Responder "no hay freight" y seguir deja el
+  MISMO agujero que dejaba no responder. La pregunta honesta ademas no es "¿hay
+  promociones?" sino "¿hay una POSTERIOR a mi commit?", porque una promocion
+  vieja promovio el artefacto anterior. Sin fecha del commit no se compara: se
+  degrada a la presencia, que es lo unico observable.
+- [x] **El smoke corria contra los pods viejos y pasaba por definicion.** Es la
+  cuarta señal del caso de campo y la mas engañosa: un verde asi no es una
+  defensa, es la confirmacion de que lo viejo sigue funcionando. Con el rollout
+  declarado incompleto, el smoke no se corre y se dice por que.
+- Nota: la condicion de salida que el reporte pedia (el tag que corren los pods
+  == el del commit shippeado) ya la implementa `check_rollout`, del #168.
+- Defecto que me hice yo mismo escribiendo esto, y queda anotado porque es la
+  clase de error que un test si puede cazar: `elige_runs` corre dentro de un
+  `$( )`, asi que sus `say` a stdout se convertian en ids de run y el watcher
+  terminaba "vigilando" palabras sueltas de su propio diagnostico. Los mensajes
+  van a stderr y hay una asercion que lo fija.

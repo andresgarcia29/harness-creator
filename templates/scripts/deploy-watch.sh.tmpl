@@ -589,6 +589,81 @@ job_es_critico() {  # job_es_critico <nombre-del-job> → 0 si construye o despl
   return 1
 }
 
+# ── DE TODOS LOS RUNS DEL SHA, ¿CUÁL ES EL QUE DESPLIEGA? ─────────────
+# Un push dispara varios workflows con el MISMO head sha, así que "el primero
+# que devuelve la API" es una moneda al aire: se eligió el `e2e` (que termina
+# antes) y se cantó verde con el `Deploy` todavía in_progress.
+#
+# La precedencia es la misma que usa el resto del script, de más explícita a
+# más inferida, y sin inventar nunca:
+#   1. DEPLOY_WORKFLOW / deploy: <repo>: workflow:   lo que el humano dijo
+#   2. el run que contiene un job CRÍTICO             quién construye de verdad
+#   3. ninguno reconocible                            ceguera declarada
+#
+# El (2) no es una heurística nueva: `critical_jobs` ya es la declaración de
+# "quién produce o despliega el artefacto", y este script ya la usa para decidir
+# si un job saltado es rojo. Se le pregunta a los jobs del run, que es donde
+# vive la respuesta, en vez de adivinar por el nombre del workflow.
+#
+# Se devuelven TODOS los que califican, no uno: si dos workflows construyen,
+# esperar solo a uno es el mismo azar con otro disfraz.
+run_tiene_critico() {  # run_tiene_critico <run-id> → 0 si alguno de sus jobs lo es
+  local jobs j
+  jobs="$(run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+    gh run view --repo "$ORG/$REPO" "$1" --json jobs --jq '.jobs[].name' 2>/dev/null)" || return 1
+  [ -n "$jobs" ] || return 1
+  while IFS= read -r j; do
+    [ -n "$j" ] || continue
+    job_es_critico "$j" && return 0
+  done <<JOBSEOF
+$jobs
+JOBSEOF
+  return 1
+}
+
+# OJO con el stdout: esta función se llama dentro de un `$( )`, así que TODO lo
+# que escriba a stdout se convierte en ids. Los mensajes van a stderr a
+# propósito (se lo comió una vez: los `say` se colaban como si fueran runs, y el
+# watcher terminaba "vigilando" palabras sueltas del propio diagnóstico).
+elige_runs() {  # elige_runs "<id> <workflow>\n..." → los ids que hay que vigilar
+  local lista="$1" id nombre elegidos="" declarado
+  [ -n "$lista" ] || return 0
+  # UN SOLO RUN NO TIENE AMBIGÜEDAD QUE RESOLVER. El bug era elegir entre
+  # varios; con uno, preguntarle por sus jobs solo agrega una llamada y una
+  # forma nueva de quedarse ciego (un `gh` sin permiso para ver jobs dejaría sin
+  # vigilar el único run que hay). Se vigila y listo.
+  if [ "$(printf '%s\n' "$lista" | grep -c .)" -eq 1 ]; then
+    printf '%s' "$lista" | awk '{print $1}'
+    return 0
+  fi
+  declarado="${DEPLOY_WORKFLOW:-$(answers_repo_key "$REPO" workflow)}"
+  if [ -n "$declarado" ]; then
+    while read -r id nombre; do
+      [ -n "${id:-}" ] || continue
+      [ "$nombre" = "$declarado" ] && elegidos="${elegidos:+$elegidos }$id"
+    done <<DECLEOF
+$lista
+DECLEOF
+    if [ -n "$elegidos" ]; then
+      printf '%s' "$elegidos"; return 0
+    fi
+    say "⚠️ el workflow declarado ('$declarado') no disparó para este commit;" >&2
+    say "   busco por job crítico, que es la otra forma de saber quién construye." >&2
+  fi
+  while read -r id nombre; do
+    [ -n "${id:-}" ] || continue
+    if run_tiene_critico "$id"; then
+      elegidos="${elegidos:+$elegidos }$id"
+      say "   run $id ($nombre): tiene job crítico, lo vigilo" >&2
+    else
+      say "   run $id ($nombre): sin job crítico, no construye el artefacto (no lo vigilo)" >&2
+    fi
+  done <<CRITEOF
+$lista
+CRITEOF
+  printf '%s' "$elegidos"
+}
+
 KIND="$(repo_kind "$REPO")"
 DRIVER="$(answers_driver "$REPO")"
 if [ -z "$DRIVER" ]; then
@@ -1013,20 +1088,31 @@ if [ "$DRIVER" != "none" ] && command -v gh >/dev/null; then
   # mismo repo, el run que importa es el de ese commit (contiene a este).
   coalesce_repoint || true
   head_sha="$LANDED_SHA"
-  run_id=""
+  run_id=""; run_ids=""; runs_json=""
   if [ -n "$head_sha" ]; then
     for _ in 1 2 3 4 5 6 7 8 9 10; do   # hasta ~100 s esperando que GitHub lo cree
       # startswith y no ==: ship.log guardaba el sha CORTO hasta hace poco, y
       # la API del forge devuelve el completo. Con == la comparación no
       # matcheaba NUNCA para logs viejos, o sea el mismo silencio por otra
       # puerta. Los shas nuevos son completos y comparan exacto igual.
-      run_id="$(run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+      #
+      # ── UN PUSH DISPARA VARIOS WORKFLOWS, Y "EL PRIMERO" ES AZAR ──────
+      # Se tomaba `.[0]`, o sea el orden en que la API devuelve los runs de ese
+      # sha. Caso de campo: un push disparó `e2e` y `Deploy` con el mismo head
+      # sha, se eligió `e2e` (que termina antes), y el watcher cantó "actions
+      # verde" con `Deploy` todavía in_progress. El verde salió 7m41s ANTES de
+      # que la imagen existiera y 11m15s antes de que sirviera; las otras tres
+      # señales eran ciertas y ninguna miraba el artefacto nuevo.
+      # Se traen TODOS los runs del sha con su workflow y después se elige por
+      # quién construye, no por quién contesta primero.
+      runs_json="$(run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
         gh run list --repo "$ORG/$REPO" --branch "$BASE_REF" --limit 20 \
-        --json databaseId,headSha --jq \
-        "map(select(.headSha | startswith(\"$head_sha\"))) | .[0].databaseId // empty" 2>/dev/null || echo "")"
-      [ -n "$run_id" ] && break
+        --json databaseId,headSha,name --jq \
+        "[ .[] | select(.headSha | startswith(\"$head_sha\")) | \"\(.databaseId) \(.name)\" ] | .[]" 2>/dev/null || echo "")"
+      [ -n "$runs_json" ] && break
       sleep 10
     done
+    run_ids="$(elige_runs "$runs_json")"
   else
     # Antes esto no existía y era el agujero: sin sha, el script seguía como si
     # nada. Un watcher que no sabe qué mirar tiene que decirlo.
@@ -1036,14 +1122,28 @@ if [ "$DRIVER" != "none" ] && command -v gh >/dev/null; then
     emit assumption "Actions de $REPO NO verificado: sin sha en ship.log"
     ciego "actions: no hay sha de $REPO en tasks/$TASK/ship.log"
   fi
-  if [ -z "$run_id" ] && [ -n "$head_sha" ]; then
+  if [ -z "$run_ids" ] && [ -n "$head_sha" ] && [ -z "$runs_json" ]; then
     say "⚠️ ningún run de Actions para el commit ${head_sha:0:12} tras 100 s."
     say "   NO vigilo el run anterior: su resultado no dice nada de este cambio."
     say "   Puede que el workflow no dispare en push a $BASE_REF, o que aún no exista."
     emit assumption "Actions de $REPO NO verificado: sin run para el commit ${head_sha:0:12}"
     ciego "actions: ningún run para el commit ${head_sha:0:12}"
+  elif [ -z "$run_ids" ] && [ -n "$runs_json" ]; then
+    # HAY runs del sha, pero ninguno reconocible como el que construye. Elegir
+    # uno igual es volver a la moneda al aire que este bloque vino a matar, así
+    # que se dice y se declara ausente el tramo.
+    say "⚠️ hay run(s) de Actions para ${head_sha:0:12}, pero NINGUNO tiene un job"
+    say "   crítico ($CRITICAL_JOBS): no sé cuál construye el artefacto en este"
+    say "   pipeline, y elegir uno sería adivinar. Es CEGUERA, no un rojo."
+    say "   ↳ declaralo y este tramo vuelve a medir, con cualquiera de las dos:"
+    say "     deploy: $REPO: workflow: \"<el workflow que despliega>\""
+    say "     deploy: $REPO: critical_jobs: \"<job-que-construye>\""
+    emit assumption "Actions de $REPO NO verificado: ningún run de ${head_sha:0:12} tiene job crítico ($CRITICAL_JOBS)"
+    ciego "actions: ningún run de ${head_sha:0:12} con job crítico reconocible"
   fi
-  if [ -n "$run_id" ]; then
+  runs_mirados=0; runs_verdes=0
+  for run_id in $run_ids; do
+    runs_mirados=$((runs_mirados+1))
     espera_run "$run_id"; run_rc=$?
     case "$run_rc" in
       1) red "Actions falló (run $run_id, conclusión: $RUN_CONCLUSION). Logs: gh run view --repo $ORG/$REPO $run_id --log-failed" ;;
@@ -1064,13 +1164,12 @@ if [ "$DRIVER" != "none" ] && command -v gh >/dev/null; then
          emit assumption "Actions de $REPO NO verificado: el run $run_id quedó en '$RUN_STATUS' tras ${ACTIONS_TIMEOUT}s"
          ciego "actions: el run $run_id quedó en '$RUN_STATUS' tras ${ACTIONS_TIMEOUT}s" ;;
     esac
-  fi
   # El resto de la etapa solo tiene sentido sobre un run que TERMINÓ EN VERDE.
   # Antes esto colgaba del mismo `if [ -n "$run_id" ]` y no miraba el resultado,
   # así que un camino que no observó nada seguía derecho hasta `verified
   # "actions"`: ceguera declarada arriba y verde cantado abajo, en el mismo
   # bloque. (El rojo no llega acá: red() sale.)
-  if [ -n "$run_id" ] && [ "${run_rc:-1}" -eq 0 ]; then
+  if [ "${run_rc:-1}" -eq 0 ]; then
     # ── UN RUN EN success CON EL BUILD SALTADO NO ES VERDE (skipped != success)
     # Caso real (issue #66): deploy.yml condiciona el job build a un bump
     # semver por conventional commits. Un ship sin prefijo (feat:/fix:) dejó
@@ -1146,8 +1245,15 @@ EOF
         say "   artefacto: un job condicional saltado es normal y no es un rojo."
       fi
       say "✅ actions verde (run $run_id)"
-      verified "actions"
+      runs_verdes=$((runs_verdes+1))
     fi
+  fi
+  done
+  # UNA sola entrada en el resumen, y solo si TODOS los runs que despliegan
+  # cerraron verdes: con dos workflows que construyen, dar por verificada la
+  # etapa con uno solo es el mismo azar que este bloque vino a matar.
+  if [ "$runs_mirados" -gt 0 ] && [ "$runs_verdes" -eq "$runs_mirados" ]; then
+    verified "actions"
   fi
 fi
 
@@ -1155,6 +1261,13 @@ fi
 # El driver `actions` termina en la etapa 1: la conclusión del workflow es
 # toda la señal que tiene, y fingir más sería inventar.
 if [ "$DRIVER" = "gitops" ]; then
+
+# Epoch del commit shippeado, leído del clon canónico. Vacío = no comparable, y
+# eso NO se convierte en rojo: es la mitad (b) que se declara ciega.
+ship_commit_epoch() {
+  [ -n "${LANDED_SHA:-}" ] || return 0
+  git -C "$WS/repos/$REPO" show -s --format=%ct "$LANDED_SHA" 2>/dev/null || true
+}
 
 # 2 · Kargo: promoción del freight (si el pipeline lo usa)
 #
@@ -1264,6 +1377,39 @@ if command -v kargo >/dev/null; then
     # reciente, la remediación exacta es pedir el refresh, no esperar más.
     say "   (si el freight nuevo no aparece, pedí el refresh del warehouse:"
     say "    kubectl annotate warehouse <warehouse> -n {{KARGO_PROJECT}} kargo.akuity.io/refresh=\"\$(date +%s)\" --overwrite)"
+    # ── UNA LISTA VACÍA NO ES UNA PROMOCIÓN: ES SU AUSENCIA ──────────────
+    # Tras el arreglo del #112 kargo SÍ responde, y cuando la respuesta es
+    # `{"kind":"List","items":null}` el script imprimía la sugerencia del
+    # refresh y seguía como si nada. Responder "no hay freight" y seguir deja
+    # el MISMO agujero que dejaba no responder: el tramo de promoción se lee
+    # como mirado y no lo está. Caso de campo: verde declarado 7m41s antes de
+    # que la imagen existiera, con la lista de promociones vacía en el log.
+    #
+    # La pregunta honesta no es "¿hay promociones?" sino "¿hay una POSTERIOR a
+    # mi commit?": una promoción vieja promovió el artefacto anterior. Sin
+    # fecha del commit no se compara (no se inventa), y entonces manda la
+    # presencia, que es lo único observable.
+    if [ "$kargo_via" != "salida de texto" ]; then
+      commit_ts="$(ship_commit_epoch)"
+      promos_nuevas="$(printf '%s' "$kargo_out" | jq -r --arg t "${commit_ts:-0}" '
+        (if type == "object" and has("items") then (.items // []) else [.] end)
+        | map(select(type == "object"))
+        | map(select(($t | tonumber) == 0
+                     or ((.metadata.creationTimestamp // "1970-01-01T00:00:00Z")
+                         | fromdateiso8601) >= ($t | tonumber)))
+        | length' 2>/dev/null)"
+      case "${promos_nuevas:-}" in ''|*[!0-9]*) promos_nuevas=0 ;; esac
+      if [ "$promos_nuevas" -eq 0 ]; then
+        say "⚠️ kargo respondió y NO hay promoción posterior a tu ship${LANDED_SHA:+ (${LANDED_SHA:0:12})}."
+        say "   Una lista vacía no es un aviso: es la prueba de que el artefacto"
+        say "   todavía no llegó al warehouse. El tramo de promoción NO se verificó."
+        say "   Esto es CEGUERA, no un rojo: no propongo revertir nada."
+        emit assumption "promoción de Kargo NO verificada en $REPO: sin freight posterior al ship"
+        ciego "kargo: sin promoción posterior al ship (el artefacto todavía no llegó)"
+      else
+        say "   ✓ $promos_nuevas promoción(es) posterior(es) a tu ship"
+      fi
+    fi
   else
     printf '%s\n' "$kargo_out" >> "$LOG"
     reason="$(printf '%s' "$kargo_out" | head -1 | cut -c1-160)"
@@ -1375,13 +1521,6 @@ rollout_workloads() {  # → "ns nombre" por línea, vacío si no se pudo resolv
     (.status.resources // [])[]
     | select(.kind == "Deployment")
     | "\(.namespace // "default") \(.name)"' 2>/dev/null
-}
-
-# Epoch del commit shippeado, leído del clon canónico. Vacío = no comparable, y
-# eso NO se convierte en rojo: es la mitad (b) que se declara ciega.
-ship_commit_epoch() {
-  [ -n "${LANDED_SHA:-}" ] || return 0
-  git -C "$WS/repos/$REPO" show -s --format=%ct "$LANDED_SHA" 2>/dev/null || true
 }
 
 check_rollout() {  # → 0 completo con mi artefacto · 1 todavía no · 2 no pude mirar
@@ -1744,7 +1883,20 @@ fi   # ← fin de las etapas exclusivas de gitops
 # 4 · Smoke del canary tenant, para TODOS los drivers. Vivía DENTRO del if
 #     gitops, así que con driver actions no corría NUNCA: la última defensa
 #     dependía de la tecnología de deploy, que no tiene nada que ver.
-if [ -x "$WS/scripts/smoke/$REPO.sh" ]; then
+if [ -x "$WS/scripts/smoke/$REPO.sh" ] && [ -n "${ROLLOUT_INCOMPLETO:-}" ]; then
+  # ── UN SMOKE CONTRA LOS PODS VIEJOS PASA POR DEFINICIÓN ─────────────
+  # Es la cuarta señal del caso de campo, y la más engañosa: el smoke corrió
+  # cuando el rollout todavía no había terminado, interrogó a los pods de la
+  # versión ANTERIOR y salió verde. Un verde así no es una defensa, es una
+  # confirmación de que lo viejo sigue funcionando. Con el rollout declarado
+  # incompleto arriba, el smoke no se corre: se dice por qué.
+  say "── smoke: $REPO (NO lo corro) ──"
+  say "   El rollout no terminó, así que el smoke interrogaría a los pods de la"
+  say "   versión anterior y saldría verde sin decir nada de tu cambio."
+  say "   ↳ volvé a correr este watcher cuando el rollout haya terminado."
+  emit assumption "smoke de $REPO NO corrido: el rollout no había terminado (habría medido los pods viejos)"
+  ciego "smoke: no corrido (el rollout no terminó; habría medido los pods viejos)"
+elif [ -x "$WS/scripts/smoke/$REPO.sh" ]; then
   say "── smoke: $REPO ──"
   # El smoke es shell ARBITRARIO del usuario: casi siempre curl contra el
   # canary, y un curl sin --max-time no vuelve. Es la última defensa del

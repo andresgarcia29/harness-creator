@@ -1872,6 +1872,34 @@ class CostGateTest(unittest.TestCase):
         """El instante en que corre el test, con el formato de un transcript."""
         return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
+    def write_subagent(self, rol, turns, cache_read, cache_write):
+        """El transcript de un SUBAGENTE, que el medidor lee de
+        `<sid>/subagents/agent-*.jsonl` y cuyo rol sale del `.meta.json` de al
+        lado. Hace falta para probar que la exencion de COST-CTX es del
+        ORQUESTADOR y de nadie mas."""
+        d = self.proj / self.sid / "subagents"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "agent-1.meta.json").write_text(json.dumps({"agentType": rol}))
+        stamp = self.ahora()
+        lines = []
+        for _ in range(turns):
+            lines.append(json.dumps({
+                "type": "assistant",
+                # La ruta de la tarea, que es de donde sale la atribucion.
+                "cwd": str(self.ws / "worktrees" / self.task.name / "atlas"),
+                "timestamp": stamp,
+                "message": {
+                    "role": "assistant", "model": "claude-opus-5",
+                    "usage": {"input_tokens": 0,
+                              "cache_read_input_tokens": cache_read,
+                              "cache_creation_input_tokens": cache_write,
+                              "output_tokens": 500},
+                    "content": [{"type": "tool_use", "id": "t", "name": "Bash",
+                                 "input": {}}],
+                },
+            }))
+        (d / "agent-1.jsonl").write_text("\n".join(lines) + "\n")
+
     def write_transcript(self, turns, cache_read, cache_write, ctx_extra=0,
                          ts=None):
         """Un transcript minimo con el usage que el medidor lee.
@@ -1904,10 +1932,19 @@ class CostGateTest(unittest.TestCase):
             }))
         (self.proj / f"{self.sid}.jsonl").write_text("\n".join(lines) + "\n")
 
-    def transition(self, phase):
+    def transition(self, phase, sin_relevo=False):
+        """`sin_relevo=True` apaga el vigilante, que es la configuracion donde
+        la SESION CONTINUA con su contexto: nadie va a levantar una nueva. Es la
+        condicion bajo la que COST-CTX del orquestador tiene que seguir
+        frenando, y por eso los tests que prueban el freno la piden explicita en
+        vez de heredarla del entorno."""
         env = os.environ.copy()
         env["CLAUDE_CONFIG_DIR"] = str(self.cfg)
         env["HARNESS_WS"] = str(self.ws)
+        if sin_relevo:
+            env["HARNESS_ORCH_OFF"] = "1"
+        else:
+            env.pop("HARNESS_ORCH_OFF", None)
         return subprocess.run(
             ["python3", str(SCRIPT), "--policy", str(POLICY),
              "transition", str(self.task), phase, "--actor", "orchestrator"],
@@ -1934,10 +1971,79 @@ class CostGateTest(unittest.TestCase):
         self.assertIn("POLICY-BUDGET-005", r.stderr)
         self.assertIn("COST-CACHE", r.stderr)
 
-    def test_contexto_desbocado_frena_la_transicion(self):
+    def test_contexto_desbocado_frena_cuando_la_sesion_CONTINUA(self):
+        # El termino sigue frenando donde su remediacion existe: con el relevo
+        # desarmado, quien sigue trabajando es la MISMA sesion con el MISMO
+        # contexto, asi que dejarla pasar seria el falso verde de siempre.
         self.assertEqual(self.init().returncode, 0)
         # Caché sana, pero arrastra 400k de contexto: el otro modo de fuga.
         self.write_transcript(turns=40, cache_read=400_000, cache_write=1_000)
+        r = self.transition("implement", sin_relevo=True)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("COST-CTX", r.stderr)
+
+    def test_contexto_desbocado_NO_frena_una_transicion_que_RELEVA(self):
+        """ISSUE #180: la cura estaba detras del sintoma.
+
+        Esta transicion ES la remediacion del contexto: escribe el marcador de
+        relevo, el orquestador cierra su turno y el vigilante levanta una sesion
+        NUEVA con contexto limpio. COST-CTX la frenaba para exigir un perdon por
+        el contexto que la transicion esta por tirar, y el perdon se concedia
+        siempre (la tarea esta verde y la plata ya se gasto). Medido en campo:
+        tareas con CUATRO cost-waives del mismo termino, uno por fase, y un
+        reporte con la tarea entera en verde y sin camino ejecutable."""
+        self.assertEqual(self.init().returncode, 0)
+        self.write_transcript(turns=40, cache_read=400_000, cache_write=1_000)
+        r = self.transition("implement")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # NO se calla: un termino que deja de frenar y deja de verse es el
+        # silencio que todo este gate existe para no tener.
+        self.assertIn("COST-CTX", r.stdout)
+        self.assertIn("releva la sesión", r.stdout)
+        # Y sin ceremonia: no se firmo ningun perdon por algo que no lo necesita.
+        state = json.loads((self.task / "state.json").read_text())
+        self.assertNotIn("cost_waivers", state, state)
+        self.assertEqual(
+            [h for h in state["history"] if h.get("kind") == "cost-waive"], [])
+        # El relevo que hace de remediacion tiene que haber quedado pedido.
+        self.assertTrue((self.task / "handoff.json").exists(),
+                        "sin marcador no hay sesion nueva, y entonces el "
+                        "termino no debio eximirse")
+
+    def test_el_eximido_del_ctx_de_un_SUBAGENTE_no_se_toca(self):
+        # La exencion es del ORQUESTADOR y solo de el: el contexto de arranque
+        # de un subagente SI es controlable (lo arma quien lo lanza), o sea que
+        # ahi la remediacion que el mensaje imprime se puede aplicar de verdad.
+        self.assertEqual(self.init().returncode, 0)
+        self.write_transcript(turns=10, cache_read=10_000, cache_write=500)
+        self.write_subagent("implementer", turns=40, cache_read=400_000,
+                            cache_write=1_000)
+        r = self.transition("implement")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("COST-CTX", r.stderr)
+
+    def test_los_dolares_siguen_frenando_aunque_la_transicion_releve(self):
+        # Lo que NO se afloja: el relevo tira el contexto, no la factura.
+        self.assertEqual(self.init(budget=0.50).returncode, 0)
+        self.write_transcript(turns=200, cache_read=100_000, cache_write=1_000)
+        r = self.transition("implement")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("COST-BUDGET", r.stderr)
+
+    def test_la_cache_rota_sigue_frenando_aunque_la_transicion_releve(self):
+        self.assertEqual(self.init().returncode, 0)
+        self.write_transcript(turns=40, cache_read=20_000, cache_write=200_000)
+        r = self.transition("implement")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("COST-CACHE", r.stderr)
+
+    def test_el_kill_switch_por_ARCHIVO_tambien_cierra_la_exencion(self):
+        # Las dos formas del kill switch valen, porque quien lo necesita a las
+        # tres de la mañana usa el archivo (mismo criterio que orchestrator-watch).
+        self.assertEqual(self.init().returncode, 0)
+        self.write_transcript(turns=40, cache_read=400_000, cache_write=1_000)
+        (self.ws / ".harness").mkdir(parents=True, exist_ok=True)
+        (self.ws / ".harness" / "orch-watch.off").touch()
         r = self.transition("implement")
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertIn("COST-CTX", r.stderr)
@@ -2004,10 +2110,12 @@ class CostGateTest(unittest.TestCase):
         # pero tiene que EXISTIR o el gate es un boton de apagado del harness.
         self.assertEqual(self.init().returncode, 0)
         self.write_transcript(turns=40, cache_read=400_000, cache_write=1_000)
-        self.assertEqual(self.transition("implement").returncode, 3)
+        # sin_relevo: se necesita un termino que EFECTIVAMENTE frene para poder
+        # probar que el umbral de emergencia lo destraba.
+        self.assertEqual(self.transition("implement", sin_relevo=True).returncode, 3)
         env = os.environ.copy()
         env.update(CLAUDE_CONFIG_DIR=str(self.cfg), HARNESS_WS=str(self.ws),
-                   HARNESS_CTX_CEILING="900000")
+                   HARNESS_ORCH_OFF="1", HARNESS_CTX_CEILING="900000")
         r = subprocess.run(
             ["python3", str(SCRIPT), "--policy", str(POLICY), "transition",
              str(self.task), "implement", "--actor", "orchestrator"],
@@ -2125,8 +2233,12 @@ class CostGateTest(unittest.TestCase):
         # waive aceptado, y la unica salida que quedaba era HARNESS_CTX_CEILING,
         # que el propio mensaje describe como el recurso que no deja rastro.
         self.assertEqual(self.init(budget=500).returncode, 0)
+        # `sin_relevo`: con el vigilante apagado nadie levanta una sesion
+        # nueva, asi que el orquestador SIGUE siendo el mismo con el mismo
+        # contexto. Es la condicion donde este waive es la salida correcta, y
+        # desde el #180 tambien la unica donde el termino llega a frenar.
         self.write_transcript(turns=20, cache_read=400_000, cache_write=1_000)
-        self.assertEqual(self.transition("implement").returncode, 3)
+        self.assertEqual(self.transition("implement", sin_relevo=True).returncode, 3)
         w = self.waive("ctx", "orquestador", reason="sesion larga declarada")
         self.assertEqual(w.returncode, 0, w.stdout + w.stderr)
         state = json.loads((self.task / "state.json").read_text())
@@ -2137,7 +2249,7 @@ class CostGateTest(unittest.TestCase):
         # Y ahora el contexto CRECE, que es exactamente lo que pasa en campo
         # entre el waive y la transicion. Antes de #103 esto volvia a salir 3.
         self.write_transcript(turns=26, cache_read=420_000, cache_write=1_000)
-        r = self.transition("implement")
+        r = self.transition("implement", sin_relevo=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_el_eximido_de_ctx_deja_REGISTRAR_la_fase_que_ya_se_shippeo(self):
@@ -2156,8 +2268,12 @@ class CostGateTest(unittest.TestCase):
         self.assertEqual(self.init(budget=500).returncode, 0)
         # Se llega a la fase en limpio: lo que se mide es la fase que se CIERRA.
         self.assertEqual(self.transition("implement").returncode, 0)
+        # El caso de campo era una fase con los dos repos YA en main y
+        # desplegados: de las que no relevan la sesion por definicion
+        # (a `archive` y a `deploy` no se releva). `sin_relevo` es su
+        # equivalente ejecutable en este fixture.
         self.write_transcript(turns=34, cache_read=430_000, cache_write=1_000)
-        frena = self.transition("review")
+        frena = self.transition("review", sin_relevo=True)
         self.assertEqual(frena.returncode, 3, frena.stdout + frena.stderr)
         self.assertIn("COST-CTX", frena.stdout + frena.stderr,
                       "el que frena tiene que ser el termino que se va a eximir")
@@ -2171,7 +2287,7 @@ class CostGateTest(unittest.TestCase):
         # El contexto sigue creciendo entre el sello y la transicion, que es la
         # carrera entera del reporte: son tool calls del propio waive.
         self.write_transcript(turns=40, cache_read=460_000, cache_write=1_000)
-        r = self.transition("review")
+        r = self.transition("review", sin_relevo=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         # Y destraba DEJANDO RASTRO, que es la otra mitad del reporte: la unica
         # salida que quedaba era HARNESS_CTX_CEILING, y el propio mensaje la

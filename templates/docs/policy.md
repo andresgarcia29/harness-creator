@@ -156,11 +156,48 @@ antes de elegir remediación:
 | `COST-CACHE` | acierto de caché de un rol bajo el piso | la fase en curso | `harness-policy.py cost-waive tasks/<id> --band cache --agent <rol> --actor <quien> --reason "<por qué>"` |
 | `COST-CTX` | contexto medio de un rol sobre el techo | la fase en curso | `... --band ctx --agent <rol> ...` |
 
-`budget --to` **solo** mueve `COST-BUDGET`. Los otros dos salen de los
-transcripts de un agente que ya cerró, o sea que son históricos e inmutables:
-la remediación que el gate imprime (recortar el contexto de arranque) no se
-puede aplicar en retroactivo, y sin `cost-waive` la tarea quedaba trabada para
-siempre en su fase, con el trabajo commiteado y el precheck verde.
+`budget --to` **solo** mueve `COST-BUDGET`. Los otros dos salen de
+transcripts, o sea que son históricos e inmutables: la remediación que el gate
+imprime (recortar el contexto de arranque) no se puede aplicar en retroactivo, y
+sin `cost-waive` la tarea quedaba trabada para siempre en su fase, con el
+trabajo commiteado y el precheck verde.
+
+### `COST-CTX` del orquestador no frena una transición que RELEVA
+
+Un término se cobra donde su remediación existe, y ésta es la excepción que lo
+hace explícito. La transición de fase **es** la remediación del contexto: deja
+el marcador de relevo, el orquestador cierra su turno y `orchestrator-watch`
+levanta una sesión nueva con contexto limpio. Cobrar `COST-CTX` ahí no recupera
+un peso (ese contexto ya se gastó) y no protege nada: lo único que el bloqueo
+evitaría, que la fase siguiente corra sobre la sesión inflada, ya lo evita el
+relevo. Lo que producía era ceremonia, un eximido por fase concedido siempre,
+porque con la tarea verde y la plata gastada no hay otra respuesta correcta.
+
+Así que en una transición que releva, el término **se imprime y va al bus, pero
+no frena**. Sigue frenando, con `cost-waive` como salida, cuando la sesión de
+verdad continúa:
+
+- se va a `archive` o a `deploy`, que no relevan;
+- el carril es `quick`;
+- el vigilante está apagado (`HARNESS_ORCH_OFF` o `.harness/orch-watch.off`),
+  así que nadie va a levantar la sesión nueva.
+
+Es fail-closed sobre esas tres: la exención existe solo mientras el contexto del
+que el término se queja esté por descartarse. Y no afloja lo demás:
+`COST-BUDGET` sigue frenando por dólares, `COST-CACHE` sigue igual, y la
+exención es del **orquestador** y de nadie más, porque el contexto de arranque
+de un subagente sí lo controla quien lo lanza, que es justo lo que la
+remediación impresa pide.
+
+### El aviso llega mientras todavía se puede actuar
+
+`orchestrator-watch` corre `harness-cost.py ctx-watch` en cada pasada (una sola
+lectura de los transcripts para todas las tareas, igual que `stale`) y avisa al
+llegar al 80% del techo, `HARNESS_CTX_WARN_PCT`. Antes el techo se cruzaba en
+silencio y el primer aviso era la transición frenada, o sea con todo gastado y
+ninguna decisión disponible. La decisión que este aviso habilita solo existe a
+tiempo: cerrar la fase y dejar entrar el relevo, en vez de arrancar otro tramo
+de descubrimiento sobre una sesión que ya arrastra 400k.
 
 ### La ventana: los dos términos de tasa miran la fase EN CURSO
 

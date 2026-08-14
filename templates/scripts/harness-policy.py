@@ -99,6 +99,36 @@ def current_session(task_dir: Path) -> str:
         return ""
 
 
+def fase_se_releva(state: dict, current: str, phase: str) -> bool:
+    """Las tres condiciones ESTRUCTURALES del relevo de fase.
+
+    Existe como función porque la contestan DOS lugares (quién escribe el
+    marcador y quién decide si el gate de contexto puede cobrarse), y dos
+    copias divergirían justo donde duele: una diría "te relevo" y la otra no
+    relevaría."""
+    return (phase != current and phase not in ("archive", "deploy")
+            and state.get("lane") != "quick")
+
+
+def relevo_efectivo(task_dir: Path, state: dict, current: str, phase: str) -> bool:
+    """¿Esta transición va a relevar la sesión DE VERDAD?
+
+    Es `fase_se_releva` más la pregunta que el marcador solo no contesta: ¿hay
+    alguien que vaya a levantar la sesión nueva? El corte lo ejecuta
+    `orchestrator-watch.sh`, así que con el vigilante apagado el marcador se
+    escribe y no lo consume nadie: quien sigue trabajando es la MISMA sesión con
+    el MISMO contexto.
+
+    Fail-CLOSED a propósito, y es la mitad que sostiene todo el cambio: el gate
+    de contexto deja de cobrarse solo cuando el contexto del que se queja está
+    por descartarse. Si no se descarta, cobra como siempre."""
+    if not fase_se_releva(state, current, phase):
+        return False
+    if os.environ.get("HARNESS_ORCH_OFF"):
+        return False
+    return not (task_dir.parent.parent / ".harness" / "orch-watch.off").exists()
+
+
 def write_handoff(task_dir: Path, phase: str, from_session: str) -> None:
     """Deja el marcador de RELEVO: esta fase la sigue una sesión nueva.
 
@@ -1770,29 +1800,95 @@ def cmd_transition(args: argparse.Namespace) -> int:
         # substring mandaría a eximir algo que ya está eximido. El JSON se pide
         # solo en este camino (el gate ya se negó), así que no toca la latencia
         # de una transición sana. Si no se puede leer, se cae al texto.
-        codigos = set()
+        frenan: list = []
         detalle = cost_check(task_dir, as_json=True)
         if detalle is not None and (detalle.stdout or "").strip():
             try:
                 data = json.loads(detalle.stdout.strip().splitlines()[-1])
-                codigos = {b.get("code") for b in data.get("breaches") or []}
+                frenan = [(b.get("code"), b.get("agent"))
+                          for b in data.get("breaches") or []]
             except Exception:
-                codigos = set()
-        if not codigos:
-            codigos = {c for c in ("COST-CACHE", "COST-CTX")
-                       if c in (proc.stdout or "")}
+                frenan = []
+        if not frenan:
+            frenan = [(c, None) for c in ("COST-CACHE", "COST-CTX")
+                      if c in (proc.stdout or "")]
+
+        # ── UN TÉRMINO SE COBRA DONDE SU REMEDIACIÓN EXISTE ─────────────────
+        # LA CURA ESTABA DETRÁS DEL SÍNTOMA. Esta transición ES la remediación
+        # del contexto: escribe el marcador de relevo, el orquestador cierra su
+        # turno y el vigilante levanta una sesión NUEVA con contexto limpio. Y
+        # COST-CTX la frenaba para exigir un perdón por el contexto que la
+        # transición está a punto de tirar.
+        #
+        # Cobrarlo acá no recupera un peso (ese contexto ya se gastó) y no
+        # protege nada: lo único que el bloqueo evitaría, que la fase siguiente
+        # corra sobre la sesión inflada, ya lo evita el relevo. Lo que producía
+        # era ceremonia: un waive por fase, siempre concedido, porque con la
+        # tarea verde y la plata gastada no existe otra respuesta correcta.
+        # Medido en el propio repo: tareas con CUATRO cost-waives del mismo
+        # COST-CTX, una por fase (ver write_handoff). Y cinco reportes de campo
+        # dando vueltas por el mismo cuarto: #90, #91, #93 ("la salida que
+        # ofrece no destraba"), #103 y #111 ("el perdón vence antes de
+        # escribirse"), y el último con la tarea entera en verde y sin camino.
+        #
+        # Lo que NO se afloja: COST-BUDGET sigue frenando por dólares, que es el
+        # término que protege la plata, y COST-CACHE sigue igual. Y si el relevo
+        # no va a ocurrir (`relevo_efectivo` es fail-closed), este término
+        # frena como siempre, porque ahí la sesión SÍ continúa con ese contexto.
+        # No se calla nunca: se imprime y va al bus.
+        if relevo_efectivo(task_dir, state, current, args.phase):
+            exentos = [f for f in frenan
+                       if f[0] == "COST-CTX" and f[1] == "orquestador"]
+            if exentos:
+                frenan = [f for f in frenan if f not in exentos]
+                print(f"🔻 COST-CTX del orquestador NO frena esta transición: "
+                      f"{current} → {args.phase} releva la sesión, así que el "
+                      "contexto que el término mide está por descartarse. El "
+                      "vigilante levanta una sesión nueva con contexto limpio.")
+                emit_bus(task_dir, "decision",
+                         "COST-CTX del orquestador no frenó: la transición "
+                         f"{current} → {args.phase} releva la sesión")
+        if not frenan:
+            proc = None            # la transición sigue: no quedó nada frenando
+
+    if proc is not None and proc.returncode == 3:
+        codigos = {c for c, _ in frenan}
         if codigos & {"COST-CACHE", "COST-CTX"}:
             salida += (
                 " OJO: `budget --to` solo mueve el término COST-BUDGET. Para "
-                "COST-CACHE y COST-CTX, que salen de transcripts de un agente "
-                "que YA CERRÓ y no se pueden remediar en retroactivo, la salida "
-                "auditable es `harness-policy.py cost-waive tasks/<id> --band "
+                "COST-CACHE y COST-CTX la salida auditable es "
+                "`harness-policy.py cost-waive tasks/<id> --band "
                 "cache|ctx --agent <rol> --actor <quien> --reason \"<por qué>\"`: "
                 "queda en history[] y cada cost-check lo declara. Esos dos "
                 "términos se miden sobre la FASE EN CURSO (phase_since), así "
                 "que lo que frena corrió en esta fase: un agente de una fase "
                 "anterior ya no puede trabar la tarea para siempre (#95)."
             )
+            # ── EL CASO DEL ORQUESTADOR VIVO, QUE ES EL MÁS FRECUENTE ───────
+            # El texto anterior decía "de un agente que YA CERRÓ", y eso leía
+            # AL REVÉS al operador cuyo orquestador está vivo: se deducía fuera
+            # de las dos ramas contempladas (no puede recortar un arranque que
+            # ya ocurrió, y no califica como "cerrado" para el waive) y
+            # concluía, con razón, que no tenía camino. Pasó en campo con la
+            # tarea entera en verde: levantó un bug en vez de correr UN comando.
+            # El waive de `ctx` se ancla a la FASE justamente porque el
+            # orquestador está vivo por definición cuando pide la transición
+            # (#103), así que el camino existía y el mensaje lo escondía.
+            if any(c == "COST-CTX" and a == "orquestador" for c, a in frenan):
+                salida += (
+                    " Y si el que arrastra el contexto es el ORQUESTADOR, que "
+                    "está vivo por definición al pedir esta transición: el "
+                    "waive es igual de válido y se ancla a la FASE, no a un "
+                    "valor, para que no venza mientras su contexto sigue "
+                    "creciendo (#103). El comando exacto es "
+                    "`harness-policy.py cost-waive tasks/" + task_dir.name +
+                    " --band ctx --agent orquestador --actor <quien> --reason "
+                    "\"<por qué>\"`. Que esté frenando acá significa que esta "
+                    "transición NO releva la sesión (vas a archive o deploy, el "
+                    "carril es quick, o el vigilante está apagado): en una que "
+                    "releva, este término no frena, porque el contexto se "
+                    "descarta con la sesión."
+                )
         fail("POLICY-BUDGET-005",
              (proc.stdout or "").strip() + "\n\n"
              "El gasto de esta tarea está fuera de banda y la transición se "
@@ -1938,8 +2034,7 @@ def cmd_transition(args: argparse.Namespace) -> int:
     # proceso de bash a cero tokens: durante la espera no hay ninguna sesión
     # viva. Si el watcher muere sin escribirlo, la tarea cae en la regla de
     # silencio de bus de siempre.
-    if args.phase != current and args.phase not in ("archive", "deploy") \
-            and state.get("lane") != "quick":
+    if fase_se_releva(state, current, args.phase):
         write_handoff(task_dir, args.phase, sid)
     detail = f" (repo {args.repo}: ronda {rounds_by_repo.get(args.repo)})" if args.repo and args.phase == "review" else ""
     # la ronda viaja al bus: el panel antes no tenía forma de contar rondas

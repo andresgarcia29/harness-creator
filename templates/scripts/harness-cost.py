@@ -1107,6 +1107,46 @@ def cmd_check(args) -> int:
     return EXIT_BREACH
 
 
+def cmd_ctx_watch(args) -> int:
+    """El aviso que llega cuando TODAVÍA se puede actuar.
+
+    POR QUÉ EXISTE: el techo de contexto se cruzaba en silencio y el primer
+    aviso era la transición frenada, o sea cuando ya se gastó todo. Ese orden
+    dejaba al operador con un hecho consumado y ninguna decisión: el contexto de
+    una fase no se devuelve.
+
+    Con el relevo de fase, cruzar el techo dejó de ser una pared (la transición
+    releva la sesión y el término no frena, ver harness-policy.py), pero el
+    contexto sigue costando plata y latencia POR TURNO mientras la fase dura. La
+    decisión que este aviso habilita es real y solo existe a tiempo: cerrar la
+    fase y dejar que el relevo entre, en vez de arrancar otro tramo de
+    descubrimiento sobre una sesión que ya arrastra 400k.
+
+    UNA SOLA PASADA sobre los transcripts, igual que `day`, y no una por tarea:
+    lo corre el vigilante cada dos minutos, y N escaneos por pasada convertirían
+    el aviso en el gasto que viene a evitar.
+
+    Contrato, calcado del `stale` de harness-policy.py para que el vigilante los
+    consuma igual: una línea `<tarea>\t<rol>\t<ctx>\t<techo>` por stdout.
+    Exit 0 siempre: esto AVISA, no decide. Fail-open, como todo observador.
+    """
+    pd = find_project_dir(WS)
+    if not pd:
+        return EXIT_OK
+    umbral = float(os.environ.get("HARNESS_CTX_WARN_PCT", "0.8"))
+    for r in collect(pd, since_days=args.days):
+        if not r.get("task"):
+            continue
+        techo = ctx_ceiling_for(r["role"])
+        ctx = r.get("ctx_avg") or 0
+        # Solo el tramo de AVISO: por encima del techo ya no es un aviso, es el
+        # término que el gate evalúa en la transición, y repetirlo acá sería dos
+        # voces distintas para el mismo hecho.
+        if techo * umbral <= ctx < techo:
+            print(f"{r['task']}\t{r['role']}\t{ctx:.0f}\t{techo}")
+    return EXIT_OK
+
+
 def cmd_export(args) -> int:
     """Una línea JSON por agente. El formato para una base de datos.
 
@@ -1180,6 +1220,12 @@ def main(argv=None) -> int:
     e.add_argument("--days", type=int, default=None,
                    help="solo lo tocado en los ultimos N dias")
     e.set_defaults(func=cmd_export)
+
+    cw = sub.add_parser("ctx-watch",
+                        help="avisa qué agente se acerca a su techo de contexto, "
+                             "mientras todavía se puede cerrar la fase")
+    cw.add_argument("--days", type=int, default=1)
+    cw.set_defaults(func=cmd_ctx_watch)
 
     c = sub.add_parser("check", help="gate: sale 3 si está fuera de banda")
     c.add_argument("task")

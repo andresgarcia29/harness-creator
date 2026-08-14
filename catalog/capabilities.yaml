@@ -153,6 +153,9 @@ capabilities:
     bin: gcloud
     install: "brew install --cask gcloud-cli"
     install_kind: auto
+    install_linux: "https://cloud.google.com/sdk/docs/install#linux"
+    install_linux_kind: manual
+    note: "los casks son de macOS y NO existen en Linux ni con brew instalado, así que en Linux esta entrada NO tiene comando ejecutable: el SDK se baja del archivo oficial (o del repo apt de Google, que son varios pasos con pipe y no cabe en install:). Por eso install_linux_kind es manual y no auto"
     secrets: [{ key: CLOUDSDK_AUTH_ACCESS_TOKEN, source: "vault://gcp/impersonated-account" }]
     permission_tier: read-only
     profiles: [deployer, orquestador]

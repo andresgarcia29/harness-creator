@@ -816,3 +816,32 @@ ese script y hace falta el rastro para encontrarla.
   piden datos interactivos, y encadenarlos a ciegas desde un bootstrap es como
   se pierden sesiones ajenas. Sin el CLI de la fuente se declara ceguera, que es
   la misma respuesta que da el resto del harness cuando no puede mirar.
+||||||| parent of eb6073c (fix: el plan pedia correr los gates que el precheck ya corre (#170))
+||||||| parent of 86b9d1c (fix: el plan pedia correr los gates que el precheck ya corre (#170))
+## Cerrado el 2026-08-14 (issue #170: los gates corrian dos veces por ronda)
+
+- [x] **`plan-lint.sh` bendecia criterios que contradicen a `implementer.md` §5.**
+  El §5 prohibe re-correr la suite ("antes se corria cuatro veces por tarea") y
+  el formato de plan que este mismo script valida empuja a lo contrario, porque
+  la forma natural de escribir un criterio binario y ejercitable es NOMBRAR los
+  comandos de gate del repo. Las dos reglas son del mismo harness y se
+  contradicen; gana la que el implementer tiene delante, que es el plan. Medido
+  en una tarea de dos rondas del carril express (1 repo, 2 archivos de
+  produccion y 2 de test): 18,9 min de reloj de herramientas, de los cuales ~10
+  son el precheck y ~7,9 los MISMOS gates corridos a mano antes. Unos 8 minutos
+  por tarea de ejecucion duplicada, en el carril mas barato, y en un repo cuya
+  suite paga 90 s de arranque por corrida. Ahora `plan-lint` AVISA (no bloquea:
+  el criterio no es incorrecto, es caro) y la plantilla del architect dice que
+  el criterio correcto es la CONDUCTA que el cambio agrega.
+- [x] **`harness-cost.py` no reportaba tiempo, y por eso el diagnostico apunto
+  al lugar equivocado.** Reportaba dolares, turnos y contexto, asi que la
+  latencia se diagnosticaba con el unico numero disponible: la duracion que el
+  runtime informa al orquestador. Ese numero es inconsistente para los agentes
+  CONTINUADOS (`SendMessage`), que es como el harness hace las rondas: en la
+  misma sesion, el reviewer devolvio duracion POR RONDA (12,4 min) y el
+  implementer la vida entera del agente con el ocio adentro (33,9 min contra
+  12,2 de trabajo). Ahora el reporte trae DOS columnas y la diferencia es el
+  dato: `activo` suma solo los huecos entre turnos que son trabajo (perilla
+  `HARNESS_COST_HUECO_MAX_S`), y `reloj` va del primer turno al ultimo. El
+  tiempo va junto al costo y no en otro comando: "por que tardo" y "por que
+  costo" se preguntan a la vez.

@@ -143,7 +143,15 @@ verifica y sin verde no hay implement):
   primero mueve el archivo y el implementer queda siguiendo coordenadas
   muertas. Nombra la función, la clase o la sección.
 - `criterios` binarios y ejercitables. Si no se puede escribir el test
-  que lo prueba, no es un criterio.
+  que lo prueba, no es un criterio. Lo que NO va: enumerar los comandos de
+  gate del repo (`bun run test`, `go test ./...`, `npm run lint`). Los corre
+  `ship.sh --precheck`, que el implementer ya está obligado a correr, y
+  nombrarlos acá los hace correr DOS veces por ronda. Medido en una tarea de
+  dos rondas del carril express: 8 de los 19 minutos de herramientas fueron
+  esa duplicación, y en un repo cuya suite paga 90 s de arranque cada vez.
+  El criterio correcto es la CONDUCTA que el cambio agrega (el 429, el campo
+  nuevo, el error que ahora se rechaza); "precheck verde" ya está implícito
+  en el contrato del implementer y no hace falta escribirlo.
 - `deps` por conflicto REAL (archivo compartido o dependencia de
   contrato). Entre tareas del MISMO repo, `POLICY-DAG-010` exige una de dos:
   una arista de orden (cualquiera de los dos sentidos sirve), o `files[]`

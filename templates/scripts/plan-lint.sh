@@ -307,6 +307,50 @@ if [ "$LANE" = "standard" ] || [ "$LANE" = "full" ]; then
   fi
 fi
 
+# ── 8. UN CRITERIO QUE NOMBRA UN GATE LO HACE CORRER DOS VECES ────────
+#
+# POR QUÉ EXISTE: `implementer.md` §5 prohíbe re-correr la suite ("No corras la
+# suite otra vez: antes se corría cuatro veces por tarea"), y el formato de plan
+# que este mismo script bendice empuja a lo contrario, porque la forma natural
+# de escribir un criterio binario y ejercitable es nombrar los comandos de gate
+# del repo. Las dos reglas son del mismo harness y se contradicen; la que gana
+# es la que el implementer tiene delante, que es el plan.
+#
+# Medido en una tarea de dos rondas del carril express (1 repo, 2 archivos de
+# producción y 2 de test): 18,9 min de reloj de herramientas, de los cuales
+# ~10 son el precheck y ~7,9 son los MISMOS gates corridos a mano antes. O sea
+# unos 8 minutos por tarea de ejecución duplicada, en el carril más barato que
+# tiene el harness, y en un repo cuya suite paga 90 s de arranque por corrida.
+#
+# AVISA, no bloquea, y es deliberado: un criterio así no es incorrecto, es caro,
+# y un lint que bloquea algo correcto es un lint que alguien apaga (misma
+# decisión que el aviso de carril de más, arriba).
+#
+# La lista es de FORMAS conocidas y no del set de gates del repo: los gates por
+# lenguaje viven en `run_lang_gates` de ship.sh, que no se puede consultar desde
+# acá sin duplicar su despacho. Para un AVISO alcanza con reconocer las que
+# aparecen en los planes; una que se escape solo cuesta el aviso que no salió.
+gates_en_criterios="$(awk '
+  /^[ \t]*[-*][ \t]+[Cc]riterios[ \t]*:/ {
+    linea = tolower($0)
+    if (linea ~ /(npm|pnpm|yarn|bun)[ \t]+(run[ \t]+)?(test|lint|typecheck|check)/ ||
+        linea ~ /go[ \t]+(test|vet|build)/ ||
+        linea ~ /(pytest|ruff|mypy|cargo[ \t]+test|tsc|terraform[ \t]+(validate|fmt))/ ||
+        linea ~ /gradlew?[ \t]+(test|build)|mvn[ \t]+(test|verify)/) {
+      sub(/^[ \t]*[-*][ \t]+/, "", $0); print substr($0, 1, 120)
+    }
+  }' "$PLAN")"
+if [ -n "$gates_en_criterios" ]; then
+  echo "ℹ️  criterio(s) que nombran comandos de gate:"
+  printf '%s\n' "$gates_en_criterios" | while IFS= read -r l; do [ -n "$l" ] && say "$l"; done
+  echo "   Los corre \`ship.sh --precheck\`, que el implementer YA está obligado a"
+  echo "   correr antes de entregar: nombrarlos acá los hace correr dos veces por"
+  echo "   ronda. Medido: ~8 min por tarea de dos rondas en el carril express."
+  echo "   ↳ el criterio correcto es la CONDUCTA que el cambio agrega (el 429, el"
+  echo "     campo nuevo, el error que ahora se rechaza). El precheck verde ya está"
+  echo "     en el contrato del implementer y no hace falta escribirlo."
+fi
+
 if [ "$red" -eq 0 ]; then
   echo "✅ plan ejecutable: $tasks_n tarea(s), claves completas, sin decisiones abiertas"
   exit 0

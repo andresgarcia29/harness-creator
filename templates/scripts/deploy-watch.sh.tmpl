@@ -41,6 +41,8 @@
 #   DEPLOY_ACTIONS_POLL_SECS 10   cada cuánto se le pregunta
 #   DEPLOY_TIMEOUT          900   cuánto se espera a que ArgoCD llegue a sano
 #   DEPLOY_POLL_SECS         10   cada cuánto se le pregunta al cluster
+#   DEPLOY_ROLLOUT_TIMEOUT  300   cuánto se espera a que los PODS terminen de
+#                                 rotar después de que ArgoCD dice Synced
 #   DEPLOY_SMOKE_TIMEOUT    120   cuánto puede tardar el smoke del canary
 #   DEPLOY_HARD_LIMIT      2400   techo TOTAL del script. Backstop: si algún
 #                                 camino nuevo se olvida de acotar, esto lo mata
@@ -54,6 +56,12 @@
 #                                 declara por repo en harness-answers.yaml
 #                                 (deploy: <repo>: critical_jobs: "a, b") y
 #                                 esta variable pisa esa lista por corrida.
+#   DEPLOY_K8S_WORKLOADS          qué Deployment(s) mirar para saber si el
+#                                 rollout terminó ("ns/nombre ns/nombre").
+#                                 Por defecto salen de .status.resources de la
+#                                 Application; declararlos hace falta solo si
+#                                 el Deployment vive en OTRA app (layout con
+#                                 repo de manifiestos aparte).
 set -uo pipefail
 
 TASK="${1:?uso: deploy-watch.sh <task-id> <repo> [--coalesce]}"
@@ -141,6 +149,7 @@ resolve_argocd_app() {  # resolve_argocd_app <repo> → nombre de la app
   app_name "$repo"
 }
 TIMEOUT="${DEPLOY_TIMEOUT:-900}"
+ROLLOUT_TIMEOUT="${DEPLOY_ROLLOUT_TIMEOUT:-300}"
 ROLLBACK_MODE="{{ROLLBACK_MODE}}"   # auto | manual
 
 # ── SIEMPRE SE SABE EN QUÉ ETAPA ESTÁ ─────────────────────────────────
@@ -1317,6 +1326,166 @@ argocd_cli_ready() {
   return 1
 }
 
+# ── EL MANIFIESTO NO ES EL POD, Y ESTA ES LA PREGUNTA QUE FALTABA ─────
+# `Synced + Healthy` dice que el cluster coincide con el MANIFIESTO de esa
+# revisión y que los pods viven. NO dice que los pods corran TU artefacto, y las
+# dos cosas se separan solas en cuanto hay promoción de imagen (Kargo) o un
+# rollout a medias. Dos casos de campo, y el segundo se lo hizo el propio autor
+# del vigilante, que es la prueba de que el defecto es de la SEÑAL y no de quien
+# la lee:
+#
+#   1. 🟢 declarado con  gen=134 obsGen=134 replicas=3 updated=2 ready=3
+#      available=2, y un pod viejo Running con la imagen ANTERIOR: un tercio del
+#      tráfico contra el artefacto viejo con el deploy ya dado por bueno. Para un
+#      cambio que agrega una GUARDA, el verde prematuro afirma que la guarda está
+#      activa mientras un pod todavía acepta lo que la guarda rechaza.
+#   2. Un vigilante a mano sobre `updated == ready == replicas` salió COMPLETO
+#      con 2/2/2 y era falso: los pods corrían la imagen anterior y el build del
+#      commit nuevo seguía en vuelo. Si el promotor todavía no movió el tag, el
+#      Deployment está legítimamente estable EN LA REVISIÓN VIEJA y sus
+#      contadores dan verde.
+#
+# De ahí que la condición cruce DOS cosas y no una:
+#   (a) el rollout terminó   → observedGeneration al día, updated == ready ==
+#       available == replicas, y UNA sola imagen entre los pods (dos imágenes es
+#       exactamente el pod viejo sirviendo);
+#   (b) los pods son POSTERIORES a mi commit → al menos uno nació después de la
+#       fecha del sha shippeado. Un contador de réplicas contesta "el rollout que
+#       hubiera terminó", no "mi cambio está sirviendo".
+#
+# Lo que NO hace: inventar. Sin kubectl, sin poder leer el Deployment o sin sha
+# comparable, esto es CEGUERA y el verde se degrada al de siempre (el del
+# manifiesto), que es la conducta que ya existía. Solo cuando SÍ se puede mirar
+# y lo que se ve dice "todavía no", la señal de manifiesto deja de alcanzar.
+#
+# ponytail: la lista de workloads sale de `.status.resources` de la Application.
+# Un layout con el Deployment en otra Application (repo de manifiestos aparte)
+# cae a ceguera, que es la respuesta honesta; el escape es DEPLOY_K8S_WORKLOADS
+# ("ns/nombre ns/nombre").
+rollout_workloads() {  # → "ns nombre" por línea, vacío si no se pudo resolver
+  local raw
+  if [ -n "${DEPLOY_K8S_WORKLOADS:-}" ]; then
+    printf '%s\n' "$DEPLOY_K8S_WORKLOADS" | tr ' ' '\n' | tr '/' ' '
+    return 0
+  fi
+  raw="$(run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+    kubectl --request-timeout="${CALL_TIMEOUT}s" get application "$APP" \
+      -n "${ARGOCD_NAMESPACE:-argocd}" -o json 2>/dev/null)" || return 0
+  printf '%s' "$raw" | jq -r '
+    (.status.resources // [])[]
+    | select(.kind == "Deployment")
+    | "\(.namespace // "default") \(.name)"' 2>/dev/null
+}
+
+# Epoch del commit shippeado, leído del clon canónico. Vacío = no comparable, y
+# eso NO se convierte en rojo: es la mitad (b) que se declara ciega.
+ship_commit_epoch() {
+  [ -n "${LANDED_SHA:-}" ] || return 0
+  git -C "$WS/repos/$REPO" show -s --format=%ct "$LANDED_SHA" 2>/dev/null || true
+}
+
+check_rollout() {  # → 0 completo con mi artefacto · 1 todavía no · 2 no pude mirar
+  local ws deadline rem inc="" imgs n_img ready upd avail reps gen obs nuevo
+  local ns name pods commit_ts
+  ROLLOUT_DIAG=""
+  command -v kubectl >/dev/null 2>&1 || return 2
+  command -v jq >/dev/null 2>&1 || return 2
+  ws="$(rollout_workloads)"
+  [ -n "$ws" ] || return 2
+  commit_ts="$(ship_commit_epoch)"
+  deadline=$(( $(date +%s) + ROLLOUT_TIMEOUT ))
+  while :; do
+    inc=""
+    while read -r ns name; do
+      [ -n "${name:-}" ] || continue
+      rem=$(( deadline - $(date +%s) ))
+      [ "$rem" -gt 0 ] || rem=1
+      [ "$rem" -gt "$CALL_TIMEOUT" ] && rem="$CALL_TIMEOUT"
+      # Una sola lectura del Deployment: contadores, generación y selector.
+      local dep
+      dep="$(run_bounded "$rem" "$CALL_GRACE" \
+        kubectl --request-timeout="${rem}s" get deployment "$name" -n "$ns" -o json 2>/dev/null)" \
+        || dep=""
+      [ -n "$dep" ] || return 2
+      gen="$(printf '%s' "$dep" | jq -r '.metadata.generation // 0')"
+      obs="$(printf '%s' "$dep" | jq -r '.status.observedGeneration // 0')"
+      reps="$(printf '%s' "$dep" | jq -r '.spec.replicas // 0')"
+      upd="$(printf '%s' "$dep" | jq -r '.status.updatedReplicas // 0')"
+      ready="$(printf '%s' "$dep" | jq -r '.status.readyReplicas // 0')"
+      avail="$(printf '%s' "$dep" | jq -r '.status.availableReplicas // 0')"
+      # Un contador que no se pudo leer NO es un contador en cero: sin números
+      # esto no puede afirmar nada, y el `if` de abajo con una cadena vacía se
+      # iría por el else, o sea que un jq fallado se cobraría como rollout
+      # completo. Es exactamente el falso verde que este bloque vino a matar.
+      for _v in "$gen" "$obs" "$reps" "$upd" "$ready" "$avail"; do
+        case "$_v" in ''|*[!0-9]*) return 2 ;; esac
+      done
+      if [ "$obs" -lt "$gen" ] || [ "$reps" -eq 0 ] \
+         || [ "$upd" -ne "$reps" ] || [ "$ready" -ne "$reps" ] || [ "$avail" -ne "$reps" ]; then
+        inc="$inc   · $ns/$name: gen=$gen obsGen=$obs replicas=$reps updated=$upd ready=$ready available=$avail
+"
+        continue
+      fi
+      # Los PODS, que es donde vive la respuesta. Dos imágenes distintas es el
+      # pod viejo sirviendo, y ningún contador lo dice.
+      local sel
+      sel="$(printf '%s' "$dep" | jq -r '
+        (.spec.selector.matchLabels // {}) | to_entries
+        | map("\(.key)=\(.value)") | join(",")')"
+      [ -n "$sel" ] || return 2
+      pods="$(run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+        kubectl --request-timeout="${CALL_TIMEOUT}s" get pods -n "$ns" -l "$sel" -o json 2>/dev/null)" \
+        || pods=""
+      [ -n "$pods" ] || return 2
+      # Una línea por POD con TODAS sus imágenes, no una lista suelta de
+      # imágenes: con un sidecar (service mesh, log shipper) toda instalación
+      # tendría dos imágenes distintas y esto declararía "rollout a medias"
+      # para siempre. Lo que distingue al pod viejo es su TERNA, no una imagen.
+      imgs="$(printf '%s' "$pods" | jq -r '
+        [ (.items // [])[]
+          | select((.metadata.deletionTimestamp // "") == "")
+          | [ (.spec.containers // [])[].image ] | sort | join(" + ") ]
+        | unique | .[]' 2>/dev/null)"
+      n_img="$(printf '%s\n' "$imgs" | grep -c . || true)"
+      if [ "${n_img:-0}" -gt 1 ]; then
+        inc="$inc   · $ns/$name: $n_img juegos de imagen distintos entre los pods (hay uno viejo sirviendo):
+$(printf '%s\n' "$imgs" | sed 's/^/       /')
+"
+        continue
+      fi
+      # (b) ¿son POSTERIORES a mi commit? Sin fecha comparable no se afirma
+      # nada: se anota como ceguera parcial y el rollout se juzga solo por (a).
+      if [ -n "$commit_ts" ]; then
+        # ponytail: "nació después de tu commit" es más débil que "corre el
+        # build de ESE sha", y a propósito: el tag de imagen lo elige cada
+        # instancia (semver, sha, fecha) y compararlo exigiría conocer su
+        # convención. El techo conocido: un restart ajeno posterior al commit y
+        # anterior a la promoción del tag pasaría por nuevo. Si aparece en
+        # campo, el arreglo es comparar el tag contra el build de $LANDED_SHA.
+        # `fromdateiso8601` quiere justo el formato que Kubernetes emite
+        # (…Z), así que el timestamp va tal cual: normalizarlo lo rompería.
+        nuevo="$(printf '%s' "$pods" | jq -r --argjson t "$commit_ts" '
+          [ (.items // [])[] | (.status.startTime // empty)
+            | fromdateiso8601 | select(. >= $t) ] | length' 2>/dev/null)"
+        if [ "${nuevo:-0}" -eq 0 ]; then
+          inc="$inc   · $ns/$name: ningún pod nació después de tu commit (${LANDED_SHA:0:12}); corren $(printf '%s' "$imgs" | head -1)
+"
+          continue
+        fi
+      else
+        ROLLOUT_DIAG="   (no pude fechar el commit shippeado: solo verifiqué que el rollout terminó)"
+      fi
+    done <<ROLLEOF
+$ws
+ROLLEOF
+    [ -n "$inc" ] || return 0
+    [ "$(date +%s)" -ge "$deadline" ] && { ROLLOUT_INCOMPLETO="$inc"; return 1; }
+    say "   ⏳ el rollout todavía no terminó, espero:"
+    printf '%s' "$inc"
+    sleep "${DEPLOY_POLL_SECS:-10}"
+  done
+}
+
 check_argocd_health() {  # → 0 sano · 1 no sano · 2 no concluyente · 3 revisión ajena · 4 relación indecidible
   local sync health out deadline rem avisada="" anc=0
   ANCESTRY_CIEGA=""
@@ -1481,8 +1650,45 @@ case "$health_rc" in
      # apuntando a la imagen anterior: Synced+Healthy verdaderos, pods
      # corriendo lo viejo. La ancestria prueba que el REPO avanzo, no
      # que TU CODIGO corre.
-     verified "argocd sincronizado al manifiesto" cluster
-     ARGOCD_VERIFICO=1 ;;
+     #
+     # Por eso el credito de CLUSTER ya no lo da el manifiesto solo: se le
+     # pregunta a los pods, que es donde vive la respuesta. Los tres
+     # desenlaces son distintos y ninguno se puede callar.
+     say "── rollout: mirando los pods de $APP (timeout ${ROLLOUT_TIMEOUT}s) ──"
+     check_rollout; rollout_rc=$?
+     case "$rollout_rc" in
+       0) say "✅ rollout completo y los pods corren el artefacto de este ship"
+          [ -n "${ROLLOUT_DIAG:-}" ] && say "$ROLLOUT_DIAG"
+          verified "argocd sincronizado + rollout completo en los pods" cluster
+          ARGOCD_VERIFICO=1
+          ROLLOUT_VERIFICO=1 ;;
+       1) # OBSERVADO y todavia no: el manifiesto aterrizo, el artefacto no.
+          # NO es rojo (nada esta enfermo: un rollout a medias sigue su
+          # curso, o el promotor todavia no movio el tag) y NO es verde,
+          # porque el verde afirmaria que tu cambio esta sirviendo.
+          say "⚠️  $APP está Synced+Healthy pero el ROLLOUT NO terminó en ${ROLLOUT_TIMEOUT}s:"
+          printf '%s' "${ROLLOUT_INCOMPLETO:-}"
+          say "   El manifiesto aterrizó; el ARTEFACTO todavía no. Mientras esto"
+          say "   dure, parte del tráfico va a la versión anterior: si tu cambio"
+          say "   agrega una guarda, hay pods que siguen aceptando lo que la"
+          say "   guarda rechaza."
+          say "   NO propongo revertir: no observé nada enfermo, observé algo"
+          say "   INCOMPLETO."
+          say "   ↳ volvé a correr este watcher en unos minutos, o mirá:"
+          say "     kubectl -n <ns> rollout status deploy/<nombre>"
+          emit assumption "deploy de $REPO NO verificado en el cluster: rollout incompleto tras ${ROLLOUT_TIMEOUT}s (los pods no corren el artefacto de este ship)"
+          ciego "rollout: los pods no corren (todavía) el artefacto de este ship" ;;
+       *) # No pude mirar los pods: el verde se degrada al de siempre, el del
+          # manifiesto, que es exactamente la conducta anterior a este bloque.
+          say "⚠️  no pude mirar el rollout (sin kubectl/jq, sin RBAC sobre el"
+          say "   Deployment, o la app no lista uno): me quedo con lo que ArgoCD"
+          say "   dice del MANIFIESTO, que no es lo mismo que el pod."
+          say "   ↳ si el Deployment vive en otra Application, declaralo:"
+          say "     DEPLOY_K8S_WORKLOADS=\"<ns>/<deployment>\""
+          verified "argocd sincronizado al manifiesto" cluster
+          ARGOCD_VERIFICO=1
+          ciego "rollout: no pude leer el Deployment de $APP" ;;
+     esac ;;
   1) red "$APP existe y NO está Healthy+Synced" ;;
   3) # Sano pero NUNCA en mi revisión, hasta el deadline: el cambio no
      # aterrizó. Es rojo (el deploy no pasó) pero SIN rollback: revertir un
@@ -1664,10 +1870,15 @@ else
   # corre es el que interroga al artefacto: verify_cmd o el smoke.
   if [ -n "${ARGOCD_VERIFICO:-}" ] && [ -z "$VERIFY_CMD" ] \
      && [ -z "${SMOKE_VERIFICO:-}" ]; then
-    say "   ⚠️  pero NADIE interrogó al artefacto: lo de ArgoCD prueba que el"
-    say "      cluster coincide con el MANIFIESTO de esa revisión, no que el pod"
-    say "      corra TU imagen. Con promoción de tag (Kargo) las dos cosas se"
-    say "      separan: Synced+Healthy pueden ser ciertos con la imagen anterior."
+    if [ -n "${ROLLOUT_VERIFICO:-}" ]; then
+      say "   ⚠️  pero nadie interrogó al artefacto: sé que los pods rotaron y"
+      say "      corren la imagen de este ship, no que se COMPORTE como esperás."
+    else
+      say "   ⚠️  pero NADIE interrogó al artefacto: lo de ArgoCD prueba que el"
+      say "      cluster coincide con el MANIFIESTO de esa revisión, no que el pod"
+      say "      corra TU imagen. Con promoción de tag (Kargo) las dos cosas se"
+      say "      separan: Synced+Healthy pueden ser ciertos con la imagen anterior."
+    fi
     say "      ↳ cerralo declarando verify_cmd de $REPO en harness-answers.yaml:"
     say "        un curl a un marcador de build que SOLO exista en tu cambio."
     emit assumption "deploy de $REPO: verde por manifiesto, sin interrogar al artefacto (sin verify_cmd ni smoke)"

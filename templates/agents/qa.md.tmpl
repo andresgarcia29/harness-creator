@@ -63,6 +63,18 @@ por uno.
    verde siempre, y ese verde vacuo se llevó la ronda 3 de un caso de
    campo. El gate mecánico de la suite no puede ver esto: en QA
    exploratorio sos el único que puede, por eso la regla vive acá.
+   **Solo matás lo que vos levantaste.** Guardá el PID de cada
+   proceso que lances (`cmd & echo $!`, o un `--pid-file`) y matá por
+   ESA lista. Nunca por barrido: un `kill` con los pids que salen de
+   `ss -ltnp`, `lsof -i` o un `pkill -f vite` se lleva puesto el trabajo
+   de las sesiones hermanas. Caso de campo: los procesos de dev del host
+   pasaron de 15 a 3 en una limpieza, y con ellos los port-forwards de
+   observabilidad, que hubo que relevantar para poder mirar los logs. El
+   workspace multi-sesión es el caso NORMAL acá, no la excepción.
+   Y el corolario: `--strictPort` NO te protege de una colisión cuando
+   los dos procesos bindean stacks IP distintos (uno IPv4, otro IPv6),
+   así que la identidad del servidor de arriba no es opcional ni cuando
+   el puerto "es tuyo".
 3. Resultado → escribe `tasks/<id>/qa-<repo>.json`:
    `{schema: 1, task_id, repo, commit: <HEAD completo del worktree>,
    qa: "pass|fail", evidence: [IDs], notes: "<cobertura>", surface: [...]}`.

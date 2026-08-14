@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -492,14 +493,27 @@ def stale_delta_spec(task_dir: Path) -> "str | None":
     Caso de campo: el delta-spec se enmendó a mitad de corrida porque el review
     cambió la semántica, y nada impedía que /archive fusionara a las specs
     maestras un texto que ningún reviewer vio (dos reviewers tuvieron que
-    avisarlo a mano). Se compara por mtime: la señal es imperfecta (un touch o
-    un rsync la disparan), pero el falso positivo cuesta un re-veredicto barato
-    y el falso negativo costaría spec rot con firma de reviewer.
+    avisarlo a mano).
 
-    Follow-up más sólido: un campo delta_spec_sha256 dentro del veredicto
-    (identidad de contenido, inmune a relojes); exige tocar verdict-scaffold.sh
-    y el prompt del reviewer, y los veredictos viejos caerían a este mtime
-    igual, así que el mtime es el piso que hay que construir de todas formas.
+    ── POR QUÉ EL MTIME NO ALCANZABA ─────────────────────────────────────
+    Comparar mtimes lo derrota CUALQUIER escritura mecánica posterior sobre el
+    veredicto, y hay una que el propio flujo prescribe: fundir el campo `qa` es
+    un paso de /review, o sea que en TODA tarea el veredicto se reescribe
+    después del juicio del reviewer. Segundo caso de campo, con 17 segundos de
+    ventana: delta-spec.md editado a las 23:20:26, verdict refundido a las
+    23:20:43, gate en verde, y el reviewer había cerrado antes del texto nuevo.
+    Cualquier edición del delta que caiga en esa ventana quedaba blanqueada.
+
+    Ahora manda la IDENTIDAD DE CONTENIDO: `delta_spec_sha256`, que
+    verdict-scaffold.sh sella con el delta que ese veredicto mira. No lo mueve
+    ninguna escritura mecánica y además sobrevive a un `git checkout`, que
+    también resetea mtimes. Un veredicto cuyo hash coincide con el delta actual
+    es prueba positiva de que ese texto SÍ fue juzgado.
+
+    El mtime queda como piso para los veredictos VIEJOS, que no traen el campo:
+    sin él la señal es imperfecta (un touch o un rsync la disparan), pero el
+    falso positivo cuesta un re-veredicto barato y el falso negativo costaría
+    spec rot con firma de reviewer.
 
     Fail-open cuando falta una de las dos partes: sin delta no hay nada que
     fusionar; sin veredictos no hay juicio contra el cual comparar."""
@@ -507,6 +521,22 @@ def stale_delta_spec(task_dir: Path) -> "str | None":
     verdicts = list(task_dir.glob("verdict-*.json"))
     if not delta.exists() or not verdicts:
         return None
+
+    sellados = []
+    for v in verdicts:
+        try:
+            sellados.append(json.loads(v.read_text(encoding="utf-8"))
+                            .get("delta_spec_sha256") or "")
+        except (OSError, json.JSONDecodeError, AttributeError):
+            sellados.append("")
+    if any(sellados):
+        vigente = hashlib.sha256(delta.read_bytes()).hexdigest()
+        if vigente in sellados:
+            return None
+        return ("delta-spec.md cambió después del último veredicto: su hash "
+                f"({vigente[:12]}) no es el que ningún verdict-*.json declara "
+                "haber revisado")
+
     delta_m = delta.stat().st_mtime
     newest = max(v.stat().st_mtime for v in verdicts)
     if delta_m <= newest:

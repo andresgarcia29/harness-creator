@@ -219,6 +219,22 @@ assert_file "$WS/tasks/TRABAJANDO/handoff.json" "y el relevo queda pendiente par
 out="$(corre status)"; reposa
 assert_eq 0 "$(relanzos)" "status no toma relevos (es el modo por defecto)"
 
+# Un marcador HUERFANO (de una tarea vieja cuyo relevo nunca ocurrio) no es un
+# relevo pendiente: caduca. Caso de campo: 19 marcadores acumulados, o sea 19
+# sesiones ajenas al pedido si alguien arrancaba el vigilante, y por ese riesgo
+# el pipeline entero se corrio en UNA sesion (el relevo por fase, desactivado de
+# hecho, y el contexto del orquestador subiendo 230k → 357k).
+rm -f "$WS/relanzamientos.txt"; rm -rf "$WS/.harness/claims" "$WS/.harness/orch-watch" "$WS/tasks"
+nueva_tarea HUERFANA implement 300
+printf '{"schema":1,"phase":"implement","at":"2026-08-01T00:00:00Z","from_session":"vieja"}\n' \
+  > "$WS/tasks/HUERFANA/handoff.json"
+envejece "$WS/tasks/HUERFANA/handoff.json" 25200   # 7 h: mas viejo que el TTL de 6
+evento HUERFANA tool 300
+out="$(corre once)"; reposa
+assert_eq 0 "$(relanzos)" "un marcador huerfano NO dispara una sesion"
+assert_contains "$out" "huérfano" "y lo dice antes de tirarlo"
+assert_no_file "$WS/tasks/HUERFANA/handoff.json" "el marcador vencido se caduca en vez de quedarse para siempre"
+
 echo
 echo "── la tarea que emite y NO avanza: la otra señal (#155)"
 # El hueco de bus caza al agente que murió callado. NO caza a la que sigue

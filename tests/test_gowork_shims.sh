@@ -46,6 +46,36 @@ assert_contains "$content" "replace example.com/shared v1.2.3 => ./repos/shared"
                                                     "gowork: replace VERSIONADO al canónico (use no alcanza)"
 assert_contains "$content" "go 1.22"               "gowork: usa la mayor directiva go (1.22)"
 
+# ── modo --base: las rutas del go.work tienen que RESOLVER de verdad ──────────
+# Los `use` son relativos al archivo y el kernel resuelve cada `..` sobre la ruta
+# REAL. El arbol base del gate muerde nace de `mktemp -d`, o sea bajo /tmp o
+# $TMPDIR, y en macOS los dos son symlinks (/tmp → /private/tmp): con la ruta
+# LOGICA el calculo se queda un nivel corto y aterriza en /private/<algo> que no
+# existe. Sintoma en campo: `go: cannot load module ... listed in go.work file`
+# en TODO arbol base, o sea gate_test_muerde ciego en los seis servicios Go de
+# una plataforma, en cada corrida. La asercion NO mira el texto: comprueba que
+# cada ruta exista desde donde el go.work vive, que es lo que `go` hace.
+# El symlink se arma a mano porque es lo que hay que reproducir: una ruta
+# LOGICA mas corta que la real (/var → /private/var suma un nivel, /tmp igual).
+mkdir -p "$WS/hondo/anidado/real/base/svc"
+ln -s "$WS/hondo/anidado/real" "$WS/corto"
+BASE="$WS/corto/base"
+cp "$GA/repos/svc/go.mod" "$BASE/svc/go.mod"
+bash "$GA/scripts/gowork.sh" --base "$BASE" >/dev/null 2>&1 || true
+assert_file "$BASE/go.work" "gowork --base: escribe el go.work en el arbol dado"
+rutas_rotas=""
+for ruta in $(awk '/^use \(/{u=1;next} u&&/^\)/{u=0;next} u{gsub(/[ \t]/,"");print}
+                   /^replace /{print $NF}' "$BASE/go.work"); do
+  # [ -d ] pregunta al KERNEL, que es quien resuelve los `..` como lo hace `go`.
+  # Un `cd` de bash es LOGICO y no reproduce el defecto: por eso la asercion no
+  # puede escribirse con cd.
+  [ -d "$BASE/$ruta" ] || rutas_rotas="$rutas_rotas $ruta"
+done
+[ -z "$rutas_rotas" ] \
+  && pass "gowork --base: todas las rutas resuelven desde el arbol base" \
+  || fail "gowork --base: rutas que no resuelven:$rutas_rotas (go dira 'cannot load module')"
+rm -rf "$WS/hondo" "$WS/corto"
+
 # no-op limpio sin módulos Go
 GB="$WS/nogow"; mkdir -p "$GB/scripts" "$GB/repos"
 cp "$ROOT/templates/scripts/gowork.sh" "$GB/scripts/gowork.sh"

@@ -800,7 +800,8 @@ extract muerde_limpia >> "$WS/gate_muerde.sh"
 for fn in delta_seccion declara_tests_nuevos muerde_pytest muerde_go \
           muerde_go_tags_de muerde_go_tags \
           muerde_go_base_compila muerde_tf muerde_tf_root muerde_tf_base_init \
-          muerde_node tiene_runner_navegador con_limite muerde_node_colecta_en muerde_node_colecta muerde_corre \
+          muerde_node tiene_runner_navegador con_limite muerde_vitest_lista \
+          muerde_node_colecta_en muerde_node_colecta muerde_corre \
           muerde_verde_vacio muerde_corre_grupo muerde_salto gate_test_muerde; do
   extract "$fn" >> "$WS/gate_muerde.sh"
 done
@@ -1135,6 +1136,14 @@ assert_not_contains "$out" "o sea que MUERDE" "sin cobrar como verificación el 
 # alcanza", "la config no carga" y "la sonda se paso del tiempo" aterrizaban en
 # el mismo mensaje, y el operador no tenia por donde empezar a mirar.
 assert_contains "$out" "No test files found" "y muestra lo que el runner contestó, no solo la conclusión del gate"
+# Y el cierre no puede cantar un ✅: NINGUNA unidad se midio. El mensaje viejo
+# ("lo que SI pude correr falla sobre la base") lo imprimia igual con cero
+# unidades corridas, o sea el cierre de un gate que verifico algo puesto por uno
+# que no verifico nada. Caso de campo: en un monorepo Go con el arbol base sin
+# resolver sus modulos, TODO el alcance cae a ciego y el gate mas caro del
+# precheck cerraba en verde.
+assert_not_contains "$out" "✅" "sin una sola unidad medida, el gate no pone un verde"
+assert_contains "$out" "NO verificó NINGÚN test" "lo dice con todas las letras"
 
 # (j2) #85: la sonda pregunta sobre el ARBOL BASE, y la config del runner NO
 # viaja ahi (no es un archivo de test). Un paquete nuevo, o un include nuevo en
@@ -1177,6 +1186,42 @@ out="$( . "$WS/gate_muerde.sh"
         muerde_node_colecta_en "$WS/hang/base" x.test.ts || true
         printf '%s' "${MUERDE_COLECTA_DIAG:-}" )"
 assert_contains "$out" "se pasó del límite" "una sonda cortada se reporta como timeout, no como 'no colecta'"
+
+# (j4) `list` es SUBCOMANDO desde vitest 2.1; en 1.6 es UN FILTRO MAS, asi que
+# la sonda corria OTRA seleccion de archivos y su salida no hablaba del archivo
+# preguntado. Caso de campo: el gate marco un .test.tsx como "tramo sin red" y
+# en la linea siguiente imprimio su propio diagnostico
+# `vitest (exit 1): Tests 17 failed | 17 passed`, o sea la prueba de que si
+# habia corrido tests. El archivo mordia: 17 failed | 7 passed medido a mano.
+mkdir -p "$WS/vt16/node_modules/.bin" "$WS/vt16/node_modules/vitest" "$WS/vt16/base"
+printf '{"version":"1.6.1"}\n' > "$WS/vt16/node_modules/vitest/package.json"
+# El vitest de 1.6: `list` es un filtro mas, corre OTROS archivos y su salida
+# jamas nombra el que se pregunto.
+cat > "$WS/vt16/node_modules/.bin/vitest" <<'VT16'
+#!/bin/sh
+echo "Tests 17 failed | 17 passed (34)"
+exit 1
+VT16
+chmod +x "$WS/vt16/node_modules/.bin/vitest"
+out="$( . "$WS/gate_muerde.sh"
+        WT="$WS/vt16"; MUERDE_NODE_RUNNERS="vitest"; MUERDE_NODE_RUNNER=""
+        muerde_node_colecta_en "$WS/vt16/base" src/PerfilPage.test.tsx \
+          && printf 'COLECTA=%s' "$MUERDE_NODE_RUNNER" || printf 'SINRED' )"
+assert_contains "$out" "COLECTA=vitest" "vitest 1.6: no se le pregunta con \`list\`, se cae al statu quo"
+assert_not_contains "$out" "SINRED" "un archivo que muerde no puede quedar declarado 'sin red'"
+# Y con 2.1 la sonda SIGUE viva: este es el falso verde de COR-651 y no se afloja.
+printf '{"version":"2.1.9"}\n' > "$WS/vt16/node_modules/vitest/package.json"
+cat > "$WS/vt16/node_modules/.bin/vitest" <<'VT21'
+#!/bin/sh
+echo "No test files found"
+exit 1
+VT21
+chmod +x "$WS/vt16/node_modules/.bin/vitest"
+out="$( . "$WS/gate_muerde.sh"
+        WT="$WS/vt16"; MUERDE_NODE_RUNNERS="vitest"; MUERDE_NODE_RUNNER=""
+        muerde_node_colecta_en "$WS/vt16/base" src/x.test.ts \
+          && printf 'COLECTA' || printf 'SINRED' )"
+assert_contains "$out" "SINRED" "vitest 2.1: la sonda pregunta de verdad y el 'no encontre' se respeta"
 
 # (k) COR-656: con @playwright/test declarado e instalado, el spec e2e SÍ se
 #     verifica. Antes muerde_node devolvía 1 ('no declara vitest ni jest') y el
@@ -3402,6 +3447,23 @@ assert_not_contains "$out" "prosa suelta" "y lo anterior al encabezado nunca ent
 out="$(delta_seccion "$WS/delta.md" 'ADDED')"
 assert_contains "$out" "nuevo_test.go" "la misma regla aplica a ADDED"
 assert_not_contains "$out" "llm_metering_usecase_test.go" "sin llevarse lo de MODIFIED"
+
+# El TITULO de la subseccion es contenido: si el nombre del archivo vive solo
+# ahi, gate_tests_untouched tiene que verlo igual. Caso de campo: un delta-spec
+# que cumplia la regla a la vista de un humano y salia rojo por DONDE estaba el
+# nombre, no por si estaba.
+cat > "$WS/delta2.md" <<'DELTAEOF'
+## MODIFIED Requirements
+### PerfilPage.test.tsx
+Se reescribe el caso de login para el flujo nuevo.
+
+## ADDED Requirements
+### otro.test.tsx
+DELTAEOF
+out="$(delta_seccion "$WS/delta2.md" '(MODIFIED|REMOVED)')"
+assert_contains "$out" "PerfilPage.test.tsx" "el nombre en el ### de la subseccion SI cuenta"
+assert_not_contains "$out" "otro.test.tsx" "sin cruzar al ## siguiente"
+assert_not_contains "$out" "MODIFIED Requirements" "el encabezado que ABRE la seccion no es contenido"
 
 echo "── declara_tests_nuevos: un test nuevo dentro de un archivo que ya existia"
 # El gate razonaba por ARCHIVO (solo los AÑADIDOS entraban al alcance), y el caso

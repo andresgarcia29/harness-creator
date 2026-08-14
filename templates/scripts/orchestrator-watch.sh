@@ -24,6 +24,7 @@
 #   HARNESS_ORCH_INTERVAL  120   cada cuánto mira el modo daemon
 #   HARNESS_ORCH_MAX       2     relanzamientos sin progreso antes del humano
 #   HARNESS_ORCH_HANDOFF   60    quietud mínima para tomar un relevo de fase
+#   HARNESS_ORCH_HANDOFF_TTL 21600  edad máxima de un marcador de relevo (6 h)
 #   HARNESS_ORCH_OFF             cualquier valor = no relanza nada (kill switch)
 #
 # El kill switch también es un ARCHIVO (.harness/orch-watch.off), porque quien
@@ -35,6 +36,7 @@ IDLE="${HARNESS_ORCH_IDLE:-720}"
 INTERVAL="${HARNESS_ORCH_INTERVAL:-120}"
 MAX_TRIES="${HARNESS_ORCH_MAX:-2}"
 HANDOFF_GRACE="${HARNESS_ORCH_HANDOFF:-60}"
+HANDOFF_TTL="${HARNESS_ORCH_HANDOFF_TTL:-21600}"
 BUS="$WS/.harness/events.jsonl"
 CLAIMS="$WS/.harness/claims"
 STATE_DIR="$WS/.harness/orch-watch"
@@ -109,6 +111,17 @@ iso_to_epoch() {  # iso_to_epoch <2026-08-10T06:08:55Z> → epoch, 0 si no se pu
 # último `tool-start` de la tarea NO tiene un `tool` posterior, hay una llamada
 # EN VUELO y la sesión está trabajando. Matar a un orquestador sano cuesta
 # doble: pierde lo que tenía en vuelo y lo relanza con el modelo caro.
+handoff_vencido() {  # handoff_vencido <task-id> → 0 si el marcador ya no vale
+  local m
+  m="$(stat -f%m "$WS/tasks/$1/handoff.json" 2>/dev/null \
+       || stat -c%Y "$WS/tasks/$1/handoff.json" 2>/dev/null || echo 0)"
+  case "$m" in ''|*[!0-9]*) m=0 ;; esac
+  # Sin mtime legible NO se caduca: perder un relevo legítimo cuesta una tarea
+  # varada, y esta guarda existe para lo contrario.
+  [ "$m" -gt 0 ] || return 1
+  [ "$(( $(now_epoch) - m ))" -gt "$HANDOFF_TTL" ]
+}
+
 call_in_flight() {  # call_in_flight <task-id> → 0 si hay una llamada abierta
   [ -f "$BUS" ] || return 1
   command -v jq >/dev/null 2>&1 || return 1
@@ -260,6 +273,21 @@ pass_once() {  # pass_once <act 0|1>
     # problema que vino a arreglar. Sus eventos de bus corren el reloj, así que
     # con actividad el relevo no se toma; con el turno cerrado se toma en 60s
     # en vez de los 12 minutos de la regla de silencio.
+    # ── UN MARCADOR HUÉRFANO NO ES UN RELEVO PENDIENTE ──────────────────
+    # El marcador lo deja la transición y lo consume la pasada siguiente, así
+    # que su vida normal se mide en minutos. Los que quedan de tareas viejas
+    # (el daemon no corría, o el relanzamiento nunca ocurrió) NO caducan solos,
+    # y al arrancar el vigilante disparan una sesión por cada uno. Caso de
+    # campo: 19 marcadores viejos acumulados, o sea 19 sesiones ajenas al
+    # pedido; con ese riesgo delante, el pipeline entero se corrió en UNA sola
+    # sesión y el relevo por fase quedó desactivado de hecho. El contexto del
+    # orquestador subió 230k → 357k monótonamente y se llevó el 40% del costo
+    # de la tarea. Un mecanismo que se vuelve inusable en cuanto se acumula
+    # basura, se llena de basura solo.
+    if [ -f "$WS/tasks/$task/handoff.json" ] && handoff_vencido "$task"; then
+      echo "   🗑️  $task ($phase): marcador de relevo huérfano (más de $((HANDOFF_TTL / 3600))h), lo caduco"
+      [ "$act" = "1" ] && rm -f "$WS/tasks/$task/handoff.json" 2>/dev/null
+    fi
     if [ "$act" = "1" ] && [ -f "$WS/tasks/$task/handoff.json" ] \
        && [ "$idle_for" -ge "$HANDOFF_GRACE" ] && ! call_in_flight "$task"; then
       if lease_taken "$task"; then

@@ -184,8 +184,12 @@ class EvidenceTest(unittest.TestCase):
         veredicto quedaba sin evidence[]. Lo que NO se afloja: lo que ensucio
         ESTA tarea sigue siendo rechazo.
         """
-        repo = Path(self.tmp.name) / "instancia"      # NO cuelga de worktrees/
-        repo.mkdir()
+        # El repo de la instancia ES el árbol del workspace, o sea el padre de
+        # tasks/<id>: esa es toda la definición, y por estructura, sin leer el
+        # answers. Un árbol cualquiera de fuera del workspace NO hereda la
+        # concesión (ver el test de la sonda, más abajo).
+        repo = Path(self.tmp.name) / "instancia"
+        (repo / "tasks").mkdir(parents=True)
         run = lambda *a: subprocess.run(["git", "-C", str(repo), *a],
                                         capture_output=True, text=True)
         run("init", "-q", "."); run("config", "user.email", "t@t"); run("config", "user.name", "t")
@@ -198,18 +202,18 @@ class EvidenceTest(unittest.TestCase):
 
         # Suciedad AJENA (otra tarea en vuelo sobre el arbol compartido).
         (repo / "ajeno.txt").write_text("otra tarea trabajando")
-        ok = self.run_ev_in(repo)
+        ok = self.run_ev_in(repo, task_dir=repo / "tasks" / "T1")
         self.assertEqual(ok.returncode, 0,
                          "el arbol compartido tiene que poder sellar\n" + ok.stderr)
         self.assertIn("COMPARTIDO", ok.stderr)
         self.assertIn("ajeno.txt", ok.stderr)
         # Y el sello lo DICE: deja de mentir por omision.
-        ev = json.loads(next((Path(self.tmp.name) / "T1" / "evidence").glob("EV-*.json")).read_text())
+        ev = json.loads(next((repo / "tasks" / "T1" / "evidence").glob("EV-*.json")).read_text())
         self.assertTrue(any("ajeno.txt" in x for x in ev.get("shared_tree_dirty", [])), ev)
 
         # Lo que SI sigue frenando: ensuciar un archivo de ESTA tarea.
         (repo / "mio.txt").write_text("v3 sin commitear")
-        malo = self.run_ev_in(repo)
+        malo = self.run_ev_in(repo, task_dir=repo / "tasks" / "T1")
         self.assertEqual(malo.returncode, 3, malo.stderr)
         self.assertIn("SIN COMMITEAR", malo.stderr)
         self.assertIn("mio.txt", malo.stderr)
@@ -230,11 +234,97 @@ class EvidenceTest(unittest.TestCase):
                          "en un worktree de tarea la limpieza se sigue exigiendo entera")
         self.assertNotIn("COMPARTIDO", r.stderr)
 
-    def run_ev_in(self, repo):
+    def test_un_arbol_SONDA_de_fuera_del_workspace_NO_hereda_la_concesion(self):
+        """La regla vieja era "no cuelga de worktrees/", asi que CUALQUIER arbol
+        de fuera del workspace pasaba por "compartido" y su suciedad no
+        bloqueaba. Un verificador que levanta un arbol descartable en /tmp para
+        medir algo caia justo ahi: el sello nombraba un commit y lo que corrio
+        fue ese commit MAS el checkout que el verificador acababa de hacer.
+        Caso de campo: un EV-TEST verde que parecia sostener la afirmacion
+        CONTRARIA a la que se estaba midiendo."""
+        sonda = Path(self.tmp.name) / "sonda"      # ni worktree ni instancia
+        sonda.mkdir()
+        run = lambda *a: subprocess.run(["git", "-C", str(sonda), *a],
+                                        capture_output=True, text=True)
+        run("init", "-q", "."); run("config", "user.email", "t@t"); run("config", "user.name", "t")
+        (sonda / "src.txt").write_text("v1")
+        run("add", "-A"); run("commit", "-qm", "base")
+        # Suciedad que NINGUN commit de la tarea explica: es exactamente lo que
+        # la concesion del #137 dejaba pasar.
+        (sonda / "src.txt").write_text("los fuentes de la base, puestos encima")
+        r = self.run_ev_in(sonda)
+        self.assertEqual(r.returncode, 3,
+                         "un arbol sonda tiene que fallar CERRADO\n" + r.stderr)
+        self.assertNotIn("COMPARTIDO", r.stderr)
+
+    def test_un_artefacto_SIN_TRACKEAR_que_el_comando_nombra_no_se_sella(self):
+        """Un archivo sin trackear no bloquea por si solo (un artefacto de build
+        no cambia lo que el commit contiene). Pero si el COMANDO lo nombra, es
+        lo que se esta probando: el sello diria "commit P" sobre una prueba que
+        no esta en P. Caso de campo: un arbol con los tests nuevos copiados
+        encima de los fuentes de la base; un test nuevo es un archivo nuevo, o
+        sea sin trackear, y nada frenaba el sello."""
+        repo = Path(self.tmp.name) / "conuntracked"
+        repo.mkdir()
+        run = lambda *a: subprocess.run(["git", "-C", str(repo), *a],
+                                        capture_output=True, text=True)
+        run("init", "-q", "."); run("config", "user.email", "t@t"); run("config", "user.name", "t")
+        (repo / "app.txt").write_text("v1")
+        run("add", "-A"); run("commit", "-qm", "init")
+        (repo / "nuevo_test.py").write_text("# el test que se esta probando\n")
+
+        t1 = Path(self.tmp.name) / "T1"
+        t1.mkdir(exist_ok=True); (t1 / "task.md").touch()
+        malo = subprocess.run(
+            ["python3", str(SCRIPT), "run", "--task-dir", str(t1),
+             "--repo", "r", "--runner", "qa", "--kind", "test",
+             "--cwd", str(repo), "--", "cat", "nuevo_test.py"],
+            capture_output=True, text=True)
+        self.assertEqual(malo.returncode, 3, malo.stderr)
+        self.assertIn("NO están en el commit", malo.stderr)
+        self.assertIn("nuevo_test.py", malo.stderr)
+
+        # Y el sin trackear que NADIE nombra sigue sin bloquear: un artefacto de
+        # build no cambia lo que el commit contiene.
+        (repo / "build.log").write_text("ruido")
+        (repo / "nuevo_test.py").unlink()
+        ok = self.run_ev_in(repo)
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertIn("sin trackear", ok.stderr)
+
+        # Lo IGNORADO tampoco bloquea AUNQUE el comando lo nombre: el binario
+        # del runner es la herramienta, no el artefacto bajo prueba, y no viaja
+        # en ningun commit. Cobrarselo seria un rojo imposible de satisfacer.
+        (repo / ".gitignore").write_text("node_modules/\n")
+        run("add", "-A"); run("commit", "-qm", "gitignore")
+        (repo / "node_modules").mkdir()
+        runner = repo / "node_modules" / "runner"
+        runner.write_text("#!/bin/sh\nexit 0\n"); runner.chmod(0o755)
+        conherramienta = subprocess.run(
+            ["python3", str(SCRIPT), "run", "--task-dir", str(t1),
+             "--repo", "r", "--runner", "qa", "--kind", "test",
+             "--cwd", str(repo), "--", "./node_modules/runner"],
+            capture_output=True, text=True)
+        self.assertEqual(conherramienta.returncode, 0, conherramienta.stderr)
+
+        # Y lo que vive FUERA del repo tampoco: un wrapper del workspace
+        # (scripts/py.sh y sus hermanos) no esta ni puede estar en el commit del
+        # repo que se sella, y exigirlo seria un rojo imposible de satisfacer
+        # justo donde el harness pide usar el runner.
+        fuera = Path(self.tmp.name) / "wrapper.sh"
+        fuera.write_text("#!/bin/sh\nexit 0\n"); fuera.chmod(0o755)
+        conwrapper = subprocess.run(
+            ["python3", str(SCRIPT), "run", "--task-dir", str(t1),
+             "--repo", "r", "--runner", "qa", "--kind", "test",
+             "--cwd", str(repo), "--", "sh", str(fuera)],
+            capture_output=True, text=True)
+        self.assertEqual(conwrapper.returncode, 0, conwrapper.stderr)
+
+    def run_ev_in(self, repo, task_dir=None):
         # evidence.py ya NO crea task-dirs: el fixture lo crea con un marker,
         # como haría worktree-task.sh en una instancia real.
-        t1 = Path(self.tmp.name) / "T1"
-        t1.mkdir(exist_ok=True)
+        t1 = Path(task_dir) if task_dir else Path(self.tmp.name) / "T1"
+        t1.mkdir(parents=True, exist_ok=True)
         (t1 / "task.md").touch()
         return subprocess.run(
             ["python3", str(SCRIPT), "run", "--task-dir", str(t1),

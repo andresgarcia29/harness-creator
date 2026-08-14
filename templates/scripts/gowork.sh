@@ -94,7 +94,20 @@ if [ "${1:-}" = "--base" ]; then
   [ -n "$base" ] || { echo "❌ --base necesita un directorio"; exit 1; }
   case "$base" in /*) ;; *) echo "❌ --base quiere una ruta ABSOLUTA (recibí '$base')"; exit 1 ;; esac
   [ -d "$base" ] || { echo "❌ --base: el directorio no existe ($base)"; exit 1; }
-  base="$(cd "$base" && pwd)"
+  # ── RUTA FÍSICA, NO LÓGICA, Y NO ES UN DETALLE ────────────────────────
+  # Los `use` del go.work son RELATIVOS al archivo, y el kernel resuelve cada
+  # `..` sobre la ruta REAL, no sobre la que uno escribió. El árbol base del
+  # gate muerde nace de `mktemp -d`, o sea bajo /tmp o $TMPDIR, y en macOS los
+  # dos son symlinks (/tmp → /private/tmp, /var → /private/var): la ruta lógica
+  # es un nivel MÁS CORTA que la real, así que el `../../..` calculado desde
+  # ella se queda corto y aterriza en /private/<algo> que no existe. Medido:
+  #   base lógico  /var/folders/xx/T/tmp.AAA   → ../../../../../../Users/... ✗
+  #   base físico  /private/var/folders/...    → un `..` más, y resuelve ✓
+  # Consecuencia en campo: `go: cannot load module ... listed in go.work file`
+  # en TODO árbol base, o sea gate_test_muerde ciego en los seis servicios Go
+  # de una plataforma, en cada corrida, sin que nada lo dijera salvo una línea
+  # de ceguera que el operador leía como ruido.
+  base="$(cd "$base" && pwd -P)"
 fi
 
 # ── descubrimiento: go.mod bajo un root, podando ruido y (opcional) una ruta extra ──
@@ -173,7 +186,9 @@ collect() { # lee paths de go.mod por stdin y agrega registros
   while IFS= read -r gomod; do
     [ -n "$gomod" ] || continue
     mp="$(mod_of "$gomod")"; [ -n "$mp" ] || continue
-    dir="$(cd "$(dirname "$gomod")" && pwd)"
+    # Física, igual que el workdir: las dos puntas del cálculo relativo tienen
+    # que hablar del mismo árbol o el resultado no resuelve (ver --base).
+    dir="$(cd "$(dirname "$gomod")" && pwd -P)"
     records="${records}${mp}	${dir}	${gomod}
 "
   done
@@ -246,6 +261,10 @@ else
     fi
   fi
 fi
+
+# Las dos puntas del cálculo relativo tienen que hablar del MISMO árbol: los
+# dirs ya vienen físicos de collect(), así que el workdir también (ver --base).
+workdir="$(cd "$workdir" && pwd -P)"
 
 # ── ganadores: último registro por module-path, ordenado por module-path ──
 winners="$(printf '%s' "$records" | awk -F'\t' 'NF>=3{last[$1]=$0} END{for(k in last) print last[k]}' | sort)"

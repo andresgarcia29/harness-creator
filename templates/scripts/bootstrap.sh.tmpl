@@ -103,19 +103,118 @@ case ":$PATH:" in *":$HOME/go/bin:"*) ;; *) warn 'agrega $HOME/go/bin a tu PATH 
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) warn 'agrega $HOME/.local/bin a tu PATH (binarios de uv tool)';; esac
 
 # ── secretos ({{SECRETS_SOURCE}}) ─────────────────────────────────────
+# ── EL ONBOARDING ES DE TU FUENTE, NO DE VAULT ────────────────────────
+# Este bloque preguntaba SIEMPRE por un token de Vault y cableaba
+# `vault-token` como archivo, sin mirar qué fuente declaró la instancia. Medido
+# sobre las siete que `secrets.sh` implementa: seis no recibían NINGÚN paso de
+# credencial y el bootstrap saltaba directo a `secrets.sh pull`, que falla sin
+# decir cómo autenticarse. Con equipos que corren un harness por nube (uno en
+# GCP SM, otro en AWS SM), el onboarding no existía en ninguno salvo el de
+# Vault, y la propia cabecera de este script promete "pide el token de secretos
+# (fuera del chat)" para cualquier fuente.
+#
+# Se DESPACHA por fuente, que es la regla 8 del repo: un eje que varía entre
+# proyectos se detecta y se despacha, jamás se cablea a un vendor.
+#
+# Lo que este script NO hace es correr el login por vos: `gcloud auth login`,
+# `aws sso login`, `doppler login` y `op signin` abren navegador o piden datos
+# interactivos, y encadenarlos a ciegas desde un bootstrap es como se pierden
+# sesiones ajenas. Lo que sí hace es lo que ningún prompt puede: COMPROBAR si la
+# credencial está y sirve, y si no, nombrar el comando exacto.
+
+# ¿La credencial de esta fuente está y sirve? Tres desenlaces, y ninguno se
+# calla: sin CLI no se puede saber (ceguera), con CLI y check verde está lista,
+# y con CLI y check rojo hay que autenticarse, con el comando delante.
+onboard_cli() {  # onboard_cli <fuente> <bin> <comando-de-login> <comando-de-chequeo...>
+  local fuente="$1" bin="$2" login="$3"; shift 3
+  if ! command -v "$bin" >/dev/null 2>&1; then
+    warn "fuente de secretos '$fuente' y su CLI ($bin) NO está instalado:"
+    warn "  no puedo comprobar la credencial ni obtenerla. Esto NO es 'todo bien':"
+    warn "  es que no pude mirar. Instalalo (catálogo: $bin) y re-corré el bootstrap."
+    return 0
+  fi
+  if "$@" >/dev/null 2>&1; then
+    ok "credencial de $fuente lista ($bin responde)"
+  else
+    warn "fuente de secretos '$fuente': $bin está pero NO hay credencial válida."
+    warn "  ↳ autenticate y re-corré el bootstrap (el valor no pasa por el agente):"
+    warn "      $login"
+  fi
+}
+
 if [ "$SKIP_SECRETS" -eq 0 ] && [ "$CHECK" -eq 0 ]; then
   echo "══ bootstrap: secretos ══"
   TOKFILE="$HOME/.config/harness/vault-token"
   NEED_TOKEN=0
-  if [ "{{SECRETS_SOURCE}}" = "vault" ]; then
+  case "{{SECRETS_SOURCE}}" in
+    vault)
     if [ ! -f "$TOKFILE" ]; then
       NEED_TOKEN=1
     elif command -v vault >/dev/null 2>&1; then
       # vigencia: si el token murió, pedirlo de nuevo (fue el bug clásico)
       VAULT_ADDR="{{VAULT_ADDR}}" VAULT_TOKEN="$(cat "$TOKFILE")" vault token lookup >/dev/null 2>&1 \
         || { warn "el token de Vault existente está EXPIRADO o sin permisos — hay que renovarlo"; NEED_TOKEN=1; }
+    else
+      # ── UN TOKEN SIN VALIDAR NO ES UN TOKEN VÁLIDO ──────────────────
+      # Esta rama no existía, y su ausencia era silencio: con el CLI ausente
+      # (una instalación que falló por plataforma o por red) las dos ramas de
+      # arriba quedaban sin tomar, NEED_TOKEN se quedaba en 0 y el bootstrap
+      # daba por bueno un token que nunca verificó contra ningún servidor. La
+      # primera corrida al menos pide el token; de la segunda en adelante no
+      # dice absolutamente nada. El síntoma aparece lejos: `secrets.sh pull`
+      # trae 0 claves y el usuario culpa a sus policies o rota el token.
+      warn "hay un token en $TOKFILE pero el CLI vault NO está: no puedo comprobar"
+      warn "  si sigue vivo. Puede estar expirado y el harness no tiene cómo saberlo."
+      warn "  ↳ instalá el CLI (catálogo: vault) y re-corré, o validalo a mano:"
+      warn "      VAULT_ADDR={{VAULT_ADDR}} vault token lookup"
     fi
-  fi
+    ;;
+    gcp-secret-manager)
+      onboard_cli "gcp-secret-manager" gcloud \
+        "gcloud auth login && gcloud auth application-default login" \
+        gcloud auth application-default print-access-token ;;
+    aws-secrets-manager)
+      onboard_cli "aws-secrets-manager" aws \
+        "aws sso login   (o aws configure, según cómo se autentique tu cuenta)" \
+        aws sts get-caller-identity ;;
+    doppler)
+      onboard_cli "doppler" doppler \
+        "doppler login && doppler setup" \
+        doppler me ;;
+    1password)
+      onboard_cli "1password" op \
+        "op signin" \
+        op whoami ;;
+    sops)
+      # sops no tiene "login": tiene una LLAVE. Se comprueba la de age, que es
+      # la que el harness puede ver desde acá; con KMS la credencial es la de la
+      # nube y la comprueba su propio CLI cuando `sops -d` corre.
+      if ! command -v sops >/dev/null 2>&1; then
+        warn "fuente de secretos 'sops' y su CLI no está instalado: no puedo comprobar"
+        warn "  la llave. Instalalo (catálogo: sops) y re-corré el bootstrap."
+      elif [ -f "${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt}" ]; then
+        ok "credencial de sops lista (llave age en ${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt})"
+      else
+        warn "fuente de secretos 'sops': no encuentro la llave age."
+        warn "  ↳ colocala en ${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt} (chmod 600), o exportá"
+        warn "    SOPS_AGE_KEY_FILE. Si desciframos con KMS, la credencial es la de tu nube"
+        warn "    (gcloud/aws) y este chequeo no aplica."
+      fi ;;
+    env)
+      # No hay credencial que pedir: .secrets lo escribe el humano. Lo que sí se
+      # puede comprobar es si existe, que es la precondición real de esta fuente.
+      if [ -f "$WS/.secrets" ]; then
+        ok "fuente de secretos 'env': .secrets ya existe (lo mantenés a mano)"
+      else
+        warn "fuente de secretos 'env': falta $WS/.secrets, y esta fuente no lo materializa."
+        warn "  ↳ crealo a mano (KEY=VALUE, chmod 600); las claves que el harness espera"
+        warn "    están en secrets.refs de harness-answers.yaml."
+      fi ;;
+    *)
+      warn "fuente de secretos desconocida: '{{SECRETS_SOURCE}}'"
+      warn "  ↳ válidas: vault | gcp-secret-manager | aws-secrets-manager | doppler |"
+      warn "    sops | 1password | env. Se declara en harness-answers.yaml y se regenera." ;;
+  esac
   if [ "$NEED_TOKEN" -eq 1 ]; then
     cat <<'TOKHELP'
 ──────────────────────────────────────────────────────────────

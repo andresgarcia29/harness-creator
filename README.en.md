@@ -855,6 +855,8 @@ flowchart LR
 - **Discovery detects** your source (signals: `.sops.yaml`, `doppler.yaml`, `op://`, secret managers in terraform, `VAULT_ADDR`) and the interview recommends with evidence.
 - The generator **verifies the real layout** of your Vault (path and field names, never values) before writing the mappings.
 - `make init` detects a **missing or expired** token (it validates with `vault token lookup`, not just its existence), shows you how to get one, asks for it interactively and validates it on save.
+- And the onboarding is **for your source, not for Vault**: `bootstrap.sh` dispatches on the one you declared, checks whether the credential is there and works using that source's own CLI (`gcloud auth application-default print-access-token`, `aws sts get-caller-identity`, `doppler me`, `op whoami`, the sops age key, the hand-written `.secrets` of `env`) and, if not, names the exact login command. What it does not do is run that login for you: they open a browser or ask for input, and chaining them blindly from a bootstrap is how other people's sessions get lost. Before, six of the seven sources got no credential step at all and the bootstrap jumped straight to `secrets.sh pull`, which fails without saying how to authenticate.
+- When it **cannot validate**, it says so: a Vault token on disk with the CLI missing is no longer taken as good in silence (it happened from the second run onward, and the symptom showed up far away, with `pull` returning zero keys).
 - Materialization is **honest**: if a key could not be read, it fails with the detail, it does not say "done".
 
 ---

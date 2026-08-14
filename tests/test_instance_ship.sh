@@ -122,6 +122,11 @@ touch "$IWS/.doctor-red"
 out="$(run_is)"; rc=$?
 assert_eq 3 "$rc" "doctor rojo: exit 3"
 assert_contains "$out" "no se publica a sí misma" "con el porqué"
+# Y que el rojo diga de QUE clase es: un CLI que le falta a este host no es una
+# instancia rota, y confundirlos dejaba sin publicar un commit de documentos por
+# 16 CLIs que ese commit no ejecuta (#185).
+assert_contains "$out" "FALLOS DE LA INSTANCIA" "nombrando la clase que sí bloquea"
+assert_contains "$out" "--instance-only" "y la remediación pide el modo que le compete"
 assert_contains "$out" "scripts/doctor.sh" "y manda al detalle con remediaciones"
 
 # ── EL ROJO QUE NO ES TUYO en la puerta de la instancia (issue #59) ────

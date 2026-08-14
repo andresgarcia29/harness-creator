@@ -275,8 +275,21 @@ fi
 
 # ── 4. doctor en verde: una instancia rota no se publica ──────────────
 if [ -x "$WS/scripts/doctor.sh" ]; then
-  echo "── doctor (los FAIL bloquean; los warn no) ──"
-  if bash "$WS/scripts/doctor.sh" . >/dev/null 2>&1; then
+  # ── ESTE GATE MIRA LA INSTANCIA, NO LA MÁQUINA (#185) ────────────────
+  # Corría el doctor COMPLETO, que cuenta con el mismo peso dos cosas de
+  # naturaleza distinta: que la instancia esté sana (links, hooks, reglas,
+  # drift de templates) y que este host tenga provisionados sus CLIs. Solo la
+  # primera dice algo sobre si el commit es seguro para main.
+  # Caso de campo: un commit de documentos más el bump del harness quedó sin
+  # publicar por 16 `cli faltante`, ninguno de los cuales ese commit ejecuta, y
+  # la única salida que quedaba era declarar un HARNESS_KNOWN_BUG que no era un
+  # bug del harness. Le pasa a todo host acotado: CI, un contenedor, una VPS
+  # sin los SDK de cliente, que es justo donde el repo de la instancia se queda
+  # sin camino a main (el hueco que este script existe para cerrar, #37).
+  echo "── doctor de la INSTANCIA (los FAIL bloquean; los warn no) ──"
+  echo "   (los CLI que falten en este host se cuentan como aviso: son de la"
+  echo "    máquina, no de lo que se publica. 'make doctor' los sigue cobrando)"
+  if bash "$WS/scripts/doctor.sh" --instance-only . >/dev/null 2>&1; then
     echo "✅ doctor sin fallos"
   elif known_bug_cubre doctor; then
     # NO se borra el gate: el rojo sigue siendo rojo, solo que DECLARADO y con
@@ -289,8 +302,11 @@ if [ -x "$WS/scripts/doctor.sh" ]; then
       "instancia: slot 'doctor' rojo declarado como bug conocido del harness (${KNOWN_BUG#*=})" \
       "" "" >/dev/null 2>&1 || true
   else
-    echo "❌ el doctor reporta FALLOS: una instancia rota no se publica a sí misma."
-    echo "   ↳ remediación: bash scripts/doctor.sh .  (el detalle con remediaciones)"
+    echo "❌ el doctor reporta FALLOS DE LA INSTANCIA, y una instancia rota no se publica a sí misma."
+    echo "   Esto NO son CLIs que le falten a este host: ésos ya se cuentan como"
+    echo "   aviso y no llegan hasta acá."
+    echo "   ↳ remediación: bash scripts/doctor.sh --instance-only .  (el detalle"
+    echo "     con remediaciones; sin el flag ves además lo que falta en la máquina)"
     echo "   ↳ si el rojo NO es tuyo (un bug del harness ya reportado upstream):"
     echo "     HARNESS_KNOWN_BUG='doctor=<url-del-issue>' scripts/instance-ship.sh"
     exit 3

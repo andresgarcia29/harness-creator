@@ -892,3 +892,40 @@ ese script y hace falta el rastro para encontrarla.
   (`write_handoff` en cada transicion que releva); lo que faltaba era que la
   transicion no estuviera bloqueada. Un comando mas seria un tercer camino al
   mismo lugar.
+
+## Cerrado el 2026-08-14 (issues #182 y #185: dos autoridades, un hecho, respuestas distintas)
+
+- [x] **`transition` concedia una ronda extra por convergencia y
+  `validate-ship` la rechazaba.** Las dos mitades del mismo
+  `harness-policy.py` evaluaban el mismo numero con reglas distintas:
+  `transition` conocia la excepcion por convergencia y su techo duro (2x el
+  maximo), y `validate-ship` comparaba contra el maximo pelado. Medido en campo:
+  la tarea cruzo a la ronda 5 porque el propio motor se la CONCEDIO (bloqueantes
+  4 → 0 → 1 → 0, con su aviso al bus), el reviewer firmo `pass` con cero
+  requisitos sin cubrir, el precheck quedo verde, y el ship se nego con
+  `POLICY-LIMIT-001`. El mecanismo que existe para premiar al que converge
+  terminaba bloqueandolo: gasto una ronda que su propio harness autorizo y no
+  pudo publicarla. Ahora la regla vive en `limite_de_rondas()` y la consultan
+  los dos; nadie la reimplementa. Ningun test cubria la divergencia, que es por
+  lo que llego a campo: el nuevo falla contra el codigo anterior.
+- [x] **Y su mensaje era "review_rounds invalido o excedido".** No decia el
+  numero, ni el techo, ni cual de las dos cosas paso, ni que hacer. Los mensajes
+  de este repo son prompts (regla 5): ahora trae el valor, el techo efectivo y,
+  cuando el techo no se movio, por que (la serie de bloqueantes no baja).
+- [x] **El gate del doctor de `instance-ship` confundia host sin provisionar con
+  instancia rota.** `doctor.sh` cuenta con el mismo simbolo y el mismo peso dos
+  cosas de naturaleza distinta: salud de la INSTANCIA (links de docs, hooks
+  cableados, reglas con verificador, drift de templates) y provision del HOST
+  (falta flutter, falta gcloud, falta terraform). Solo la primera dice algo
+  sobre si el commit es seguro para main. Caso de campo: un commit de documentos
+  mas el bump del harness quedo sin publicar por 16 `cli faltante`, ninguno de
+  los cuales ese commit ejecuta, y los dos SDK mas pesados (flutter ~1GB, gcloud
+  ~500MB) son ademas los mas caros de instalar, asi que el gate empujaba a
+  provisionar media maquina para publicar un markdown. El operador termino
+  declarando un `HARNESS_KNOWN_BUG` que no era un bug del harness, por falta de
+  una tercera opcion: la señal de que el gate medía lo que no le competia.
+  Ahora `doctor.sh --instance-only` baja esa clase a aviso (se sigue VIENDO, con
+  su remediacion) y el gate pide ese modo; `make doctor` sigue cobrando todo.
+  Le pasa a todo host acotado: CI, un contenedor, una VPS sin los SDK de
+  cliente, que es justo donde el repo de la instancia se queda sin camino a main
+  (el hueco que `instance-ship.sh` existe para cerrar, #37).

@@ -264,7 +264,14 @@ entrega declarada sea `trunk`.
 `validate-ship` exige:
 
 - fase `review`;
-- máximo de rondas respetado;
+- máximo de rondas respetado, **con la misma regla que usa `transition`**: si
+  la serie de bloqueantes de algún repo viene bajando, el techo efectivo es el
+  duro (2× el máximo), igual que la excepción por convergencia que concede la
+  ronda extra. Los dos lados consultan `limite_de_rondas()`, que es donde vive
+  la regla. Antes cada uno la evaluaba por su cuenta y se contradecían: una
+  tarea cruzaba a la ronda 5 porque el motor se la **concedía** por convergencia
+  y después el ship la rechazaba contra el máximo pelado, o sea que el mecanismo
+  que premia converger terminaba bloqueando al que converge;
 - verdict y QA en `pass` para el HEAD actual;
 - reviewer identificado y separado de los implementadores;
 - entrega coherente: con `delivery: review` no se publica nada

@@ -424,4 +424,45 @@ assert_contains "$out" "checkout main" "con la remediacion exacta"
 # Y el caso negativo: un warn barato que suena siempre se aprende a ignorar.
 assert_not_contains "$out" "repos/sano" "un clon en su trunk NO dispara el aviso"
 
+echo "── doctor --instance-only: el CLI que le falta al HOST no es una instancia rota (#185)"
+# El gate del doctor de instance-ship.sh corria el doctor COMPLETO, que cuenta
+# con el mismo peso dos cosas de naturaleza distinta: que la instancia este sana
+# (links, hooks, reglas, drift) y que ESTA maquina tenga sus CLIs. Solo la
+# primera dice algo sobre si el commit es seguro para main. Caso de campo: un
+# commit de documentos mas el bump del harness quedo sin publicar por 16
+# `cli faltante`, ninguno de los cuales ese commit ejecuta, y la unica salida
+# que quedaba era declarar un HARNESS_KNOWN_BUG que no era un bug del harness.
+IW="$WS/inst"; mkdir -p "$IW/repos"
+cat > "$IW/harness-answers.yaml" <<'YEOF'
+capabilities:
+  - name: un-cli-que-no-existe
+    bin: zzz-cli-inexistente-para-el-test
+YEOF
+completo="$(bash "$ROOT/scripts/doctor.sh" "$IW" 2>&1)"
+assert_contains "$completo" "❌ cli faltante: zzz-cli-inexistente-para-el-test"   "el doctor COMPLETO sigue cobrando el CLI ausente como FALLO"
+
+solo="$(bash "$ROOT/scripts/doctor.sh" --instance-only "$IW" 2>&1)"
+assert_not_contains "$solo" "❌ cli faltante" "en --instance-only NO es un fallo"
+assert_contains "$solo" "⚠️" "pero se sigue VIENDO: baja a aviso, no desaparece"
+assert_contains "$solo" "provisión del HOST" "y dice por que no bloquea"
+assert_contains "$solo" "bootstrap.sh" "conservando la remediacion"
+assert_contains "$solo" "modo --instance-only" "y el modo se declara en el resumen"
+
+# La contra-mitad, que es la que impide que esto sea un apagador del gate: un
+# fallo de SALUD DE LA INSTANCIA sigue siendo fallo en los dos modos. Si no,
+# `--instance-only` seria "doctor que no falla nunca" con otro nombre.
+f_completo="$(printf '%s' "$completo" | grep -c '^❌' || true)"
+f_solo="$(printf '%s' "$solo" | grep -c '^❌' || true)"
+[ "$f_solo" -gt 0 ] \
+  && pass "--instance-only sigue reportando los fallos de la INSTANCIA ($f_solo)" \
+  || fail "--instance-only no reporto ni un fallo: es un gate apagado con otro nombre"
+[ "$f_solo" -lt "$f_completo" ] \
+  && pass "y son MENOS que los del doctor completo ($f_solo < $f_completo)" \
+  || fail "no bajo ningun fallo: el flag no hizo nada"
+
+# El gate de instance-ship tiene que PEDIR ese modo, o el arreglo no llega.
+ish="$(cat "$ROOT/templates/scripts/instance-ship.sh")"
+assert_contains "$ish" "doctor.sh --instance-only" \
+  "instance-ship llama al doctor en el modo que le compete"
+
 t_done

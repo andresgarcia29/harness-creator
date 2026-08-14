@@ -8,6 +8,38 @@
 # Portabilidad: bash 3.2 (macOS), BSD grep. Requiere jq.
 set -uo pipefail
 
+# ── DOS NATURALEZAS QUE NO SE PUEDEN CONTAR JUNTAS ────────────────────
+# `--instance-only` corre los chequeos de salud de la INSTANCIA y baja a aviso
+# los de provisión del HOST. Son cosas distintas y solo una debería frenar una
+# publicación:
+#
+#   salud de la INSTANCIA   links de docs rotos, un hook sin cablear, una regla
+#                           que apunta a un verificador inexistente, drift de
+#                           templates. Publicar eso PROPAGA una instancia rota.
+#   provisión del HOST      falta flutter, falta gcloud, falta terraform. Es
+#                           ESTA máquina, no lo que se publica.
+#
+# Caso de campo (#185): un commit de documentos y el bump del harness quedó sin
+# publicar porque al host le faltaban 16 CLIs, ninguno de los cuales ese commit
+# ejecuta. Los dos SDK más pesados (flutter ~1GB, gcloud ~500MB) son además los
+# más caros de instalar, así que el gate empujaba a provisionar media máquina
+# para publicar un markdown, o a declarar un HARNESS_KNOWN_BUG que no era un bug
+# del harness. El operador terminó haciendo lo segundo por falta de una tercera
+# opción, que es la señal de que el gate medía lo que no le competía.
+#
+# Lo que NO se afloja: `make doctor` sigue corriendo todo y contando todo. Este
+# modo solo cambia lo que el gate MIRA, y lo dice en su salida: un CLI ausente
+# se sigue viendo, con su remediación, como aviso.
+INSTANCE_ONLY=0
+args=()
+for a in "$@"; do
+  case "$a" in
+    --instance-only) INSTANCE_ONLY=1 ;;
+    *) args+=("$a") ;;
+  esac
+done
+set -- "${args[@]+"${args[@]}"}"
+
 WS="${1:-.}"; WS="$(cd "$WS" && pwd)"
 ANSWERS="$WS/harness-answers.yaml"
 FAIL=0; WARN=0
@@ -15,6 +47,17 @@ FAIL=0; WARN=0
 ok()   { echo "✅ $1"; }
 warn() { echo "⚠️  $1"; WARN=$((WARN+1)); }
 fail() { echo "❌ $1"; echo "   ↳ remediación: $2"; FAIL=$((FAIL+1)); }
+# Un fallo de PROVISIÓN DEL HOST: cuenta como fallo en el doctor completo y
+# como aviso en `--instance-only`. Es una función y no un `if` suelto para que
+# el día que aparezca el segundo chequeo de esta clase no haya que acordarse.
+fail_host() {
+  if [ "$INSTANCE_ONLY" -eq 1 ]; then
+    warn "$1 (provisión del HOST: no bloquea la publicación de la instancia)"
+    echo "   ↳ $2"
+  else
+    fail "$1" "$2"
+  fi
+}
 
 echo "── doctor: $WS ──"
 
@@ -223,7 +266,7 @@ if [ -f "$ANSWERS" ]; then
     elif [ "$scope" = "cronjob" ]; then
       warn "cli faltante: $bin (scope: cronjob — solo lo usa harness-cronjobs, repo aparte)"
     else
-      fail "cli faltante: $bin" "corre scripts/bootstrap.sh (instala todo lo elegido) o ver install en catalog/capabilities.yaml"
+      fail_host "cli faltante: $bin" "corre scripts/bootstrap.sh (instala todo lo elegido) o ver install en catalog/capabilities.yaml"
     fi
   done < <(awk '
     /^  - name:/ { if (bin != "") print bin, scope; bin=""; scope="core" }
@@ -902,5 +945,6 @@ if [ -d "$WS/worktrees" ] && [ -d "$WS/tasks/archive" ]; then
   fi
 fi
 
+[ "$INSTANCE_ONLY" -eq 1 ] && echo "── modo --instance-only: los CLI faltantes del host se contaron como avisos ──"
 echo "── resultado: $FAIL fallos, $WARN advertencias ──"
 [ "$FAIL" -eq 0 ]

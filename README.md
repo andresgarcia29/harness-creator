@@ -855,6 +855,8 @@ flowchart LR
 - El **discovery detecta** tu fuente (señales: `.sops.yaml`, `doppler.yaml`, `op://`, secret managers en terraform, `VAULT_ADDR`) y la entrevista recomienda con evidencia.
 - El generador **verifica el layout real** de tu Vault (nombres de rutas y campos, nunca valores) antes de escribir los mapeos.
 - `make init` detecta el token **faltante o expirado** (lo valida con `vault token lookup`, no solo su existencia), te enseña cómo conseguir uno, te lo pide de forma interactiva y lo valida al guardarlo.
+- Y el onboarding es **de tu fuente, no de Vault**: `bootstrap.sh` despacha por la que declaraste, comprueba si la credencial está y sirve con el propio CLI de esa fuente (`gcloud auth application-default print-access-token`, `aws sts get-caller-identity`, `doppler me`, `op whoami`, la llave age de sops, el `.secrets` a mano de `env`) y, si no, nombra el comando exacto de login. Lo que no hace es correr ese login por vos: abren navegador o piden datos, y encadenarlos a ciegas desde un bootstrap es como se pierden sesiones ajenas. Antes, seis de las siete fuentes no recibían ningún paso de credencial y el bootstrap saltaba directo a `secrets.sh pull`, que falla sin decir cómo autenticarse.
+- Cuando **no se puede validar**, se dice: un token de Vault en disco con el CLI ausente ya no se da por bueno en silencio (pasaba desde la segunda corrida en adelante, y el síntoma aparecía lejos, con `pull` trayendo cero claves).
 - La materialización es **honesta**: si una clave no se pudo leer, falla con el detalle, no dice "listo".
 
 ---

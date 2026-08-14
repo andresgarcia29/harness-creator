@@ -194,4 +194,54 @@ assert_contains "$bs" "OPCIÓN B · root token" "documenta el root token como op
 assert_contains "$bs" "llave maestra" "con su costo escrito, para que sea decision y no sorpresa"
 assert_contains "$bs" "NO tenés que re-autenticarte nunca" "y aclara que el periodic ya evita re-autenticarse"
 
+echo
+echo "── el onboarding es de TU fuente, no de Vault (7 fuentes, no 1)"
+# El bloque preguntaba SIEMPRE por un token de Vault y cableaba `vault-token`
+# como archivo, sin mirar que fuente declaro la instancia: 6 de las 7 fuentes
+# que secrets.sh implementa no recibian NINGUN paso de credencial y el
+# bootstrap saltaba directo a `secrets.sh pull`, que falla sin decir como
+# autenticarse.
+for f in gcp-secret-manager aws-secrets-manager doppler sops 1password env; do
+  assert_contains "$bs" "    $f)" "el bootstrap despacha la fuente $f"
+done
+assert_contains "$bs" "gcloud auth application-default login" "y nombra el login exacto de GCP"
+assert_contains "$bs" "aws sso login" "el de AWS"
+assert_contains "$bs" "doppler login" "el de Doppler"
+assert_contains "$bs" "op signin" "el de 1Password"
+assert_contains "$bs" "SOPS_AGE_KEY_FILE" "y la llave de sops, que no tiene login"
+
+# El caso del #174: token en disco + CLI ausente = no se pudo VALIDAR, y eso
+# tiene que decirse en TODA corrida. Antes las dos ramas quedaban sin tomar,
+# NEED_TOKEN se quedaba en 0 y el bootstrap daba por bueno un token que nunca
+# verifico contra ningun servidor.
+assert_contains "$bs" "pero el CLI vault NO está" "sin CLI, el token no se da por bueno en silencio"
+assert_contains "$bs" "no tiene cómo saberlo" "y dice que es ceguera, no un verde"
+
+# El tramo se extrae y se EJERCITA, que es lo unico que prueba que la rama se
+# toma de verdad: sin CLI de vault y con token en disco, tiene que hablar.
+tmpb="$WS/bootstrap-secretos.sh"
+{ printf 'warn() { echo "WARN: $1"; }\nok() { echo "OK: $1"; }\nSKIP_SECRETS=0\nCHECK=0\nWS="%s"\n' "$WS"
+  sed 's/{{SECRETS_SOURCE}}/vault/g; s/{{VAULT_ADDR}}/https:\/\/vault.example/g' \
+      "$ROOT/templates/scripts/bootstrap.sh.tmpl" \
+    | awk '/^onboard_cli\(\) \{/{f=1} f{print} /^  esac$/{if(f) exit}'
+  printf 'fi\n'   # el `if` del bloque cierra mas abajo, fuera del tramo extraido
+} > "$tmpb"
+mkdir -p "$WS/fakehome/.config/harness"
+printf 'un-token-viejo\n' > "$WS/fakehome/.config/harness/vault-token"
+out="$( HOME="$WS/fakehome" PATH="$(t_path_without vault)" bash "$tmpb" 2>&1 )"
+assert_contains "$out" "WARN: hay un token" "con token en disco y sin CLI: avisa (antes: silencio)"
+assert_contains "$out" "vault token lookup" "y da el comando para validarlo a mano"
+
+# Y una fuente que NO es vault no pide token de vault ni nombra su archivo.
+{ printf 'warn() { echo "WARN: $1"; }\nok() { echo "OK: $1"; }\nSKIP_SECRETS=0\nCHECK=0\nWS="%s"\n' "$WS"
+  sed 's/{{SECRETS_SOURCE}}/doppler/g; s/{{VAULT_ADDR}}/https:\/\/vault.example/g' \
+      "$ROOT/templates/scripts/bootstrap.sh.tmpl" \
+    | awk '/^onboard_cli\(\) \{/{f=1} f{print} /^  esac$/{if(f) exit}'
+  printf 'fi\n'   # el `if` del bloque cierra mas abajo, fuera del tramo extraido
+} > "$tmpb"
+out="$( HOME="$WS/fakehome" PATH="$(t_path_without doppler)" bash "$tmpb" 2>&1 )"
+assert_contains "$out" "doppler" "fuente doppler: habla de doppler"
+assert_not_contains "$out" "token de Vault" "y NO pide un token de Vault"
+assert_contains "$out" "no puedo comprobar" "sin su CLI declara ceguera, no un verde"
+
 t_done

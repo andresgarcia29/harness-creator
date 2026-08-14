@@ -633,3 +633,83 @@ test de neutralidad.
   tiraba el juicio del reviewer) y `--rebase` se negaba porque el commit no se
   habia movido. La remediacion impresa era inalcanzable y la tarea quedaba
   trabada con el veredicto ya en `pass`.
+
+## Cerrado el 2026-08-13 (issue #168: la capa de verificacion con sesgo a falso verde)
+
+Siete hallazgos de una sola sesion, y cuatro comparten defecto: no fallan al
+detectar un problema, **afirman que no lo hay**. Los cuatro concluyen desde una
+señal indirecta en vez del artefacto (el manifiesto en lugar de los pods, el
+exit code en lugar de la asercion, el arbol que el propio verificador acaba de
+tocar). Un falso rojo cuesta una ronda; un falso verde cuesta el defecto entero,
+en produccion, y nadie se entera.
+
+- [x] **`deploy-watch` daba 🟢 con el rollout a medias.** Declaraba verde con
+  ArgoCD `Synced+Healthy`, que habla del MANIFIESTO. Medido en ese mismo
+  momento: `updated=2 ready=3 available=2` y un pod viejo Running con la imagen
+  anterior, o sea un tercio del trafico contra el artefacto viejo. Segunda
+  ocurrencia con contadores 2/2/2 en verde y los pods en la imagen anterior
+  porque el promotor todavia no habia movido el tag: si Kargo no promovio, el
+  Deployment esta legitimamente estable EN LA REVISION VIEJA. `check_rollout`
+  cruza ahora rollout terminado Y pods posteriores al commit shippeado, con una
+  sola terna de imagen entre los pods (la terna, no la imagen suelta: con un
+  sidecar toda instalacion tendria dos). Incompleto deja de dar credito de
+  cluster; no poder mirar sigue siendo ceguera con el verde del manifiesto.
+- [x] **`gate_test_muerde` ponia ✅ con CERO unidades medidas.** El cierre
+  imprimia "lo que SI pude correr falla sobre la base" aunque ese "lo que si"
+  fuera vacio, o sea el mensaje de un gate que verifico algo puesto por uno que
+  no verifico nada: un test vacuo y uno bueno recibian la misma respuesta.
+- [x] **Y su ceguera en Go tenia una causa medible que ningun reporte nombro.**
+  Los `use` del `go.work` son relativos al archivo y el kernel resuelve cada
+  `..` sobre la ruta FISICA. El arbol base nace de `mktemp -d`, o sea bajo
+  `/tmp` o `$TMPDIR`, y en macOS los dos son symlinks (`/var` → `/private/var`):
+  la ruta logica queda un nivel mas corta, el relativo aterriza en
+  `/private/<algo>` inexistente y `go` contesta `cannot load module ... listed
+  in go.work file` en TODO arbol base, en cada corrida. `gowork.sh` resuelve con
+  `pwd -P` las dos puntas del calculo. El test viejo no podia cazarlo porque
+  comprobaba con `cd`, que es logico; el nuevo usa `[ -d ]`, que pregunta al
+  kernel igual que `go`.
+- [x] **La sonda de coleccion no sabia leer vitest 1.6.** `list` es subcomando
+  desde 2.1; en 1.6 es UN FILTRO MAS, asi que corria otra seleccion de archivos
+  y su salida no nombraba el archivo preguntado. El gate marcaba "tramo sin red"
+  un `.test.tsx` que si muerde y en la linea siguiente imprimia su propio
+  diagnostico `vitest (exit 1): Tests 17 failed | 17 passed`. La deteccion por
+  texto del error no alcanzaba: 1.6 no se queja, hace otra cosa en silencio.
+- [x] **`evidence.py` sellaba verde sobre arboles que no controla.** La concesion
+  del #137 (en un arbol compartido, la suciedad que esta tarea no commiteo no
+  bloquea) aplicaba a CUALQUIER arbol de fuera del workspace, incluida una sonda
+  descartable en `/tmp`. Ahora es solo el arbol de la INSTANCIA, que se reconoce
+  por estructura (el padre de `tasks/<id>`). Y una guarda nueva de la misma
+  familia: si el COMANDO nombra un archivo que no esta en el commit (sin
+  trackear y sin ignorar, dentro del repo), falla cerrado, porque un test nuevo
+  es un archivo nuevo y por ahi el sello certificaba codigo que no viajaba en el
+  commit que nombra.
+- [x] **`POLICY-ARCHIVE-001` se derrotaba con la fusion mecanica del campo
+  `qa`.** Comparaba mtimes, y fundir `qa` en el veredicto es un paso PRESCRITO
+  por `/review` DESPUES del juicio del reviewer: 17 segundos de ventana bastaron
+  para blanquear una enmienda del delta-spec. Ahora manda `delta_spec_sha256`,
+  que sella `verdict-scaffold.sh`; el mtime queda de piso para los veredictos
+  viejos, que no traen el campo.
+- [x] **`delta_seccion` tiraba la linea de encabezado de las subsecciones.** Un
+  test nombrado solo en el `### <archivo>` no lo veia `gate_tests_untouched`: el
+  delta-spec cumplia la regla a la vista de un humano y el gate salia rojo con
+  un mensaje que hablaba de SI el nombre estaba y no de DONDE.
+- [x] **El contrato del rol `qa` no decia nada sobre matar procesos.** Un `kill`
+  con los pids que salen de `ss -ltnp` se llevo puesto el trabajo de las
+  sesiones hermanas (los dev servers del host pasaron de 15 a 3, y con ellos los
+  port-forwards de observabilidad). Ahora exige matar solo los pids propios, y
+  declara el corolario: `--strictPort` no protege de una colision cuando dos
+  procesos bindean stacks IP distintos.
+- [x] **Los marcadores de relevo de fase no caducaban.** 19 marcadores huerfanos
+  son 19 sesiones ajenas al pedido en cuanto alguien levanta el vigilante, asi
+  que nadie lo levanta y el relevo por fase queda desactivado de hecho: el
+  pipeline entero corrio en una sola sesion, con el contexto del orquestador
+  subiendo de 230k a 357k monotonamente y llevandose el 40% del costo de la
+  tarea. `HARNESS_ORCH_HANDOFF_TTL` (6 h) los caduca y lo dice antes de tirarlos.
+
+**Lo que NO se pudo reproducir, dicho para que no se lea como cerrado:** el
+reporte afirma que `evidence.py run --cwd` RESTAURA el arbol que recibe. Medido
+sobre un worktree sonda con los fuentes de la base encima, no toca nada y falla
+cerrado con exit 3. Lo que si se arreglaron son los dos caminos verificables por
+los que ese sello podia salir verde igual (los dos de la entrada de
+`evidence.py`, arriba). Si el arbol de veras se restauro, la causa esta fuera de
+ese script y hace falta el rastro para encontrarla.

@@ -53,6 +53,72 @@ _bs_platform_note() {
 }
 _bs_platform_note
 
+# ── EL GESTOR TIENE QUE EXISTIR ANTES DEL PRIMER ensure ───────────────
+# Este bootstrap instala la mayoria de sus capacidades con `brew`, y hasta aqui
+# NINGUNA linea comprobaba que brew existiera. En una maquina Linux recien
+# creada (contenedor, CI, VPS de dev) no viene, asi que cada `ensure` fallaba
+# por separado con "falló la instalación de X" y el usuario terminaba con un
+# doctor en rojo cuya remediación era "corre scripts/bootstrap.sh": el que
+# acababa de correr. Caso de campo medido: 14 de 24 lineas de instalacion no
+# ejecutaron nada y quedaron 18 capacidades sin instalar, `bd` y el grafo
+# incluidos, sin que apareciera la palabra "brew" una sola vez en la salida.
+#
+# Son dos fallas distintas y se tratan distinto:
+#   1. brew esta instalado pero no en ESTE PATH (sesion no interactiva, que no
+#      lee ~/.zshrc). Se resuelve solo, cargando su shellenv: es la misma
+#      leccion que doctor.sh ya aprendio ("no esta en mi PATH" no es "no esta
+#      instalado"), y reinstalar lo que ya esta es peor que no hacer nada.
+#   2. brew no esta. Eso NO se resuelve solo por defecto: instalar un gestor de
+#      paquetes entero es una decision de cadena de suministro del humano, no
+#      de un script de onboarding. Se falla CERRADO con el comando exacto
+#      (regla 3 y 5 del repo), y quien quiera automatizarlo lo declara con
+#      HARNESS_BOOTSTRAP_INSTALL_BREW=1.
+_bs_brew_preflight() {
+  # Igual que _bs_platform_note: el patron matchea lineas de instalacion
+  # REALES, para que esta funcion no se detecte a si misma ni a los comentarios
+  # de ejemplo que trae el template.
+  grep -qE '^(ensure|require) .*[[:space:]]brew[[:space:]]' "$0" 2>/dev/null || return 0
+  command -v brew >/dev/null 2>&1 && return 0
+
+  local p
+  for p in /opt/homebrew /usr/local /home/linuxbrew/.linuxbrew "$HOME/.linuxbrew"; do
+    if [ -x "$p/bin/brew" ]; then
+      eval "$("$p/bin/brew" shellenv)" 2>/dev/null || true
+      if command -v brew >/dev/null 2>&1; then
+        ok "brew estaba instalado en $p pero fuera de este PATH: cargado para esta corrida"
+        echo "   ↳ para que persista, 'eval \"\$($p/bin/brew shellenv)\"' va en ~/.zshenv"
+        echo "     (zsh lo lee SIEMPRE, tambien en cron y en 'ssh host cmd'), no solo en ~/.zshrc"
+        return 0
+      fi
+    fi
+  done
+
+  local cmd='/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+  if [ "${HARNESS_BOOTSTRAP_INSTALL_BREW:-0}" = "1" ] && [ "$CHECK" -eq 0 ]; then
+    inst "Homebrew (declarado con HARNESS_BOOTSTRAP_INSTALL_BREW=1)"
+    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" \
+      || { warn "falló la instalación de Homebrew, hazla a mano: $cmd"; return 1; }
+    for p in /opt/homebrew /usr/local /home/linuxbrew/.linuxbrew "$HOME/.linuxbrew"; do
+      [ -x "$p/bin/brew" ] && { eval "$("$p/bin/brew" shellenv)" 2>/dev/null || true; break; }
+    done
+    command -v brew >/dev/null 2>&1 && { ok "Homebrew instalado"; return 0; }
+    warn "Homebrew instalado pero no lo encuentro en el PATH"; return 1
+  fi
+
+  warn "este bootstrap instala con 'brew' y brew NO está en esta máquina"
+  echo "   ↳ sin él, TODAS las líneas 'brew install' de abajo fallan una por una."
+  echo "     Instálalo (corre en Linux y en macOS):"
+  echo "       $cmd"
+  echo "     Y en Linux, cárgalo en la shell:"
+  echo "       eval \"\$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)\""
+  echo "     Para que este bootstrap lo instale solo: HARNESS_BOOTSTRAP_INSTALL_BREW=1 $0"
+  # --check REPORTA, no bloquea: es su contrato ("solo reporta qué falta").
+  [ "$CHECK" -eq 1 ] && return 1
+  echo "   ↳ se corta aquí en vez de encadenar $(grep -cE '^(ensure|require) .*[[:space:]]brew[[:space:]]' "$0") fallos sin explicación."
+  exit 1
+}
+_bs_brew_preflight || true
+
 # ensure <bin> <cmd de instalación...> — instala si falta (o reporta en --check)
 ensure() {
   local bin="$1"; shift
@@ -79,7 +145,19 @@ require() {
 
 echo "══ bootstrap: dependencias del harness ══"
 # ── núcleo (siempre) ──────────────────────────────────────────────────
-ensure jq brew install jq
+# jq es la única dependencia DURA: doctor.sh se muere en su línea 21 sin él, o
+# sea antes de poder decir qué más falta. Por eso es el único `ensure` que no
+# se delega a brew a ciegas y despacha por el gestor que la máquina tenga: era
+# la primera línea del bootstrap y la primera en fallar en una máquina sin
+# brew, dejando al usuario sin jq y sin diagnóstico. El catálogo ya declara
+# esta misma alternativa en el `install_alt` de jq.
+if command -v jq >/dev/null 2>&1;      then ok jq
+elif command -v brew >/dev/null 2>&1;  then ensure jq brew install jq
+elif command -v apt-get >/dev/null 2>&1; then ensure jq apt-get install -y jq
+elif command -v dnf >/dev/null 2>&1;   then ensure jq dnf install -y jq
+elif command -v apk >/dev/null 2>&1;   then ensure jq apk add --no-cache jq
+else ensure jq brew install jq
+fi
 
 # ── elegidas en la entrevista (generado desde el catálogo) ────────────
 {{ENSURE_LINES}}

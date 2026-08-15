@@ -1079,3 +1079,61 @@ ese script y hace falta el rastro para encontrarla.
     `head -1` acertaba sin querer. Con 0.61.1 y 0.61.2 discrepan y la mutacion
     muerde. Una mutacion que no falla puede ser un test debil, una mutacion que
     no muto, o un fixture donde el error no se manifiesta: los tres pasaron hoy.
+
+## Cerrado el 2026-08-15 (issues #199 y #200: install_linux existia para el host sin brew, y en ese host no instalaba)
+
+- [x] **La causa comun, que ninguno de los dos issues nombra**: el catalogo
+  declara UN comando por capacidad y el generador lo escribe TAL CUAL detras de
+  `ensure <bin> ...`. Un comando con `&&`, `|` o `$( )` adentro NO llega entero
+  a `ensure`: el shell parte la linea al leer el archivo y solo el primer pedazo
+  queda como argumento. El resto corre SUELTO. Medido con el `install_linux` que
+  tenia kubectl, ejecutando la linea generada:
+  · con kubectl YA instalado, la cadena se ejecuta igual y lo reinstala en cada
+    corrida;
+  · con `--check`, cuyo contrato escrito es "solo reporta que falta, no instala
+    nada", tambien descarga e instala;
+  · lo que `ensure` cuenta como la instalacion es `d=$(mktemp -d)`, un no-op, asi
+    que `INSTALLED` y `MISSING` quedan mintiendo.
+  Es la MISMA clase del issue #22 (prosa con parentesis en `install:`), que ya
+  estaba prohibida para `install:` y nadie habia prohibido para `install_linux`.
+- [x] **Por eso 13 capacidades estaban `manual` (#200)**: no porque su
+  instalacion fuera una decision humana, sino porque no cabia en un comando. El
+  `note` de gcloud lo decia con todas las letras ("son varios pasos con pipe y no
+  cabe en install:"). Un aprovisionador que imprime 7 URLs no cumple su unica
+  funcion.
+- [x] **Las recetas se mudaron al bootstrap, que es shell de verdad**
+  (`bs_install <bin>`), y el catalogo las NOMBRA con un solo argv. Asi corren
+  DENTRO de `ensure` (respetan `--check`, cuentan bien, no reinstalan) y sirven
+  para los DOS generadores, sin pedirle a ninguno que aprenda a citar.
+- [x] **El destino es un directorio del usuario (#199)**. `install_linux` existe
+  para el host que no puede usar brew, y ese host es casi siempre uno donde no se
+  es root: si se pudiera ser root, brew tampoco seria un problema. O sea que el
+  caso que `install_linux` atiende y el caso donde `/usr/local/bin` funciona son
+  casi disjuntos. Apuntar ahi tiraba a la basura la descarga y su verificacion en
+  la ultima linea, con "Permission denied".
+- [x] **Nueve recetas, y las que bajan binario verifican su sha256** cuando el
+  fabricante lo publica al lado: kubectl, terraform, vault, argocd, bd, helm, uv,
+  node/npm y gcloud. La unica sin checksum publicado es gcloud, y esta dicho en
+  el comentario de su rama.
+- **Como se verifico**: las nueve recetas se corrieron en el Linux del reporte
+  (sin brew, sin sudo, `/usr/local/bin` de root) con un `HOME` desechable, y las
+  nueve instalaron un binario que responde. No es un `bash -n`: es la instalacion
+  real, que es lo unico que distingue "el comando parece correcto" de "el comando
+  instala". En la suite quedan tres ratchets: `install_linux` sin sintaxis de
+  shell, cada `bs_install X` con su receta, y ninguna receta escribiendo en un
+  directorio de root.
+- Tres cosas que apareceron al correrlas y que valen por si solas:
+  · **helm instala bien y despues sale 1**: su instalador termina con
+    `command -v helm` y no lo encuentra si el destino no esta en el PATH. El
+    prefijo de entorno va por comando (`PATH=... bash get-helm-3`) y NO en el
+    PATH del bootstrap: meterlo ahi haria pasar el `command -v` de `ensure`
+    aunque el PATH del humano no lo tenga, que es exactamente el falso verde del
+    issue #198.
+  · **npm se niega a cambiar el prefix** si lo encuentra en un `.npmrc` de
+    proyecto (cualquier ancestro del cwd, y el bootstrap corre desde el
+    workspace). Va con `--location=user`. Sin el prefix, los CLIs de `npm i -g`
+    quedan instalados e INVISIBLES, sin un solo error.
+  · **`sha256sum --check` es de GNU**: el de macOS falla con "usage:", que se lee
+    igual que un checksum que no coincide. Se COMPARA el hash en vez de delegar
+    en el flag, con lo cual el test dejo de necesitar un stub de sha256sum: menos
+    cosas fingidas en la prueba.

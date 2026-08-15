@@ -194,32 +194,90 @@ bash -n "$WS/evil.sh" 2>/dev/null \
   && fail "el bash -n no detecta los paréntesis: el test no protege nada" \
   || pass "prosa con paréntesis: bash -n la caza (el test tiene dientes)"
 
-echo "── el install_linux de kubectl VERIFICA antes de instalar (#192)"
-# Es el UNICO install_linux de tipo `auto` que descarga un BINARIO: los demas
-# son de canal (go install, npm, uv, cargo) o `manual`, que es una URL que sigue
-# un humano. Y corre en el bootstrap de cada instancia, o sea en el momento de
-# menos supervision, escribiendo en un directorio del PATH.
-#
-# El comando se saca VERBATIM del catalogo y se EJECUTA: lo unico stubbeado son
-# las herramientas (curl sirve de un directorio local, install redirige la
-# escritura, sha256sum se emula donde no existe). Un grep del texto probaria que
-# la palabra "sha256" esta escrita; esto prueba que el binario manipulado NO SE
-# INSTALA, que es lo que importa.
-KB="$WS/kubectl-verifica"; mkdir -p "$KB/bin" "$KB/srv" "$KB/dest"
-cmd="$(python3 -c "
-import yaml
-d = yaml.safe_load(open('$CAT'))
-print([c for c in d['capabilities'] if c['name']=='kubectl'][0]['install_linux'])
-")"
-[ -n "$cmd" ] && pass "el catalogo declara install_linux para kubectl" \
-               || fail "sin install_linux de kubectl no hay nada que ejercitar"
-# Primero la estructural, porque es la que NOMBRA el defecto: sin ella, una
-# regresion se reporta como "no instalo el binario bueno", que manda a mirar
-# el lugar equivocado.
-case "$cmd" in
-  *.sha256*--check*) pass "el comando descarga el checksum publicado y lo COMPRUEBA" ;;
-  *) fail "el install_linux de kubectl no verifica: baja un binario y lo hace ejecutable sin comprobar el .sha256 que el fabricante publica al lado (#192)" ;;
+echo "── install_linux es UN comando, igual que install (#199/#200)"
+# POR QUE: el generador escribe el valor TAL CUAL detras de `ensure <bin> ...`.
+# Una cadena con `&&`/`|`/`$( )` NO llega entera a ensure: el shell parte la
+# linea al leer el archivo y solo el primer pedazo queda como argumento; el
+# resto corre SUELTO. Medido con el install_linux que tenia kubectl:
+#   · con kubectl ya instalado, la cadena se ejecutaba igual y lo reinstalaba;
+#   · con --check ("solo reporta que falta, no instala nada"), instalaba;
+#   · lo que ensure contaba como la instalacion era `d=$(mktemp -d)`, un no-op.
+# Es la misma clase del issue #22, que ya estaba prohibida para `install:` y
+# nadie habia prohibido para install_linux. Lo que no cabe en un comando va
+# como receta a `bs_install <bin>` dentro del bootstrap.
+linux_entries() {
+  awk '
+    function flush() { if (name != "" && li != "") printf "%s\t%s\n", name, li }
+    /^  - name:/ { flush(); name=$3; li="" }
+    /^    install_linux:/ { line=$0; sub(/^[ \t]*install_linux:[ \t]*/, "", line)
+                            q=substr(line,1,1)
+                            if (q == "\"" || q == "'"'"'") { line=substr(line,2); i=index(line,q); if (i>0) line=substr(line,1,i-1) }
+                            else { sub(/[ \t]+#.*$/, "", line) }
+                            li=line }
+    END { flush() }
+  ' "$CAT"
+}
+lbad=0; ln_n=0
+while IFS="$(printf '\t')" read -r name li; do
+  [ -n "$li" ] || continue
+  ln_n=$((ln_n+1))
+  case "$li" in
+    http://*|https://*) ;;   # manual: una URL que sigue un humano
+    *"("*|*")"*|*"|"*|*"&"*|*";"*|*"<"*|*">"*|*'`'*|*'$'*|*'"'*|*"'"*)
+      fail "$name: install_linux con sintaxis de shell adentro; no llega entero a ensure: '$li'"
+      lbad=$((lbad+1)) ;;
+  esac
+done <<EOF
+$(linux_entries)
+EOF
+[ "$lbad" -eq 0 ] && pass "$ln_n install_linux sin cadenas de shell (llegan enteros a ensure)"
+
+echo "── cada receta que el catalogo NOMBRA existe en el bootstrap"
+# Un `bs_install foo` sin su rama en el case es una capacidad que falla recien
+# en la maquina del que corre el bootstrap, y con el mensaje equivocado.
+BOOT="$ROOT/templates/scripts/bootstrap.sh.tmpl"
+falta=0; recetas=0
+while IFS="$(printf '\t')" read -r name li; do
+  case "$li" in bs_install\ *) ;; *) continue ;; esac
+  r="${li#bs_install }"; recetas=$((recetas+1))
+  grep -qE "^    [a-z|]*\b$r\b[a-z|]*\)" "$BOOT" \
+    || { fail "$name: el catalogo pide 'bs_install $r' y bootstrap.sh no tiene esa receta"; falta=$((falta+1)); }
+done <<EOF
+$(linux_entries)
+EOF
+[ "$falta" -eq 0 ] && pass "las $recetas recetas nombradas por el catalogo existen en el bootstrap"
+
+echo "── ninguna receta escribe donde hace falta root (#199)"
+# install_linux existe para el host que NO puede usar brew, y ese host es casi
+# siempre uno donde no se es root: si se pudiera ser root, brew tampoco seria un
+# problema. Un destino como /usr/local/bin tira a la basura la descarga y su
+# verificacion en la ultima linea.
+# Se miran las lineas de CODIGO, no los comentarios: uno de ellos explica que
+# el instalador de helm apunta a /usr/local/bin con sudo salvo que se le diga,
+# y un gate que se dispara con la prosa que lo documenta se apaga solo.
+recetas_txt="$(awk '/^bs_install\(\)/,/^}/' "$BOOT" | sed 's/[ \t]*#.*$//')"
+case "$recetas_txt" in
+  *"/usr/local/bin"*|*"sudo "*) fail "una receta de bs_install escribe con root (/usr/local/bin o sudo)" ;;
+  *) pass "las recetas instalan en \$BINDIR, un directorio del usuario" ;;
 esac
+grep -q '^BINDIR="\$HOME/.local/bin"' "$BOOT" \
+  && pass "BINDIR es un directorio del usuario" \
+  || fail "BINDIR dejo de ser un directorio del usuario"
+
+echo "── bs_install kubectl VERIFICA antes de instalar (#192)"
+# Es la unica receta que baja un BINARIO suelto de un endpoint sin firma, y
+# corre en el bootstrap de cada instancia, o sea en el momento de menos
+# supervision, escribiendo en un directorio del PATH.
+#
+# La funcion se saca VERBATIM del template y se EJECUTA: lo unico stubbeado es
+# curl (sirve de un directorio local). El destino es un $HOME temporal, asi que
+# no hace falta stubbear `install` ni tocar la maquina. Un grep del texto
+# probaria que la palabra sha256 esta escrita; esto prueba que el binario
+# manipulado NO SE INSTALA, que es lo que importa.
+KB="$WS/kubectl-verifica"; mkdir -p "$KB/bin" "$KB/srv" "$KB/home"
+awk '/^BINDIR=/,/^# ── ESTE BOOTSTRAP SE GENERO/' "$BOOT" | sed '$d' > "$KB/recetas.sh"
+[ -s "$KB/recetas.sh" ] && pass "las recetas se extraen del template" \
+                        || fail "no pude extraer las recetas del bootstrap"
 
 # curl de palo: traduce la URL a un archivo del directorio servido.
 cat > "$KB/bin/curl" <<'CURLEOF'
@@ -232,34 +290,15 @@ while [ $# -gt 0 ]; do
     *) url="$1"; shift ;;
   esac
 done
-p="${url#http://serv}"
-src="$SRVDIR$p"
+src="$SRVDIR${url#https://dl.k8s.io}"
 [ -f "$src" ] || exit 22
-# Un test JAMAS escribe fuera de su arbol. El comando anterior al #192 bajaba
-# directo a /usr/local/bin sin pasar por `install`, asi que sin esta guarda una
-# regresion del catalogo convertiria a la suite en algo que toca la maquina.
+# Un test JAMAS escribe fuera de su arbol.
 case "${out:-}" in
   ""|"$SRVDIR"*|/var/*|/tmp/*|/private/*) ;;
   *) echo "curl de palo: me pidieron escribir fuera del test ($out)" >&2; exit 23 ;;
 esac
 if [ -n "$out" ]; then cp "$src" "$out"; else cat "$src"; fi
 CURLEOF
-# install de palo: la ruta real es /usr/local/bin y un test no escribe ahi.
-cat > "$KB/bin/install" <<'INSEOF'
-#!/usr/bin/env bash
-args=(); for a in "$@"; do args+=("${a/\/usr\/local\/bin/$DESTDIR}"); done
-/usr/bin/install "${args[@]}"
-INSEOF
-# sha256sum: SIEMPRE se stubbea, y el motivo importa. `--check` es de GNU
-# coreutils, que es lo que hay en Linux, o sea el unico sitio donde install_linux
-# corre. El host de esta suite es macOS y su `sha256sum` (cuando existe) es el
-# BSD, que NO conoce `--check`: sin este stub el test medía la ausencia del flag
-# en el host y no la conducta del comando. Se delega a `shasum -a 256`, que sí
-# implementa el chequeo con el mismo formato `<hash>  <archivo>`.
-cat > "$KB/bin/sha256sum" <<'SHAEOF'
-#!/usr/bin/env bash
-exec shasum -a 256 "$@"
-SHAEOF
 chmod +x "$KB/bin/"*
 
 mkdir -p "$KB/srv/release/v1.33.0/bin/linux/amd64"
@@ -269,23 +308,30 @@ printf 'v1.33.0' > "$KB/srv/release/stable.txt"
   && { command -v sha256sum >/dev/null 2>&1 && sha256sum kubectl || shasum -a 256 kubectl; } \
      | awk '{print $1}' > kubectl.sha256 )
 
-corre_install() {  # corre el comando del catalogo con las herramientas de palo
-  ( export PATH="$KB/bin:$PATH" SRVDIR="$KB/srv" DESTDIR="$KB/dest"
-    eval "${cmd//https:\/\/dl.k8s.io/http://serv}" ) >/dev/null 2>&1
+corre_receta() {  # corre bs_install <bin> con el curl de palo y un HOME propio
+  ( export PATH="$KB/bin:$PATH" SRVDIR="$KB/srv" HOME="$KB/home"
+    warn() { echo "WARN: $1"; }
+    . "$KB/recetas.sh"
+    bs_install "$1" ) >/dev/null 2>&1
 }
+DEST="$KB/home/.local/bin/kubectl"
 
 # (1) binario intacto: instala y sale 0.
-rm -f "$KB/dest/kubectl"; corre_install; rc=$?
-assert_eq 0 "$rc" "binario intacto: el comando sale 0"
-[ -x "$KB/dest/kubectl" ] && pass "y lo instala" || fail "no instalo el binario bueno"
+rm -f "$DEST"; corre_receta kubectl; rc=$?
+assert_eq 0 "$rc" "binario intacto: la receta sale 0"
+[ -x "$DEST" ] && pass "y lo instala en el bin del usuario" || fail "no instalo el binario bueno"
 
 # (2) EL CASO: el binario cambia y el checksum publicado NO. Es lo que produce
-#     un mirror comprometido o un MITM. El comando anterior lo instalaba y salia
-#     0 (verificado a mano contra un servidor local antes de escribir esto).
+#     un mirror comprometido o un MITM.
 printf 'yo soy kubectl MANIPULADO\n' > "$KB/srv/release/v1.33.0/bin/linux/amd64/kubectl"
-rm -f "$KB/dest/kubectl"; corre_install; rc=$?
-[ "$rc" -ne 0 ] && pass "binario manipulado: el comando CORTA (exit $rc)" \
+rm -f "$DEST"; corre_receta kubectl; rc=$?
+[ "$rc" -ne 0 ] && pass "binario manipulado: la receta CORTA (exit $rc)" \
                 || fail "binario manipulado: salio 0, o sea que el checksum no frena nada"
-assert_no_file "$KB/dest/kubectl" "y NO lo instala: un binario que no coincide con su checksum no entra al PATH"
+assert_no_file "$DEST" "y NO lo instala: un binario que no coincide con su checksum no entra al PATH"
+
+# (3) una receta que no existe se DICE, no se ignora en silencio
+corre_receta capacidad-inventada; rc=$?
+[ "$rc" -ne 0 ] && pass "un bin sin receta devuelve != 0 (ensure lo reporta como fallo)" \
+                || fail "un bin sin receta salio 0: ensure lo contaria como instalado"
 
 t_done

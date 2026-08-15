@@ -54,6 +54,122 @@ link_into_path() {
   return 1
 }
 
+# ── LAS RECETAS DE LINUX VIVEN ACA, NO EN EL CATALOGO ─────────────────
+# El catalogo declara UN comando por capacidad y el generador lo escribe TAL
+# CUAL detras de `ensure <bin> ...`. Un comando con `&&`, `|` o `$( )` adentro
+# NO llega entero a ensure: el shell parte la linea al leer el archivo y solo
+# el primer pedazo queda como argumento; el resto corre SUELTO, al margen de
+# ensure. Medido con el install_linux que tenia kubectl:
+#   · con kubectl YA instalado, la cadena se ejecuta igual y lo reinstala en
+#     cada corrida;
+#   · con --check, cuyo contrato es "solo reporta que falta, no instala nada",
+#     tambien descarga e instala;
+#   · lo que ensure cuenta como la instalacion es `d=$(mktemp -d)`, un no-op,
+#     asi que INSTALLED y MISSING quedan mintiendo.
+# Es la misma clase que el issue #22 (prosa con parentesis en `install:`): ya
+# estaba prohibida para `install:` y nadie la habia prohibido para install_linux.
+#
+# Por eso la receta vive de este lado, que es shell de verdad, y el catalogo la
+# NOMBRA con un solo argv: `install_linux: "bs_install kubectl"`. Asi corre
+# DENTRO de ensure (respeta --check, cuenta bien, no reinstala) y sirve para los
+# dos generadores, sin pedirle a ninguno que aprenda a citar.
+#
+# Todas escriben en $BINDIR, un directorio del USUARIO, y ese es el punto del
+# issue #199: install_linux existe para el host que no puede usar brew, y ese
+# host es casi siempre uno donde no se es root (si se pudiera ser root, brew
+# tampoco seria un problema). Apuntar a /usr/local/bin ahi tira a la basura la
+# descarga y su verificacion en la ultima linea.
+BINDIR="$HOME/.local/bin"
+
+# _bs_sha256 <archivo>: imprime su sha256, con la herramienta que haya.
+# Se COMPARA el hash en vez de delegar en `--check`: ese flag es de coreutils,
+# y el `sha256sum` de macOS no lo conoce (falla con "usage:", que se lee igual
+# que un checksum que no coincide). El formato "<hash>  <archivo>" sí es común
+# a los tres, así que el primer campo es el dato.
+_bs_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | awk '{print $1}'
+}
+
+# _bs_fetch <dir> <url> [<url del sums>]: baja el asset con SU nombre y, si el
+# fabricante publica sha256, lo COMPRUEBA. Imprime la ruta de lo bajado.
+# El sums viene en dos formatos: el hash solo (kubectl) o "<hash>  <nombre>"
+# (hashicorp, github). Los avisos van a stderr porque el stdout ES el valor.
+_bs_fetch() {
+  local d="$1" u="$2" s="${3:-}" n="${2##*/}" want got
+  curl -fsSLo "$d/$n" "$u" || { warn "no pude bajar $u" >&2; return 1; }
+  [ -n "$s" ] || { printf '%s' "$d/$n"; return 0; }
+  curl -fsSL "$s" > "$d/SUMS" || { warn "no pude bajar el sha256 de $n" >&2; return 1; }
+  want="$(awk -v n="$n" 'NF==1 {print $1; exit} $2==n || $2=="*"n {print $1; exit}' "$d/SUMS")"
+  [ -n "$want" ] || { warn "$n: hay sums publicado pero no encuentro su linea" >&2; return 1; }
+  got="$(_bs_sha256 "$d/$n")"
+  [ "$got" = "$want" ] \
+    || { warn "$n: el sha256 NO coincide con el publicado; no lo instalo" >&2; return 1; }
+  printf '%s' "$d/$n"
+}
+
+# bs_install <bin>: la receta de Linux de esa capacidad, para lo que ningun
+# package manager portable resuelve. Todo lo que baja un binario verifica su
+# checksum cuando el fabricante lo publica al lado (#192).
+bs_install() {
+  local bin="$1" d f v rc=1
+  d="$(mktemp -d)" || return 1
+  mkdir -p "$BINDIR" || { rm -rf "$d"; return 1; }
+  case "$bin" in
+    kubectl)
+      v="$(curl -fsSL https://dl.k8s.io/release/stable.txt)" \
+        && f="$(_bs_fetch "$d" "https://dl.k8s.io/release/$v/bin/linux/amd64/kubectl" "https://dl.k8s.io/release/$v/bin/linux/amd64/kubectl.sha256")" \
+        && install -m 0755 "$f" "$BINDIR/kubectl" && rc=0 ;;
+    terraform|vault)
+      v="$(curl -fsSL "https://api.releases.hashicorp.com/v1/releases/$bin/latest" | jq -r .version)" \
+        && f="$(_bs_fetch "$d" "https://releases.hashicorp.com/$bin/$v/${bin}_${v}_linux_amd64.zip" "https://releases.hashicorp.com/$bin/$v/${bin}_${v}_SHA256SUMS")" \
+        && unzip -oq "$f" "$bin" -d "$BINDIR" && chmod 0755 "$BINDIR/$bin" && rc=0 ;;
+    argocd)
+      f="$(_bs_fetch "$d" "https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64" "https://github.com/argoproj/argo-cd/releases/latest/download/cli_checksums.txt")" \
+        && install -m 0755 "$f" "$BINDIR/argocd" && rc=0 ;;
+    bd)
+      v="$(curl -fsSL https://api.github.com/repos/steveyegge/beads/releases/latest | jq -r .tag_name)" \
+        && f="$(_bs_fetch "$d" "https://github.com/steveyegge/beads/releases/download/$v/beads_${v#v}_linux_amd64.tar.gz" "https://github.com/steveyegge/beads/releases/download/$v/checksums.txt")" \
+        && tar -xzf "$f" -C "$d" bd && install -m 0755 "$d/bd" "$BINDIR/bd" && rc=0 ;;
+    npm)
+      # node no es un binario suelto: trae su lib/. Se instala el prefijo y se
+      # enlazan los ejecutables. Y `npm i -g` usa el prefijo de NODE, asi que
+      # sin el `npm config set prefix` de la ultima linea los CLIs de npm
+      # quedan instalados e INVISIBLES, sin un solo error. Va con
+      # --location=user porque npm SE NIEGA a cambiar el prefix cuando lo
+      # encuentra en un .npmrc de proyecto (cualquier ancestro del cwd), y el
+      # bootstrap corre desde el workspace.
+      v="$(curl -fsSL https://nodejs.org/dist/index.json | jq -r 'map(select(.lts != false))[0].version')" \
+        && f="$(_bs_fetch "$d" "https://nodejs.org/dist/$v/node-$v-linux-x64.tar.xz" "https://nodejs.org/dist/$v/SHASUMS256.txt")" \
+        && mkdir -p "$HOME/.local/lib" && tar -xJf "$f" -C "$d" \
+        && rm -rf "$HOME/.local/lib/node" && mv "$d/node-$v-linux-x64" "$HOME/.local/lib/node" \
+        && ln -sf "$HOME/.local/lib/node/bin/node" "$HOME/.local/lib/node/bin/npm" "$HOME/.local/lib/node/bin/npx" "$BINDIR/" \
+        && PATH="$BINDIR:$PATH" "$HOME/.local/lib/node/bin/npm" config set prefix "$HOME/.local" --location=user && rc=0 ;;
+    gcloud)
+      # el unico sin sha256 publicado al lado del artefacto; trae su propio
+      # Python, asi que tampoco es un binario suelto.
+      f="$(_bs_fetch "$d" "https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-x86_64.tar.gz")" \
+        && mkdir -p "$HOME/.local/lib" && rm -rf "$HOME/.local/lib/google-cloud-sdk" \
+        && tar -xzf "$f" -C "$HOME/.local/lib" \
+        && "$HOME/.local/lib/google-cloud-sdk/install.sh" --quiet --usage-reporting=false --path-update=false >/dev/null \
+        && ln -sf "$HOME/.local/lib/google-cloud-sdk/bin/gcloud" "$HOME/.local/lib/google-cloud-sdk/bin/gsutil" "$BINDIR/" && rc=0 ;;
+    helm)
+      # Su instalador escribe en /usr/local/bin CON SUDO salvo que se le diga.
+      # El PATH va delante porque el script TERMINA verificando con `command -v
+      # helm`: instala bien y despues sale 1 con "helm not found. Is ... on your
+      # $PATH?". El prefijo es por comando a proposito: meter $BINDIR en el PATH
+      # del bootstrap haria pasar el `command -v` de ensure aunque el PATH del
+      # humano no lo tenga, o sea justo el falso verde del #198.
+      curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 > "$d/get-helm-3" \
+        && PATH="$BINDIR:$PATH" HELM_INSTALL_DIR="$BINDIR" USE_SUDO=false bash "$d/get-helm-3" >/dev/null && rc=0 ;;
+    uv)
+      curl -fsSL https://astral.sh/uv/install.sh > "$d/uv.sh" \
+        && UV_INSTALL_DIR="$BINDIR" sh "$d/uv.sh" >/dev/null && rc=0 ;;
+    *) warn "no tengo receta de Linux para '$bin'" ;;
+  esac
+  rm -rf "$d"
+  return "$rc"
+}
+
 # ── ESTE BOOTSTRAP SE GENERO PARA UNA PLATAFORMA ──────────────────────
 # Los comandos de abajo se eligieron cuando se genero la instancia, mirando la
 # maquina que la genero. Si esta instancia se clona a otra plataforma, algunos

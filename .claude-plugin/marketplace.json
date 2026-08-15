@@ -7,7 +7,7 @@
     {
       "name": "harness-creator",
       "source": "./",
-      "version": "0.61.14",
+      "version": "0.61.15",
       "description": "Creador e instalador de harnesses de ingeniería agéntica multi-repo — para cualquier proyecto",
       "keywords": [
         "harness",

@@ -961,9 +961,12 @@ ese script y hace falta el rastro para encontrarla.
   exige que toda capacidad con `install: brew` declare `install_linux`. Sin eso,
   la proxima capacidad que se agregue reabre el hueco y se descubre igual que
   esta vez: en una maquina, a mano, resolviendo releases uno por uno.
-- Pendiente declarado, que NO se toco acá: el `install_linux` de kubectl (el que
-  ya existia) baja un binario con curl y lo hace ejecutable SIN verificar el
-  checksum del fabricante, teniendo kubernetes publicado su `.sha256`. Es la
-  misma clase de agujero de cadena de suministro para gcloud y kargo. Cambiarlo
+- Pendiente declarado, que NO se toco acá: el `install_linux` de kubectl (el
+  unico `auto` que baja un BINARIO) lo hace ejecutable sin verificar el checksum
+  del fabricante, teniendo kubernetes publicado su `.sha256` al lado. Cambiarlo
   a ciegas seria tocar un comando que hoy funciona sin poder ejercitarlo en
   Linux, asi que va como issue aparte y no colado acá.
+  (Correccion de la primera version de esta entrada, que decia que gcloud y
+  kargo tenian el mismo agujero: NO lo tienen. Los dos son `manual`, o sea una
+  URL que el humano sigue, y la verificacion la trae la documentacion del
+  fabricante. El unico comando que descarga y ejecuta es el de kubectl.)

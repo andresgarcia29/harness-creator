@@ -318,8 +318,36 @@ if [ -f "$ANSWERS" ]; then
     fi
   fi
   if [ "$src" = "vault" ] || [ "$src" = "gcp-secret-manager" ]; then
-    [ -f "$WS/.secrets" ] && ok ".secrets materializado" \
-      || warn ".secrets no materializado — corre: scripts/secrets.sh pull (los MCPs autenticados y deploy-watch lo necesitan)"
+    if [ ! -f "$WS/.secrets" ]; then
+      warn ".secrets no materializado: corre scripts/secrets.sh pull (los MCPs autenticados y deploy-watch lo necesitan)"
+    else
+      # ── UN .secrets INCOMPLETO NO ES UN .secrets ─────────────────────
+      # Esto miraba solo que el archivo EXISTIERA. Con una credencial vencida,
+      # `secrets.sh pull` lo escribe igual, con las claves que SÍ pudo leer, así
+      # que un archivo con 3 de las 18 declaradas daba verde. Y lo daba dos
+      # líneas debajo del aviso de que el token estaba expirado: la misma
+      # salida se contradecía, y el humano se queda con la línea verde.
+      # Se cuenta contra lo que secrets.sh DECLARA, que es la única referencia
+      # que existe de "completo".
+      sec_falta=""; sec_total=0
+      for k in $(grep -E '^[[:space:]]*dump_(kv|sm|file) ' "$WS/scripts/secrets.sh" 2>/dev/null | awk '{print $2}' | sort -u); do
+        sec_total=$((sec_total+1))
+        grep -q "^$k=" "$WS/.secrets" 2>/dev/null || sec_falta="$sec_falta $k"
+      done
+      if [ "$sec_total" -eq 0 ]; then
+        ok ".secrets materializado"
+      elif [ -z "$sec_falta" ]; then
+        ok ".secrets materializado ($sec_total claves declaradas, todas presentes)"
+      else
+        sec_n=$(echo "$sec_falta" | wc -w | tr -d ' ')
+        # Se nombran las primeras y se dice cuántas quedan, en vez de cortar la
+        # lista por caracteres: una clave partida al medio no se puede buscar.
+        sec_muestra=$(echo "$sec_falta" | tr ' ' '\n' | grep -v '^$' | head -4 | tr '\n' ' ' | sed 's/ *$//')
+        [ "$sec_n" -gt 4 ] && sec_muestra="$sec_muestra y $((sec_n-4)) más"
+        fail_host ".secrets INCOMPLETO: faltan $sec_n de $sec_total claves declaradas ($sec_muestra)" \
+          "la credencial de la fuente no sirve o el layout cambió: corre 'bash scripts/secrets.sh pull' y mira qué clave falla"
+      fi
+    fi
   fi
 fi
 

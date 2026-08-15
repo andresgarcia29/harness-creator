@@ -414,12 +414,74 @@ done
 # ~1.3 tokens por palabra (aprox. honesta; la cuenta exacta la da count_tokens)
 ctx_tokens=$((ctx_words * 13 / 10))
 if [ "$ctx_tokens" -gt 3000 ]; then
-  fail "contexto siempre-inyectado ≈ ${ctx_tokens} tokens (CLAUDE.md + constitution.md)" \
+  fail "el mapa siempre-inyectado ≈ ${ctx_tokens} tokens (CLAUDE.md + constitution.md)" \
        "PASA de 3000. Es un MAPA, no un manual: mueve el detalle a docs/ o a una skill y deja punteros. Un CLAUDE.md inflado hace que los agentes ignoren las instrucciones que sí importan."
 elif [ "$ctx_tokens" -gt 1500 ]; then
-  warn "contexto siempre-inyectado ≈ ${ctx_tokens} tokens — vigila el techo (falla a 3000). Prueba: ¿quitar esta línea haría que un agente se equivoque? Si no, fuera."
+  warn "el mapa siempre-inyectado ≈ ${ctx_tokens} tokens (CLAUDE.md + constitution.md) — vigila el techo (falla a 3000). Prueba: ¿quitar esta línea haría que un agente se equivoque? Si no, fuera."
 else
-  ok "contexto siempre-inyectado ≈ ${ctx_tokens} tokens (bajo el techo de 1500)"
+  ok "el mapa siempre-inyectado ≈ ${ctx_tokens} tokens (CLAUDE.md + constitution.md, bajo el techo de 1500)"
+fi
+
+# 8b-bis · El mapa NO era lo único siempre inyectado, y este bloque lo decía
+# igual (issue #206): una instancia con 3 reglas custom reportaba 2999 tokens
+# contra su techo de fallo de 3000, con 4202 tokens más entrando por un camino
+# que nadie contaba. Claude Code carga `.claude/rules/*.md` NATIVAMENTE, y el
+# cuerpo entero, salvo que la regla declare `paths:` (ver docs/harness/rules.md).
+# El mapa tiene techo desde el día uno; las reglas que el propio harness genera
+# con /custom-build-rule no tenían ninguno.
+rules_words=0; rules_n=0; rules_lazy=0
+for rl in "$WS"/.claude/rules/*.md; do
+  [ -f "$rl" ] || continue
+  [ "$(basename "$rl")" = "README.md" ] && continue
+  rules_n=$((rules_n + 1))
+  # `paths:` en el frontmatter difiere la carga: cuerpo bajo demanda, solo el
+  # frontmatter arriba. Esa regla no pesa en el arranque, así que no se cuenta.
+  if head -20 "$rl" | grep -q '^paths:'; then rules_lazy=$((rules_lazy + 1)); continue; fi
+  rules_words=$((rules_words + $(wc -w < "$rl" | tr -d ' ')))
+done
+rules_tokens=$((rules_words * 13 / 10))
+rules_det=""
+[ "$rules_lazy" -gt 0 ] && rules_det=" · ${rules_lazy}/${rules_n} con paths:, o sea bajo demanda"
+if [ "$rules_tokens" -gt 5000 ]; then
+  fail "reglas custom siempre-inyectadas ≈ ${rules_tokens} tokens (.claude/rules/${rules_det})" \
+       "PASA de 5000. Claude Code inyecta cada regla ENTERA en cada sesión: adelgázala con /custom-edit-rule (la evidencia larga va a docs/), fusiona reglas que se pisan, o dale 'paths:' en el frontmatter para que su cuerpo cargue solo cuando se toca lo que gobierna."
+elif [ "$rules_tokens" -gt 2500 ]; then
+  warn "reglas custom siempre-inyectadas ≈ ${rules_tokens} tokens, vigila el techo (falla a 5000)${rules_det}. Una regla que aplica a UN repo no tiene por qué pesar en las sesiones de los otros: eso lo resuelve 'paths:'."
+elif [ "$rules_n" -gt 0 ]; then
+  ok "reglas custom siempre-inyectadas ≈ ${rules_tokens} tokens en ${rules_n} regla(s) (bajo el techo de 2500${rules_det})"
+fi
+
+# 8b-ter · El total, y por qué es una COTA INFERIOR y no una medición.
+# También entran siempre: las descripciones de agentes, skills y comandos (de
+# ellos, eso es lo único que se inyecta; el cuerpo carga bajo demanda) y lo que
+# imprimen los hooks SessionStart. Lo que este doctor NO puede contar, porque no
+# vive en archivos del workspace: definiciones de tools, esquemas de los MCP y
+# el system prompt de la plataforma. Por eso el total AVISA y nunca falla: un
+# rojo permanente que nadie puede bajar es un check que se aprende a ignorar.
+desc_words=$({ grep -h '^description:' "$WS"/.claude/agents/*.md "$WS"/.claude/commands/*.md \
+                 "$WS"/.claude/skills/*/SKILL.md 2>/dev/null || true; } | wc -w | tr -d ' ')
+hook_words=0
+if [ -f "$WS/.claude/settings.json" ] && [ "${HARNESS_DOCTOR_SKIP_HOOKS:-0}" != "1" ]; then
+  # Son idempotentes por diseño (corren en cada arranque de sesión) y fail-open:
+  # correrlos una vez más cuesta lo mismo que abrir una sesión. HARNESS_DOCTOR_SKIP_HOOKS=1
+  # los saltea si una instancia mete uno lento o con efecto.
+  while IFS= read -r hcmd; do
+    [ -n "$hcmd" ] || continue
+    hpath="$WS/${hcmd#\$CLAUDE_PROJECT_DIR/}"
+    case "$hpath" in "$WS"/*) ;; *) continue ;; esac   # nada de fuera del workspace
+    [ -x "$hpath" ] || continue
+    hook_words=$((hook_words + $(CLAUDE_PROJECT_DIR="$WS" "$hpath" </dev/null 2>/dev/null | wc -w | tr -d ' ')))
+  done <<EOF
+$(jq -r '.hooks.SessionStart[]?.hooks[]?.command // empty' "$WS/.claude/settings.json" 2>/dev/null | awk '{print $1}')
+EOF
+fi
+extra_tokens=$(((desc_words + hook_words) * 13 / 10))
+total_tokens=$((ctx_tokens + rules_tokens + extra_tokens))
+total_det="mapa ${ctx_tokens} + reglas ${rules_tokens} + descripciones/SessionStart ${extra_tokens}"
+if [ "$total_tokens" -gt 12000 ]; then
+  warn "contexto total siempre-inyectado ≈ ${total_tokens} tokens (${total_det}), y es una COTA INFERIOR: tools, esquemas MCP y system prompt suman encima y no se pueden contar desde acá. Mídelo de verdad comparando el primer turno dentro y fuera del workspace."
+else
+  ok "contexto total siempre-inyectado ≈ ${total_tokens} tokens (${total_det}; cota inferior)"
 fi
 
 # 8c · La UI (observa local; opera solo creando trabajo — ADR-0010)

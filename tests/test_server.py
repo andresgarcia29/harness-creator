@@ -61,6 +61,39 @@ class Base(unittest.TestCase):
             return []
 
 
+class TestCtxPorTurno(Base):
+    """El panel medía lo ACUMULADO (lo que se factura) y nada más. El contexto
+    que arrastra CADA turno pesa cuatro veces más que el arranque, y el harness
+    no lo medía en ningún lado (issue #206). El dato ya estaba parseado."""
+
+    def _msg(self, mid, inp, cr, cc, out=10):
+        return {'type': 'assistant', 'timestamp': '2026-08-15T10:00:00Z',
+                'message': {'id': mid, 'model': 'claude-sonnet-5', 'content': [],
+                            'usage': {'input_tokens': inp, 'output_tokens': out,
+                                      'cache_read_input_tokens': cr,
+                                      'cache_creation_input_tokens': cc}}}
+
+    def test_ctx_es_lo_que_entro_en_el_ultimo_turno(self):
+        for m in (self._msg('m1', 100, 50, 10), self._msg('m2', 2000, 300, 700)):
+            self.state._ingest(m, 'sess-1', 'main', [])
+        a = self.state.agents[('sess-1', 'main')]
+        self.assertEqual(a['ctx'], 3000)          # el ÚLTIMO turno, no la suma
+        self.assertEqual(a['usage']['in'], 2100)  # lo acumulado sigue acumulando
+
+    def test_ctx_max_recuerda_el_pico(self):
+        for m in (self._msg('m1', 9000, 0, 0), self._msg('m2', 10, 0, 0)):
+            self.state._ingest(m, 'sess-1', 'main', [])
+        a = self.state.agents[('sess-1', 'main')]
+        self.assertEqual(a['ctx'], 10)
+        self.assertEqual(a['ctx_max'], 9000)      # el techo no se olvida al bajar
+
+    def test_ctx_viaja_al_snapshot(self):
+        self.state._ingest(self._msg('m1', 1000, 200, 50), 'sess-1', 'main', [])
+        agentes = [ag for s in self.state.snapshot()['sessions'] for ag in s['agents']]
+        self.assertTrue(agentes, 'el snapshot no trajo agentes')
+        self.assertEqual(agentes[0]['ctx'], 1250)
+
+
 class TestCost(Base):
     def test_modelo_sin_precio_es_none(self):
         # ADR-0004: GLM sin precio NO se factura como Opus

@@ -18,6 +18,9 @@ una ley del flujo del harness (eso es `harness-policy.json`).
 ---
 id: linear-proyecto-por-servicio    # OBLIGATORIO, igual al nombre del archivo
 applies_to: workspace               # workspace | <repo> | agente:<nombre>
+paths:                              # opcional, y es lo ÚNICO que difiere la carga
+  - "repos/atlas/**"                # (ver "Cómo llega a los agentes"). Sin paths,
+                                    # el cuerpo entero entra en CADA sesión.
 enforcement: pipeline-step          # judgment|semgrep|hook|gate|pipeline-step|doctor|cronjob
 enforced_by: .claude/pipeline/linear-sync.md   # OBLIGATORIO salvo judgment
 needs_mcp: linear-server            # opcional; el doctor exige esa clave en .mcp.json
@@ -58,7 +61,22 @@ que la constitución.
 
 ## Cómo llega a los agentes
 
-El archivo es la fuente de verdad; lo que la hace visible es el puntero de una
-línea en `docs/constitution.md` §7 (que se inyecta a TODOS los agentes) para
-las de `applies_to: workspace`, o en el agente o repo correspondiente cuando el
-alcance es más chico. Una regla sin puntero es un archivo que nadie lee.
+Claude Code carga `.claude/rules/*.md` NATIVAMENTE y **el cuerpo entero**, en
+cada sesión, sin que nadie lo pida. El puntero de una línea en
+`docs/constitution.md` §7 sigue existiendo (es lo que le dice a un humano qué
+leyes hay), pero **no es lo que las hace llegar**: la regla llega igual sin él.
+
+Eso tiene una consecuencia que cuesta tokens y hay que decirla: `applies_to`
+NO difiere nada. Una regla de `applies_to: atlas` entra completa en las
+sesiones que no tocan atlas. `needs_mcp` tampoco: es metadata que el doctor
+VALIDA, no una condición de carga.
+
+Lo único que difiere la carga es **`paths:`**, el frontmatter nativo de Claude
+Code (desde 2.1.198): con él, arriba entra solo el frontmatter y el cuerpo se
+carga cuando el agente toca un archivo que matchea el glob. Es el mismo
+mecanismo que ya usan las skills (descripción arriba, cuerpo bajo demanda).
+
+Regla práctica: si `applies_to` NO es `workspace`, declara también el `paths:`
+equivalente (`applies_to: atlas` → `paths: ["repos/atlas/**"]`). El doctor pesa
+las reglas sin `paths:` contra un techo (`make doctor`, bloque 8b) justamente
+porque son las que se pagan en cada sesión de todos.

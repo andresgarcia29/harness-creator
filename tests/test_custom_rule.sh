@@ -170,4 +170,19 @@ rm -rf "$WS/.claude/rules"
 out="$(doctor)"
 assert_not_contains "$out" "regla " "sin .claude/rules el doctor calla"
 
+echo "── el contrato dice QUIÉN carga la regla, y qué difiere esa carga (#206)"
+
+# Claude Code inyecta el cuerpo entero de cada regla en cada sesión. El contrato
+# decía que lo que la hacía llegar era el puntero en la constitución, y de ahí
+# salía la idea de que applies_to acotaba algo: no acota nada, y el costo se
+# paga igual. `paths:` es el único campo que difiere la carga de verdad.
+contrato="$(cat "$CONTRATO")"
+assert_contains "$contrato" "paths:" "el contrato declara el campo nativo paths:"
+assert_contains "$contrato" "cuerpo entero" "y dice que sin paths: entra el cuerpo entero"
+assert_contains "$contrato" "NO difiere" "y desarma la ilusión de que applies_to acota la carga"
+
+build="$(cat "$BUILD")"
+assert_contains "$build" "paths:" "custom-build-rule emite paths: cuando el alcance no es el workspace"
+assert_contains "$build" 'repos/<repo>/**' "con el mapeo concreto de applies_to a globs"
+
 t_done

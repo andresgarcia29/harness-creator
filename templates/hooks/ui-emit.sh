@@ -113,10 +113,28 @@ case "$KIND" in
                  | tostring | .[0:200])}' 2>/dev/null | redact)"
     ;;
   subagent-start|subagent-stop|stop|session-start|prompt)
-    line="$(printf '%s' "$payload" | jq -c --arg ts "$ts" --arg k "$KIND" --arg task "${task:-}" --arg host "$HOST_ID" '
+    # CONTEXTO POR TURNO (issue #206). El harness medía el ARRANQUE, y el
+    # arranque es el 15-24% del input: lo que pesa es lo que arrastra cada
+    # turno (mediana 266k-348k, máximo 579k en tres sesiones reales), y de eso
+    # no había señal en vivo en ningún lado; ccusage es post-mortem. El último
+    # `usage` del transcript es justo lo que el próximo turno va a cargar.
+    # Fail-open en todo: sin transcript, sin jq de más, sin campo raro, ctx 0 y
+    # el evento sale igual. Un bus que se calla por no poder contar es peor que
+    # un número ausente.
+    ctx=0
+    tp="$(printf '%s' "$payload" | jq -r '.transcript_path // ""' 2>/dev/null)"
+    if [ -n "$tp" ] && [ -f "$tp" ]; then
+      ctx="$(tail -n 60 "$tp" 2>/dev/null | jq -rs '
+        [ .[]? | .message?.usage? | select(. != null)
+          | ((.input_tokens // 0) + (.cache_read_input_tokens // 0)
+             + (.cache_creation_input_tokens // 0)) ] | last // 0' 2>/dev/null)"
+      case "$ctx" in ''|*[!0-9]*) ctx=0 ;; esac
+    fi
+    line="$(printf '%s' "$payload" | jq -c --arg ts "$ts" --arg k "$KIND" --arg task "${task:-}" --arg host "$HOST_ID" --argjson ctx "$ctx" '
       {ts: $ts, kind: $k, task: $task, host: $host,
        session: (.session_id // ""),
        agent: (.agent_id // "main"),
+       ctx: $ctx,
        summary: ((.prompt // .reason // "") | tostring | .[0:200])}' 2>/dev/null | redact)"
     ;;
   *) exit 0 ;;

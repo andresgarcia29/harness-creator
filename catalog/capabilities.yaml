@@ -49,6 +49,8 @@ capabilities:
     bin: jq
     install: "brew install jq"
     install_kind: auto
+    install_linux: "https://jqlang.github.io/jq/download/"
+    install_linux_kind: manual
     install_alt: "apt-get install -y jq"
     permission_tier: read-only
     profiles: [all]
@@ -61,6 +63,8 @@ capabilities:
     bin: gh
     install: "brew install gh"
     install_kind: auto
+    install_linux: "https://github.com/cli/cli/blob/trunk/docs/install_linux.md"
+    install_linux_kind: manual
     install_alt: "https://cli.github.com"
     secrets: [{ key: GH_TOKEN, source: "env://GH_TOKEN" }]
     permission_tier: read-write
@@ -75,6 +79,8 @@ capabilities:
     bin: go
     install: "brew install go golangci-lint"
     install_kind: auto
+    install_linux: "https://go.dev/dl/"
+    install_linux_kind: manual
     permission_tier: read-write
     profiles: [implementer, qa]
     detect: "repos con go.mod"
@@ -86,6 +92,8 @@ capabilities:
     bin: npm
     install: "brew install node"
     install_kind: auto
+    install_linux: "https://nodejs.org/en/download/package-manager"
+    install_linux_kind: manual
     install_alt: "brew install oven-sh/bun/bun"
     permission_tier: read-write
     profiles: [implementer, qa]
@@ -98,6 +106,8 @@ capabilities:
     bin: uv
     install: "brew install uv"
     install_kind: auto
+    install_linux: "curl -LsSf https://astral.sh/uv/install.sh | sh"
+    install_linux_kind: auto
     permission_tier: read-write
     profiles: [implementer, qa]
     detect: "repos con pyproject.toml"
@@ -121,6 +131,8 @@ capabilities:
     bin: buf
     install: "brew install bufbuild/buf/buf"
     install_kind: auto
+    install_linux: "go install github.com/bufbuild/buf/cmd/buf@latest"
+    install_linux_kind: auto
     permission_tier: read-only
     profiles: [implementer, arquitecto, reviewer]
     detect: "repos con buf.yaml"
@@ -168,6 +180,8 @@ capabilities:
     bin: argocd
     install: "brew install argocd"
     install_kind: auto
+    install_linux: "https://argo-cd.readthedocs.io/en/stable/cli_installation/"
+    install_linux_kind: manual
     # La DIRECCION va junto al token: un CLI no puede hablar con un servidor que
     # no sabe cual es. Sin esta clave el bootstrap instalaba la herramienta, el
     # doctor la veia presente, y el watcher quedaba ciego por diseno: la cadena
@@ -205,6 +219,8 @@ capabilities:
     bin: terraform
     install: "brew install hashicorp/tap/terraform"
     install_kind: auto
+    install_linux: "https://developer.hashicorp.com/terraform/install"
+    install_linux_kind: manual
     install_alt: "https://developer.hashicorp.com/terraform/install"
     note: "salió de homebrew-core con el cambio a BUSL: 'brew install terraform' aborta pidiendo confiar el tap. El path completo lo auto-tapea; confiar un tap sigue siendo decisión del humano"
     permission_tier: read-only
@@ -218,6 +234,8 @@ capabilities:
     bin: helm
     install: "brew install helm"
     install_kind: auto
+    install_linux: "curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash"
+    install_linux_kind: auto
     install_alt: "https://helm.sh/docs/intro/install/"
     # helm-unittest es un PLUGIN de helm, no un binario suelto: no puede tener
     # su propia fila acá (el bootstrap instala binarios y el doctor los busca
@@ -235,6 +253,8 @@ capabilities:
     bin: vault
     install: "brew install hashicorp/tap/vault"
     install_kind: auto
+    install_linux: "https://developer.hashicorp.com/vault/install"
+    install_linux_kind: manual
     secrets: [{ key: VAULT_TOKEN, source: "file://~/.config/harness/vault-token (chmod 600, fuera del repo)" }]
     permission_tier: read-write
     profiles: [orquestador, deployer]
@@ -248,6 +268,8 @@ capabilities:
     bin: gitleaks
     install: "brew install gitleaks"
     install_kind: auto
+    install_linux: "go install github.com/zricethezav/gitleaks/v8@latest"
+    install_linux_kind: auto
     permission_tier: read-only
     profiles: [all]
     detect: always-recommend
@@ -259,6 +281,8 @@ capabilities:
     bin: semgrep
     install: "brew install semgrep"
     install_kind: auto
+    install_linux: "uv tool install semgrep"
+    install_linux_kind: auto
     install_alt: "uv tool install semgrep"
     permission_tier: read-only
     profiles: [implementer, qa, reviewer]
@@ -311,6 +335,8 @@ capabilities:
     bin: sg
     install: "brew install ast-grep"
     install_kind: auto
+    install_linux: "npm install -g @ast-grep/cli"
+    install_linux_kind: auto
     permission_tier: read-only
     profiles: [implementer, reviewer]
     detect: always-recommend
@@ -404,6 +430,8 @@ capabilities:
     bin: engram
     install: "brew install gentleman-programming/tap/engram"
     install_kind: auto
+    install_linux: "https://github.com/gentleman-programming/engram/releases/latest"
+    install_linux_kind: manual
     permission_tier: read-write
     profiles: [orquestador, arquitecto]   # NUNCA en implementers
     detect: always-recommend
@@ -495,6 +523,8 @@ capabilities:
     bin: bd
     install: "brew install beads"
     install_kind: auto
+    install_linux: "https://github.com/steveyegge/beads/releases/latest"
+    install_linux_kind: manual
     permission_tier: read-write
     profiles: [orquestador, arquitecto, implementer]
     detect: always-recommend
@@ -569,6 +599,8 @@ capabilities:
     bin: k6
     install: "brew install k6"
     install_kind: auto
+    install_linux: "https://grafana.com/docs/k6/latest/set-up/install-k6/"
+    install_linux_kind: manual
     permission_tier: read-only
     profiles: [qa]
     detect: "signal:grpc"        # discover.sh: service en .proto, o dep grpc
@@ -648,6 +680,8 @@ capabilities:
     bin: osv-scanner
     install: "brew install osv-scanner"
     install_kind: auto
+    install_linux: "go install github.com/google/osv-scanner/cmd/osv-scanner@latest"
+    install_linux_kind: auto
     permission_tier: read-only
     profiles: []
     detect: always-recommend
@@ -660,6 +694,8 @@ capabilities:
     bin: trivy
     install: "brew install trivy"
     install_kind: auto
+    install_linux: "https://trivy.dev/latest/getting-started/installation/"
+    install_linux_kind: manual
     permission_tier: read-only
     profiles: []
     detect: always-recommend
@@ -674,6 +710,8 @@ capabilities:
     bin: cosign
     install: "brew install cosign"
     install_kind: auto
+    install_linux: "go install github.com/sigstore/cosign/v2/cmd/cosign@latest"
+    install_linux_kind: auto
     permission_tier: read-write
     profiles: [deployer]
     detect: "repos con Dockerfile + CD"
@@ -698,6 +736,8 @@ capabilities:
     bin: goose
     install: "brew install goose"
     install_kind: auto
+    install_linux: "go install github.com/pressly/goose/v3/cmd/goose@latest"
+    install_linux_kind: auto
     permission_tier: read-write
     profiles: [implementer]
     detect: "signal:migrations"  # discover.sh: repos/*/migrations/*.sql
@@ -722,6 +762,8 @@ capabilities:
     bin: sloth
     install: "brew install slok/tap/sloth"
     install_kind: auto
+    install_linux: "go install github.com/slok/sloth/cmd/sloth@latest"
+    install_linux_kind: auto
     permission_tier: read-only
     profiles: [deployer]
     detect: "signal:prometheus"  # discover.sh: prometheus en yaml/tf
@@ -746,6 +788,8 @@ capabilities:
     bin: lychee
     install: "brew install lychee"
     install_kind: auto
+    install_linux: "cargo install lychee"
+    install_linux_kind: auto
     permission_tier: read-only
     profiles: []
     detect: always-recommend
@@ -758,6 +802,8 @@ capabilities:
     bin: d2
     install: "brew install d2"
     install_kind: auto
+    install_linux: "go install oss.terrastruct.com/d2@latest"
+    install_linux_kind: auto
     permission_tier: read-only
     profiles: [jardinero, arquitecto]
     detect: always-recommend

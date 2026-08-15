@@ -150,7 +150,26 @@ capabilities:
     # herramienta.
     install: "brew install kubectl"
     install_kind: auto
-    install_linux: "curl -fsSLo /usr/local/bin/kubectl https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl && chmod +x /usr/local/bin/kubectl"
+    # ── SE VERIFICA ANTES DE INSTALAR, Y EL FALLO CORTA (#192) ──────────
+    # El comando anterior bajaba el binario y lo hacía ejecutable en /usr/local/bin
+    # SIN comprobar nada, teniendo Kubernetes publicado su `.sha256` en la ruta de
+    # al lado. Es el único `install_linux` de tipo `auto` que descarga un BINARIO
+    # (los demás son de canal, o `manual`, que es una URL que sigue un humano), y
+    # corre en el bootstrap de cada instancia, o sea en el momento de menos
+    # supervisión y escribiendo en un directorio del PATH. El propio instructivo
+    # oficial verifica con `sha256sum --check` antes de instalar.
+    #
+    # La versión se resuelve UNA sola vez, en `v`: el comando anterior llamaba a
+    # `stable.txt` dentro de la URL, y con dos llamadas separadas (binario y
+    # checksum) un rollover de release entre una y otra daría un checksum que no
+    # corresponde al binario, o sea un rojo que parece manipulación y es una
+    # carrera.
+    #
+    # Encadenado con `&&` a propósito: si la verificación falla, el `install`
+    # nunca corre y el comando entero sale != 0, que es lo que `ensure` lee. Un
+    # binario que no coincide con su checksum no se instala. El temporal queda
+    # en pie cuando falla, y eso también es deliberado: es la evidencia.
+    install_linux: 'd="$(mktemp -d)" && v="$(curl -fsSL https://dl.k8s.io/release/stable.txt)" && curl -fsSLo "$d/kubectl" "https://dl.k8s.io/release/$v/bin/linux/amd64/kubectl" && curl -fsSLo "$d/kubectl.sha256" "https://dl.k8s.io/release/$v/bin/linux/amd64/kubectl.sha256" && echo "$(cat "$d/kubectl.sha256")  $d/kubectl" | sha256sum --check && install -m 0755 "$d/kubectl" /usr/local/bin/kubectl && rm -rf "$d"'
     install_linux_kind: auto
     install_alt: "gcloud components install kubectl (GKE) · az aks install-cli (AKS) · el gestor de paquetes de tu distro"
     secrets: [{ key: KUBECONFIG, source: "vault://<project>/harness/kubeconfig" }]

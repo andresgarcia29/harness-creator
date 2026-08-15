@@ -375,25 +375,67 @@ TOKHELP
     if [ -t 0 ]; then
       # el valor NUNCA pasa por el agente: lo tecleas tú directo al archivo
       mkdir -p "$(dirname "$TOKFILE")"
-      printf "pega tu token de Vault, periodic o root (no se muestra): "
-      IFS= read -rs VTOK; echo
-      if [ -n "$VTOK" ]; then
-        printf '%s' "$VTOK" > "$TOKFILE"; chmod 600 "$TOKFILE"
-        if command -v vault >/dev/null 2>&1 && VAULT_ADDR="{{VAULT_ADDR}}" VAULT_TOKEN="$VTOK" vault token lookup >/dev/null 2>&1; then
-          ok "token guardado y VALIDADO"
-        else
-          warn "token guardado pero no pude validarlo (¿permisos/red?) — secrets.sh pull te dirá"
+      # ── SE INSISTE HASTA VALIDAR, PORQUE LA FUENTE YA SE DECLARO ──────
+      # Antes el token se pedía UNA vez y las tres salidas (inválido, vacío,
+      # sin TTY) terminaban igual: un warn y seguir. Después corría
+      # `secrets.sh pull` de todos modos, que escribe el archivo con las claves
+      # que SÍ pudo leer, así que quedaba un .secrets incompleto.
+      # Ese es el peor de los tres desenlaces: un archivo a medias se ve igual
+      # que uno completo, así que el fallo no aparece acá sino mucho después,
+      # cuando un agente en medio de una tarea no encuentra una clave y culpa a
+      # sus policies o rota un token que estaba bien. Caso de campo: 3 claves
+      # materializadas de 18 declaradas, y el bootstrap terminó sin un rojo.
+      # Declarar la fuente es declarar que esta instancia NO funciona sin sus
+      # secretos, así que acá se planta. Se sale con enter vacío, o sea a
+      # propósito y no por accidente.
+      _tok_try=0
+      while :; do
+        _tok_try=$((_tok_try+1))
+        printf "pega tu token de Vault, periodic o root (no se muestra; enter vacío para salir): "
+        IFS= read -rs VTOK; echo
+        if [ -z "$VTOK" ]; then
+          warn "sin token: NO voy a materializar un .secrets a medias."
+          warn "  ↳ ponelo después en $TOKFILE (chmod 600) y re-corré este script."
+          SECRETS_BLOCKED=1; break
         fi
-      else
-        warn "sin token — colócalo después en $TOKFILE (chmod 600)"
-      fi
-      unset VTOK
+        printf '%s' "$VTOK" > "$TOKFILE"; chmod 600 "$TOKFILE"
+        if ! command -v vault >/dev/null 2>&1; then
+          warn "token guardado, pero sin el CLI vault no puedo comprobarlo contra el servidor."
+          warn "  ↳ instalalo (catálogo: vault) y re-corré para validarlo."
+          break
+        fi
+        if VAULT_ADDR="{{VAULT_ADDR}}" VAULT_TOKEN="$VTOK" vault token lookup >/dev/null 2>&1; then
+          ok "token guardado y VALIDADO"; break
+        fi
+        # El mensaje nombra la causa PROBABLE, que es lo que ahorra la vuelta:
+        # el reflejo de quien pega un token y lo ve rechazado es sospechar del
+        # copiado, de la dirección o de un namespace, y perder ahí un rato.
+        warn "ese token no lo acepta {{VAULT_ADDR}} (intento $_tok_try)."
+        warn "  Si lo pegaste entero, no es el formato: el servidor NO lo conoce"
+        warn "  (caducó, lo revocaron, o es de otro cluster). Sacá uno nuevo:"
+        warn "      export VAULT_ADDR={{VAULT_ADDR}}"
+        warn "      vault login -method=<oidc|userpass|github>"
+        warn "      vault token create -period=768h -orphan -field=token"
+      done
+      unset VTOK _tok_try
     else
-      warn "sin TTY: coloca tu token en $TOKFILE (chmod 600) y re-corre"
+      warn "sin TTY: no puedo pedirte el token, y sin token no materializo nada."
+      warn "  ↳ poné tu token en $TOKFILE (chmod 600) y re-corré."
+      SECRETS_BLOCKED=1
     fi
   fi
   if [ -x "$WS/scripts/secrets.sh" ]; then
-    bash "$WS/scripts/secrets.sh" pull || warn "no pude materializar .secrets — revisa el token/red y re-corre scripts/secrets.sh pull"
+    # Fail-closed a propósito, y es la mitad del arreglo: `pull` sin credencial
+    # escribe el archivo igual, con lo que pudo leer. No correrlo deja al humano
+    # SIN .secrets, que es un estado honesto y ruidoso; correrlo lo deja con uno
+    # incompleto, que es silencioso y miente.
+    if [ "${SECRETS_BLOCKED:-0}" -eq 1 ]; then
+      warn "no corro 'secrets.sh pull': sin credencial válida dejaría un .secrets"
+      warn "  incompleto, que se ve igual que uno completo."
+      warn "  ↳ cuando tengas el token: bash scripts/secrets.sh pull"
+    else
+      bash "$WS/scripts/secrets.sh" pull || warn "no pude materializar .secrets: revisá el token o la red y re-corré scripts/secrets.sh pull"
+    fi
   fi
 fi
 

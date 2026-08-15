@@ -557,4 +557,51 @@ stub_harness ""
 out="$(run)"
 assert_not_contains "$out" "generador" "sin binario instalado no hay ruido: no todos lo tienen"
 
+echo
+echo "── --verify encuentra el plugin SIN CLAUDE_PLUGIN_ROOT (#194)"
+# La variable la exporta Claude Code DENTRO de sus comandos. Un humano que corre
+# `bash scripts/harness-version.sh --verify` desde su shell no la tiene, y eso es
+# exactamente lo que el paso 6 de /harness-update le manda hacer. O sea que el
+# chequeo archivo por archivo (el UNICO que caza "el numero quedo bien y el
+# CONTENIDO no") estaba apagado justo en la invocacion prescrita.
+#
+# Lo caro no es el chequeo que no corre: es lo que deja pasar. En una instancia
+# real, .harness-version decia 0.61.8 y .harness-templates traia el digest EXACTO
+# de v0.61.8, y aun asi bootstrap.sh era el template de v0.61.5 instanciado,
+# deploy-watch.sh el de v0.61.4 y secrets.sh anterior a v0.49.0.
+echo "0.60.0" > "$WS/.harness-version"
+echo "$SET_A" > "$WS/.harness-templates"
+sin_root() {  # como lo corre un humano: sin la variable en el entorno
+  ( cd "$WS" && env -u CLAUDE_PLUGIN_ROOT -u HARNESS_PLUGIN_ROOT \
+      HOME="$WS/fakehome" PATH="$WS/bin:$PATH" \
+      bash scripts/harness-version.sh --verify ) 2>&1
+}
+
+# (1) Sin la variable y sin plugin en ninguna ruta conocida: el mensaje tiene que
+#     hablar de la RUTA, no de la frescura. Culpar a la version manda a
+#     actualizar un plugin que puede estar perfectamente al dia.
+mkdir -p "$WS/fakehome"
+out="$(sin_root)"
+assert_contains "$out" "no sé DÓNDE está el plugin" "nombra la causa REAL: no sabe la ruta"
+assert_contains "$out" "CLAUDE_PLUGIN_ROOT=" "y da el comando exacto para destrabarlo"
+assert_not_contains "$out" "sin un plugin en disco al día" \
+  "y NO culpa a la frescura del plugin, que es lo que mandaba a mirar al lugar equivocado"
+
+# (2) Con el plugin en una ruta CONOCIDA: lo encuentra solo y el chequeo CORRE.
+mkdir -p "$WS/fakehome/.claude/plugins/marketplaces"
+cp -R "$WS/plugin" "$WS/fakehome/.claude/plugins/marketplaces/harness"
+out="$(sin_root)"
+assert_contains "$out" "¿y cada archivo?" "el bloque del chequeo por archivo aparece"
+assert_not_contains "$out" "no sé DÓNDE está el plugin" \
+  "ya no se queja de la ruta: la resolvio sola"
+
+# (3) Y la contra-mitad, que es lo que impide que esto sea "encuentra cualquier
+#     cosa": un directorio con el NOMBRE correcto y sin templates adentro NO es
+#     el plugin. Se valida por contenido, no por llamarse como esperamos.
+rm -rf "$WS/fakehome/.claude/plugins/marketplaces/harness"
+mkdir -p "$WS/fakehome/.claude/plugins/marketplaces/harness"
+out="$(sin_root)"
+assert_contains "$out" "no sé DÓNDE está el plugin" \
+  "un directorio vacio con el nombre correcto no cuenta como plugin"
+
 t_done

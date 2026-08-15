@@ -29,6 +29,18 @@
 #             fórmula de brew sin bottle de Linux deja la capacidad en ❌ sin
 #             explicación (issue #24: kargo). Si la entrada lo trae y el
 #             workspace es Linux, el bootstrap usa ESE valor y su kind.
+#             Vale la MISMA regla que `install:`: UN comando, sin `&&`, `|` ni
+#             `$( )`. No es estética. El generador escribe el valor tal cual
+#             detrás de `ensure <bin> ...`, así que una cadena NO llega entera:
+#             el shell parte la línea y solo el primer pedazo queda como
+#             argumento; el resto corre suelto, al margen de ensure. Medido con
+#             el que tenía kubectl: reinstalaba en cada corrida aunque el
+#             binario ya estuviera, y `--check` ("no instala nada") instalaba
+#             (#199/#200). Lo que no cabe en un comando va como receta a
+#             `bs_install <bin>` en templates/scripts/bootstrap.sh.tmpl, que es
+#             shell de verdad, y acá se la NOMBRA. tests/test_catalog.sh
+#             verifica las dos mitades: que el valor no traiga sintaxis de
+#             shell, y que cada `bs_install X` tenga su receta.
 #   permission_tier: read-only | read-write | destructive. La entrevista puede
 #             DEGRADAR el tier (ej. github-mcp a read-only); se registra en answers.
 #   profiles: qué agentes ven esta capacidad (menos tools = contexto más barato).
@@ -92,8 +104,8 @@ capabilities:
     bin: npm
     install: "brew install node"
     install_kind: auto
-    install_linux: "https://nodejs.org/en/download/package-manager"
-    install_linux_kind: manual
+    install_linux: "bs_install npm"
+    install_linux_kind: auto
     install_alt: "brew install oven-sh/bun/bun"
     permission_tier: read-write
     profiles: [implementer, qa]
@@ -106,8 +118,9 @@ capabilities:
     bin: uv
     install: "brew install uv"
     install_kind: auto
-    install_linux: "curl -LsSf https://astral.sh/uv/install.sh | sh"
+    install_linux: "bs_install uv"
     install_linux_kind: auto
+    install_alt: "https://docs.astral.sh/uv/getting-started/installation/"
     permission_tier: read-write
     profiles: [implementer, qa]
     detect: "repos con pyproject.toml"
@@ -151,25 +164,16 @@ capabilities:
     install: "brew install kubectl"
     install_kind: auto
     # ── SE VERIFICA ANTES DE INSTALAR, Y EL FALLO CORTA (#192) ──────────
-    # El comando anterior bajaba el binario y lo hacía ejecutable en /usr/local/bin
-    # SIN comprobar nada, teniendo Kubernetes publicado su `.sha256` en la ruta de
-    # al lado. Es el único `install_linux` de tipo `auto` que descarga un BINARIO
-    # (los demás son de canal, o `manual`, que es una URL que sigue un humano), y
-    # corre en el bootstrap de cada instancia, o sea en el momento de menos
-    # supervisión y escribiendo en un directorio del PATH. El propio instructivo
-    # oficial verifica con `sha256sum --check` antes de instalar.
-    #
-    # La versión se resuelve UNA sola vez, en `v`: el comando anterior llamaba a
-    # `stable.txt` dentro de la URL, y con dos llamadas separadas (binario y
-    # checksum) un rollover de release entre una y otra daría un checksum que no
-    # corresponde al binario, o sea un rojo que parece manipulación y es una
-    # carrera.
-    #
-    # Encadenado con `&&` a propósito: si la verificación falla, el `install`
-    # nunca corre y el comando entero sale != 0, que es lo que `ensure` lee. Un
-    # binario que no coincide con su checksum no se instala. El temporal queda
-    # en pie cuando falla, y eso también es deliberado: es la evidencia.
-    install_linux: 'd="$(mktemp -d)" && v="$(curl -fsSL https://dl.k8s.io/release/stable.txt)" && curl -fsSLo "$d/kubectl" "https://dl.k8s.io/release/$v/bin/linux/amd64/kubectl" && curl -fsSLo "$d/kubectl.sha256" "https://dl.k8s.io/release/$v/bin/linux/amd64/kubectl.sha256" && echo "$(cat "$d/kubectl.sha256")  $d/kubectl" | sha256sum --check && install -m 0755 "$d/kubectl" /usr/local/bin/kubectl && rm -rf "$d"'
+    # El comando bajaba el binario y lo hacía ejecutable SIN comprobar nada,
+    # teniendo Kubernetes publicado su `.sha256` en la ruta de al lado. La
+    # verificación sigue existiendo: hoy vive en `bs_install kubectl`, dentro de
+    # bootstrap.sh, junto con el resto de las recetas de Linux (#199/#200). Ahí
+    # la versión se resuelve UNA sola vez (dos llamadas a `stable.txt` con un
+    # rollover en el medio darían un checksum que no corresponde al binario: un
+    # rojo que parece manipulación y es una carrera), el checksum se compara
+    # antes de instalar, y el destino es un directorio del USUARIO en vez de
+    # /usr/local/bin, que en el host sin brew pide un root que no hay.
+    install_linux: "bs_install kubectl"
     install_linux_kind: auto
     install_alt: "gcloud components install kubectl (GKE) · az aks install-cli (AKS) · el gestor de paquetes de tu distro"
     secrets: [{ key: KUBECONFIG, source: "vault://<project>/harness/kubeconfig" }]
@@ -184,9 +188,10 @@ capabilities:
     bin: gcloud
     install: "brew install --cask gcloud-cli"
     install_kind: auto
-    install_linux: "https://cloud.google.com/sdk/docs/install#linux"
-    install_linux_kind: manual
-    note: "los casks son de macOS y NO existen en Linux ni con brew instalado, así que en Linux esta entrada NO tiene comando ejecutable: el SDK se baja del archivo oficial (o del repo apt de Google, que son varios pasos con pipe y no cabe en install:). Por eso install_linux_kind es manual y no auto"
+    install_linux: "bs_install gcloud"
+    install_linux_kind: auto
+    install_alt: "https://cloud.google.com/sdk/docs/install#linux"
+    note: "los casks son de macOS y NO existen en Linux ni con brew instalado. El SDK se baja del archivo oficial y trae su propio Python, o sea que no es un binario suelto: son varios pasos, y por eso estuvo manual mientras el catálogo solo admitía UN comando. Hoy los pasos viven en `bs_install gcloud` (bootstrap.sh) y el catálogo lo nombra"
     secrets: [{ key: CLOUDSDK_AUTH_ACCESS_TOKEN, source: "vault://gcp/impersonated-account" }]
     permission_tier: read-only
     profiles: [deployer, orquestador]
@@ -199,8 +204,9 @@ capabilities:
     bin: argocd
     install: "brew install argocd"
     install_kind: auto
-    install_linux: "https://argo-cd.readthedocs.io/en/stable/cli_installation/"
-    install_linux_kind: manual
+    install_linux: "bs_install argocd"
+    install_linux_kind: auto
+    install_alt: "https://argo-cd.readthedocs.io/en/stable/cli_installation/"
     # La DIRECCION va junto al token: un CLI no puede hablar con un servidor que
     # no sabe cual es. Sin esta clave el bootstrap instalaba la herramienta, el
     # doctor la veia presente, y el watcher quedaba ciego por diseno: la cadena
@@ -238,8 +244,8 @@ capabilities:
     bin: terraform
     install: "brew install hashicorp/tap/terraform"
     install_kind: auto
-    install_linux: "https://developer.hashicorp.com/terraform/install"
-    install_linux_kind: manual
+    install_linux: "bs_install terraform"
+    install_linux_kind: auto
     install_alt: "https://developer.hashicorp.com/terraform/install"
     note: "salió de homebrew-core con el cambio a BUSL: 'brew install terraform' aborta pidiendo confiar el tap. El path completo lo auto-tapea; confiar un tap sigue siendo decisión del humano"
     permission_tier: read-only
@@ -253,7 +259,7 @@ capabilities:
     bin: helm
     install: "brew install helm"
     install_kind: auto
-    install_linux: "curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash"
+    install_linux: "bs_install helm"
     install_linux_kind: auto
     install_alt: "https://helm.sh/docs/intro/install/"
     # helm-unittest es un PLUGIN de helm, no un binario suelto: no puede tener
@@ -272,8 +278,9 @@ capabilities:
     bin: vault
     install: "brew install hashicorp/tap/vault"
     install_kind: auto
-    install_linux: "https://developer.hashicorp.com/vault/install"
-    install_linux_kind: manual
+    install_linux: "bs_install vault"
+    install_linux_kind: auto
+    install_alt: "https://developer.hashicorp.com/vault/install"
     secrets: [{ key: VAULT_TOKEN, source: "file://~/.config/harness/vault-token (chmod 600, fuera del repo)" }]
     permission_tier: read-write
     profiles: [orquestador, deployer]
@@ -542,8 +549,9 @@ capabilities:
     bin: bd
     install: "brew install beads"
     install_kind: auto
-    install_linux: "https://github.com/steveyegge/beads/releases/latest"
-    install_linux_kind: manual
+    install_linux: "bs_install bd"
+    install_linux_kind: auto
+    install_alt: "https://github.com/steveyegge/beads/releases/latest"
     permission_tier: read-write
     profiles: [orquestador, arquitecto, implementer]
     detect: always-recommend

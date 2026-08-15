@@ -906,7 +906,7 @@ Y cumple la regla de la casa: si no puede consultar la versión de upstream (sin
 
 Un número de versión lo escribe quien genera, y por lo tanto puede mentir sin proponérselo. Pasó en la forma más cara posible: un generador escribió `.harness-version` con la versión **nueva** habiendo generado desde templates **viejos**. Reportó "1 actualizado, 24 conflictos" y ninguno de esos 24 archivos traía los arreglos que el número prometía. Nada en la salida lo decía, así que la única forma de enterarse era resolver los 24 diffs a mano y notar que faltaban.
 
-Por eso el repo publica **`templates/MANIFEST.sha256`**: el sha256 de cada uno de los 114 archivos que terminan dentro de una instancia, más un `digest:` que identifica al set completo. Y todo generador **debe** escribir ese digest en `.harness-templates` al generar. (Ese 114 también lo verifica la suite contra el manifiesto real: ver el final de esta sección.)
+Por eso el repo publica **`templates/MANIFEST.sha256`**: el sha256 de cada uno de los 115 archivos que terminan dentro de una instancia, más un `digest:` que identifica al set completo. Y todo generador **debe** escribir ese digest en `.harness-templates` al generar. (Ese 115 también lo verifica la suite contra el manifiesto real: ver el final de esta sección.)
 
 Con eso, `make version` compara **contenido**, no solo números:
 
@@ -978,7 +978,7 @@ templates/         todo lo que se genera:
 
 La suite prueba **el código real de los templates**, no copias ni mocks del sistema bajo prueba, y cada test crea su workspace temporal y lo borra: nada toca tu workspace ni la red. El reloj es de la corrida completa medida en un laptop (9 m 53 s en macOS): crece con la suite, así que tómalo como orden de magnitud y no como promesa.
 
-La tabla de abajo no los lista todos (son 70 archivos): están los que explican mejor qué se protege y por qué. El número lo verifica la propia suite (`test_docs.sh` cuenta los archivos y lo compara con esta línea), porque una cuenta escrita a mano en prosa se queda atrás en tres PRs y nadie se entera.
+La tabla de abajo no los lista todos (son 71 archivos): están los que explican mejor qué se protege y por qué. El número lo verifica la propia suite (`test_docs.sh` cuenta los archivos y lo compara con esta línea), porque una cuenta escrita a mano en prosa se queda atrás en tres PRs y nadie se entera.
 
 | Test | Qué protege |
 |---|---|

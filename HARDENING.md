@@ -929,3 +929,41 @@ ese script y hace falta el rastro para encontrarla.
   Le pasa a todo host acotado: CI, un contenedor, una VPS sin los SDK de
   cliente, que es justo donde el repo de la instancia se queda sin camino a main
   (el hueco que `instance-ship.sh` existe para cerrar, #37).
+
+## Cerrado el 2026-08-14 (issue #190: el catalogo asumia que brew corre en Linux)
+
+- [x] **`install_linux` cubria 3 de 60 capacidades, e `install_alt` 8.** El
+  catalogo se apoyaba en una premisa escrita en la propia tabla de generacion:
+  "Homebrew SI corre en Linux, asi que las formulas normales sobreviven al
+  cruce". Los #184, #186 y #188 la derribaron: en un host Linux acotado brew no
+  esta, y como ROOT no puede estar (su instalador aborta con "Don't run this as
+  root!" y no admite override, que es decision de upstream). Con la premisa
+  caida, cada `install: brew ...` sin `install_linux` es una capacidad que esa
+  maquina no puede instalar, y el catalogo no lo decia.
+  Medido sobre una instancia real: de las 16 CLIs que hacian falta, 8 no tenian
+  NINGUN dato de Linux y hubo que resolver a mano su release, su artefacto y su
+  archivo de checksums; las otras 8 salieron bien solo porque su install ya era
+  portable (npm/uv/go), no porque el catalogo lo declarara. O sea que comandos
+  que existen, son estables y publica el fabricante se reconstruian desde cero
+  en cada instalacion.
+  Ahora las 23 que faltaban declaran su camino: `install_linux` pasa de 3 a 26.
+- [x] **El criterio de que es `auto` y que es `manual`, porque no es cosmetico.**
+  `auto` solo donde hay UN comando no interactivo de un canal que el catalogo YA
+  usa y cuyo paquete se verifico en vivo (go install, npm, uv, cargo, y los
+  instaladores oficiales de helm y uv). Es el patron que el propio reporte midio
+  funcionando: las 8 CLIs que salieron bien eran las de install ecosistema-nativo.
+  El resto queda `manual` con la URL oficial del fabricante, que hace que
+  `require` compruebe presencia y NOMBRE de donde sacarlo. Dos razones:
+  `install_linux` es UN campo para todo Linux, asi que un `apt-get` romperia en
+  Fedora; y un comando de descarga que no pude ejercitar es peor que un enlace
+  correcto, porque falla en la maquina de otro y con un error que no es el suyo.
+- [x] **Y el ratchet, que es lo que lo convierte en un arreglo.** `test_catalog`
+  exige que toda capacidad con `install: brew` declare `install_linux`. Sin eso,
+  la proxima capacidad que se agregue reabre el hueco y se descubre igual que
+  esta vez: en una maquina, a mano, resolviendo releases uno por uno.
+- Pendiente declarado, que NO se toco acá: el `install_linux` de kubectl (el que
+  ya existia) baja un binario con curl y lo hace ejecutable SIN verificar el
+  checksum del fabricante, teniendo kubernetes publicado su `.sha256`. Es la
+  misma clase de agujero de cadena de suministro para gcloud y kargo. Cambiarlo
+  a ciegas seria tocar un comando que hoy funciona sin poder ejercitarlo en
+  Linux, asi que va como issue aparte y no colado acá.

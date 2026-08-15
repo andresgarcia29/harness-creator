@@ -124,6 +124,36 @@ $(awk '
 EOF
 assert_eq 0 "$linux_bad" "todo install_linux declara su install_linux_kind"
 
+# ── EL RATCHET: una capacidad que instala con brew DEBE tener camino en Linux ──
+# POR QUE EXISTE (#190): el catalogo asumia que "brew corre en Linux, asi que
+# las formulas normales sobreviven al cruce". Los #184/#186/#188 derribaron esa
+# premisa: en un host Linux acotado brew no esta, y como root NO PUEDE estar (su
+# instalador aborta y no admite override). Con la premisa caida, cada
+# `install: brew ...` sin `install_linux` es una capacidad que ESA maquina no
+# puede instalar, y el catalogo no lo dice.
+#
+# Medido sobre una instancia real: de las 16 CLIs que hacian falta, 8 no tenian
+# NINGUN dato de Linux; las otras 8 salieron bien solo porque su install ya era
+# portable (npm/uv/go), no porque el catalogo lo declarara. O sea que cada
+# instalacion reconstruia a mano comandos que existen, son estables y publica el
+# fabricante.
+#
+# Sin este ratchet la proxima capacidad que se agregue con brew reabre el hueco,
+# y se descubre igual que esta vez: en una maquina, a mano, con el humano
+# resolviendo releases uno por uno. Con el ratchet, se descubre acá.
+sin_linux="$(awk '
+  /^  - name:/ { if (name != "" && brew && !li) print "  · " name; name=$3; brew=0; li=0 }
+  /^    install:.*brew/ { brew=1 }
+  /^    install_linux:/ { li=1 }
+  END { if (name != "" && brew && !li) print "  · " name }
+' "$CAT")"
+if [ -z "$sin_linux" ]; then
+  pass "toda capacidad que instala con brew declara su camino en Linux"
+else
+  fail "capacidades con 'install: brew' y SIN install_linux (en un host sin brew no hay forma de instalarlas, y el catalogo no lo dice):
+$sin_linux"
+fi
+
 echo "── el bootstrap generado con TODO el catálogo parsea (bash -n)"
 
 # instancia el template exactamente como el generador: una línea por capacidad

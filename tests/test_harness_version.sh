@@ -569,7 +569,12 @@ echo "── --verify encuentra el plugin SIN CLAUDE_PLUGIN_ROOT (#194)"
 # real, .harness-version decia 0.61.8 y .harness-templates traia el digest EXACTO
 # de v0.61.8, y aun asi bootstrap.sh era el template de v0.61.5 instanciado,
 # deploy-watch.sh el de v0.61.4 y secrets.sh anterior a v0.49.0.
-echo "0.60.0" > "$WS/.harness-version"
+# El bloque se deja AUTOCONTENIDO: los dos ejes (numero y digest) tienen que
+# coincidir para que la comparacion archivo por archivo llegue a correr, y
+# heredar el estado del test anterior hacia que midiera otra cosa.
+stub_gh "0.61.2" "$SET_A"
+stub_plugin "0.61.2" "$SET_A"
+echo "0.61.2" > "$WS/.harness-version"
 echo "$SET_A" > "$WS/.harness-templates"
 sin_root() {  # como lo corre un humano: sin la variable en el entorno
   ( cd "$WS" && env -u CLAUDE_PLUGIN_ROOT -u HARNESS_PLUGIN_ROOT \
@@ -591,7 +596,11 @@ assert_not_contains "$out" "sin un plugin en disco al día" \
 mkdir -p "$WS/fakehome/.claude/plugins/marketplaces"
 cp -R "$WS/plugin" "$WS/fakehome/.claude/plugins/marketplaces/harness"
 out="$(sin_root)"
-assert_contains "$out" "¿y cada archivo?" "el bloque del chequeo por archivo aparece"
+# OJO: `── ¿y cada archivo? ──` se imprime SIEMPRE, antes del if, asi que
+# asertarlo seria una asercion VACUA (pasa pase lo que pase; lo aprendi
+# mutando). La señal de que el chequeo CORRIO de verdad es el cierre, que solo
+# sale cuando la comparacion archivo por archivo se hizo y dio bien.
+assert_contains "$out" "archivo por archivo" "el chequeo por archivo CORRIO"
 assert_not_contains "$out" "no sé DÓNDE está el plugin" \
   "ya no se queja de la ruta: la resolvio sola"
 
@@ -603,5 +612,40 @@ mkdir -p "$WS/fakehome/.claude/plugins/marketplaces/harness"
 out="$(sin_root)"
 assert_contains "$out" "no sé DÓNDE está el plugin" \
   "un directorio vacio con el nombre correcto no cuenta como plugin"
+
+# (4) EL LAYOUT REAL (#196): el cache de Claude Code es VERSIONADO, o sea
+#     cache/<marketplace>/<plugin>/<version>/. La primera lista de candidatas lo
+#     erro por UN NIVEL y en una maquina con el plugin presente daba las 6
+#     negativas. Comprobado en campo: cache/claude-plugins-official/gopls-lsp/1.0.0,
+#     cache/engram/engram/0.1.1.
+rm -rf "$WS/fakehome/.claude"
+mkdir -p "$WS/fakehome/.claude/plugins/cache/harness/harness-creator"
+cp -R "$WS/plugin" "$WS/fakehome/.claude/plugins/cache/harness/harness-creator/0.61.2"
+out="$(sin_root)"
+assert_contains "$out" "archivo por archivo" "encuentra el plugin en el cache VERSIONADO y compara"
+assert_not_contains "$out" "no sé DÓNDE está el plugin" "y no se queja de la ruta"
+
+# Con VARIAS versiones cacheadas gana la MAYOR, que es la que Claude Code usa.
+# Tomar la primera del glob dejaria la eleccion en manos del orden de readdir.
+# La vieja se deja INVALIDA (sin su MANIFEST): si el glob tomara la primera en
+# vez de la mayor, es_plugin la rechaza, no queda candidata y el script dice que
+# no sabe la ruta. Asi la asercion DISCRIMINA de verdad.
+#
+# Y los NUMEROS estan elegidos: con 0.61.15 y 0.61.9 el orden lexicografico y el
+# de version COINCIDEN por casualidad ("0.61.15" < "0.61.9" como texto), asi que
+# un `head -1` acertaba sin querer y la mutacion no mordia. Con 0.61.1 y 0.61.2
+# discrepan: lexicograficamente gana la VIEJA, y solo `sort -V` elige bien.
+mkdir -p "$WS/fakehome/.claude/plugins/cache/harness/harness-creator/0.61.1/templates"
+out="$(sin_root)"
+assert_contains "$out" "archivo por archivo" \
+  "con varias versiones cacheadas gana la MAYOR (0.61.2 sobre 0.61.1), no la primera del glob"
+
+# (5) Y el clon del workspace vive bajo repos/, que es donde lo pone el manifest.
+rm -rf "$WS/fakehome/.claude"
+mkdir -p "$WS/repos"
+cp -R "$WS/plugin" "$WS/repos/harness-creator"
+out="$(sin_root)"
+assert_contains "$out" "archivo por archivo" "encuentra el clon del workspace en repos/, no en la raiz"
+rm -rf "$WS/repos/harness-creator"
 
 t_done

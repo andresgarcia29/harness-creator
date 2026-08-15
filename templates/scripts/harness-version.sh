@@ -66,19 +66,42 @@ es_plugin() {  # es_plugin <dir> → 0 si ahí vive un plugin del harness
 if ! es_plugin "$PLUGIN_ROOT"; then
   PLUGIN_ROOT=""
   # El marketplace se llama `harness` (.claude-plugin/marketplace.json) y Claude
-  # Code lo deja bajo marketplaces/ y cache/. El clon del workspace va último:
-  # es el menos canónico, pero en una instancia que se instaló desde el clon es
-  # el único que hay.
+  # Code lo deja bajo marketplaces/ y cache/.
+  #
+  # ── EL CACHE ES VERSIONADO, Y LA PRIMERA LISTA LO ERRÓ POR UN NIVEL (#196) ──
+  # El layout real es `cache/<marketplace>/<plugin>/<version>/`, o sea un nivel
+  # MÁS ABAJO de donde miraba la lista original. Comprobado en una máquina con
+  # cuatro marketplaces instalados: `cache/claude-plugins-official/gopls-lsp/1.0.0`,
+  # `cache/engram/engram/0.1.1`. Con varias versiones cacheadas se toma la MAYOR,
+  # que es la que Claude Code usa; tomar la primera del glob dejaría la elección
+  # en manos del orden de readdir, que es como ya nos equivocamos en gowork.sh.
+  _cv="$(ls -d "$HOME"/.claude/plugins/cache/harness/harness-creator/*/ 2>/dev/null \
+         | sed 's|/*$||' | sort -V | tail -1)"
+  #
+  # ── Y EL CLON DEL WORKSPACE VIVE EN repos/, NO EN LA RAÍZ (#196) ────────
+  # Es donde lo pone el manifest, que es la fuente de verdad de los clones. La
+  # lista original probaba `$WS/harness-creator`, que no es donde el propio
+  # harness los deja.
+  #
+  # ORDEN, y no es arbitrario: primero lo INSTALADO (marketplaces y cache), que
+  # es de donde `/harness-update` copia de verdad (usa `${CLAUDE_PLUGIN_ROOT}`,
+  # ver commands/harness-update.md). El clon de `repos/` va último porque es un
+  # clon en un commit CUALQUIERA: puede estar en una rama de tarea o veinte
+  # commits atrás, y compararse contra él daría drift donde no lo hay. Lo que lo
+  # vuelve seguro incluirlo es la guarda de versión de abajo, que se niega a
+  # comparar si el plugin en disco no está en el tag de upstream.
   for _c in \
     "$HOME/.claude/plugins/marketplaces/harness" \
-    "$HOME/.claude/plugins/cache/harness" \
     "$HOME/.claude/plugins/marketplaces/harness/harness-creator" \
+    "$_cv" \
     "$HOME/.claude/plugins/cache/harness/harness-creator" \
+    "$HOME/.claude/plugins/cache/harness" \
+    "$WS/repos/harness-creator" \
     "$WS/harness-creator" \
     "$WS/../harness-creator"; do
     if es_plugin "$_c"; then PLUGIN_ROOT="$(cd "$_c" && pwd)"; break; fi
   done
-  unset _c
+  unset _c _cv
 fi
 # El generador del tap. Se nombra por variable y no a pelo porque el propio
 # playbook avisa de "otro binario que se llame igual": apuntarlo es la forma de

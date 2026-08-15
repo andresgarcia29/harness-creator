@@ -1041,3 +1041,41 @@ ese script y hace falta el rastro para encontrarla.
   el resolvedor seguia funcionando) y dio "no muerde". Rehecha anulando el
   bloque entero, muerde. Una mutacion que no falla puede significar que el test
   es debil o que la mutacion no mutó nada; distinguirlo es parte del trabajo.
+
+## Cerrado el 2026-08-15 (issue #196: el fix del #194 erro el layout por un nivel)
+
+- [x] **La lista de candidatas del #194 no cubria el layout estandar.** Reportado
+  sobre v0.61.16 recien aplicada, con el plugin PRESENTE en disco en dos sitios y
+  las 6 candidatas dando las 6 negativas. Dos huecos:
+  · el cache de Claude Code es **VERSIONADO**:
+    `cache/<marketplace>/<plugin>/<version>/`, o sea un nivel MAS ABAJO de donde
+    miraba la lista. Comprobado en una maquina con cuatro marketplaces:
+    `cache/claude-plugins-official/gopls-lsp/1.0.0`, `cache/engram/engram/0.1.1`.
+    Con varias versiones cacheadas se toma la MAYOR (`sort -V`), no la primera
+    del glob: dejar la eleccion al orden de readdir es como ya nos equivocamos
+    en gowork.sh.
+  · el clon del workspace vive bajo **`repos/`**, que es donde lo pone el
+    manifest. La lista probaba `$WS/harness-creator`, que no es donde el propio
+    harness deja los clones.
+- Un dato del reporte que NO es exacto, y cambia la precedencia: dice que
+  `repos/harness-creator` "es la que usa el propio comando /harness-update para
+  leer los templates". No: `commands/harness-update.md` usa
+  `${CLAUDE_PLUGIN_ROOT}` en las siete referencias. Por eso lo INSTALADO
+  (marketplaces y cache) va primero y el clon de `repos/` va ULTIMO: es un clon
+  en un commit cualquiera, puede estar en una rama de tarea o veinte commits
+  atras, y compararse contra el daria drift donde no lo hay. Lo que lo vuelve
+  seguro incluirlo es la guarda de version, que se niega a comparar si el plugin
+  en disco no esta en el tag de upstream.
+- **Dos defectos de MIS PROPIOS TESTS, encontrados mutando, y valen mas que el
+  arreglo**:
+  · `assert_contains "$out" "¿y cada archivo?"` era una asercion VACUA: ese
+    encabezado se imprime SIEMPRE, antes del `if`, asi que pasaba pase lo que
+    pase. Es exactamente el verde vacuo que `gate_test_muerde` existe para cazar,
+    cometido en la suite del propio harness. La señal honesta es el cierre
+    "archivo por archivo", que solo sale cuando la comparacion CORRIO.
+  · el caso de "gana la version MAYOR" no discriminaba porque los numbers
+    elegidos (0.61.15 y 0.61.9) hacen que el orden lexicografico y el de version
+    COINCIDAN por casualidad ("0.61.15" < "0.61.9" como texto), asi que un
+    `head -1` acertaba sin querer. Con 0.61.1 y 0.61.2 discrepan y la mutacion
+    muerde. Una mutacion que no falla puede ser un test debil, una mutacion que
+    no muto, o un fixture donde el error no se manifiesta: los tres pasaron hoy.

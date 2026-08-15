@@ -970,3 +970,40 @@ ese script y hace falta el rastro para encontrarla.
   kargo tenian el mismo agujero: NO lo tienen. Los dos son `manual`, o sea una
   URL que el humano sigue, y la verificacion la trae la documentacion del
   fabricante. El unico comando que descarga y ejecuta es el de kubectl.)
+
+## Cerrado el 2026-08-15 (issue #192: el unico install_linux que baja un binario, sin verificarlo)
+
+- [x] **`kubectl` se bajaba y se hacia ejecutable en `/usr/local/bin` sin
+  comprobar nada**, teniendo Kubernetes publicado su `.sha256` en la ruta de al
+  lado y verificandolo su propio instructivo oficial. Era el UNICO
+  `install_linux` de tipo `auto` que descarga un BINARIO (los demas son de canal
+  (go install, npm, uv, cargo) o `manual`, que es una URL que sigue un humano), y
+  corre en el bootstrap de cada instancia: el momento de menos supervision,
+  escribiendo en un directorio del PATH. El repo ya es explicito sobre cadena de
+  suministro en otro lado (las actions van pineadas por SHA de 40, con test que
+  lo fija); este era el mismo riesgo por otra puerta.
+- [x] **La version se resuelve UNA sola vez.** El comando anterior llamaba a
+  `stable.txt` dentro de la URL, y con dos llamadas separadas (binario y
+  checksum) un rollover de release entre una y otra daria un checksum que no
+  corresponde al binario: un rojo que parece manipulacion y es una carrera.
+- [x] **El fallo CORTA.** Encadenado con `&&`: si la verificacion falla, el
+  `install` nunca corre y el comando sale != 0, que es lo que `ensure` lee.
+- **Como se verifico, que es la parte que vale**: el test saca el comando
+  VERBATIM del catalogo y lo EJECUTA con las herramientas stubbeadas (curl sirve
+  de un directorio local, install redirige la escritura, sha256sum se emula).
+  Dos casos: binario intacto (instala, exit 0) y binario MANIPULADO con el
+  checksum sin tocar, que es lo que produce un mirror comprometido o un MITM
+  (corta con exit 1 y no instala). Un grep del texto habria probado que la
+  palabra "sha256" esta escrita; esto prueba que el binario malo no entra al
+  PATH. Medido contra el comando anterior sobre un servidor local: instalaba el
+  binario manipulado y salia 0.
+- Dos cosas que apareceron al escribir el test y que valen por si solas:
+  · `sha256sum --check` es de GNU coreutils. El `sha256sum` de macOS es BSD y NO
+    conoce `--check`, asi que el stub se instala SIEMPRE: sin eso el test medía
+    la ausencia del flag en el host y no la conducta del comando. En Linux, que
+    es el unico sitio donde `install_linux` corre, el real es el de GNU.
+  · el `curl` de palo se NIEGA a escribir fuera del arbol del test. El comando
+    anterior bajaba DIRECTO a `/usr/local/bin` sin pasar por `install`, asi que
+    sin esa guarda una regresion del catalogo convertia a la suite en algo que
+    pisa la maquina de quien la corre. Comprobado: con la mutacion puesta, el
+    guard corta y el kubectl real del host queda intacto.

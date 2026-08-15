@@ -1007,3 +1007,37 @@ ese script y hace falta el rastro para encontrarla.
     sin esa guarda una regresion del catalogo convertia a la suite en algo que
     pisa la maquina de quien la corre. Comprobado: con la mutacion puesta, el
     guard corta y el kubectl real del host queda intacto.
+
+## Cerrado el 2026-08-15 (issue #194: el chequeo mas importante estaba apagado en la invocacion prescrita)
+
+- [x] **`harness-version.sh --verify` no corria el chequeo archivo por archivo
+  sin `CLAUDE_PLUGIN_ROOT`.** Esa variable la exporta Claude Code DENTRO de sus
+  comandos; un humano que corre `bash scripts/harness-version.sh --verify` desde
+  su shell no la tiene, y eso es EXACTAMENTE lo que el paso 6 de
+  `/harness-update` le manda hacer. O sea que el chequeo por archivo, el unico
+  que caza "el numero quedo bien y el CONTENIDO no", estaba apagado justo en la
+  invocacion que el playbook prescribe.
+  Lo caro no es el chequeo que no corre: es lo que deja pasar. Medido en una
+  instancia real: `.harness-version` decia 0.61.8 y `.harness-templates` traia el
+  digest EXACTO de v0.61.8, y aun asi `bootstrap.sh` era el template de v0.61.5
+  instanciado, `deploy-watch.sh` el de v0.61.4 y `secrets.sh` anterior a
+  v0.49.0. Los tres son `.tmpl`, o sea los unicos que el fallback manual del
+  update INSTANCIA en vez de copiar, asi que se saltearon update tras update
+  mientras la instancia se reportaba al dia por los dos ejes que si miraba.
+  Ahora la ruta se RESUELVE: las rutas conocidas de instalacion
+  (`~/.claude/plugins/{marketplaces,cache}/harness`) y el clon del workspace. Y
+  cada candidata se valida por su CONTENIDO (su `templates/MANIFEST.sha256`), no
+  por llamarse como esperamos: un directorio con el nombre correcto y sin
+  templates adentro no es el plugin, y creerle seria el mismo silencio con otra
+  cara.
+- [x] **Y el aviso culpaba al plugin de un problema que no era suyo.** El bloque
+  decia "sin un plugin en disco al dia" para DOS causas distintas: no saber
+  DONDE esta el plugin, y que el plugin este VIEJO. Solo la segunda habla de
+  frescura, asi que a quien le faltaba la ruta se le mandaba a actualizar un
+  plugin que ya estaba al dia. Cada causa tiene ahora su mensaje y su
+  remediacion (regla 5).
+- Nota de metodo: la primera mutacion que corri para probar el resolvedor estaba
+  MAL HECHA (agregaba una candidata vacia y dejaba el resto de la lista, asi que
+  el resolvedor seguia funcionando) y dio "no muerde". Rehecha anulando el
+  bloque entero, muerde. Una mutacion que no falla puede significar que el test
+  es debil o que la mutacion no mutó nada; distinguirlo es parte del trabajo.

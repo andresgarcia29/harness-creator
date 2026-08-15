@@ -39,6 +39,47 @@ UPSTREAM_REPO="${HARNESS_UPSTREAM_REPO:-andresgarcia29/harness-creator}"
 # El plugin EN DISCO: la fuente real de la que un update copia. Claude Code lo
 # exporta como CLAUDE_PLUGIN_ROOT dentro de los comandos.
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${HARNESS_PLUGIN_ROOT:-}}"
+
+# ── LA RUTA SE RESUELVE, NO SE ESPERA QUE ALGUIEN LA EXPORTE (#194) ────
+# `CLAUDE_PLUGIN_ROOT` lo exporta Claude Code DENTRO de sus comandos. Un humano
+# que corre `bash scripts/harness-version.sh --verify` desde su shell no la
+# tiene, y eso es exactamente lo que el paso 6 de /harness-update le manda
+# hacer. Consecuencia medida: el chequeo archivo por archivo (el ÚNICO que caza
+# "el número quedó bien y el CONTENIDO no") estaba apagado justo en la
+# invocación que el playbook prescribe.
+#
+# Lo caro no es el chequeo que no corre: es lo que deja pasar. En una instancia
+# real, `.harness-version` decía 0.61.8 y `.harness-templates` traía el digest
+# EXACTO de v0.61.8, y sin embargo bootstrap.sh era el template de v0.61.5
+# instanciado, deploy-watch.sh el de v0.61.4 y secrets.sh anterior a v0.49.0.
+# Los tres son `.tmpl`, o sea los únicos que el fallback manual del update
+# INSTANCIA en vez de copiar, así que se saltearon update tras update mientras
+# la instancia se reportaba al día por los dos ejes que sí miraba.
+#
+# Se prueban las rutas conocidas, y cada candidata se valida por su CONTENIDO
+# (su `templates/MANIFEST.sha256`), no por llamarse como esperamos: un
+# directorio con el nombre correcto y sin templates adentro no es el plugin, y
+# creerle sería el mismo silencio con otra cara.
+es_plugin() {  # es_plugin <dir> → 0 si ahí vive un plugin del harness
+  [ -n "${1:-}" ] && [ -f "$1/templates/MANIFEST.sha256" ] && [ -d "$1/templates" ]
+}
+if ! es_plugin "$PLUGIN_ROOT"; then
+  PLUGIN_ROOT=""
+  # El marketplace se llama `harness` (.claude-plugin/marketplace.json) y Claude
+  # Code lo deja bajo marketplaces/ y cache/. El clon del workspace va último:
+  # es el menos canónico, pero en una instancia que se instaló desde el clon es
+  # el único que hay.
+  for _c in \
+    "$HOME/.claude/plugins/marketplaces/harness" \
+    "$HOME/.claude/plugins/cache/harness" \
+    "$HOME/.claude/plugins/marketplaces/harness/harness-creator" \
+    "$HOME/.claude/plugins/cache/harness/harness-creator" \
+    "$WS/harness-creator" \
+    "$WS/../harness-creator"; do
+    if es_plugin "$_c"; then PLUGIN_ROOT="$(cd "$_c" && pwd)"; break; fi
+  done
+  unset _c
+fi
 # El generador del tap. Se nombra por variable y no a pelo porque el propio
 # playbook avisa de "otro binario que se llame igual": apuntarlo es la forma de
 # comprobar EL que se va a usar, y no el primero que aparezca en el PATH.
@@ -590,11 +631,28 @@ if [ "$MODE" = "verify" ]; then
   # que la instancia está mal cuando la desactualizada es la referencia.
   echo
   echo "── ¿y cada archivo? ──"
-  if [ -n "$PLUGIN_ROOT" ] && [ "${disk_ver:-}" = "$up_ver" ]; then
-    verificar_archivos || { [ "$?" -eq 1 ] && vrc=1; }
-  else
-    echo "⚠️  sin un plugin en disco al día no hay contra qué comparar los archivos."
+  # ── DOS CAUSAS DISTINTAS NO PUEDEN COMPARTIR UN MENSAJE (#194) ──────
+  # Este bloque decía "sin un plugin en disco al día" para las DOS: no saber
+  # DÓNDE está el plugin, y que el plugin esté VIEJO. Solo la segunda habla de
+  # frescura, así que a quien le faltaba la ruta se le decía que actualizara un
+  # plugin que ya estaba al día, y el chequeo quedaba apagado en silencio.
+  # Cada causa con su mensaje y su remediación, que es la regla 5 de este repo.
+  if [ -z "$PLUGIN_ROOT" ]; then
+    echo "⚠️  no sé DÓNDE está el plugin en disco, así que no puedo comparar los"
+    echo "   archivos. Esto NO dice nada de su versión: probé las rutas conocidas"
+    echo "   (~/.claude/plugins/{marketplaces,cache}/harness y el clon del"
+    echo "   workspace) y en ninguna encontré un templates/MANIFEST.sha256."
+    echo "   ↳ remediación: pasale la ruta y vuelve a correr:"
+    echo "     CLAUDE_PLUGIN_ROOT=<ruta-del-plugin> bash scripts/harness-version.sh --verify"
     [ "$vrc" -eq 0 ] && vrc=2
+  elif [ "${disk_ver:-}" != "$up_ver" ]; then
+    echo "⚠️  el plugin en disco está en ${disk_ver:-?} y upstream en ${up_ver:-?}:"
+    echo "   comparar los archivos contra un plugin viejo diría que tu instancia"
+    echo "   tiene drift cuando lo que está atrasado es la fuente."
+    echo "   ↳ remediación: /plugin marketplace update harness  y volvé a correr"
+    [ "$vrc" -eq 0 ] && vrc=2
+  else
+    verificar_archivos || { [ "$?" -eq 1 ] && vrc=1; }
   fi
   [ "$vrc" -eq 0 ] && echo "✅ el update aterrizó: instancia == ${UP_TAG:-upstream} en número, contenido y archivo por archivo"
   exit "$vrc"

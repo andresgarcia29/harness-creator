@@ -365,6 +365,12 @@ class State:
                 'type': 'main' if aid == 'main' else '?', 'desc': '',
                 'model': '', 'depth': 0, 'parent': None if aid == 'main' else 'main',
                 'usage': {'in': 0, 'out': 0, 'cache_read': 0, 'cache_creation': 0},
+                # `usage` es lo ACUMULADO (lo que se factura). `ctx` es otra
+                # cosa y hacía falta: lo que el ÚLTIMO turno arrastró, o sea el
+                # tamaño real de la ventana ahora mismo. El harness medía el
+                # arranque y nada más, y el arranque es el 15-24% del input:
+                # el contexto por turno pesa cuatro veces más (issue #206).
+                'ctx': 0, 'ctx_max': 0,
                 'seen': {},   # message.id → usage final (dedupe, ver _ingest)
                 'msgs': 0, 'tools': [], 'last_text': '', 'first_ts': 0,
                 'last_ts': 0,
@@ -439,6 +445,10 @@ class State:
             a['seen'][mid] = new
             a['usage'] = {k: sum(v[k] for v in a['seen'].values())
                           for k in ('in', 'out', 'cache_read', 'cache_creation')}
+            # El contexto de ESTE turno: todo lo que entró, venga del caché o no.
+            # Los transcripts se leen en orden, así que el último gana.
+            a['ctx'] = new['in'] + new['cache_read'] + new['cache_creation']
+            a['ctx_max'] = max(a['ctx_max'], a['ctx'])
         rec_ts = ts or a['last_ts'] or 0
         for block in (msg.get('content') or []):
             if not isinstance(block, dict):
@@ -1006,6 +1016,7 @@ class State:
                     'active': self._is_active(a), 'depth': a['depth'],
                     'first_ts': a['first_ts'], 'last_ts': a['last_ts'], 'elapsed': el,
                     'usage': a['usage'], 'cost': self.cost(a['model'], a['usage']),
+                    'ctx': a['ctx'], 'ctx_max': a['ctx_max'],
                     'thread': a['thread'],
                 })
             agents.sort(key=lambda x: (x['id'] != 'main', x['first_ts'] or 9e18))

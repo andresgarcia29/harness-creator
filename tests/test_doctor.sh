@@ -501,4 +501,77 @@ solo="$( HOME="$SW/fakehome" bash "$ROOT/scripts/doctor.sh" --instance-only "$SW
 assert_contains "$solo" ".secrets INCOMPLETO" "en --instance-only se sigue VIENDO"
 assert_not_contains "$solo" "❌ .secrets INCOMPLETO" "pero baja a aviso: una credencial vencida no es una instancia rota"
 
+echo "── 8b: el contexto siempre-inyectado son las reglas custom, no solo el mapa (#206)"
+
+CW="$WS/ctx"; mkdir -p "$CW/.claude/rules"
+gordo() { for _ in $(seq 1 "$1"); do printf 'palabra '; done; echo; }
+regla() {  # regla <id> <palabras> [linea-extra-de-frontmatter]
+  { printf -- '---\nid: %s\napplies_to: workspace\n' "$1"
+    [ -n "${3:-}" ] && printf '%s\n' "$3"
+    printf -- 'enforcement: judgment\nstatus: RATIFICADA\nsource: test\n---\n# regla\n'
+    gordo "$2"; } > "$CW/.claude/rules/$1.md"
+}
+ctx() { HARNESS_DOCTOR_SKIP_HOOKS=1 bash "$ROOT/scripts/doctor.sh" "$CW" 2>&1; }
+
+# a) el síntoma del issue: reglas más gordas que el mapa, y el doctor sin verlas
+regla regla-gorda 4200
+out="$(ctx)"
+assert_contains "$out" "reglas custom siempre-inyectadas" "8b pesa .claude/rules/"
+assert_contains "$out" "PASA de 5000" "4200 palabras (~5460 tokens) revientan el techo"
+assert_contains "$out" "contexto total siempre-inyectado" "y reporta el total con su desglose"
+assert_contains "$out" "cota inferior" "diciendo que es cota inferior: el doctor no ve la plataforma"
+
+# b) una regla chica queda verde: un check que siempre falla no mide nada
+regla regla-gorda 20
+out="$(ctx)"
+assert_contains "$out" "bajo el techo de 2500" "regla chica: verde, el techo no es ruido permanente"
+
+# c) `paths:` es lo ÚNICO que difiere la carga: esa regla no se paga al arrancar
+regla regla-gorda 4200 'paths: ["repos/atlas/**"]'
+out="$(ctx)"
+assert_not_contains "$out" "PASA de 5000" "con paths: el cuerpo carga bajo demanda y no pesa en 8b"
+assert_contains "$out" "con paths:, o sea bajo demanda" "y el doctor dice cuántas se difieren"
+
+# d) el mapa y las reglas se cuentan por separado: mezclarlos esconde a las dos
+printf 'mapa mapa mapa\n' > "$CW/CLAUDE.md"
+out="$(ctx)"
+assert_contains "$out" "el mapa siempre-inyectado" "el mapa conserva su propio techo (1500/3000)"
+
+# e) las descripciones de agentes/skills/comandos también entran siempre
+mkdir -p "$CW/.claude/skills/demo"
+{ printf -- '---\nname: demo\ndescription: '; gordo 900; printf -- '---\n'; } > "$CW/.claude/skills/demo/SKILL.md"
+tot="$(ctx | grep -o 'contexto total siempre-inyectado ≈ [0-9]*' | grep -o '[0-9]*$')"
+[ "${tot:-0}" -gt 1000 ] \
+  && pass "las descripciones suman al total (${tot} tokens)" \
+  || fail "las descripciones NO suman al total (${tot:-vacío} tokens)"
+
+# f) y la salida de los hooks SessionStart, que es contexto que nadie contaba
+mkdir -p "$CW/.claude/hooks"
+printf '#!/usr/bin/env bash\nfor _ in $(seq 1 3000); do printf "hookword "; done\n' > "$CW/.claude/hooks/saluda.sh"
+chmod +x "$CW/.claude/hooks/saluda.sh"
+cat > "$CW/.claude/settings.json" <<'EOF'
+{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"$CLAUDE_PROJECT_DIR/.claude/hooks/saluda.sh"}]}]}}
+EOF
+con="$(bash "$ROOT/scripts/doctor.sh" "$CW" 2>&1 | grep -o 'contexto total siempre-inyectado ≈ [0-9]*' | grep -o '[0-9]*$')"
+sin="$(ctx | grep -o 'contexto total siempre-inyectado ≈ [0-9]*' | grep -o '[0-9]*$')"
+[ "${con:-0}" -gt "${sin:-0}" ] \
+  && pass "la salida de SessionStart suma al total (${con} con hooks vs ${sin} sin ellos)" \
+  || fail "la salida de SessionStart NO suma al total (${con:-vacío} vs ${sin:-vacío})"
+
+echo "── 8b: mutación, los cables cortan de verdad"
+
+mut="$WS/doctor-mut.sh"
+sed 's/^rules_tokens=.*/rules_tokens=0/' "$ROOT/scripts/doctor.sh" > "$mut"
+regla regla-gorda 4200
+HARNESS_DOCTOR_SKIP_HOOKS=1 bash "$mut" "$CW" 2>&1 | grep -q "PASA de 5000" \
+  && fail "cegar rules_tokens no cambió nada: la aserción del techo no muerde" \
+  || pass "cegar rules_tokens apaga el techo de reglas: la aserción muerde"
+
+sed 's/^total_tokens=.*/total_tokens=$ctx_tokens/' "$ROOT/scripts/doctor.sh" > "$mut"
+m="$(HARNESS_DOCTOR_SKIP_HOOKS=1 bash "$mut" "$CW" 2>&1 | grep -o 'contexto total siempre-inyectado ≈ [0-9]*' | grep -o '[0-9]*$')"
+n="$(ctx | grep -o 'contexto total siempre-inyectado ≈ [0-9]*' | grep -o '[0-9]*$')"
+[ "${m:-0}" -lt "${n:-0}" ] \
+  && pass "sacar las reglas del total lo baja: el total no es decorativo" \
+  || fail "sacar las reglas del total no cambió el número: el total no suma lo que dice"
+
 t_done

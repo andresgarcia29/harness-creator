@@ -87,4 +87,42 @@ assert_eq 0 $? "payload vacío: sale 0"
 fire kind-inventado '{"command":"x"}' >/dev/null 2>&1
 assert_eq 0 $? "kind desconocido: sale 0 sin escribir basura"
 
+echo "── ctx por turno: el bus dice cuánto contexto arrastra el turno (#206)"
+
+prompt() {  # prompt <transcript_path>
+  jq -nc --arg c "$WS/worktrees/T1/atlas" --arg tp "$1" \
+     '{prompt:"hola", session_id:"sess-1", cwd:$c, transcript_path:$tp}' \
+    | CLAUDE_PROJECT_DIR="$WS" bash "$HOOK" prompt
+}
+
+TR="$WS/transcript.jsonl"
+printf '%s\n' \
+  '{"type":"assistant","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":50,"cache_creation_input_tokens":10}}}' \
+  '{"type":"assistant","message":{"usage":{"input_tokens":2000,"cache_read_input_tokens":300,"cache_creation_input_tokens":700}}}' > "$TR"
+rm -f "$BUS"; prompt "$TR"
+assert_contains "$(bus)" '"ctx":3000' \
+  "ctx = input + cache_read + cache_creation del ÚLTIMO turno (no la suma de todos)"
+
+# lo que NO puede pasar: que el bus se calle por no poder contar
+rm -f "$BUS"; prompt "/no/existe/transcript.jsonl"
+assert_contains "$(bus)" '"ctx":0' "sin transcript: ctx 0 y el evento sale igual"
+rm -f "$BUS"; printf 'no soy json\n' > "$TR"; prompt "$TR"
+assert_contains "$(bus)" '"ctx":0' "transcript corrupto: ctx 0 y el evento sale igual"
+rm -f "$BUS"
+jq -nc --arg c "$WS/worktrees/T1/atlas" '{prompt:"hola", session_id:"sess-1", cwd:$c}' \
+  | CLAUDE_PROJECT_DIR="$WS" bash "$HOOK" prompt
+assert_contains "$(bus)" '"ctx":0' "sin transcript_path en el payload: ctx 0 y el evento sale igual"
+
+# mutación: sin la suma de caché el número miente por un orden de magnitud,
+# que es exactamente el error que hace parecer barato un turno de 300k.
+mut="$WS/ui-emit-mut.sh"
+sed 's/+ (.cache_read_input_tokens \/\/ 0)//' "$HOOK" > "$mut"
+printf '%s\n' \
+  '{"type":"assistant","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":90000,"cache_creation_input_tokens":0}}}' > "$TR"
+rm -f "$BUS"
+jq -nc --arg c "$WS/worktrees/T1/atlas" --arg tp "$TR" \
+   '{prompt:"hola", session_id:"sess-1", cwd:$c, transcript_path:$tp}' \
+  | CLAUDE_PROJECT_DIR="$WS" bash "$mut" prompt
+assert_contains "$(bus)" '"ctx":10' "sin el caché leído el ctx colapsa a 10: la aserción muerde"
+
 t_done

@@ -106,7 +106,7 @@ assert_contains "$(cat "$root/templates/docs/intake.md.tmpl")" "enrichment" \
 # falso: no era un cambio, ni era de este repo. Un gate que mide otra cosa que
 # la que dice medir se apaga solo, porque el primero que lo vea mentir deja de
 # creerle. En CI daba verde, además, así que discrepaban las dos mitades.
-EMDASH_MAX=434
+EMDASH_MAX=430
 emdash_now=$( (cd "$root" && git ls-files -z -- '*.md' '*.tmpl' '*.yaml' '*.sh' '*.py' '*.json' 2>/dev/null \
     | xargs -0 grep -o "—" 2>/dev/null) \
   | grep -v "templates/ui/dist" | wc -l | tr -d ' ')

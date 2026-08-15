@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_bootstrap_link.sh — link_into_path() del bootstrap, contra el CÓDIGO
+# test_bootstrap_link.sh: link_into_path() del bootstrap, contra el CÓDIGO
 # REAL del template. Es la función que decide si ensure() cuenta un binario
 # como instalado, y cantaba éxito sin haber enlazado nada (issue #198):
 # sin brew el destino colapsaba a "/bin" (el del sistema), el `ln` moría con

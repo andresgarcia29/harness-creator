@@ -465,4 +465,40 @@ ish="$(cat "$ROOT/templates/scripts/instance-ship.sh")"
 assert_contains "$ish" "doctor.sh --instance-only" \
   "instance-ship llama al doctor en el modo que le compete"
 
+echo "── un .secrets INCOMPLETO no es un .secrets materializado"
+# El chequeo miraba solo que el archivo EXISTIERA. Con la credencial vencida,
+# `secrets.sh pull` lo escribe igual con lo que pudo leer, asi que un archivo
+# con 3 de 18 claves daba verde, y lo daba DOS LINEAS debajo del aviso de que
+# el token estaba expirado: la misma salida se contradecia.
+SW="$WS/sec"; mkdir -p "$SW/scripts" "$SW/fakehome/.config/harness"
+printf 'secrets:\n  source: vault\n' > "$SW/harness-answers.yaml"
+cat > "$SW/scripts/secrets.sh" <<'SEOF'
+#!/usr/bin/env bash
+  export VAULT_ADDR="https://vault.example"
+  dump_kv ALFA   ejemplo/uno   campo
+  dump_kv BETA   ejemplo/uno   otro
+  dump_kv GAMMA  ejemplo/dos   campo
+#  dump_kv COMENTADA ejemplo/tres campo
+SEOF
+
+# a) incompleto: una de las tres declaradas
+printf 'ALFA=x\n' > "$SW/.secrets"
+out="$( HOME="$SW/fakehome" bash "$ROOT/scripts/doctor.sh" "$SW" 2>&1 )"
+assert_contains "$out" ".secrets INCOMPLETO" "con 1 de 3 claves NO dice materializado"
+assert_contains "$out" "faltan 2 de 3" "y dice cuantas faltan de cuantas"
+assert_contains "$out" "BETA" "nombrando alguna, para poder buscarla"
+assert_not_contains "$out" "COMENTADA" "una linea comentada no cuenta como declarada"
+
+# b) completo: las tres
+printf 'ALFA=x\nBETA=y\nGAMMA=z\n' > "$SW/.secrets"
+out="$( HOME="$SW/fakehome" bash "$ROOT/scripts/doctor.sh" "$SW" 2>&1 )"
+assert_contains "$out" ".secrets materializado" "con las tres presentes vuelve a verde"
+assert_not_contains "$out" "INCOMPLETO" "y no queda ruido del caso anterior"
+
+# c) es provision del HOST, no instancia rota: no puede bloquear el ship.
+printf 'ALFA=x\n' > "$SW/.secrets"
+solo="$( HOME="$SW/fakehome" bash "$ROOT/scripts/doctor.sh" --instance-only "$SW" 2>&1 )"
+assert_contains "$solo" ".secrets INCOMPLETO" "en --instance-only se sigue VIENDO"
+assert_not_contains "$solo" "❌ .secrets INCOMPLETO" "pero baja a aviso: una credencial vencida no es una instancia rota"
+
 t_done

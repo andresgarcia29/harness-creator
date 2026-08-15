@@ -3,7 +3,7 @@
 # Un generador DEBE escribir el digest de abajo en .harness-templates de
 # la instancia: sin eso, nadie puede saber con qué set se generó.
 plugin_version: 0.61.19
-1574b04c60e60954d4082ca65266623e372a77265bb16313c44eb59bd16a3b2e  scripts/doctor.sh
+18ebe559c2f887604307abb0574ba352d76dd9608517a31c2780f0a0b1dacac3  scripts/doctor.sh
 77ab20012f45ae3c308bcc1020a8c50c7a9eeef973f3ad459b984fd4fe1ac99b  templates/AGENTS.md.tmpl
 4d1907f5c82a0d12f55a7c6aa4e24fff57ef1282f0eb9136e38abebf07168540  templates/CLAUDE.md.tmpl
 76b79f633c0cb547d61225899de83b9ec23e6756ab91e99abe2a2aee2af39948  templates/Makefile.tmpl
@@ -60,7 +60,7 @@ df5526368f05925a2c4755a0c614cbf0bb7ce15db649128ab85143f13b66eb0d  templates/mode
 e35a13cb19567e368515acc2e23b725d450e1f8f8c46013e3df4ebc0d43f002a  templates/policy.json.tmpl
 5f5272749dd4aeb94bf41f2ad4092019da9129889a67c7499de24519c258591b  templates/scripts/adr-new.sh
 f08368c4d6cda3be15cfa048baa8085898ae879b961355a40797f36a61b0a2c0  templates/scripts/archived-repos.sh
-851a4cd20d7bef096e6d3e1f828e0712ddeda5d09c55b108972155fc53a2dd11  templates/scripts/bootstrap.sh.tmpl
+a60cd9a0aba99a2e8270dd509316116ccf727ff046c08da23871e9a1cfdf1a96  templates/scripts/bootstrap.sh.tmpl
 a93b2fcf9749e40f2172e7ffd9b5abf649b1ba39f7ff9f10e14dbc6f95d3c872  templates/scripts/bounded.sh
 7b9389335ae2d9fe130cafd3d08ab82baaba531937f7bc106d76acdc7d8057fc  templates/scripts/build-slot.sh
 b98953198434a5b38bff137a92cc5d745118f46cc3b868aec43da6c29eafacc0  templates/scripts/change-id.sh
@@ -117,4 +117,4 @@ b4a953e4bf0371e24aa6cc3ed2ebbb056999da789f98d99c57fff7c032a0db44  templates/skil
 1b8a61fae86b92b3b8e6e9c2476bb22b53f1675ec52cba55552a15408bf637d1  templates/ui/panel.sh
 7942c3c4b0f99e626475c9b02bbe4babb7553ffbd480a6b17bb7a6bb04a8ac55  templates/ui/pricing.json
 c1788266c91e18d16646ad8c345a4d7a91255ec138db609437276b812f9b0e16  templates/ui/server.py
-digest: c3b75b705906533e4243e142c38d771c31108f09d3012c084628a5bcd0e8d7d6
+digest: 4ff1357a1ce0c031c4b3149eb3a6bb5d2bf26ad0ff8c4e1d167e55f66246f514

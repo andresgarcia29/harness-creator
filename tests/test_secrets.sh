@@ -244,4 +244,57 @@ assert_contains "$out" "doppler" "fuente doppler: habla de doppler"
 assert_not_contains "$out" "token de Vault" "y NO pide un token de Vault"
 assert_contains "$out" "no puedo comprobar" "sin su CLI declara ceguera, no un verde"
 
+echo "── declarar la fuente es declarar que sin credencial no se sigue"
+# El token se pedia UNA vez y las tres salidas (invalido, vacio, sin TTY)
+# terminaban igual: warn y seguir. Despues corria `secrets.sh pull` de todos
+# modos, que escribe el archivo con lo que SI pudo leer, asi que quedaba un
+# .secrets incompleto. Caso de campo: 3 claves de 18 y ningun rojo.
+tmpl="$WS/tmpl-render.sh"
+sed 's/{{SECRETS_SOURCE}}/vault/g; s/{{VAULT_ADDR}}/https:\/\/vault.example/g' \
+    "$ROOT/templates/scripts/bootstrap.sh.tmpl" > "$tmpl"
+
+# 1) el BUCLE, ejercitado: se extrae solo y se le da entrada por stdin.
+tmpl_loop="$WS/loop.sh"
+{ printf 'warn() { echo "WARN: $1"; }\nok() { echo "OK: $1"; }\nTOKFILE="%s/fakehome/.config/harness/vault-token"\nSECRETS_BLOCKED=0\n' "$WS"
+  awk '/^      _tok_try=0$/{f=1} f{print} /^      done$/{if(f) exit}' "$tmpl"
+  printf 'echo "BLOQUEADO=$SECRETS_BLOCKED"\n'
+} > "$tmpl_loop"
+
+# 1a) enter vacio: sale a proposito, y lo declara bloqueado
+out="$( printf '\n' | bash "$tmpl_loop" 2>&1 )"
+assert_contains "$out" "sin token" "enter vacio: sale"
+assert_contains "$out" "a medias" "diciendo que NO va a materializar un .secrets parcial"
+assert_contains "$out" "BLOQUEADO=1" "y deja marcado que no hay credencial"
+
+# 1b) un token que el servidor rechaza: REINTENTA, no se conforma con el primero
+fakebin="$WS/fakebin"; mkdir -p "$fakebin"
+printf '#!/bin/sh\nexit 1\n' > "$fakebin/vault"; chmod +x "$fakebin/vault"
+out="$( printf 'token-malo\ntambien-malo\n\n' | PATH="$fakebin:$PATH" bash "$tmpl_loop" 2>&1 )"
+assert_contains "$out" "(intento 1)" "el primer rechazo se cuenta"
+assert_contains "$out" "(intento 2)" "y vuelve a pedirlo: no se conforma con uno"
+assert_contains "$out" "NO lo conoce" "nombrando la causa probable, no el formato"
+assert_contains "$out" "vault token create" "con el comando para sacar uno nuevo"
+
+# 1c) un token que el servidor acepta: corta al primero
+printf '#!/bin/sh\nexit 0\n' > "$fakebin/vault"
+out="$( printf 'token-bueno\n' | PATH="$fakebin:$PATH" bash "$tmpl_loop" 2>&1 )"
+assert_contains "$out" "OK: token guardado y VALIDADO" "token bueno: valida y corta"
+assert_not_contains "$out" "intento 2" "sin pedirlo de nuevo"
+assert_contains "$out" "BLOQUEADO=0" "y no queda bloqueado"
+
+# 2) el pull es FAIL-CLOSED: sin credencial no se corre, que es la otra mitad.
+tmpb2="$WS/bootstrap-pull.sh"
+{ printf 'warn() { echo "WARN: $1"; }\nok() { echo "OK: $1"; }\nWS="%s"\nif true; then\n' "$WS"
+  awk '/^  if \[ -x "\$WS\/scripts\/secrets.sh" \]; then$/{f=1} f{print} /^fi$/{if(f) exit}' "$tmpl"
+} > "$tmpb2"
+mkdir -p "$WS/scripts"
+printf '#!/bin/sh\necho "EL PULL CORRIO"\n' > "$WS/scripts/secrets.sh"; chmod +x "$WS/scripts/secrets.sh"
+
+out="$( SECRETS_BLOCKED=1 bash "$tmpb2" 2>&1 )"
+assert_not_contains "$out" "EL PULL CORRIO" "sin credencial NO se corre el pull"
+assert_contains "$out" "incompleto" "y dice por que: un archivo a medias se ve igual que uno completo"
+
+out="$( SECRETS_BLOCKED=0 bash "$tmpb2" 2>&1 )"
+assert_contains "$out" "EL PULL CORRIO" "con credencial si se corre (esto no es un apagador del pull)"
+
 t_done

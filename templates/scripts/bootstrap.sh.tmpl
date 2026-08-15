@@ -21,13 +21,35 @@ inst() { echo "📦 instalando: $1"; }
 warn() { echo "⚠️  $1"; }
 
 # link_into_path <bin> — go install/uv tool instalan fuera del PATH típico;
-# busca el binario recién instalado y enlázalo al prefix de brew (ya en PATH)
+# busca el binario recién instalado y enlázalo a un directorio que SÍ esté en
+# el PATH. Solo devuelve 0 si el binario quedó realmente invocable: esta
+# función es lo único que separa "instalado" de "instalado pero invisible" en
+# ensure(), y cantaba éxito en dos casos donde no había enlace ninguno:
+#   · sin brew, "$(brew --prefix)/bin" colapsaba a "/bin" (el del SISTEMA);
+#     `[ -d /bin ]` es verdadero, así que la guarda no cortaba, el `ln` moría
+#     con Permission denied y el ok() se imprimía igual.
+#   · el exit de `ln` no se miraba nunca.
+# Resultado medido en una VPS sin sudo: "ln: Permission denied" seguido de
+# "✅ go-arch-lint instalado", y el doctor contradiciéndolo cuatro líneas
+# después. Falso verde, que es justo lo que el resto del harness persigue.
 link_into_path() {
-  local bin="$1" cand dest
-  dest="$(brew --prefix 2>/dev/null)/bin"
-  [ -d "$dest" ] || return 1
-  for cand in "$(go env GOPATH 2>/dev/null)/bin/$bin" "$HOME/go/bin/$bin" "$HOME/.local/bin/$bin"; do
-    [ -x "$cand" ] && { ln -sf "$cand" "$dest/$bin"; ok "$bin enlazado a $dest (estaba fuera del PATH)"; return 0; }
+  local bin="$1" cand dest gobin
+  if command -v brew >/dev/null 2>&1; then dest="$(brew --prefix)/bin"
+  else dest="$HOME/.local/bin"; fi   # el mismo dir de usuario que usa uv tool
+  mkdir -p "$dest" 2>/dev/null || return 1
+  # sin go, "$(go env GOPATH)/bin" es la MISMA sustitución vacía que apuntaba a
+  # "/bin": el candidato se omite en vez de mirar el /bin del sistema.
+  gobin="$(go env GOPATH 2>/dev/null)"
+  for cand in ${gobin:+"$gobin/bin/$bin"} "$HOME/go/bin/$bin" "$HOME/.local/bin/$bin"; do
+    [ -x "$cand" ] || continue
+    # cand == dest/bin: ya está donde toca, enlazarlo a sí mismo es un error
+    # de `ln` y no arregla nada; lo que falta ahí es el PATH, y de eso decide
+    # el `command -v` de abajo.
+    if [ "$cand" != "$dest/$bin" ]; then ln -sf "$cand" "$dest/$bin" 2>/dev/null || continue; fi
+    hash -r 2>/dev/null || true
+    command -v "$bin" >/dev/null 2>&1 || continue   # dest fuera del PATH: no es éxito
+    ok "$bin enlazado a $dest (estaba fuera del PATH)"
+    return 0
   done
   return 1
 }

@@ -978,7 +978,7 @@ templates/         todo lo que se genera:
 
 La suite prueba **el código real de los templates**, no copias ni mocks del sistema bajo prueba, y cada test crea su workspace temporal y lo borra: nada toca tu workspace ni la red. El reloj es de la corrida completa medida en un laptop (9 m 53 s en macOS): crece con la suite, así que tómalo como orden de magnitud y no como promesa.
 
-La tabla de abajo no los lista todos (son 69 archivos): están los que explican mejor qué se protege y por qué. El número lo verifica la propia suite (`test_docs.sh` cuenta los archivos y lo compara con esta línea), porque una cuenta escrita a mano en prosa se queda atrás en tres PRs y nadie se entera.
+La tabla de abajo no los lista todos (son 70 archivos): están los que explican mejor qué se protege y por qué. El número lo verifica la propia suite (`test_docs.sh` cuenta los archivos y lo compara con esta línea), porque una cuenta escrita a mano en prosa se queda atrás en tres PRs y nadie se entera.
 
 | Test | Qué protege |
 |---|---|

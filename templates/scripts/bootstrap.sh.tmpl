@@ -366,6 +366,57 @@ case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) warn 'agrega $HOME/.local/bin a 
 # ¿La credencial de esta fuente está y sirve? Tres desenlaces, y ninguno se
 # calla: sin CLI no se puede saber (ceguera), con CLI y check verde está lista,
 # y con CLI y check rojo hay que autenticarse, con el comando delante.
+# ── VIVO NO ES LO MISMO QUE SIRVE (issue #211) ────────────────────────
+# `vault token lookup` responde una sola pregunta: ¿el servidor conoce este
+# token? Un token OIDC de humano la contesta que sí y no tiene NINGUNA de las
+# policies que esta instancia necesita. Caso de campo: el bootstrap cantó
+# "VALIDADO", materializó 15 de 18 claves, y el fallo real apareció tres pasos
+# más abajo como un 403 al mintear el token de nube. La causa nunca fue que el
+# token estuviera muerto, y el error apareció lejos de ella.
+#
+# La comprobación correcta no necesita saber nada del proyecto: `secrets.sh`
+# DECLARA sus rutas, así que se lee UNA con la MISMA operación que hará
+# `dump_kv` y se falla acá, con el nombre de la ruta que no pudo leer.
+#
+# El valor del secreto JAMÁS se captura: stdout va a /dev/null y solo se mira
+# el stderr, que no lo contiene. Un smoke que filtra lo que viene a proteger
+# sería peor que no tenerlo.
+vault_smoke() {  # vault_smoke <token> → 0 sirve (o no hay nada declarado) · 1 deny
+  local linea ruta campo err pols
+  linea="$(grep -E '^[[:space:]]*dump_(kv|file)[[:space:]]' "$WS/scripts/secrets.sh" 2>/dev/null | head -1)"
+  # Instancia recién generada: {{VAULT_KEYS}} sin llenar, los ejemplos van
+  # comentados. No hay ruta declarada, así que no hay nada que el token deba
+  # poder leer: un rojo acá sería inventado.
+  [ -z "$linea" ] && return 0
+  ruta="$(printf '%s\n' "$linea" | awk '{print $3}')"
+  campo="$(printf '%s\n' "$linea" | awk '{print $4}')"
+  err="$(VAULT_ADDR="{{VAULT_ADDR}}" VAULT_TOKEN="$1" vault kv get -field="$campo" "$ruta" 2>&1 >/dev/null)" \
+    && return 0
+  case "$err" in
+    *"permission denied"*)
+      # Lo que ahorra la vuelta es el PAR: la ruta que no leyó y las policies
+      # que sí tiene. Con eso, quien administra Vault cierra el hueco sin
+      # adivinar. El harness no puede saber los nombres de las policies de un
+      # proyecto (viven en el ACL de Vault, el único lugar donde son verdad),
+      # y por eso los pide prestados al propio token en vez de declararlos.
+      pols="$(VAULT_ADDR="{{VAULT_ADDR}}" VAULT_TOKEN="$1" vault token lookup -format=json 2>/dev/null \
+        | jq -r '(.data.policies // ["?"]) | join(", ")' 2>/dev/null)"
+      [ -n "$pols" ] || pols="?"
+      warn "el token está VIVO pero NO PUEDE LEER $ruta (permission denied)."
+      warn "  policies que el token SÍ tiene: $pols"
+      warn "  esa ruta la declara scripts/secrets.sh. Pedí un token cuya policy la lea:"
+      warn "      vault token create -period=768h -orphan -policy=<una que lea $ruta> -field=token"
+      return 1 ;;
+    *)
+      # Ruta inexistente, sin red, mount equivocado: nada de eso es culpa del
+      # token, y tratarlo como deny haría que el bootstrap pida tokens nuevos
+      # para siempre por un typo en secrets.sh. `secrets.sh pull` ya cuenta lo
+      # que no pudo leer.
+      warn "smoke de $ruta no concluyente (no fue permission denied): sigo, secrets.sh pull dirá."
+      return 0 ;;
+  esac
+}
+
 onboard_cli() {  # onboard_cli <fuente> <bin> <comando-de-login> <comando-de-chequeo...>
   local fuente="$1" bin="$2" login="$3"; shift 3
   if ! command -v "$bin" >/dev/null 2>&1; then
@@ -392,9 +443,16 @@ if [ "$SKIP_SECRETS" -eq 0 ] && [ "$CHECK" -eq 0 ]; then
     if [ ! -f "$TOKFILE" ]; then
       NEED_TOKEN=1
     elif command -v vault >/dev/null 2>&1; then
-      # vigencia: si el token murió, pedirlo de nuevo (fue el bug clásico)
-      VAULT_ADDR="{{VAULT_ADDR}}" VAULT_TOKEN="$(cat "$TOKFILE")" vault token lookup >/dev/null 2>&1 \
-        || { warn "el token de Vault existente está EXPIRADO o sin permisos — hay que renovarlo"; NEED_TOKEN=1; }
+      # Dos preguntas distintas, y hasta el issue #211 solo se hacía la primera:
+      # ¿sigue vivo? y ¿puede leer lo que esta instancia declara? Un token que
+      # contesta que sí a la primera y que no a la segunda deja un .secrets a
+      # medias, que es el estado que #201 vino a cerrar.
+      if ! VAULT_ADDR="{{VAULT_ADDR}}" VAULT_TOKEN="$(cat "$TOKFILE")" vault token lookup >/dev/null 2>&1; then
+        warn "el token de Vault existente está EXPIRADO o revocado: hay que renovarlo"
+        NEED_TOKEN=1
+      elif ! vault_smoke "$(cat "$TOKFILE")"; then
+        NEED_TOKEN=1   # vault_smoke ya dijo cuál ruta y con qué policies
+      fi
     else
       # ── UN TOKEN SIN VALIDAR NO ES UN TOKEN VÁLIDO ──────────────────
       # Esta rama no existía, y su ausencia era silencio: con el CLI ausente
@@ -468,7 +526,7 @@ OPCIÓN A · periodic token (recomendada, y NO tenés que re-autenticarte nunca)
      export VAULT_ADDR={{VAULT_ADDR}}
      vault login -method=<tu método: oidc|userpass|github>
      vault token create -period=768h -orphan \
-       -policy=<policies del harness> -field=token
+       -policy=<la que lea las rutas de scripts/secrets.sh> -field=token
    Un periodic token no expira mientras se renueve, y secrets.sh lo renueva
    solo en cada `pull`. Con -period=768h alcanza con que el harness corra una
    vez cada 32 días. O sea: se configura una vez y listo.
@@ -521,7 +579,13 @@ TOKHELP
           break
         fi
         if VAULT_ADDR="{{VAULT_ADDR}}" VAULT_TOKEN="$VTOK" vault token lookup >/dev/null 2>&1; then
-          ok "token guardado y VALIDADO"; break
+          # "VALIDADO" tiene que significar que SIRVE, no solo que existe: es
+          # la palabra que hace que el humano deje de mirar (issue #211).
+          if vault_smoke "$VTOK"; then
+            ok "token guardado y VALIDADO (vivo, y lee lo que esta instancia declara)"; break
+          fi
+          warn "  ↳ pegá otro con esa policy, o enter vacío para salir y ponerlo después."
+          continue
         fi
         # El mensaje nombra la causa PROBABLE, que es lo que ahorra la vuelta:
         # el reflejo de quien pega un token y lo ve rechazado es sospechar del

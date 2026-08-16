@@ -24,18 +24,26 @@ mkdir -p "$BUS_DIR" 2>/dev/null || exit 0
 
 # Rotación barata: un stat por llamada, portable macOS/Linux.
 #
-# EL mkdir ES EL LOCK. Con varias sesiones escribiendo, dos pueden ver el bus
+# EL LOCK ES `.owner`, NO EL mkdir. Con varias sesiones escribiendo, dos pueden ver el bus
 # pasado de tamaño a la vez y hacer las dos el mv: el segundo .1 pisa al
 # primero y se pierde una tanda entera de eventos. mkdir es atómico en todos
 # los filesystems que importan, así que rota UNA sola; la otra sigue de largo
 # (su evento cae en el bus nuevo, que es exactamente lo correcto).
+#
+# El mkdir a secas NO sirve para eso: con uutils coreutils (Ubuntu 26.04) hace
+# check-then-act y bajo carrera le devuelve 0 a varias a la vez (issue #209).
+# Quien rota es quien gana el O_EXCL de `.owner`, que lo hace la propia shell.
+mkdir_lock() {  # mkdir_lock <dir> → 0 solo si el lock es NUESTRO
+  mkdir "$1" 2>/dev/null || return 1
+  ( set -C; : > "$1/.owner" ) 2>/dev/null
+}
 size=$(stat -f%z "$BUS" 2>/dev/null || stat -c%s "$BUS" 2>/dev/null || echo 0)
-if [ "${size:-0}" -gt "$MAX_BYTES" ] && mkdir "$BUS_DIR/.rotating" 2>/dev/null; then
+if [ "${size:-0}" -gt "$MAX_BYTES" ] && mkdir_lock "$BUS_DIR/.rotating"; then
   # Re-chequeo dentro del lock: si otra sesión ya rotó mientras esperábamos,
   # el bus está chico otra vez y rotar de nuevo tiraría eventos frescos.
   size2=$(stat -f%z "$BUS" 2>/dev/null || stat -c%s "$BUS" 2>/dev/null || echo 0)
   [ "${size2:-0}" -gt "$MAX_BYTES" ] && mv -f "$BUS" "$BUS.1" 2>/dev/null
-  rmdir "$BUS_DIR/.rotating" 2>/dev/null
+  rm -rf "$BUS_DIR/.rotating" 2>/dev/null   # rmdir ya no basta: adentro está .owner
 fi
 
 payload="$(cat 2>/dev/null)"

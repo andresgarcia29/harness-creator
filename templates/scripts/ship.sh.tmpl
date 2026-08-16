@@ -782,9 +782,17 @@ pid_alive() {  # pid_alive <pid> → 0 vivo · 1 muerto · 2 no se pudo saber
     *) return 2 ;;
   esac
 }
+# `mkdir` solo no alcanza como mutex: con uutils coreutils (Ubuntu 26.04) hace
+# check-then-act y bajo carrera le dice que sí a varios (issue #209). El dueño
+# es quien crea `.owner`, cuyo O_EXCL lo hace la shell y no un binario.
+mkdir_lock() {  # mkdir_lock <dir> → 0 solo si el lock es NUESTRO
+  mkdir "$1" 2>/dev/null || return 1
+  ( set -C; : > "$1/.owner" ) 2>/dev/null
+}
+
 acquire_lock() {
   local waited=0 nopid=0
-  until mkdir "$LOCKDIR" 2>/dev/null; do
+  until mkdir_lock "$LOCKDIR"; do
     if [ -f "$LOCKDIR/pid" ]; then
       # lock huérfano: el proceso dueño ya no existe
       lpid="$(cat "$LOCKDIR/pid" 2>/dev/null)"

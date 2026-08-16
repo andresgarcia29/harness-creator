@@ -299,10 +299,18 @@ tarea_abandonada() {  # tarea_abandonada <task-id> → 0 si lleva demasiado en f
   [ "$(( $(now_epoch) - since ))" -gt "$(( MAX_AGE_H * 3600 ))" ]
 }
 
+# `mkdir` solo no alcanza como mutex: con uutils coreutils (Ubuntu 26.04) hace
+# check-then-act y bajo carrera le dice que sí a varios (issue #209). El dueño
+# es quien crea `.owner`, cuyo O_EXCL lo hace la shell y no un binario.
+mkdir_lock() {  # mkdir_lock <dir> → 0 solo si el lock es NUESTRO
+  mkdir "$1" 2>/dev/null || return 1
+  ( set -C; : > "$1/.owner" ) 2>/dev/null
+}
+
 take_lease() {  # take_lease <task-id> → 0 si es nuestro
   local task="$1" d="$CLAIMS/orch-$task.lock.d"
   mkdir -p "$CLAIMS" 2>/dev/null || return 1
-  mkdir "$d" 2>/dev/null || return 1
+  mkdir_lock "$d" || return 1
   now_epoch > "$d/at" 2>/dev/null || true
   printf '%s\n' "$task" > "$d/task" 2>/dev/null || true
   return 0

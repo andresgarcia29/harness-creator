@@ -82,12 +82,20 @@ cd "$WS"
 # mkdir es el lock (atómico en todo filesystem que importe). Si otra corrida
 # ya está refrescando, esta se va: el grafo que deje la otra sirve igual, y
 # esperar solo agrega latencia a un prefetch que corre en background.
+# `mkdir` solo no alcanza como mutex: con uutils coreutils (Ubuntu 26.04) hace
+# check-then-act y bajo carrera le dice que sí a varios (issue #209). El dueño
+# es quien crea `.owner`, cuyo O_EXCL lo hace la shell y no un binario.
+mkdir_lock() {  # mkdir_lock <dir> → 0 solo si el lock es NUESTRO
+  mkdir "$1" 2>/dev/null || return 1
+  ( set -C; : > "$1/.owner" ) 2>/dev/null
+}
+
 LOCKDIR="$WS/.cache/graph.lock.d"
 mkdir -p "$WS/.cache" 2>/dev/null || true
-if ! mkdir "$LOCKDIR" 2>/dev/null; then
+if ! mkdir_lock "$LOCKDIR"; then
   # Lock huérfano: si nadie lo sostiene hace más de 30 min, se reclama.
   if [ -n "$(find "$LOCKDIR" -maxdepth 0 -mmin +30 2>/dev/null)" ]; then
-    rm -rf "$LOCKDIR"; mkdir "$LOCKDIR" 2>/dev/null || exit 0
+    rm -rf "$LOCKDIR"; mkdir_lock "$LOCKDIR" || exit 0
   else
     echo "→ otro graph-refresh en curso; no duplico el trabajo" >&2; exit 0
   fi

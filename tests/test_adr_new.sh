@@ -123,6 +123,78 @@ sobras="$(/bin/ls "$I/docs/adr" | grep -c 'no-va' | tr -d ' ')"
 assert_eq "0" "$sobras" "no deja archivos a medias cuando no puede reservar"
 
 echo
+echo "── adr-new.sh: un \`mkdir\` que MIENTE no abre el lock (issue #209)"
+# El caso de campo: Ubuntu 26.04 cambió GNU coreutils por uutils, y su `mkdir`
+# hace statx y DESPUÉS mkdir(2) (check-then-act). Bajo carrera dos procesos
+# ganan el mismo lock y salen los dos en verde con el MISMO número de ADR. En el
+# host del reporte pasaba 5 de 5; en un Mac, nunca: el bug es del BINARIO, no
+# del script, así que un test que dependa del scheduler no sirve de guardia.
+#
+# Acá el binario mentiroso se inyecta: un shim de `mkdir` que hace el trabajo y
+# SIEMPRE sale 0, que es exactamente el modo de falla de uutils llevado a su
+# extremo determinista. Con eso el fallo es reproducible en CUALQUIER host.
+mk_shim() {  # mk_shim <dir> : un mkdir que nunca dice que no
+  mkdir -p "$1"
+  cat > "$1/mkdir" <<'EOF'
+#!/bin/sh
+/bin/mkdir "$@" 2>/dev/null
+exit 0
+EOF
+  chmod +x "$1/mkdir"
+}
+SHIM="$WS/shim"; mk_shim "$SHIM"
+
+# (a) determinista, sin concurrencia: el lock está TOMADO por un dueño vivo y el
+#     mkdir dice que sí igual. Entrar sería crear un ADR encima de otra tarea.
+I="$WS/mkdir-miente"; mk_inst "$I"
+mkdir -p "$I/locks/adr-number.lock.d"
+: > "$I/locks/adr-number.lock.d/.owner"
+echo $$ > "$I/locks/adr-number.lock.d/pid"
+set +e
+out="$(PATH="$SHIM:$PATH" HARNESS_ADR_LOCK_TIMEOUT=2 bash "$I/scripts/adr-new.sh" no-entra 2>&1)"
+rc=$?
+set -e
+assert_eq "6" "$rc" "con el lock ajeno tomado y un mkdir que miente: NO entra"
+sobras="$(/bin/ls "$I/docs/adr" | grep -c 'no-entra' | tr -d ' ')"
+assert_eq "0" "$sobras" "y no deja ningún ADR escrito por encima del dueño"
+
+# (b) con el mismo binario mentiroso, cuatro procesos de verdad en paralelo
+#     siguen sin compartir número: el dueño es quien gana el O_EXCL, no el mkdir.
+I="$WS/mkdir-miente-race"; mk_inst "$I"; mkdir -p "$WS/out209"
+i=1
+while [ "$i" -le 4 ]; do
+  ( PATH="$SHIM:$PATH" bash "$I/scripts/adr-new.sh" "concurrente-$i" \
+      >"$WS/out209/$i.path" 2>/dev/null; echo $? > "$WS/out209/$i.rc" ) &
+  i=$((i + 1))
+done
+wait
+oks209=0; nums209=""
+i=1
+while [ "$i" -le 4 ]; do
+  [ "$(cat "$WS/out209/$i.rc" 2>/dev/null)" = "0" ] && oks209=$((oks209 + 1))
+  path="$(cat "$WS/out209/$i.path" 2>/dev/null || true)"
+  [ -n "$path" ] && nums209="$nums209$(num_of "$path")
+"
+  i=$((i + 1))
+done
+assert_eq "4" "$oks209" "los 4 salen en verde con el mkdir mentiroso"
+assert_eq "4" "$(printf '%s' "$nums209" | sort -u | grep -c . | tr -d ' ')" \
+  "y los 4 números son DISTINTOS: el mutex real es el O_EXCL, no el mkdir"
+
+# (c) mutación: sin el O_EXCL de .owner, el mkdir mentiroso deja entrar a todos.
+mut="$WS/adr-sin-owner.sh"
+sed 's#^  ( set -C; : > "$1/.owner" ) 2>/dev/null#  true#' "$SRC" > "$mut"
+I="$WS/mut209"; mk_inst "$I"; cp "$mut" "$I/scripts/adr-new.sh"
+mkdir -p "$I/locks/adr-number.lock.d"
+: > "$I/locks/adr-number.lock.d/.owner"
+echo $$ > "$I/locks/adr-number.lock.d/pid"
+set +e
+PATH="$SHIM:$PATH" HARNESS_ADR_LOCK_TIMEOUT=2 bash "$I/scripts/adr-new.sh" mutante >/dev/null 2>&1
+mrc=$?
+set -e
+assert_eq "0" "$mrc" "quitar el O_EXCL reabre el agujero: la aserción muerde"
+
+echo
 echo "── adr-new.sh: los TIRANTES (noclobber) no pisan un nombre ya ocupado"
 # El lock serializa, pero el segundo mecanismo es independiente a propósito: el
 # día que el lock falle (un reclamo de huérfano de más, un FS raro), el modo de

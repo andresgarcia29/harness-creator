@@ -312,11 +312,19 @@ deps_en_repo() {
 WT_LOCKDIR=""
 trap 'if [ -n "$WT_LOCKDIR" ]; then rm -rf "$WT_LOCKDIR"; fi' EXIT
 
+# `mkdir` solo no alcanza como mutex: con uutils coreutils (Ubuntu 26.04) hace
+# check-then-act y bajo carrera le dice que sí a varios (issue #209). El dueño
+# es quien crea `.owner`, cuyo O_EXCL lo hace la shell y no un binario.
+mkdir_lock() {  # mkdir_lock <dir> → 0 solo si el lock es NUESTRO
+  mkdir "$1" 2>/dev/null || return 1
+  ( set -C; : > "$1/.owner" ) 2>/dev/null
+}
+
 acquire_create_lock() {  # acquire_create_lock <task> <repo> → 0 si es nuestro
   local dir="$WS/locks/wt-${1}__${2}.lock.d" lpid="" tries=0
   local max_wait="${HARNESS_WT_LOCK_WAIT:-10}"   # segundos antes de rendirse
   mkdir -p "$WS/locks"
-  until mkdir "$dir" 2>/dev/null; do
+  until mkdir_lock "$dir"; do
     lpid="$(cat "$dir/pid" 2>/dev/null || true)"
     if [ -n "$lpid" ] && ! kill -0 "$lpid" 2>/dev/null; then
       echo "⚠️  lock de creación huérfano (pid $lpid ya no existe); lo reclamo"

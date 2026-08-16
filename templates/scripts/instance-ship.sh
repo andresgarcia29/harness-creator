@@ -221,13 +221,22 @@ elif [ -n "$dirty" ]; then
 fi
 
 # ── lock: dos sesiones publicando la instancia no se pisan ────────────
+# `mkdir` solo no alcanza como mutex: con uutils coreutils (Ubuntu 26.04) hace
+# check-then-act y bajo carrera le dice que sí a varios (issue #209). El dueño
+# es quien crea `.owner`, cuyo O_EXCL lo hace la shell y no un binario.
+mkdir_lock() {  # mkdir_lock <dir> → 0 solo si el lock es NUESTRO
+  mkdir "$1" 2>/dev/null || return 1
+  ( set -C; : > "$1/.owner" ) 2>/dev/null
+}
+
 LOCKDIR="$WS/locks/instance.lock.d"
 mkdir -p "$WS/locks"
-if ! mkdir "$LOCKDIR" 2>/dev/null; then
+if ! mkdir_lock "$LOCKDIR"; then
   lpid="$(cat "$LOCKDIR/pid" 2>/dev/null || true)"
   if [ -n "$lpid" ] && ! kill -0 "$lpid" 2>/dev/null; then
     echo "⚠️  lock huérfano (pid $lpid ya no existe); lo reclamo"
-    rm -rf "$LOCKDIR"; mkdir "$LOCKDIR"
+    rm -rf "$LOCKDIR"; mkdir_lock "$LOCKDIR" || {
+      echo "❌ otra sesión ganó la carrera al reclamar el lock; re-corre."; exit 6; }
   else
     echo "❌ otra sesión${lpid:+ (pid $lpid)} está publicando la instancia; espera o revisa."
     echo "   Si estás SEGURO de que no queda ninguna viva: rm -rf $LOCKDIR"

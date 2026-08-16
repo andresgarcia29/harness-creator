@@ -223,6 +223,16 @@ trap 'if [ -n "$CLAIM_DIR" ]; then rm -rf "$CLAIM_DIR"; fi' EXIT
 # Ojo: estos códigos son INTERNOS de la función y no son los exits del script.
 # El caller los traduce: 10 (ajeno vivo) sale 0, 11 con url sale 0, 11 sin url
 # sale 9, y 12 sale 10.
+# `mkdir` solo no alcanza como mutex: con uutils coreutils (Ubuntu 26.04) hace
+# check-then-act y bajo carrera le dice que sí a varios (issue #209). El dueño
+# es quien crea `.owner`, cuyo O_EXCL lo hace la shell y no un binario. Acá el
+# stderr del mkdir NO se tapa: claim_take lo captura para distinguir una carrera
+# de un fallo real (permisos, disco), que era la razón de leerlo.
+mkdir_lock() {  # mkdir_lock <dir> → 0 solo si el lock es NUESTRO
+  mkdir "$1" || return 1
+  ( set -C; : > "$1/.owner" ) 2>/dev/null
+}
+
 claim_take() {  # claim_take <fp> → 0 tomado · 10 ajeno vivo · 11 huérfano · 12 no pude
   local fp="$1" dir err rc lpid=""
   dir="$CLAIMS/$fp.lock.d"
@@ -230,7 +240,7 @@ claim_take() {  # claim_take <fp> → 0 tomado · 10 ajeno vivo · 11 huérfano 
   if ! mkdir -p "$CLAIMS"; then
     return 12   # el motivo lo imprimió mkdir; tragárselo sería inventar un verde
   fi
-  err="$(mkdir "$dir" 2>&1)"; rc=$?
+  err="$(mkdir_lock "$dir" 2>&1)"; rc=$?
   if [ "$rc" -eq 0 ]; then
     printf '%s\n' "$$" > "$dir/pid"
     CLAIM_DIR="$dir"

@@ -13,10 +13,15 @@ TMPL="$ROOT/templates/scripts/ship.sh.tmpl"
 # pid_alive va junto: acquire_lock la usa para distinguir "el dueño murió" de
 # "no pude saberlo" (pid ilegible, o EPERM porque el proceso es de otro
 # usuario). Leer los tres casos como "muerto" liberaba locks VIVOS.
-{ awk '/^pid_alive\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$TMPL"
+# mkdir_lock también: es el primitivo con el que acquire_lock TOMA el lock, y
+# desde el issue #209 no es `mkdir` a secas (con uutils coreutils el binario
+# hace check-then-act y bajo carrera le dice que sí a varios).
+{ awk '/^mkdir_lock\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$TMPL"
+  awk '/^pid_alive\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$TMPL"
   awk '/^acquire_lock\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$TMPL"; } > "$WS/lock.sh"
 grep -q 'LOCK_HELD=1' "$WS/lock.sh" || { echo "no pude extraer acquire_lock del template"; exit 1; }
 grep -q 'pid_alive' "$WS/lock.sh" || { echo "no pude extraer pid_alive del template"; exit 1; }
+grep -q 'mkdir_lock() {' "$WS/lock.sh" || { echo "no pude extraer mkdir_lock del template"; exit 1; }
 
 run_acquire() {  # run_acquire <lockdir> [timeout]  (timeout portable: macOS no trae coreutils)
   bash -c "

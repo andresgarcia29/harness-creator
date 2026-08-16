@@ -34,7 +34,7 @@ assert_contains "$gw" 'mv -f "$tmp" "$claim"' "guard-worktree publica el claim c
 assert_not_contains "$gw" '"$now" > "$claim"' "y ya no escribe el claim directo al definitivo"
 
 wt="$(cat "$root/templates/scripts/worktree-task.sh")"
-assert_contains "$wt" 'until mkdir "$dir" 2>/dev/null' "worktree-task serializa la CREACIÓN con un lock mkdir por (task, repo)"
+assert_contains "$wt" 'until mkdir_lock "$dir"' "worktree-task serializa la CREACIÓN con un lock por (task, repo)"
 assert_not_contains "$wt" 'worktree add -b "task/$TASK" "$wt" "origin/$bb" 2>/dev/null' \
   "y una colisión de worktree add ya no muere muda a /dev/null"
 
@@ -42,10 +42,34 @@ echo
 echo "── el lock del grafo es real, no decorativo"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/.cache/graph.lock.d"    # simula una corrida en curso
+: > "$tmp/.cache/graph.lock.d/.owner"
 out="$( cd "$tmp" && WS="$tmp" bash -c '
   LOCKDIR="$WS/.cache/graph.lock.d"
-  if ! mkdir "$LOCKDIR" 2>/dev/null; then echo "OCUPADO"; fi' )"
+  mkdir_lock() { mkdir "$1" 2>/dev/null || return 1; ( set -C; : > "$1/.owner" ) 2>/dev/null; }
+  if ! mkdir_lock "$LOCKDIR"; then echo "OCUPADO"; fi' )"
 assert_contains "$out" "OCUPADO" "con el lock tomado, una segunda corrida no entra"
+
+echo
+echo "── ningún artefacto vuelve a usar \`mkdir\` pelado como mutex (issue #209)"
+# El bug no fue de un script: fue del PRIMITIVO. Ubuntu 26.04 cambió GNU
+# coreutils por uutils, y su \`mkdir\` hace statx y después mkdir(2), o sea
+# check-then-act: bajo carrera le devuelve 0 a varios procesos (medido en el
+# host del reporte: 20-31% de las rondas, tmpfs y ext4 por igual). El syscall
+# es atómico; el binario no. Todo lock del harness pasa por \`mkdir_lock\`, donde
+# el dueño es quien gana el O_EXCL de \`.owner\` (que hace la shell, sin binario).
+# Este check existe para que el próximo lock no nazca con el agujero adentro.
+sueltos="$(grep -rn 'mkdir "' "$root/templates/scripts" "$root/templates/hooks" 2>/dev/null \
+  | grep -v 'mkdir -p' | grep -v ':  mkdir "\$1"' || true)"
+[ -z "$sueltos" ] && pass "cero mkdir pelados como lock fuera de mkdir_lock" \
+  || fail "hay mkdir usado como mutex sin pasar por mkdir_lock: $sueltos"
+
+# Y que el helper no se pueda vaciar: donde se define, el O_EXCL tiene que estar.
+faltan=""
+for f in $(grep -rl 'mkdir_lock() {' "$root/templates/scripts" "$root/templates/hooks" 2>/dev/null); do
+  grep -q 'set -C; : > "\$1/.owner"' "$f" || faltan="$faltan $(basename "$f")"
+done
+[ -z "$faltan" ] && pass "cada mkdir_lock reclama con O_EXCL, que es lo único atómico acá" \
+  || fail "mkdir_lock sin el O_EXCL de .owner en:$faltan"
 
 echo
 echo "── skills-sync: instalar no puede dejar la skill a medias"

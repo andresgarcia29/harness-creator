@@ -102,6 +102,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# ── mkdir_lock: el lock, tomado DE VERDAD ─────────────────────────────
+# `mkdir` a secas dejó de ser un mutex y hay que decirlo con nombre y apellido
+# (issue #209): Ubuntu 26.04 reemplazó GNU coreutils por uutils, y su `mkdir`
+# hace `statx` y DESPUÉS `mkdir(2)`, o sea check-then-act. Bajo carrera dos
+# procesos hacen statx, los dos ven "no existe", los dos llaman al syscall y el
+# que pierde recibe EEXIST del kernel pero igual sale con 0. Medido en el host
+# del reporte: 20-31% de las rondas con más de un ganador, en tmpfs y en ext4.
+# El syscall es atómico (os.mkdir da 1 de 1 ganador en 100 rondas); el binario
+# no lo es.
+#
+# El dueño pasa a ser quien crea `.owner`, y eso NO pasa por ningún binario: el
+# O_EXCL lo hace la propia shell con `set -C`. Verificado en el mismo host: 100
+# rondas, un ganador cada vez. Quien gana el mkdir pero pierde `.owner` no era
+# el dueño y vuelve a esperar, que es justo lo que el mkdir dejó de contar.
+mkdir_lock() {  # mkdir_lock <dir> → 0 solo si el lock es NUESTRO
+  mkdir "$1" 2>/dev/null || return 1
+  ( set -C; : > "$1/.owner" ) 2>/dev/null
+}
+
 pid_dead() {  # 0 = SEGURO muerto · 1 = vivo, o no se pudo saber
   # El sesgo va siempre a CONSERVAR el lock: esperar de más cuesta segundos,
   # robarle el lock a un proceso vivo cuesta dos ADR con el mismo número, que
@@ -123,7 +142,7 @@ pid_dead() {  # 0 = SEGURO muerto · 1 = vivo, o no se pudo saber
 acquire_lock() {
   local ticks=0 nopid=0 max lpid
   max=$((LOCK_TIMEOUT * 5))
-  until mkdir "$LOCKDIR" 2>/dev/null; do
+  until mkdir_lock "$LOCKDIR"; do
     if [ -f "$LOCKDIR/pid" ]; then
       nopid=0
       lpid="$(cat "$LOCKDIR/pid" 2>/dev/null)"

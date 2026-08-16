@@ -255,7 +255,10 @@ sed 's/{{SECRETS_SOURCE}}/vault/g; s/{{VAULT_ADDR}}/https:\/\/vault.example/g' \
 
 # 1) el BUCLE, ejercitado: se extrae solo y se le da entrada por stdin.
 tmpl_loop="$WS/loop.sh"
-{ printf 'warn() { echo "WARN: $1"; }\nok() { echo "OK: $1"; }\nTOKFILE="%s/fakehome/.config/harness/vault-token"\nSECRETS_BLOCKED=0\n' "$WS"
+# vault_smoke se stubea acá porque el bucle vive en el template y la función
+# está fuera del recorte. SMOKE_RC gobierna su veredicto: 0 = el token lee lo
+# que la instancia declara, 1 = está vivo pero no puede (issue #211).
+{ printf 'warn() { echo "WARN: $1"; }\nok() { echo "OK: $1"; }\nTOKFILE="%s/fakehome/.config/harness/vault-token"\nSECRETS_BLOCKED=0\nvault_smoke() { return "${SMOKE_RC:-0}"; }\n' "$WS"
   awk '/^      _tok_try=0$/{f=1} f{print} /^      done$/{if(f) exit}' "$tmpl"
   printf 'echo "BLOQUEADO=$SECRETS_BLOCKED"\n'
 } > "$tmpl_loop"
@@ -296,5 +299,114 @@ assert_contains "$out" "incompleto" "y dice por que: un archivo a medias se ve i
 
 out="$( SECRETS_BLOCKED=0 bash "$tmpb2" 2>&1 )"
 assert_contains "$out" "EL PULL CORRIO" "con credencial si se corre (esto no es un apagador del pull)"
+
+echo
+echo "── #211: VIVO no es SIRVE. El smoke lee UNA ruta de las que declara secrets.sh"
+# El caso de campo: un token OIDC de humano pasa `vault token lookup`, el
+# bootstrap canta VALIDADO, materializa 15 de 18 claves, y el 403 aparece tres
+# pasos despues al mintear el token de nube. La causa nunca fue que el token
+# estuviera muerto: era que no tenia la policy.
+smoke="$WS/smoke.sh"
+{ printf 'warn() { echo "WARN: $1"; }\nWS="%s"\n' "$WS"
+  awk '/^vault_smoke\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$tmpl"
+} > "$smoke"
+grep -q 'permission denied' "$smoke" || { echo "no pude extraer vault_smoke del template"; exit 1; }
+
+mkdir -p "$WS/scripts" "$WS/sbin"
+decl() { printf '%s\n' "$@" > "$WS/scripts/secrets.sh"; }
+# El fake distingue los tres desenlaces que importan y, sobre todo, DEVUELVE UN
+# VALOR en el camino feliz: asi el test puede probar que el smoke no lo filtra.
+cat > "$WS/sbin/vault" <<'SH'
+#!/bin/sh
+case "$*" in
+  *"kv get"*)
+    case "${VAULT_FAKE:-ok}" in
+      ok)   echo "super-secreto-que-no-debe-verse"; exit 0 ;;
+      deny) echo "Error reading kv/x: permission denied" >&2; exit 2 ;;
+      *)    echo "Error: connection refused" >&2; exit 2 ;;
+    esac ;;
+  *"token lookup"*) printf '{"data":{"policies":["default","oidc-user"]}}\n' ;;
+esac
+exit 0
+SH
+chmod +x "$WS/sbin/vault"
+smoke_run() { ( PATH="$WS/sbin:$PATH"; . "$smoke"; vault_smoke tok ) 2>&1; }
+
+# a) el token puede leer: verde, callado, y el VALOR jamas se imprime
+decl '  dump_kv GH_TOKEN kv/harness/github pat' '  dump_kv OTRA kv/harness/otra campo'
+out="$(VAULT_FAKE=ok smoke_run)"; rc=$?
+assert_eq 0 "$rc" "con permiso: exit 0"
+assert_not_contains "$out" "super-secreto" "el valor del secreto NUNCA se imprime (stdout va a /dev/null)"
+
+# b) vivo pero sin la policy: rojo, con la ruta Y las policies que SI tiene
+out="$(VAULT_FAKE=deny smoke_run)"; rc=$?
+assert_eq 1 "$rc" "permission denied: rojo"
+assert_contains "$out" "kv/harness/github" "nombra la ruta que no pudo leer"
+assert_contains "$out" "default, oidc-user" "y las policies que el token SI tiene (el par que cierra el hueco)"
+assert_contains "$out" "vault token create" "con el comando para pedir uno que sirva"
+assert_not_contains "$out" "super-secreto" "tampoco aca se filtra un valor"
+
+# c) instancia recien generada: los ejemplos van comentados, no hay ruta declarada.
+#    Un rojo aca seria inventado: el token no tiene nada que deba poder leer.
+decl '#  dump_kv EJEMPLO kv/ejemplo campo'
+VAULT_FAKE=deny smoke_run >/dev/null 2>&1; rc=$?
+assert_eq 0 "$rc" "sin rutas declaradas el smoke no puede fallar"
+
+# d) lo que NO es permission denied no es culpa del token: sin red, mount
+#    equivocado, ruta con typo. Tratarlo como deny haria que el bootstrap pida
+#    tokens nuevos para siempre por un error de otro lado.
+decl '  dump_kv GH_TOKEN kv/harness/github pat'
+out="$(VAULT_FAKE=down smoke_run)"; rc=$?
+assert_eq 0 "$rc" "un fallo que no es permission denied no retiene el token"
+assert_contains "$out" "no concluyente" "y lo dice, en vez de callarse"
+
+# e) dump_file declara ruta igual que dump_kv: tambien cuenta
+decl '  dump_file kubeconfig kv/harness/kube config'
+out="$(VAULT_FAKE=deny smoke_run)"; rc=$?
+assert_eq 1 "$rc" "dump_file tambien declara una ruta que el token debe leer"
+assert_contains "$out" "kv/harness/kube" "y es la que nombra"
+
+echo
+echo "── #211: el bucle no acepta un token que pasa lookup pero no lee"
+# La palabra VALIDADO es la que hace que el humano deje de mirar: tiene que
+# significar que SIRVE, no solo que existe.
+printf '#!/bin/sh\nexit 0\n' > "$fakebin/vault"   # lookup en verde, siempre
+out="$( printf 'vivo-pero-sin-policy\n\n' | SMOKE_RC=1 PATH="$fakebin:$PATH" bash "$tmpl_loop" 2>&1 )"
+assert_not_contains "$out" "OK: token guardado y VALIDADO" "lookup verde + smoke rojo NO es VALIDADO"
+assert_contains "$out" "pegá otro" "vuelve a pedirlo"
+assert_contains "$out" "BLOQUEADO=1" "y si el humano se rinde, no se materializa un .secrets a medias"
+
+out="$( printf 'token-completo\n' | SMOKE_RC=0 PATH="$fakebin:$PATH" bash "$tmpl_loop" 2>&1 )"
+assert_contains "$out" "OK: token guardado y VALIDADO" "con smoke verde si valida"
+assert_contains "$out" "lee lo que esta instancia declara" "y la palabra dice QUE se comprobo"
+
+echo
+echo "── #211: mutación, los cables cortan de verdad"
+
+# m1) sin el guard de 'no hay rutas declaradas', una instancia recien generada
+#     queda trabada pidiendo tokens por una ruta que no existe.
+mut="$WS/smoke-sin-guard.sh"
+grep -v '\[ -z "$linea" \] && return 0' "$smoke" > "$mut"
+decl '#  dump_kv EJEMPLO kv/ejemplo campo'
+( PATH="$WS/sbin:$PATH"; export VAULT_FAKE=deny; . "$mut"; vault_smoke tok ) >/dev/null 2>&1
+assert_eq 1 $? "quitar el guard rompe la instancia recien generada: la aserción muerde"
+
+# m2) sin el case sobre stderr, cualquier fallo se lee como culpa del token.
+mut="$WS/smoke-todo-deny.sh"
+sed 's/\*"permission denied"\*)/*)/' "$smoke" > "$mut"
+decl '  dump_kv GH_TOKEN kv/harness/github pat'
+( PATH="$WS/sbin:$PATH"; export VAULT_FAKE=down; . "$mut"; vault_smoke tok ) >/dev/null 2>&1
+assert_eq 1 $? "tratar todo fallo como deny cambia la conducta: la aserción muerde"
+
+# m3) el valor del secreto no entra NI a una variable. Esto no se puede afirmar
+#     por conducta: `err` no se imprime en ningún camino, así que el valor no se
+#     filtra ni con el redirect ni sin él. Lo que se ata es la FORMA, y se dice
+#     que es forma: stdout al vacío, y solo stderr capturado.
+grep -q 'vault kv get .* 2>&1 >/dev/null' "$smoke" \
+  && pass "el smoke manda el valor a /dev/null y captura solo stderr" \
+  || fail "el smoke captura el stdout de 'vault kv get', o sea el secreto mismo"
+grep -q 'warn .*\$err' "$smoke" \
+  && fail "el mensaje imprime \$err: si algún día trae el valor, lo publica" \
+  || pass "y \$err no se imprime nunca, que es lo que cierra la fuga de verdad"
 
 t_done

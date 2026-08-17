@@ -355,6 +355,46 @@ else
     "toda instancia lo tiene (es LA perilla de modelos): si falta, la generación quedó incompleta y lo trae /harness-init sobre el workspace"
 fi
 
+# ── 4 · .serena/project.yml: la config sin la cual Serena ignora TODO ─
+# (#214) Es mecánica de punta a punta: el contenido sale de inventory.json y lo
+# escribe discover.sh, sin una sola decisión que consultar. Va acá y no en el
+# doctor porque un update que solo AVISA deja la instancia rota igual, y esta
+# rota barato: get_symbols_overview falla sobre el 100% del código y cada
+# pregunta cae al Read del archivo entero (46.450 tokens medidos en uno).
+ID_SER="serena.project_yml"
+SERENA_YML="$WS/.serena/project.yml"
+DISCOVER="$(cd "$(dirname "$0")" && pwd)/discover.sh"
+
+serena_ciega=0
+if [ ! -f "$SERENA_YML" ]; then
+  serena_ciega=1
+elif grep -qE '^ignore_all_files_in_gitignore: *true' "$SERENA_YML" 2>/dev/null; then
+  # El que escribió Serena sola en el primer arranque: autodetectó [bash] desde
+  # la raíz del workspace y heredó el .gitignore, donde vive repos/.
+  serena_ciega=1
+fi
+
+if [ ! -d "$WS/repos" ]; then
+  # Sin repos/ no hay lenguajes que declarar NI ceguera que arreglar: el bug es
+  # que Serena no ve lo que hay bajo repos/. No es "no pude determinar", que
+  # frenaría el update entero por una migración que acá no aplica.
+  saltada "$ID_SER" "no hay repos/ en $WS: no hay código bajo el .gitignore que Serena pueda ignorar"
+elif [ ! -x "$DISCOVER" ]; then
+  sindet "$ID_SER" "no encuentro discover.sh junto a este script ($DISCOVER)" \
+    "corré la migración desde el plugin instalado, o generá el archivo con /harness-init ."
+elif [ "$serena_ciega" -eq 0 ]; then
+  saltada "$ID_SER" "ya hay .serena/project.yml sin heredar el .gitignore"
+elif [ "$DRY" -eq 1 ]; then
+  aplicada "$ID_SER" "escribiría .serena/project.yml desde el inventario (hoy Serena no ve repos/, que está gitignoreado)"
+elif "$DISCOVER" "$WS" >/dev/null 2>&1 && [ -f "$SERENA_YML" ]; then
+  aplicada "$ID_SER" "$(sed -n 's/^language_servers: *//p' "$SERENA_YML" | head -1): antes Serena ignoraba repos/ entero"
+  grep -q '^# OMITIDOS' "$SERENA_YML" \
+    && echo "   ↳ hay language servers omitidos por falta de binario (los lista $SERENA_YML): uno que no arranca bloquea a TODOS, por eso quedan afuera"
+else
+  rota "$ID_SER" "discover.sh no pudo escribir .serena/project.yml" \
+    "corrélo a mano y mirá su salida: $DISCOVER $WS"
+fi
+
 echo "── resultado: $APLICADAS aplicada(s), $SALTADAS sin cambios, $SINDET sin determinar, $FALLOS con fallo ──"
 if [ "$FALLOS" -gt 0 ]; then
   echo "   el update NO puede seguir como si esto hubiera pasado: arreglá el fallo y volvé a correr"

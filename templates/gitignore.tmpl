@@ -21,6 +21,11 @@ locks/
 # Lo regenera scripts/discover.sh
 inventory.json
 
+# Serena: project.yml lo regenera discover.sh y depende de qué language servers
+# hay en ESTA máquina (uno declarado sin su binario bloquea a todos); cache/ y
+# memories/ son estado local suyo
+.serena/
+
 # Lo genera scripts/gowork.sh con rutas ABSOLUTAS de esta máquina:
 # versionarlo rompe cualquier otro clon
 go.work

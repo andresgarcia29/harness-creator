@@ -45,6 +45,51 @@ EOF
   fi
   chmod +x "$WS/bin/gh"
 }
+# EL SEGUNDO ORIGEN DE TAGS (#213). El REST `/tags` 404ea en un repo privado
+# con token OAuth mientras `git ls-remote` entrega los refs con la MISMA
+# credencial, así que el script pregunta por los dos caminos. Los tests tienen
+# que poder mover cada uno por separado: si acá solo hubiera stub de `gh`, el
+# fallback saldría a la red de verdad y este archivo dependería de github.com.
+#
+# Se stubea SOLO `ls-remote`: lo demás delega al git real, para no dejarle una
+# trampa al próximo que agregue otra llamada a git.
+REAL_GIT="$(command -v git)"
+stub_git() {  # stub_git <tag-de-upstream|""> [tag-del-generador|""]
+  cat > "$WS/bin/git" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "ls-remote" ]; then
+  case "\$*" in
+    *harness-daemon*) tag="${2:-}" ;;
+    *)                tag="${1:-}" ;;
+  esac
+  # 128 es lo que devuelve git cuando el remoto no responde o no autentica.
+  [ -n "\$tag" ] || exit 128
+  printf '%s\trefs/tags/v%s\n'      1111111111111111111111111111111111111111 "0.1.0"
+  printf '%s\trefs/tags/v%s\n'      2222222222222222222222222222222222222222 "\$tag"
+  printf '%s\trefs/tags/v%s^{}\n'   2222222222222222222222222222222222222222 "\$tag"
+  exit 0
+fi
+exec $REAL_GIT "\$@"
+EOF
+  chmod +x "$WS/bin/git"
+}
+# Por defecto los dos orígenes cuentan lo mismo: los tests que no hablan de
+# #213 no tienen por qué saber que hay dos.
+stub_git ""
+# El `gh` del reporte: autenticado, con acceso al repo, y 404 SOLO en /tags y
+# /releases. No es un gh roto, es el que tiene todo el mundo con un repo privado
+# y un token OAuth, y es el que hacía caer todo update al fallback 2b.
+stub_gh_sin_tags() {  # stub_gh_sin_tags <version> [digest]
+  cat > "$WS/bin/gh" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+  */tags*|*/releases*) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
+  *MANIFEST*) echo "plugin_version: $1"; echo "digest: ${2:-}" ;;
+  *) printf '{"version":"$1"}' ;;
+esac
+EOF
+  chmod +x "$WS/bin/gh"
+}
 # Un plugin instalado en disco: es DE AHÍ que un update copia, así que --verify
 # lo mira antes que nada.
 stub_plugin() {  # stub_plugin <version> <digest>
@@ -137,7 +182,9 @@ rm -f "$WS/bin/gh"
 NOGH="$(t_path_without gh)"
 command -v gh >/dev/null 2>&1 && { PATH="$NOGH" command -v gh >/dev/null 2>&1 \
   && fail "el PATH sin gh todavía tiene gh" || pass "el PATH de prueba no tiene gh"; }
-out="$( cd "$WS" && PATH="$NOGH" bash scripts/harness-version.sh 2>&1 )"
+# $WS/bin sigue adelante (ya sin `gh`): ahí vive el stub de `git ls-remote`, y
+# sin él este caso saldría a github.com de verdad por el segundo origen de tags.
+out="$( cd "$WS" && PATH="$WS/bin:$NOGH" bash scripts/harness-version.sh 2>&1 )"
 assert_contains "$out" "gh no está instalado" "sin gh: dice el motivo concreto"
 assert_not_contains "$out" "al día" "y tampoco inventa un veredicto"
 
@@ -333,7 +380,7 @@ printf '# Pipeline de Acme\n\nla seccion vieja\n' > "$WS/docs/harness/pipeline.m
 out="$(verify)"
 assert_contains "$out" "docs/harness/pipeline.md" "nombra el archivo congelado"
 assert_contains "$out" "del template no están" "y dice que le faltan lineas del template"
-assert_contains "$out" "idénticos al tag" "aunque el digest declarado siga coincidiendo"
+assert_contains "$out" "idénticos a los de" "aunque el digest declarado siga coincidiendo"
 
 # Un .tmpl NO se hashea: su sha jamas va a coincidir porque el generador
 # sustituye {{CLAVE}}, y una sola clave puede expandirse a muchas lineas
@@ -530,6 +577,41 @@ out="$(gen)"
 assert_contains "$out" "comprobación que no corrió" "sin upstream: se dice que no se comparo"
 assert_not_contains "$out" "podés generar" "y NO autoriza"
 assert_eq 2 "$(gen_rc)" "exit 2: ni autorizado ni rechazado"
+
+# (7) ISSUE #213: el 404 de /tags no es "no hay tags". En un repo privado con
+#     token OAuth el REST contesta 404 mientras `git ls-remote` entrega los refs
+#     con la MISMA credencial (168 en el host del reporte). Preguntando por un
+#     solo camino, el script degradaba a exit 2 y TODO update caia al fallback
+#     2b, que es exactamente el camino que este flag existe para evitar.
+stub_gh_sin_tags "0.59.3" "$SET_A"
+stub_git "0.59.3" "0.59.3"
+stub_harness "0.59.3"
+out="$(gen)"
+assert_contains "$out" "podés generar" \
+  "#213: con /tags en 404, los tags salen por git ls-remote y el generador SI se autoriza"
+assert_eq 0 "$(gen_rc)" "#213: exit 0, no el 2 de una comprobacion que no corrio"
+
+# El fallback no afloja la ley: con los DOS origenes mudos sigue sin autorizar,
+# y ahora nombra los dos para que el que lee sepa que se intento.
+stub_git ""
+out="$(gen)"
+assert_eq 2 "$(gen_rc)" "#213: sin ningun origen de tags, sigue siendo exit 2"
+assert_contains "$out" "git ls-remote" "#213: y nombra los dos caminos que fallaron"
+
+# SEGUNDO SINTOMA DEL #213: --verify decia "upstream no publica tags" y dos
+# lineas despues "es el ultimo tag". No pueden ser las dos verdaderas.
+echo "0.59.3" > "$WS/.harness-version"; echo "$SET_A" > "$WS/.harness-templates"
+stub_gh_sin_tags "0.59.3" "$SET_A"; stub_git "0.59.3"; stub_plugin "0.59.3" "$SET_A"
+out="$(verify)"
+assert_not_contains "$out" "no pude leer los tags" \
+  "#213: si git entrega los tags, --verify no se declara ciego"
+stub_git ""
+out="$(verify)"
+assert_contains "$out" "no pude leer los tags" \
+  "#213: sin ningun origen lo dice como lo que es, no como 'upstream no publica tags'"
+assert_not_contains "$out" "el último tag" \
+  "#213: y entonces no afirma comparar contra un tag que no leyo"
+stub_git ""
 
 stub_gh "0.59.3" "$SET_A"
 stub_harness ""

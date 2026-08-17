@@ -154,25 +154,47 @@ ver_lt() {  # ver_lt <a> <b> → 0 si a < b (semver simple, sin pre-releases)
 # La LISTA entera se guarda, no solo el último: `--generator` no pregunta "¿cuál
 # es el más nuevo?" sino "¿esta versión EXISTE?", y son preguntas distintas. Una
 # sola llamada al API para las dos.
+#
+# DOS ORÍGENES, NO UNO (#213). El REST `/tags` contesta 404 en hosts donde el
+# repo es privado y el token de `gh` es OAuth sin el scope que ese endpoint
+# pide: `gh api repos/<owner>/<repo>` responde, `/tags` y `/releases` 404ean, y
+# `git ls-remote --tags` sobre el MISMO host y con la MISMA credencial trae los
+# 168 refs. El 404 se veía acá como "no hay tags", que es la lectura más cara
+# posible: `--generator` degradaba a "no pude comprobarlo" (exit 2) y TODO
+# update caía al fallback 2b, la re-instanciación por LLM, que es exactamente
+# el camino que ese flag existe para evitar.
+#
+# Un tag es un ref de git antes que un recurso REST: si el protocolo git lo
+# entrega, la pregunta SÍ corrió. Por eso el fallback y no un mensaje mejor.
 tags_de() {  # tags_de <owner/repo> → "<version>\t<tag>" por línea, de vieja a nueva
-  command -v gh >/dev/null 2>&1 || return 0
-  gh api "repos/$1/tags" --paginate --jq '.[].name' 2>/dev/null \
+  local crudo=""
+  command -v gh >/dev/null 2>&1 \
+    && crudo="$(gh api "repos/$1/tags" --paginate --jq '.[].name' 2>/dev/null || true)"
+  if [ -z "$crudo" ] && command -v git >/dev/null 2>&1; then
+    # `^{}` es el commit al que apunta un tag anotado: mismo nombre, línea
+    # extra. Se le saca el sufijo y el `sort -u` de abajo colapsa el duplicado.
+    crudo="$(git ls-remote --tags "https://github.com/$1" 2>/dev/null \
+      | sed -e 's|.*refs/tags/||' -e 's|\^{}$||' || true)"
+  fi
+  printf '%s\n' "$crudo" \
     | awk '{ v=$0; sub(/^v/,"",v); if (v ~ /^[0-9]+\.[0-9]+\.[0-9]+$/) print v"\t"$0 }' \
-    | sort -t. -k1,1n -k2,2n -k3,3n
+    | sort -u -t. -k1,1n -k2,2n -k3,3n
 }
 
-UP_TAG=""
-UP_TAGS=""
-if command -v gh >/dev/null 2>&1; then
-  UP_TAGS="$(tags_de "$UPSTREAM_REPO")"
-  UP_TAG="$(printf '%s\n' "$UP_TAGS" | tail -1 | cut -f2)"
-fi
+# Sin guarda por `gh`: los tags también salen por `git ls-remote`, así que
+# condicionar esto a que haya `gh` era apagar el segundo origen antes de usarlo.
+UP_TAGS="$(tags_de "$UPSTREAM_REPO")"
+UP_TAG="$(printf '%s\n' "$UP_TAGS" | tail -1 | cut -f2)"
 # El tag SIN la `v`: `UP_TAG` es el ref que consume `gh_raw` (y lleva el prefijo
 # tal cual lo publica upstream), pero comparar VERSIONES con él haría que
 # `0.59.3` nunca igualara a `v0.59.3`. Dos nombres porque son dos cosas.
 UP_TAG_VER="$(printf '%s\n' "$UP_TAGS" | tail -1 | cut -f1)"
+# El sustantivo con el que --verify nombra el punto de comparación: sin tags no
+# se compara contra un tag, y decirlo igual es la contradicción del issue.
+UP_REF_N="el último tag"
+[ -n "$UP_TAG" ] || UP_REF_N="la rama por defecto de upstream"
 UP_WHERE="tag ${UP_TAG:-}"
-[ -n "$UP_TAG" ] || UP_WHERE="rama por defecto (upstream no publica tags)"
+[ -n "$UP_TAG" ] || UP_WHERE="rama por defecto (no pude leer tags de upstream)"
 
 gh_raw() {  # gh_raw <ruta> → el archivo tal cual, en el ref elegido
   local q=""
@@ -248,7 +270,9 @@ generador_check() {  # → 0 autorizado · 1 NO generar con él · 2 no pude com
   if [ -z "$gen_tags" ]; then
     echo "⚠️  generador $ver: no pude traer los tags de $GENERATOR_REPO para comparar."
     echo "   Esto NO es una autorización: es una comprobación que no corrió."
-    echo "   (¿gh sin auth, sin red?) Andá al paso 2b y declaralo."
+    echo "   Ni por \`gh api repos/$GENERATOR_REPO/tags\` ni por"
+    echo "   \`git ls-remote --tags https://github.com/$GENERATOR_REPO\`."
+    echo "   (¿sin auth, sin red?) Andá al paso 2b y declaralo."
     return 2
   fi
   if ! printf '%s\n' "$gen_tags" | cut -f1 | grep -qxF "$ver"; then
@@ -601,7 +625,10 @@ if [ "$MODE" = "verify" ]; then
     echo "   Esto no es un update fallido, es un update SIN VERIFICAR."
     exit 2
   fi
-  [ -n "$UP_TAG" ] || echo "⚠️  upstream no publica tags: comparo contra su rama por defecto, que se mueve."
+  # Antes decía "upstream no publica tags" y dos líneas más abajo "es el último
+  # tag": no pueden ser las dos verdaderas (#213). La lista vacía no prueba que
+  # no haya tags, prueba que no los pude leer, y eso es lo que se dice.
+  [ -n "$UP_TAG" ] || echo "⚠️  no pude leer los tags de upstream (ni por gh api ni por git ls-remote): comparo contra su rama por defecto, que se mueve."
 
   vrc=0
   # El plugin en disco, la fuente del copiado.
@@ -613,13 +640,13 @@ if [ "$MODE" = "verify" ]; then
     # distintas dando rojo siempre. El digest es su última línea, con prefijo.
     disk_tpl="$(sed -n 's/^digest: *//p' "$PLUGIN_ROOT/templates/MANIFEST.sha256" 2>/dev/null | head -1)"
     if [ "$disk_ver" != "$up_ver" ] || { [ -n "$disk_tpl" ] && [ "$disk_tpl" != "$up_tpl" ]; }; then
-      echo "❌ el PLUGIN EN DISCO ($disk_ver) no es el último tag ($up_ver)."
+      echo "❌ el PLUGIN EN DISCO ($disk_ver) no es $UP_REF_N ($up_ver)."
       echo "   El update copia DESDE acá, así que regenerar produce una instancia"
       echo "   vieja igual, y el número que escriba va a decir que está al día."
       echo "   ↳ /plugin marketplace update harness   y volvé a correr el update"
       vrc=1
     else
-      echo "✅ plugin en disco $disk_ver: es el último tag"
+      echo "✅ plugin en disco $disk_ver: coincide con $UP_REF_N"
     fi
   else
     echo "⚠️  no sé qué plugin está instalado (sin CLAUDE_PLUGIN_ROOT): no puedo"
@@ -628,9 +655,9 @@ if [ "$MODE" = "verify" ]; then
   fi
 
   if [ "$local_ver" = "$up_ver" ]; then
-    echo "✅ versión de la instancia $local_ver: coincide con el tag"
+    echo "✅ versión de la instancia $local_ver: coincide con $UP_REF_N"
   else
-    echo "❌ la instancia dice $local_ver y el último tag es $up_ver: el update NO aterrizó."
+    echo "❌ la instancia dice $local_ver y $UP_REF_N dice $up_ver: el update NO aterrizó."
     vrc=1
   fi
 
@@ -639,9 +666,9 @@ if [ "$MODE" = "verify" ]; then
     echo "   así que el número de arriba no es evidencia de nada."
     vrc=1
   elif [ "$local_tpl" = "$up_tpl" ]; then
-    echo "✅ templates $(printf '%.12s' "$local_tpl"): idénticos al tag"
+    echo "✅ templates $(printf '%.12s' "$local_tpl"): idénticos a los de $UP_REF_N"
   else
-    echo "❌ templates $(printf '%.12s' "$local_tpl") ≠ tag $(printf '%.12s' "$up_tpl")."
+    echo "❌ templates $(printf '%.12s' "$local_tpl") ≠ $UP_REF_N $(printf '%.12s' "$up_tpl")."
     echo "   Este es EL fallo que importa: el número quedó bien y el CONTENIDO"
     echo "   no. Faltan archivos por aplicar, o alguno se rechazó."
     echo "   ↳ volvé a correr /harness-update y aplicá los diffs que queden."

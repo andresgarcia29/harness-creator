@@ -1832,6 +1832,44 @@ run_lang_gates() {
     [ -n "$main_lint" ] && echo "⚠️  buf lint: $(printf '%s\n' "$main_lint" | grep -c .) violaciones PREEXISTENTES en main (no bloquean; candidatas al ratchet-keeper)"
   fi
 
+  # ── Los workflows de GitHub Actions: código que nadie compila ─────────
+  # Un `.github/workflows/*.yml` ES código ejecutable, y hasta acá NINGÚN gate
+  # lo miraba. Dos huecos distintos se juntaban:
+  #
+  #  · Un repo de workflows reusables (solo .github/, ningún marcador de
+  #    lenguaje) caía al aviso de "no reconozco el stack": no bloquea, así que
+  #    se pusheaba a main sin verificar una línea. Y es el peor repo donde
+  #    hacerlo, porque su producto lo consumen los demás por `uses:`, así que
+  #    un typo no rompe este repo: rompe el CI de todos los que lo llaman.
+  #  · Un repo CON stack reconocido igual no validaba sus workflows, porque
+  #    `go test` no sabe nada de YAML.
+  #
+  # Se lintea SIEMPRE que el cambio toque workflows, sin importar el stack, y
+  # solo lo que el cambio tocó: la deuda preexistente de main no secuestra un
+  # ship ajeno (mismo criterio que el ratchet de buf lint y que squawk).
+  #
+  # A propósito NO toca LANG_SEEN. Linteé el YAML, no compilé el repo: marcarlo
+  # como "stack reconocido" apagaría el aviso de más abajo y cambiaría un
+  # silencio por otro más difícil de ver.
+  local wfs
+  wfs="$(git diff "origin/$BASE_REF...HEAD" --name-only --diff-filter=ACMR \
+    | grep -E '^\.github/workflows/.*\.ya?ml$' || true)"
+  if [ -n "$wfs" ]; then
+    if command -v actionlint >/dev/null; then
+      gate "actionlint (workflows)"
+      # shellcheck disable=SC2086
+      actionlint $wfs
+    else
+      echo "⚠️  este cambio toca workflows de GitHub Actions y actionlint NO está instalado:"
+      printf '%s\n' "$wfs" | sed 's/^/     · /'
+      echo "   NO se validaron: una expresión mal escrita en un \${{ }}, un 'needs:'"
+      echo "   a un job inexistente o un 'runs-on' inválido pasarían sin que nadie"
+      echo "   lo vea, y si este repo publica workflows reusables el CI que rompe"
+      echo "   es el de quien los consume. Instalalo: brew install actionlint"
+      emit assumption "workflows de $REPO NO validados: actionlint no está en el PATH"
+    fi
+  fi
+
   # EL SILENCIO MÁS CARO: si ningún marcador matcheó, este gate no compiló ni
   # testeó NADA y hasta hoy salía verde igual. Un repo docs o de contratos
   # puede no tener stack legítimamente, así que no se bloquea, pero deja de
@@ -1842,6 +1880,8 @@ run_lang_gates() {
     echo "   package.json, pyproject.toml, pubspec.yaml, Cargo.toml, pom.xml,"
     echo "   build.gradle, Gemfile, composer.json, *.csproj/*.sln, mix.exs,"
     echo "   buf.yaml, y *.tf y Chart.yaml (raíz o subdirs, prof. 4)."
+    [ -n "$wfs" ] && echo "   (Sus workflows SÍ pasaron por actionlint, pero eso valida YAML de CI,"
+    [ -n "$wfs" ] && echo "    no el repo: no lo tomes como que algo se construyó.)"
     echo "   Si este repo SÍ se construye, agregá su rama en run_lang_gates:"
     echo "   un eje sin implementación es un vendor cableado (CONTRIBUTING #8)."
     emit assumption "$REPO NO compilado ni testeado: run_lang_gates no reconoce su stack"

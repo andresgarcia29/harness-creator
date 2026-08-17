@@ -631,20 +631,31 @@ fi
 # sí deployan, y la única vez que importó (un apply de infra rojo) el watcher
 # se declaró incompetente y hubo que verificar a mano con gh run view. La
 # precedencia acá es la MISMA que deploy-watch.sh: deploy.<repo>.driver en
-# answers > kind del manifest (service/frontend/mobile → gitops; resto → none).
+# answers > kind del manifest (service/frontend/mobile → gitops; resto → none),
+# y `none` con verify_cmd o smoke cuenta como verificado, porque eso es lo que
+# deploy-watch hace de verdad. La evidencia de que un repo deploya también es la
+# misma: un workflow de deploy, o un atlantis.yaml (que aplica al mergear).
 if [ -f "$WS/manifest.yaml" ] && [ -d "$WS/repos" ]; then
   for name in $(grep -E '^[[:space:]]+- name:' "$WS/manifest.yaml" | awk '{print $3}'); do
-    wfdir="$WS/repos/$name/.github/workflows"
-    [ -d "$wfdir" ] || continue
     has_deploy=""
-    for wf in "$wfdir"/*.yml "$wfdir"/*.yaml; do
-      [ -f "$wf" ] || continue
-      case "$(basename "$wf")" in
-        *deploy*|*release*|*apply*|*publish*) has_deploy=1; break ;;
-      esac
-      grep -qiE '(terraform[[:space:]]+apply|kubectl[[:space:]]+apply|helm[[:space:]]+(upgrade|install)|docker[[:space:]]+push|npm[[:space:]]+publish|deploy)' "$wf" 2>/dev/null \
-        && { has_deploy=1; break; }
-    done
+    # Atlantis aplica al MERGEAR, por un comentario en el PR, sin workflow: si
+    # solo se miran .github/workflows, esos repos contestan "no deployo" y el
+    # gate se los salta enteros. Es la misma clase de hueco que el gate existe
+    # para cerrar, un piso más abajo. Medido en un workspace real: de 17 repos
+    # con atlantis.yaml, 5 no tenían NINGÚN workflow que este gate reconociera.
+    { [ -f "$WS/repos/$name/atlantis.yaml" ] || [ -f "$WS/repos/$name/atlantis.yml" ]; } && has_deploy=atlantis
+    wfdir="$WS/repos/$name/.github/workflows"
+    if [ -z "$has_deploy" ]; then
+      [ -d "$wfdir" ] || continue
+      for wf in "$wfdir"/*.yml "$wfdir"/*.yaml; do
+        [ -f "$wf" ] || continue
+        case "$(basename "$wf")" in
+          *deploy*|*release*|*apply*|*publish*) has_deploy=1; break ;;
+        esac
+        grep -qiE '(terraform[[:space:]]+apply|kubectl[[:space:]]+apply|helm[[:space:]]+(upgrade|install)|docker[[:space:]]+push|npm[[:space:]]+publish|deploy)' "$wf" 2>/dev/null \
+          && { has_deploy=1; break; }
+      done
+    fi
     [ -n "$has_deploy" ] || continue
     drv="$(awk -v r="$name" '
       /^[[:space:]]*#/ { next }
@@ -670,7 +681,30 @@ if [ -f "$WS/manifest.yaml" ] && [ -d "$WS/repos" ]; then
       case "${kind:-}" in service|frontend|mobile|"") drv=gitops ;; *) drv=none ;; esac
     fi
     if [ "$drv" = "none" ]; then
-      warn "repos/$name tiene workflows de deploy y su driver resuelve a none: deploy-watch NO lo va a verificar tras el ship; declara deploy.$name.driver (gitops|actions) en harness-answers.yaml"
+      # deploy-watch.sh trata `none` + verify_cmd (o un smoke ejecutable) como
+      # VERIFICADO: salta las etapas de CI/gitops pero corre el verify. Es la
+      # config correcta para un repo que aplica por Atlantis, donde no hay run
+      # de Actions que mirar y la única verdad es interrogar al recurso. Si el
+      # doctor solo leyera `driver`, avisaría para siempre sobre una instancia
+      # bien configurada, y un aviso que no se puede apagar se aprende a
+      # ignorar justo el día que señala algo real.
+      vcmd="$(awk -v r="$name" '
+        /^[[:space:]]*#/ { next }
+        /^deploy:/ { ind=1; next }
+        ind && /^[^[:space:]]/ { ind=0 }
+        ind && $0 ~ "^[[:space:]]+" r ":" { cur=1; next }
+        ind && cur && /^[[:space:]]+verify_cmd:[[:space:]]*/ { print "si"; exit }
+        ind && cur && /^[[:space:]][[:space:]][a-zA-Z0-9_-]+:/ { cur=0 }
+      ' "$ANSWERS" 2>/dev/null)"
+      if [ -n "$vcmd" ] || [ -x "$WS/scripts/smoke/$name.sh" ]; then
+        ok "deploy de $name verificable (driver: none + verify)"
+        continue
+      fi
+      case "$has_deploy" in
+        atlantis) via="aplica infra con Atlantis (atlantis.yaml)" ;;
+        *)        via="tiene workflows de deploy" ;;
+      esac
+      warn "repos/$name $via y su driver resuelve a none sin verify: deploy-watch NO lo va a verificar tras el ship; declara deploy.$name.driver (gitops|actions) o deploy.$name.verify_cmd en harness-answers.yaml"
     else
       ok "deploy de $name verificable (driver: $drv)"
     fi

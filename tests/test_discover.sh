@@ -36,6 +36,45 @@ touch "$WS/repos/tf-network/main.tf" "$WS/repos/tf-network/variables.tf"
 mk_repo runbooks
 printf '# runbook\n' > "$WS/repos/runbooks/README.md"
 
+# ── Los tres patrones que rompían la clasificación en un workspace real de
+#    plataforma, donde el 75% de los repos lleva terraform ────────────────
+
+# app-con-infra-adjunta: código en la raíz, terraform confinado a un subdir.
+# Antes: el maxdepth 4 lo veía primero y salía infra-live → driver `none` →
+# una app deployable sin verificación post-ship.
+mk_repo api-con-tf
+touch "$WS/repos/api-con-tf/pyproject.toml" "$WS/repos/api-con-tf/Dockerfile"
+mkdir -p "$WS/repos/api-con-tf/terraform"
+touch "$WS/repos/api-con-tf/terraform/main.tf"
+
+# módulo reutilizable con el terraform anidado (convención mayoritaria):
+# variables.tf existe pero NO en la raíz, así que el chequeo de raíz fallaba
+# y un módulo se declaraba infra-live ("aplica al mergear"), su opuesto.
+mk_repo tf-anidado
+mkdir -p "$WS/repos/tf-anidado/terraform"
+touch "$WS/repos/tf-anidado/terraform/main.tf" \
+      "$WS/repos/tf-anidado/terraform/variables.tf" \
+      "$WS/repos/tf-anidado/terraform/outputs.tf"
+
+# stack live por directorio de ENTORNO: declara variables/outputs propios, así
+# que la heurística de variables.tf sola lo llamaría módulo. El entorno gana.
+mk_repo tf-entornos
+mkdir -p "$WS/repos/tf-entornos/terraform/prod"
+touch "$WS/repos/tf-entornos/terraform/prod/main.tf" \
+      "$WS/repos/tf-entornos/terraform/prod/variables.tf"
+
+# señales de nube/observabilidad: el eje tenía UNA implementación detectada
+# (gcp/gke/prometheus), así que un workspace AWS se veía igual a uno sin nube.
+mk_repo aws-stack
+mkdir -p "$WS/repos/aws-stack/terraform/gbl"
+cat > "$WS/repos/aws-stack/terraform/gbl/main.tf" <<'TF'
+provider "aws" { region = "us-east-1" }
+resource "aws_eks_cluster" "this" { name = "x" }
+resource "aws_lambda_function" "this" { function_name = "y" }
+resource "aws_cloudwatch_log_group" "this" { name = "z" }
+module "observe" { source = "observeinc/collection/aws" }
+TF
+
 echo "── discover: la inferencia de roles que alimenta el clustering"
 
 out="$(bash "$ROOT/scripts/discover.sh" "$WS" 2>&1)"; rc=$?
@@ -50,7 +89,52 @@ assert_eq frontend     "$(role webapp)"     "package.json con react → frontend
 assert_eq infra-module "$(role tf-network)" "*.tf + variables.tf → infra-module"
 assert_eq docs         "$(role runbooks)"   "puro markdown → docs"
 
-assert_eq 6 "$(jq -r '.repo_count' "$WS/inventory.json")" "repo_count correcto"
+# Los tres patrones de un workspace de plataforma real
+assert_eq service      "$(role api-con-tf)"  "app con terraform/ al lado → service, NO infra-live"
+assert_eq infra-module "$(role tf-anidado)"  "variables.tf anidado → infra-module"
+assert_eq infra-live   "$(role tf-entornos)" "terraform/prod/ (entorno) → infra-live aunque tenga variables.tf"
+
+# Señales del eje nube/observabilidad: sin esto un workspace AWS es invisible
+sig() { jq -r --arg n "$1" --arg s "$2" '.repos[]|select(.name==$n)|.signals|index($s)!=null' "$WS/inventory.json"; }
+assert_eq true "$(sig aws-stack aws)"        "provider aws → señal aws"
+assert_eq true "$(sig aws-stack eks)"        "aws_eks_cluster → señal eks"
+assert_eq true "$(sig aws-stack lambda)"     "aws_lambda_function → señal lambda"
+assert_eq true "$(sig aws-stack cloudwatch)" "aws_cloudwatch → señal cloudwatch"
+assert_eq true "$(sig aws-stack observe)"    "observeinc → señal observe"
+
+# atlantis: la TERCERA forma de aplicar infra. Sin esta señal, un repo que
+# aplica al mergear (por un comentario en el PR, sin workflow propio) era
+# indistinguible de uno que no deploya, y el gate de deploy del doctor lo
+# saltaba entero. Medido en un workspace real: 17 repos con atlantis.yaml.
+# Se monta sobre tf-entornos (un infra-live, el caso real) para no inflar el
+# repo_count que se verifica abajo.
+printf 'version: 3\nprojects:\n  - dir: .\n' > "$WS/repos/tf-entornos/atlantis.yaml"
+bash "$ROOT/scripts/discover.sh" "$WS" >/dev/null 2>&1
+assert_eq true  "$(sig tf-entornos atlantis)" "atlantis.yaml → señal atlantis"
+assert_eq false "$(sig aws-stack atlantis)"   "un repo sin atlantis.yaml NO la emite"
+# Y sale en el summary: es la LISTA que lee el instalador para decidir qué repos
+# necesitan driver+verify_cmd. Una señal por repo que no se resume obliga a
+# recorrer 91 entradas a mano, y en la práctica no se mira.
+jq -e '.summary.atlantis | index("tf-entornos")' "$WS/inventory.json" >/dev/null \
+  && pass "summary.atlantis lista los repos (insumo de la entrevista de deploy)" \
+  || fail "atlantis no llega al summary: el instalador no ve qué repos aplican por Atlantis"
+# Aditivo, no reemplazo: los ejes previos siguen intactos. `gcp` vive como
+# señal por repo (nunca estuvo en summary) y kargo/argocd siguen en summary.
+mk_repo gcp-stack
+mkdir -p "$WS/repos/gcp-stack/terraform"
+cat > "$WS/repos/gcp-stack/terraform/main.tf" <<'TF'
+provider "google" { project = "p" }
+resource "google_container_cluster" "this" { name = "c" }
+TF
+bash "$ROOT/scripts/discover.sh" "$WS" >/dev/null 2>&1
+assert_eq true "$(sig gcp-stack gcp)" "regla 8: la señal gcp previa SIGUE emitiéndose"
+assert_eq true "$(sig gcp-stack gke)" "regla 8: la señal gke previa SIGUE emitiéndose"
+jq -e 'has("kargo") and has("argocd") and has("aws") and has("observe")' \
+  <(jq '.summary' "$WS/inventory.json") >/dev/null \
+  && pass "summary conserva kargo/argocd y agrega aws/observe (se suma, no se sustituye)" \
+  || fail "summary perdió un eje previo"
+
+assert_eq 11 "$(jq -r '.repo_count' "$WS/inventory.json")" "repo_count correcto"
 assert_eq atlas "$(jq -r '.summary.go | sort | .[0]' "$WS/inventory.json")" "summary agrupa por lenguaje"
 jq -e '.by_role.contracts | index("proto")' "$WS/inventory.json" >/dev/null \
   && pass "by_role agrupa (insumo directo del clustering)" || fail "by_role no agrupa"
@@ -58,7 +142,7 @@ jq -e '.by_role.contracts | index("proto")' "$WS/inventory.json" >/dev/null \
 # un directorio SIN .git se ignora (no es un repo)
 mkdir -p "$WS/repos/no-es-repo" && touch "$WS/repos/no-es-repo/go.mod"
 bash "$ROOT/scripts/discover.sh" "$WS" >/dev/null 2>&1
-assert_eq 6 "$(jq -r '.repo_count' "$WS/inventory.json")" "directorios sin .git se ignoran"
+assert_eq 11 "$(jq -r '.repo_count' "$WS/inventory.json")" "directorios sin .git se ignoran"
 
 echo
 echo "── .serena/project.yml: el archivo sin el cual Serena ignora TODO el código (#214)"

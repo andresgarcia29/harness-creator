@@ -369,6 +369,26 @@ capabilities:
     phase: 2
     note: "sin soporte Dart built-in; semgrep/opengrep cubre lo multi-lenguaje"
 
+  # GATE de workflows. POR QUÉ es un gate y no un linter opcional: en un
+  # workspace con repos de ci-library (workflows reusables llamados con
+  # `uses:` desde otros repos), el YAML ES el producto, y era justo el repo
+  # que NINGÚN gate tocaba: sin marcador de lenguaje, run_lang_gates caía al
+  # warning no bloqueante. Un `${{ }}` mal escrito o un `needs:` a un job
+  # inexistente no rompe el repo que lo publica: rompe el CI de sus
+  # CONSUMIDORES, y se descubre en el pipeline ajeno.
+  - name: actionlint
+    category: quality
+    purpose: "Lint de GitHub Actions (expresiones ${{ }}, needs:, runs-on, shellcheck embebido): GATE en repos que tocan .github/workflows"
+    provider: cli
+    bin: actionlint
+    install: "brew install actionlint"
+    install_kind: auto
+    install_linux: "go install github.com/rhysd/actionlint/cmd/actionlint@latest"
+    install_linux_kind: auto
+    permission_tier: read-only
+    profiles: [implementer, reviewer]
+    detect: "signal:gha"   # discover.sh lo emite por repos/*/.github/workflows/
+
   # ── Economía de tokens ────────────────────────────────
   - name: quiet-wrapper
     category: token-economy
@@ -506,6 +526,57 @@ capabilities:
     permission_tier: read-only
     profiles: [deployer, orquestador]
     detect: "elegido en entrevista (observabilidad)"
+
+  - name: observe-cli
+    category: observability
+    purpose: "Consultas OPAL a Observe para verificación post-deploy (verify_cmd) y diagnóstico. CLI antes que MCP: sirve dentro del loop sin gastar tokens"
+    provider: cli
+    bin: observe
+    install: "brew install observeinc/tap/observe"
+    install_kind: auto
+    install_linux: "bs_install observe"
+    install_linux_kind: auto
+    secrets: [{ key: OBSERVE_TOKEN, source: "vault://<project>/harness/observe" }]
+    permission_tier: read-only
+    profiles: [deployer, orquestador]
+    detect: "signal:observe"     # discover.sh: observeinc/observe_/OBSERVE_CUSTOMER en tf o yaml
+
+  - name: aws-cloudwatch
+    category: observability
+    purpose: "Logs y alarmas vía `aws logs` / `aws cloudwatch` para verify_cmd y post_ship. No necesita binario propio: viene en el CLI de AWS"
+    provider: cli
+    bin: aws
+    install: "brew install awscli"
+    install_kind: auto
+    install_linux: "bs_install awscli"
+    install_linux_kind: auto
+    permission_tier: read-only
+    profiles: [deployer, orquestador]
+    detect: "signal:cloudwatch"  # discover.sh: aws_cloudwatch en .tf
+
+  # ── Streaming ─────────────────────────────────────────
+  # El eje "event streaming" no tenía NINGUNA implementación: ni señal, ni
+  # entrada, ni pregunta. Un workspace sobre Kafka se veía igual que uno sin
+  # streaming, que es el silencio que la regla 8 existe para impedir.
+  # ALLOW-LIST EXPLÍCITA, y no por gusto: a diferencia de eks-mcp, este server
+  # NO arranca read-only. Su default habilita TODOS los tools, incluidos
+  # produce-message, create-topics, delete-topics, alter-topic-config,
+  # create-connector y delete-flink-statements: o sea escribir en topics de
+  # producción y borrar infra de streaming desde el chat. `--allow-tools` se
+  # aplica ANTES del block-list y deja habilitado SOLO lo que se nombra, así
+  # que el read-only acá es el alcance de esta lista más el de la API key.
+  - name: confluent-mcp
+    category: mcp
+    purpose: "Kafka y Flink de Confluent Cloud en modo consulta: topics, lag de consumer groups, estado de connectors y salud de statements"
+    provider: mcp
+    mcp: confluent
+    config: { command: "npx", args: ["-y", "@confluentinc/mcp-confluent", "--allow-tools", "list-topics,get-topic-config,get-partition-offsets,list-consumer-groups,describe-consumer-group,get-consumer-group-lag,list-clusters,list-environments,list-connectors,get-connector-status,get-connector-tasks,get-connector-offsets,get-connector-error-summary,get-connector-logs,list-flink-statements,check-flink-statement-health,get-flink-statement-exceptions,list-flink-tables,describe-flink-table"], wrap: true }
+    secrets: [{ key: KAFKA_API_KEY, source: "vault://<project>/harness/confluent" }, { key: KAFKA_API_SECRET, source: "vault://<project>/harness/confluent" }]
+    permission_tier: read-only
+    profiles: [deployer, orquestador]
+    detect: "signal:kafka"       # discover.sh: confluent_/aws_msk/arn:aws:kafka en .tf, o cliente kafka en las deps
+    phase: 2
+    note: "consume-messages queda FUERA de la allow-list a propósito: lee el payload de topics de producción, que es dato de clientes. El lag de un consumer group se mide con get-consumer-group-lag, sin leer mensajes"
 
   - name: vault-mcp
     category: mcp
@@ -860,6 +931,29 @@ capabilities:
     profiles: [deployer]
     detect: "signal:gke"         # discover.sh: google_container_cluster en .tf
     phase: 2
+
+  # Gemela de gke-mcp en el eje "sabor de Kubernetes gestionado" (regla 8: el
+  # eje se DETECTA, no se cablea). Sin esta entrada, `eks` era la única señal
+  # que discover.sh emitía y NADIE leía: un workspace con 11 clusters EKS
+  # medidos se veía, en la entrevista, igual que uno sin Kubernetes gestionado.
+  # Es el mismo silencio verde que el ratchet de test_catalog.sh caza en el otro
+  # extremo (un `signal:` que nadie emite).
+  # SIN --allow-write NI --allow-sensitive-data-access a propósito: el default
+  # del server es read-only y sin acceso a logs/eventos/secrets, y el harness
+  # escribe al cluster por GitOps, jamás por MCP (la misma ley que le prohíbe
+  # `kubectl apply`). El costo de omitir el segundo flag es que `get_pod_logs`
+  # no anda: los logs de un pod se leen con kubectl, que ya está en el catálogo.
+  - name: eks-mcp
+    category: mcp
+    purpose: "EKS nativo de AWS (clusters, workloads, CloudFormation de la stack): complementa kubernetes-mcp"
+    provider: mcp
+    mcp: eks
+    config: { command: "uvx", args: ["awslabs.eks-mcp-server@latest"], wrap: true }
+    permission_tier: read-only
+    profiles: [deployer]
+    detect: "signal:eks"         # discover.sh: aws_eks_cluster/aws_eks_node_group en .tf
+    phase: 2
+    note: "las operaciones sobre la API de Kubernetes exigen que el principal de IAM haya creado el cluster o tenga un EKS Access Entry; sin eso los tools de k8s devuelven error de autorización aunque el server arranque bien"
 
   - name: meta-devtools-mcp
     category: mcp

@@ -151,6 +151,79 @@ assert_contains "$out" "deploy de tf-live verificable (driver: actions)" \
   "con el driver declarado: el check queda en verde"
 rm -f "$WS/harness-answers.yaml" "$WS/manifest.yaml"; rm -rf "$WS/repos/tf-live" "$WS/repos/quieto"
 
+echo "── doctor: el que aplica por Atlantis TAMBIEN cuenta como deploy"
+# POR QUE: el gate de arriba preguntaba una sola cosa, "hay un workflow con
+# deploy/apply en el nombre?". Atlantis aplica al MERGEAR, por un comentario en
+# el PR, y el repo no necesita workflow propio: contestaba NO, el gate hacia
+# `continue` antes de mirar el driver, y el repo quedaba en none SIN aviso. Es
+# el mismo hueco que este gate existe para cerrar, un piso mas abajo: el repo
+# que mas necesita verify_cmd (su unica otra senal es leer el comentario del PR
+# a mano) era justo el invisible. Medido en un workspace real: 17 repos con
+# atlantis.yaml, 5 sin ningun workflow que el gate reconociera.
+mkdir -p "$WS/repos/tf-atlantis" "$WS/repos/quieto"
+printf 'version: 3\nprojects:\n  - dir: .\n' > "$WS/repos/tf-atlantis/atlantis.yaml"
+cat > "$WS/manifest.yaml" <<'EOF'
+project: t
+repos:
+  - name: tf-atlantis
+    kind: infra-live
+    agent: infra
+  - name: quieto
+    kind: docs
+    agent: docs
+EOF
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_contains "$out" "tf-atlantis aplica infra con Atlantis (atlantis.yaml)" \
+  "repo con atlantis.yaml y driver none: warn (antes: silencio)"
+assert_not_contains "$out" "tf-atlantis tiene workflows de deploy" \
+  "y nombra la evidencia REAL, no un workflow que no existe"
+assert_contains "$out" "deploy.tf-atlantis.driver" "la remediación nombra la clave del answers"
+assert_not_contains "$out" "quieto aplica infra" "un repo sin atlantis.yaml no genera ruido"
+
+cat > "$WS/harness-answers.yaml" <<'EOF'
+deploy:
+  tf-atlantis:
+    driver: actions
+EOF
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_contains "$out" "deploy de tf-atlantis verificable (driver: actions)" \
+  "con el driver declarado: queda en verde"
+
+# `none` + verify_cmd es la config CORRECTA para el que aplica por Atlantis: no
+# hay run de Actions que mirar, y deploy-watch.sh ya la trata como verificada
+# (salta CI/gitops pero corre el verify). Si el doctor solo leyera `driver`,
+# avisaría para siempre sobre una instancia bien configurada, y un aviso que no
+# se puede apagar se aprende a ignorar justo el día que señala algo real.
+cat > "$WS/harness-answers.yaml" <<'EOF'
+deploy:
+  tf-atlantis:
+    driver: none
+    verify_cmd: "aws lambda get-function --function-name cost-usage"
+EOF
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_contains "$out" "deploy de tf-atlantis verificable (driver: none + verify)" \
+  "none + verify_cmd: verificable, igual que en deploy-watch"
+assert_not_contains "$out" "tf-atlantis aplica infra con Atlantis" \
+  "y NO avisa: el aviso que no se puede apagar se aprende a ignorar"
+
+# pero `none` pelado sigue siendo un hueco
+cat > "$WS/harness-answers.yaml" <<'EOF'
+deploy:
+  tf-atlantis:
+    driver: none
+EOF
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_contains "$out" "tf-atlantis aplica infra con Atlantis" \
+  "none SIN verify: el aviso vuelve (el verify es lo que lo apaga, no el none)"
+rm -f "$WS/harness-answers.yaml" "$WS/manifest.yaml"; rm -rf "$WS/repos/tf-atlantis" "$WS/repos/quieto"
+
+# Y la señal existe de verdad, con su consumidor: un signals+= que nadie lee es
+# la misma prosa inverificable, al revés (test_catalog.sh cuida el otro lado).
+assert_contains "$(cat "$ROOT/scripts/discover.sh")" 'signals+=("atlantis")' \
+  "el discovery emite la señal atlantis"
+assert_contains "$(cat "$ROOT/skills/harness-init/SKILL.md")" 'atlantis.yaml' \
+  "y la entrevista la usa para recomendar el driver"
+
 echo "── doctor: los dos mapas de leyes hablan de LAS MISMAS leyes"
 # CLAUDE.md y AGENTS.md comparten numeracion y los playbooks citan "Ley N" por
 # numero. Una instancia vieja que actualiza puede quedarse con las dos

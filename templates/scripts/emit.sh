@@ -74,6 +74,7 @@ _emit_redact() {
     -e 's/(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/\1[REDACTADO:jwt]/g' \
     -e 's/(AKIA|ASIA)[A-Z0-9]{12,}/[REDACTADO:aws]/g' \
     -e 's/lin_api_[A-Za-z0-9]{20,}/[REDACTADO:linear]/g' \
+    -e 's/AT[AC]TT[A-Za-z0-9_=-]{20,}/[REDACTADO:atlassian]/g' \
     -e 's/((password|passwd|secret|token|api_?key|authorization)["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"']?)[^"'"'"' ,}]{6,}/\1[REDACTADO]/gI'
 }
 

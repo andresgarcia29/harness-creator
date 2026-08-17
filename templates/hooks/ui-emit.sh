@@ -63,6 +63,7 @@ redact() {
     -e 's/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/[REDACTADO:jwt]/g' \
     -e 's/(AKIA|ASIA)[A-Z0-9]{12,}/[REDACTADO:aws]/g' \
     -e 's/lin_api_[A-Za-z0-9]{20,}/[REDACTADO:linear]/g' \
+    -e 's/AT[AC]TT[A-Za-z0-9_=-]{20,}/[REDACTADO:atlassian]/g' \
     -e 's/(-----BEGIN [A-Z ]*PRIVATE KEY-----)/[REDACTADO:privkey]/g' \
     -e 's/((password|passwd|secret|token|api_?key|authorization)["'"'"']?\s*[:=]\s*["'"'"']?)[^"'"'"' ,}]{6,}/\1[REDACTADO]/gI'
 }

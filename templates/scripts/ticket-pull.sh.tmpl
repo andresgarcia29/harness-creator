@@ -12,11 +12,14 @@
 # Uso: ticket-pull.sh <TICKET-ID>
 #   linear → {{TICKET_PREFIX}}-123
 #   github → 123, #123 o owner/repo#123 (sin owner/repo usa {{TICKETS_REPO}})
+#   jira   → PROJ-123 (la key que sale en la URL /browse/PROJ-123)
 # Requiere las credenciales del proveedor (córrelo vía with-secrets.sh):
 #   linear → LINEAR_API_KEY · github → gh autenticado (GH_TOKEN)
+#   jira   → JIRA_URL + JIRA_EMAIL + JIRA_API_TOKEN (Basic, no bearer)
 # Exit: 0 ok · 2 no existe · 3 sin label agent-ready · 4 error auth/red
 #       5 otro workspace ya tomó este ticket
-#       6 la LINEAR_API_KEY alcanza otra organizacion de Linear
+#       6 la credencial alcanza otra organización (otra org de Linear, otro
+#         site de Jira): el mismo prefijo de proyecto existe en las dos
 set -euo pipefail
 ID="${1:?uso: ticket-pull.sh <TICKET-ID>}"
 WS="$(cd "$(dirname "$0")/.." && pwd)"
@@ -111,7 +114,7 @@ fi
 
 labels="$(echo "$issue" | jq -r '.labels.nodes[].name')"
 echo "$labels" | grep -qx "agent-ready" || {
-  echo "❌ $ID no tiene label agent-ready — el intake debe validarlo primero"; exit 3; }
+  echo "❌ $ID no tiene label agent-ready: el intake debe validarlo primero"; exit 3; }
 
 # 2 · Materializar task.md (el sobre no confiable lo pone write_task_md)
 uuid="$(echo "$issue" | jq -r '.id')"
@@ -227,9 +230,96 @@ pull_github() {
   fi
 }
 
+pull_jira() {
+# El carril de Jira vive en scripts/jira.sh, por la misma razón que el de Linear
+# (#113): el diagnóstico de los 404 ambiguos lo necesitan ticket-pull Y
+# ticket-close, y una copia de la fórmula es un segundo diagnóstico que un día
+# deja de coincidir.
+# shellcheck source=/dev/null
+. "$WS/scripts/jira.sh"
+jira_require_key
+
+case "$ID" in
+  *-*[0-9]) : ;;
+  *) echo "❌ '$ID' no parece una key de Jira. Se espera PROJ-123 (la que sale"
+     echo "   en la URL: $JIRA_URL/browse/PROJ-123)."; exit 2 ;;
+esac
+
+# 1 · Traer el ticket. `fields` explícito y no `*all`: la respuesta completa de
+# un issue con historial trae megas de JSON y acá se usan siete campos.
+resp="$(jira_api GET "/issue/$ID?fields=summary,description,status,labels,priority,issuetype,project")"
+key="$(printf '%s' "$resp" | jq -r '.key // empty' 2>/dev/null || echo "")"
+if [ -z "$key" ]; then
+  # Jira devuelve 404 para "no existe" Y para "existe pero no lo podés ver", y
+  # también cuando el token es de OTRO site con el mismo prefijo de proyecto.
+  # Tres remediaciones distintas detrás del mismo código: jira_no_existe
+  # pregunta con la misma credencial y dice cuál es.
+  jira_no_existe "$ID" || exit $?
+fi
+
+# 2 · El gate. En Jira los labels son strings planos (no objetos con id), así
+# que se comparan tal cual.
+labels="$(printf '%s' "$resp" | jq -r '.fields.labels[]?' 2>/dev/null || echo "")"
+printf '%s\n' "$labels" | grep -qx "agent-ready" || {
+  echo "❌ $ID no tiene label agent-ready: el intake debe validarlo primero"
+  echo "   ↳ agregalo en $JIRA_URL/browse/$ID (campo Labels)."; exit 3; }
+
+# 3 · Materializar task.md. La descripción de la v3 es ADF (JSON anidado), no
+# un string: un `.description` directo escribe "null" y la tarea nace SIN
+# requisitos, que es peor que fallar. jira_adf_text la aplana.
+write_task_md "$ID" \
+  "$(printf '%s' "$resp" | jq -r '"id: \(.key)\ntitle: \"\(.fields.summary // "" | gsub("\"";"\\\""))\"\npriority: \(.fields.priority.name // "none")\nstate: \(.fields.status.name // "unknown")\ntype: \(.fields.issuetype.name // "unknown")"'
+     echo "url: $JIRA_URL/browse/$ID"
+     echo "labels: [$(printf '%s' "$labels" | paste -sd, -)]")" \
+  "$(jira_adf_text "$(printf '%s' "$resp" | jq -c '.fields.description')")"
+
+# 4 · Label → in-harness. Se manda el conjunto completo, quitando agent-ready y
+# conservando el resto: un PUT de labels REEMPLAZA la lista, así que calcularla
+# mal acá borra los labels de triage de un humano.
+nuevos="$(printf '%s' "$resp" | jq -c '[.fields.labels[]? | select(. != "agent-ready")] + ["in-harness"] | unique')"
+if jira_api PUT "/issue/$ID" "$(jq -n --argjson l "$nuevos" '{fields:{labels:$l}}')" >/dev/null 2>&1; then
+  echo "✅ label → in-harness"
+else
+  echo "⚠️  no pude mover el label en $ID (¿permiso de edición?): seguí, pero el"
+  echo "    ticket queda mostrándose como agent-ready para el resto del equipo."
+fi
+# El STATUS no se toca a propósito: en Jira las transiciones son del workflow
+# del proyecto (ids que varían por proyecto) y forzar una acá pelea con el
+# tablero del equipo. El label alcanza para que el intake no lo vuelva a tomar.
+
+# 5 · Claim: publicar, releer, y gana el primero que el servidor ordenó. El
+# mismo protocolo que los otros dos drivers. Los comentarios de la v3 se
+# POSTean como ADF, no como string.
+claim_body="🤖 $CLAIM_MARK: \`$CLAIM_ID\` tomó este ticket. Task-id: \`$ID\`. Trazabilidad: commits con trailer \`Task: $ID\`."
+if jira_api POST "/issue/$ID/comment" \
+     "$(jq -n --argjson b "$(jira_adf_doc "$claim_body")" '{body:$b}')" >/dev/null 2>&1; then
+  # orderBy=created: el orden lo da el SERVIDOR, que es lo único que los
+  # workspaces comparten. El primero de la lista es el dueño.
+  winner="$(jira_api GET "/issue/$ID/comment?orderBy=created&maxResults=50" 2>/dev/null \
+    | jq -r --arg m "$CLAIM_MARK" '
+        def flat: if type=="object" then ((.text // "") + ((.content // []) | map(flat) | join("")))
+                  elif type=="array" then (map(flat) | join("")) else "" end;
+        [.comments[]? | (.body | flat)] | map(select(test($m))) | .[0] // empty' 2>/dev/null || echo "")"
+  if [ -n "$winner" ]; then
+    case "$winner" in
+      *"$CLAIM_ID"*) echo "✅ claim ganado por $CLAIM_ID (comentario publicado en $ID)" ;;
+      *) claim_lost "$(printf '%s' "$winner" | sed -n "s/.*$CLAIM_MARK: \`\([^\`]*\)\`.*/\1/p")" ;;
+    esac
+  else
+    # No poder releer no es haber ganado, pero tampoco es haber perdido: se
+    # dice y se sigue, igual que en los otros drivers.
+    echo "⚠️  publiqué el claim pero no pude releerlo: no puedo demostrar que soy"
+    echo "    el único con este ticket. Revisá el issue antes de invertir horas."
+  fi
+else
+  echo "⚠️  no pude comentar en $ID: sigo SIN claim verificado (riesgo de trabajo duplicado)"
+fi
+}
+
 case "$PROVIDER" in
   linear) pull_linear ;;
   github) pull_github ;;
+  jira)   pull_jira ;;
   none|"")
     echo "❌ este harness no tiene tracker configurado (tickets.provider: none)."
     echo "   Las tareas se crean con un prompt literal: /smart \"<lo que querés>\""
@@ -237,7 +327,7 @@ case "$PROVIDER" in
     exit 2 ;;
   *)
     echo "❌ proveedor de tickets desconocido: '$PROVIDER'."
-    echo "   Implementados: linear, github. Agregar uno es una función más en"
-    echo "   este archivo (regla 8 de CONTRIBUTING), no un fork del script."
+    echo "   Implementados: linear, github, jira. Agregar uno es una función más"
+    echo "   en este archivo (regla 8 de CONTRIBUTING), no un fork del script."
     exit 4 ;;
 esac

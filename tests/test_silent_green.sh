@@ -61,6 +61,101 @@ assert_contains "$(cat "$ROOT/catalog/capabilities.yaml")" "signal:migrations" \
   "y squawk filtra por ella, no por prosa inverificable"
 
 echo
+echo "── actionlint: un workflow es código, y nadie lo compilaba"
+# Dos huecos que se juntaban: un repo de workflows reusables no tiene marcador
+# de lenguaje, así que caía al aviso NO bloqueante de "stack no reconocido" y
+# aterrizaba en main sin verificar una línea, y es el peor repo donde hacerlo,
+# porque su producto rompe el CI de QUIEN LO CONSUME por `uses:`. Y un repo CON
+# stack tampoco validaba su YAML, porque `go test` no sabe de workflows.
+assert_contains "$sh" "toca workflows de GitHub Actions y actionlint NO está instalado" \
+  "avisa cuando el cambio toca workflows y falta la herramienta"
+assert_contains "$sh" "workflows de \$REPO NO validados" "y lo emite como supuesto al ledger"
+
+# Mismo orden que squawk: primero el diff, después la herramienta. Al revés, sin
+# actionlint el bloque entero se salta en silencio.
+wfs_line="$(printf '%s' "$sh" | grep -n 'wfs=' | head -1 | cut -d: -f1)"
+al_line="$(printf '%s' "$sh" | grep -n 'command -v actionlint' | head -1 | cut -d: -f1)"
+[ "$wfs_line" -lt "$al_line" ] \
+  && pass "el diff se mira ANTES que la herramienta" \
+  || fail "se pregunta por actionlint antes de mirar si el cambio toca workflows"
+
+# El ratchet: solo lo que el cambio TOCÓ. Lintear todo main haría que un ship
+# ajeno quede secuestrado por deuda que no introdujo (criterio de buf y squawk).
+assert_contains "$sh" 'wfs="$(git diff "origin/$BASE_REF...HEAD" --name-only --diff-filter=ACMR' \
+  "solo los workflows del diff, no todo el repo"
+
+# NO enciende LANG_SEEN: lintear YAML de CI no es construir el repo. Si lo
+# encendiera, apagaría el aviso de stack no reconocido y cambiaría un silencio
+# por otro más difícil de ver. Se mide sobre el bloque extraído, no sobre el
+# archivo entero, porque LANG_SEEN=1 aparece legítimamente en otras 15 ramas.
+blk="$(awk '/^  local wfs$/{f=1} f{print} f&&/^  fi$/{exit}' "$ROOT/templates/scripts/ship.sh.tmpl")"
+assert_contains "$blk" "command -v actionlint" "el bloque del gate se extrae"
+assert_not_contains "$blk" "LANG_SEEN=1" \
+  "el gate de workflows NO se hace pasar por stack reconocido (el aviso de abajo sigue vivo)"
+
+# Y el gate CORRE de verdad: con actionlint en el PATH y un workflow en el
+# diff, se invoca con los archivos del diff; sin él, avisa y NO falla.
+run_wf_gate() {  # run_wf_gate <archivos-del-diff> <actionlint-si|no|rojo> → salida
+  local diff_out="$1" tool="$2" bin="$WS/wfbin" rc_tool=0
+  [ "$tool" = "rojo" ] && rc_tool=1
+  mkdir -p "$bin"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "%s/actionlint.args"\necho "build.yml:7:9: property \\"foo\\" is not defined"\nexit %s\n' \
+    "$WS" "$rc_tool" > "$bin/actionlint"; chmod +x "$bin/actionlint"
+  [ "$tool" = "no" ] && rm -f "$bin/actionlint"
+  rm -f "$WS/actionlint.args" "$WS/assumptions.log"
+  # git y emit stubeados: lo que se mide es el DIENTE del gate, no el productor
+  # del diff. set -euo pipefail porque es el shell real de ship.sh.
+  ( set -euo pipefail
+    PATH="$bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    REPO=ci-library; BASE_REF=main
+    git() { printf '%s' "$diff_out"; }
+    gate() { echo "GATE: $1"; }
+    emit() { echo "$*" >> "$WS/assumptions.log"; }
+    # shellcheck disable=SC1090
+    . "$WS/wfgate.sh" ) 2>&1
+}
+{ echo 'run_wf_gate_body() {'; printf '%s\n' "$blk"; echo '}'
+  echo 'run_wf_gate_body'; } > "$WS/wfgate.sh"
+
+out="$(run_wf_gate '.github/workflows/build.yml
+.github/workflows/release.yaml
+README.md' si)"; rc=$?
+assert_eq 0 "$rc" "con actionlint instalado: el gate corre y sale 0"
+assert_contains "$out" "GATE: actionlint (workflows)" "y se anuncia como gate, no como aviso"
+args="$(cat "$WS/actionlint.args" 2>/dev/null || echo VACIO)"
+assert_contains "$args" ".github/workflows/build.yml" "recibe el .yml del diff"
+assert_contains "$args" ".github/workflows/release.yaml" "y también el .yaml (las dos extensiones)"
+assert_not_contains "$args" "README.md" "y NADA que no sea un workflow"
+
+out="$(run_wf_gate '.github/workflows/build.yml' no)"; rc=$?
+assert_eq 0 "$rc" "sin actionlint: avisa y NO bloquea (no inventa un veredicto)"
+assert_contains "$out" "actionlint NO está instalado" "el aviso es explícito"
+assert_contains "$(cat "$WS/assumptions.log" 2>/dev/null || true)" \
+  "assumption workflows de ci-library NO validados" "y el supuesto nombra al repo"
+
+# LO QUE JUSTIFICA EL GATE: un workflow inválido tiene que CORTAR el ship. Sin
+# este caso el test sólo probaría que la herramienta se invoca, que es lo que ya
+# hacía el gate roto de al lado: invocar y comerse el rojo.
+out="$(run_wf_gate '.github/workflows/build.yml' rojo)"; rc=$?
+assert_eq 1 "$rc" "workflow inválido: el gate CORTA (rc != 0), no lo deja pasar"
+assert_contains "$out" 'property "foo" is not defined' "y el diagnóstico de actionlint llega al humano"
+
+out="$(run_wf_gate 'main.go
+docs/README.md' si)"; rc=$?
+assert_eq 0 "$rc" "un cambio que no toca workflows: el gate no dice nada"
+assert_not_contains "$out" "actionlint" "ni corre la herramienta ni avisa"
+assert_no_file "$WS/actionlint.args" "y no se invocó actionlint"
+
+# La capacidad está en el catálogo y filtra por una señal que discover.sh emite
+# de verdad (mismo criterio que squawk: no por prosa inverificable).
+assert_contains "$(cat "$ROOT/catalog/capabilities.yaml")" "bin: actionlint" \
+  "actionlint está en el catálogo (si no, nadie lo instala y el gate es un aviso perpetuo)"
+assert_contains "$(cat "$ROOT/catalog/capabilities.yaml")" "signal:gha" \
+  "y filtra por la señal gha"
+assert_contains "$(cat "$ROOT/scripts/discover.sh")" 'signals+=("gha")' \
+  "que el discovery emite de verdad"
+
+echo
 echo "── doctor: la validación del token de Vault ya puede ejecutarse"
 # Buscaba vault_addr: en un esquema de answers que NO tiene ese campo, así que
 # la validación de vigencia jamás corría: decía "presente (sin validar)" y el

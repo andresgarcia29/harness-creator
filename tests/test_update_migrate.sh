@@ -208,6 +208,35 @@ assert_eq auto "$(up_val "$F/harness-answers.yaml")" "y aun así aplicó la migr
 assert_contains "$out" "exit 2: hay migraciones sin resolver" "el cierre dice que exit 2 NO es éxito"
 
 echo
+echo "── (c2b) .serena/project.yml: el update ARREGLA la ceguera, no la avisa (#214)"
+# Una instancia ya instalada nunca vuelve a correr discover.sh, así que sin esta
+# migración el arreglo del #214 solo llegaba a workspaces nuevos y toda instancia
+# viva se quedaba con Serena ignorando el 100% del código (repos/ gitignoreado +
+# ignore_all_files_in_gitignore: true por default).
+S="$(mk_ws caso-serena)"; ans_viejo "$S"; models_nuevo "$S"
+mkdir -p "$S/repos/svc" && git -C "$S/repos/svc" init -q && touch "$S/repos/svc/go.mod"
+mkdir -p "$S/.serena"
+printf 'project_name: "caso-serena"\nlanguage_servers:\n- bash\nignore_all_files_in_gitignore: true\n' \
+  > "$S/.serena/project.yml"
+
+out="$(bash "$MIG" "$S" --dry-run 2>&1)"
+assert_contains "$out" "SE APLICARÍA" "el dry-run dice que hay que arreglarlo"
+assert_contains "$(cat "$S/.serena/project.yml")" "ignore_all_files_in_gitignore: true" \
+  "y el dry-run NO escribió: el archivo sigue como estaba"
+
+out="$(bash "$MIG" "$S" 2>&1)"; rc=$?
+assert_eq 0 "$rc" "la migración es mecánica de punta a punta: no hay nada que consultar"
+assert_contains "$out" "serena.project_yml" "la nombra por su id"
+yml="$(cat "$S/.serena/project.yml")"
+assert_contains "$yml" "ignore_all_files_in_gitignore: false" \
+  "#214: deja de heredar el .gitignore, donde vive repos/"
+assert_not_contains "$yml" "language_servers:
+- bash" "y el [bash] que Serena autodetectó desde la raíz ya no está solo"
+
+out="$(bash "$MIG" "$S" 2>&1)"
+assert_contains "$out" "ya hay .serena/project.yml" "segunda corrida: no-op que lo dice (idempotencia)"
+
+echo
 echo "── (c3) answers con IDs crudos bajo models: no puede salir verde"
 # El agujero real: la ley de cabecera del script dice que lo que exige elegir se
 # detecta y se reporta, y un answers viejo con 'architect: claude-opus-4-1'

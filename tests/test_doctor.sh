@@ -558,6 +558,38 @@ sin="$(ctx | grep -o 'contexto total siempre-inyectado ≈ [0-9]*' | grep -o '[0
   && pass "la salida de SessionStart suma al total (${con} con hooks vs ${sin} sin ellos)" \
   || fail "la salida de SessionStart NO suma al total (${con:-vacío} vs ${sin:-vacío})"
 
+echo "── 8c-ter: serena declarada y CIEGA (#214)"
+# Lo único que se verificaba de serena era que estuviera en .mcp.json: verde
+# mientras get_symbols_overview fallaba sobre el 100% del código. La cadena
+# completa que pide la regla 1 (instala · alimenta · vigila · ejecuta) tenía
+# tres eslabones y le faltaba el vigilante.
+SW="$WS/serena-ws"; mkdir -p "$SW"
+printf '{"mcpServers":{"serena":{"command":"uvx","args":[]}}}' > "$SW/.mcp.json"
+doc_s() { bash "$ROOT/scripts/doctor.sh" "$SW" 2>&1; }
+
+out="$(doc_s)"
+assert_contains "$out" "NO hay .serena/project.yml" "sin project.yml: el doctor deja de estar verde"
+assert_contains "$out" "discover.sh" "y da el comando exacto que lo escribe"
+
+mkdir -p "$SW/.serena"
+printf 'project_name: "x"\nlanguage_servers: [bash]\nignore_all_files_in_gitignore: true\n' > "$SW/.serena/project.yml"
+out="$(doc_s)"
+assert_contains "$out" "CIEGA" "con ignore_all_files_in_gitignore: true lo llama por su nombre (repos/ está gitignoreado)"
+
+printf 'language_servers: [go, bash]\nignore_all_files_in_gitignore: false\n# harness-requiere: binario-que-no-existe-1234\n' > "$SW/.serena/project.yml"
+out="$(doc_s)"
+assert_contains "$out" "binario-que-no-existe-1234" "un language server declarado sin su binario: lo nombra"
+assert_contains "$out" "BLOQUEA" "y dice que ese uno bloquea la inicialización de TODOS"
+
+printf 'language_servers: [bash]\nignore_all_files_in_gitignore: false\n# harness-requiere:\n# OMITIDOS (un server que no arranca bloquea a TODOS):\n#   go: falta `gopls`\n' > "$SW/.serena/project.yml"
+out="$(doc_s)"
+assert_contains "$out" "OMITIDOS por falta de binario" "los lenguajes omitidos por discover se reportan, no se entierran"
+
+printf 'language_servers: [go, bash]\nignore_all_files_in_gitignore: false\n# harness-requiere: sh\n' > "$SW/.serena/project.yml"
+out="$(doc_s)"
+assert_contains "$out" "serena ve el código" "config sana: lo dice y nombra los servers"
+assert_not_contains "$out" "CIEGA" "y no deja el warning permanente que se aprende a ignorar"
+
 echo "── 8b: mutación, los cables cortan de verdad"
 
 mut="$WS/doctor-mut.sh"

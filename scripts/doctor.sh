@@ -509,6 +509,38 @@ if [ -f "$WS/.mcp.json" ] && grep -q '"engram"' "$WS/.mcp.json" 2>/dev/null; the
   fi
 fi
 
+# 8c-ter · Serena con los ojos tapados (issue #214). La misma regla 1, con la
+# herramienta que más tokens ahorra: la INSTALA el catálogo, la CITA CLAUDE.md,
+# EMPUJA hacia ella guard-symbol-grep... y lo único que se verificaba era que
+# estuviera declarada en .mcp.json. Verde mientras `get_symbols_overview`
+# fallaba sobre el 100% del código: `repos/` está gitignoreado a propósito y el
+# default de Serena es ignorar todo lo gitignoreado.
+#
+# El agente obediente chocaba contra la pared y volvía al Read del archivo
+# entero (46.450 tokens medidos en UNO), que es exactamente el gasto que el
+# hook existe para evitar.
+if [ -f "$WS/.mcp.json" ] && grep -q '"serena"' "$WS/.mcp.json" 2>/dev/null; then
+  sp="$WS/.serena/project.yml"
+  if [ ! -f "$sp" ]; then
+    warn "serena está en .mcp.json pero NO hay .serena/project.yml: la crea sola y autodetecta el lenguaje desde la raíz del workspace (que solo tiene .sh), y con repos/ gitignoreado no ve una línea del código; regenerá con \${CLAUDE_PLUGIN_ROOT}/scripts/discover.sh $WS"
+  elif grep -qE '^ignore_all_files_in_gitignore: *true' "$sp"; then
+    warn ".serena/project.yml tiene ignore_all_files_in_gitignore: true: con repos/ en el .gitignore eso deja a serena CIEGA sobre todo el código; ponelo en false o regenerá con \${CLAUDE_PLUGIN_ROOT}/scripts/discover.sh $WS"
+  else
+    ok "serena ve el código: project.yml con $(sed -n 's/^language_servers: *//p' "$sp" | head -1)"
+  fi
+  # Los binarios que el propio archivo declara necesitar. No hay tabla acá a
+  # propósito: el generador escribe lo que asumió y esto verifica la asunción,
+  # así que la lista no se puede divergir en dos lugares.
+  if [ -f "$sp" ]; then
+    for b in $(sed -n 's/^# harness-requiere: *//p' "$sp" | head -1); do
+      command -v "$b" >/dev/null 2>&1 \
+        || warn "serena declara un language server que necesita \`$b\` en el PATH y no está: UN server que no arranca BLOQUEA la inicialización de TODOS (falla hasta el .py), así que instalalo o regenerá el project.yml con discover.sh"
+    done
+    grep -q '^# OMITIDOS' "$sp" \
+      && warn "serena tiene language servers OMITIDOS por falta de binario (los lista .serena/project.yml): esos lenguajes no responden a las tools simbólicas y sus archivos caen a Read entero"
+  fi
+fi
+
 # 8d · Bits de ejecución: un hook sin +x falla EN SILENCIO (Claude Code no
 # puede ejecutarlo y nadie te lo dice). La suite del instalador cachó seis
 # templates así; aquí vigilamos la instancia instalada.

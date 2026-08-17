@@ -74,6 +74,14 @@ tamaño; más `by_role` (el insumo del clustering). Léelo completo UNA
 vez. Si falla, arregla la causa (¿no hay repos/? ¿no son git?) — no
 improvises el inventario a mano.
 
+Y escribe `.serena/project.yml` con los lenguajes del inventario (#214).
+NO lo generes vos ni lo edites: si Serena lo autodetecta sola, detecta
+`[bash]` desde la raíz del workspace, y con `repos/` gitignoreado más el
+default `ignore_all_files_in_gitignore: true` no ve UNA línea del código
+de la plataforma. Si el script avisa de language servers OMITIDOS, decilo
+en el resumen con su línea de instalación: un server que no arranca
+bloquea la inicialización de TODOS, no solo la suya.
+
 ## Fase 2 — Entrevista (aquí piensas tú)
 
 Objetivo: llenar `harness-answers.yaml`. Pregunta SOLO lo que el

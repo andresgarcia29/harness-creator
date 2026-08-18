@@ -375,6 +375,15 @@ case "$method $url" in
   *"/project/search"*)
     keys=""; for k in ${JIRA_PROJECTS:-COR}; do keys="$keys{\"key\":\"$k\"},"; done
     resp "{\"values\":[${keys%,}]}" ;;
+  *"/project/"*)
+    # El diagnóstico pregunta por el proyecto DIRECTO (una llamada, sin paginar):
+    # con /project/search un site de más de 100 proyectos podía dejar el prefijo
+    # fuera de la primera página y el script afirmaba "el token es de otra org".
+    p="${url##*/project/}"
+    case " ${JIRA_PROJECTS:-COR} " in
+      *" $p "*) resp "{\"key\":\"$p\"}" ;;
+      *)        resp '{"errorMessages":["No project could be found"]}' 404 ;;
+    esac ;;
   *"/transitions"*)
     if [ "$method" = POST ]; then printf '%s' "$data" >> "${JIRA_CALLS:-/dev/null}"; resp '{}' 204
     elif [ "${JIRA_HAS_DONE:-1}" = 1 ]; then
@@ -384,10 +393,15 @@ case "$method $url" in
     fi ;;
   *"/comment"*)
     if [ "$method" = POST ]; then
-      jq --arg b "$data" '. + [($b|fromjson).body]' "$CJ" > "$CJ.t" && mv "$CJ.t" "$CJ"
-      resp '{"id":"1"}' 201
+      # JIRA_COMMENT_CODE: el permiso de comentar y el de editar son DISTINTOS
+      # en Jira, así que el stub tiene que poder rechazar uno y no el otro.
+      if [ "${JIRA_COMMENT_CODE:-201}" = 201 ]; then
+        jq --arg b "$data" '. + [($b|fromjson).body]' "$CJ" > "$CJ.t" && mv "$CJ.t" "$CJ"
+        resp '{"id":"1"}' 201
+      else resp '{"errorMessages":["no"]}' "${JIRA_COMMENT_CODE}"; fi
     else resp "{\"comments\":$(jq '[.[] | {body:.}]' "$CJ")}"; fi ;;
   PUT*"/issue/"*)
+    if [ "${JIRA_PUT_CODE:-204}" != 204 ]; then resp '{"errorMessages":["no"]}' "${JIRA_PUT_CODE}"; exit 0; fi
     printf '%s' "$data" >> "${JIRA_CALLS:-/dev/null}"; echo >> "${JIRA_CALLS:-/dev/null}"
     resp '{}' 204 ;;
   *"/issue/"*)
@@ -480,6 +494,38 @@ assert_contains "$out" "ABIERTO" "y NO se da por cerrado"
 out="$(jira env JIRA_ISSUE_OK=1 JIRA_CALLS="$WS/jiracalls.log" bash scripts/tc-jira.sh COR-944 --status failed)"
 assert_not_contains "$out" "estado →" "un failed NO se cierra"
 assert_contains "$(cat "$WS/jiracalls.log")" "agent-ready" "vuelve a la cola con agent-ready"
+
+# (h) EL PERMISO PARCIAL, que en Jira es la configuración normal y no el caso
+#     raro: una cuenta puede comentar y NO editar issues (son dos permisos), así
+#     que el PUT de labels vuelve 403 mientras todo lo demás anda.
+#     Antes, `jira_api` hacía `exit 4` adentro y el llamador tapaba su stderr:
+#     ticket-pull moría a mitad de camino, sin UNA línea de salida, con el
+#     task.md ya escrito y el claim sin publicar, o sea el trabajo duplicado que
+#     el claim existe para impedir. Las ramas de degradación eran inalcanzables.
+echo '[]' > "$WS/jira-comments.json"; rm -rf "$WS/tasks/COR-944"
+out="$(jira env JIRA_ISSUE_OK=1 JIRA_PUT_CODE=403 bash scripts/tp-jira.sh COR-944)"; rc=$?
+assert_eq 0 "$rc" "jira: un 403 al mover el label NO mata el pull (la rama de degradación existe de verdad)"
+assert_contains "$out" "no pude mover el label" "lo dice"
+assert_contains "$out" "403" "con el diagnóstico concreto de jira_api, que ya no se traga el stderr"
+assert_contains "$out" "claim ganado" "y SIGUE hasta publicar el claim, que es lo que evita el trabajo duplicado"
+assert_file "$WS/tasks/COR-944/task.md" "con su task.md en disco"
+
+# (i) Y el espejo: un 404 en una MUTACIÓN es la operación rechazada, no un
+#     éxito. Devolviéndolo como éxito, el cierre cantaba "✅ comentario
+#     publicado" sobre un ticket intacto: el cierre-que-no-cierra del #113 por
+#     otro camino, y el peor, porque el harness lo da por terminado.
+out="$(jira env JIRA_ISSUE_OK=1 JIRA_COMMENT_CODE=404 bash scripts/tc-jira.sh COR-944 --status shipped)"; rc=$?
+assert_eq 4 "$rc" "jira: 404 al comentar es fallo (exit 4), no éxito"
+assert_not_contains "$out" "✅ comentario publicado" "y NO canta un comentario que Jira rechazó"
+assert_not_contains "$out" "estado →" "ni sigue cerrando sobre una evidencia que no se publicó"
+
+# El mismo 404 en el label: degrada y lo dice, pero el comentario ya publicado
+# sigue siendo cierto (cada paso responde por sí mismo).
+: > "$WS/jiracalls.log"
+out="$(jira env JIRA_ISSUE_OK=1 JIRA_PUT_CODE=404 bash scripts/tc-jira.sh COR-944 --status shipped)"; rc=$?
+assert_eq 0 "$rc" "jira: un 404 al etiquetar no aborta el cierre"
+assert_contains "$out" "no pude mover el label" "pero se dice, en vez de cantar el label puesto"
+assert_contains "$out" "estado → Listo" "y la transición, que es la marca real de cierre, sí ocurre"
 
 rm -f "$WS/bin/curl"
 

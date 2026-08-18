@@ -173,9 +173,13 @@ bs_install() {
         && unzip -oq "$f" -d "$d" \
         && "$d/aws/install" --install-dir "$HOME/.local/lib/aws-cli" --bin-dir "$BINDIR" --update >/dev/null && rc=0 ;;
     observe)
-      v="$(curl -fsSL https://api.github.com/repos/observeinc/observe-cli/releases/latest | jq -r .tag_name)" \
-        && f="$(_bs_fetch "$d" "https://github.com/observeinc/observe-cli/releases/download/$v/observe-cli_${v#v}_linux_amd64.tar.gz" "https://github.com/observeinc/observe-cli/releases/download/$v/checksums.txt")" \
-        && tar -xzf "$f" -C "$d" observe && install -m 0755 "$d/observe" "$BINDIR/observe" && rc=0 ;;
+      # El repo es observeinc/cli (observeinc/observe-cli NO existe: da 404, y
+      # con él la receta entera). El artefacto es un gzip del binario suelto,
+      # no un tarball, así que va gunzip y no tar. El sums lleva la versión en
+      # el nombre (observe_<ver>_checksums.txt), por eso se pide el tag primero.
+      v="$(curl -fsSL https://api.github.com/repos/observeinc/cli/releases/latest | jq -r .tag_name)" \
+        && f="$(_bs_fetch "$d" "https://github.com/observeinc/cli/releases/download/$v/observe-linux-x64.gz" "https://github.com/observeinc/cli/releases/download/$v/observe_${v#v}_checksums.txt")" \
+        && gunzip -c "$f" > "$d/observe" && install -m 0755 "$d/observe" "$BINDIR/observe" && rc=0 ;;
     *) warn "no tengo receta de Linux para '$bin'" ;;
   esac
   rm -rf "$d"

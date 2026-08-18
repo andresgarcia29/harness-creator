@@ -532,8 +532,14 @@ capabilities:
     purpose: "Consultas OPAL a Observe para verificación post-deploy (verify_cmd) y diagnóstico. CLI antes que MCP: sirve dentro del loop sin gastar tokens"
     provider: cli
     bin: observe
-    install: "brew install observeinc/tap/observe"
-    install_kind: auto
+    # NO hay formula de brew: el tap observeinc/homebrew-tap trae una sola
+    # (observe-agent) y en core no existe, así que `brew install
+    # observeinc/tap/observe` falla con "No available formula". Declararlo
+    # `auto` era prometer una instalación que no ocurre y dejar al doctor
+    # pidiendo un comando roto, el bucle sin salida del #23. En macOS es
+    # manual: el release publica el binario (gzip) para darwin arm64/x64.
+    install: "https://github.com/observeinc/cli/releases/latest"
+    install_kind: manual
     install_linux: "bs_install observe"
     install_linux_kind: auto
     secrets: [{ key: OBSERVE_TOKEN, source: "vault://<project>/harness/observe" }]

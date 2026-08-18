@@ -146,6 +146,38 @@ assert_eq 0 "$rc" "un cambio que no toca workflows: el gate no dice nada"
 assert_not_contains "$out" "actionlint" "ni corre la herramienta ni avisa"
 assert_no_file "$WS/actionlint.args" "y no se invocó actionlint"
 
+# Y LOS DOS AVISOS NO PUEDEN CONTRADECIRSE EN LA MISMA CORRIDA. El de abajo (el
+# de stack no reconocido) agregaba "Sus workflows SÍ pasaron por actionlint"
+# mirando solo si el diff tocaba workflows, así que lo afirmaba también cuando
+# actionlint faltaba y el bloque de arriba acababa de avisar lo contrario y de
+# emitir el supuesto. Un falso verde textual, en el repo exacto que el gate
+# existe para cubrir: el de workflows reusables, que no tiene stack.
+blk2="$(awk '/^  if \[ "\$LANG_SEEN" -eq 0 \]; then$/{f=1} f{print} f&&/^  fi$/{exit}' \
+  "$ROOT/templates/scripts/ship.sh.tmpl")"
+assert_contains "$blk2" "no reconozco el stack" "el bloque del aviso de stack se extrae"
+run_ambos() {  # run_ambos <actionlint-si|no> → gate de workflows + aviso de stack, juntos
+  { echo 'run_ambos_body() {'; echo '  local LANG_SEEN=0'; printf '%s\n' "$blk"
+    printf '%s\n' "$blk2"; echo '}'; echo 'run_ambos_body'; } > "$WS/wfambos.sh"
+  run_wf_gate '.github/workflows/build.yml' "$1" >/dev/null 2>&1 || true
+  local bin="$WS/wfbin"
+  [ "$1" = "no" ] && rm -f "$bin/actionlint"
+  ( set -euo pipefail
+    PATH="$bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    REPO=ci-library; BASE_REF=main
+    git() { printf '%s' '.github/workflows/build.yml'; }
+    gate() { echo "GATE: $1"; }
+    emit() { echo "$*" >> "$WS/assumptions.log"; }
+    # shellcheck disable=SC1090
+    . "$WS/wfambos.sh" ) 2>&1
+}
+out="$(run_ambos no)"
+assert_contains "$out" "actionlint NO está instalado" "sin actionlint: el gate avisa que no validó"
+assert_not_contains "$out" "SÍ pasaron por actionlint" \
+  "y el aviso de stack NO afirma lo contrario en la misma corrida (era un falso verde de texto)"
+out="$(run_ambos si)"
+assert_contains "$out" "SÍ pasaron por actionlint" \
+  "y con actionlint presente sí lo dice: la aclaración no se perdió, se condicionó"
+
 # La capacidad está en el catálogo y filtra por una señal que discover.sh emite
 # de verdad (mismo criterio que squawk: no por prosa inverificable).
 assert_contains "$(cat "$ROOT/catalog/capabilities.yaml")" "bin: actionlint" \

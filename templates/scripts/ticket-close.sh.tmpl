@@ -60,14 +60,21 @@ close_jira() {
   . "$WS/scripts/jira.sh"
   jira_require_key
 
-  local resp key nuevos
-  resp="$(jira_api GET "/issue/$ID?fields=labels")"
+  local resp key nuevos grc=0
+  # `jira_api` DEVUELVE el veredicto (4 auth/red, 44 no está) en vez de salir:
+  # las ✅ de abajo tienen que poder no imprimirse. Antes un 404 en cualquiera
+  # de estas llamadas contaba como éxito y el cierre cantaba "comentario
+  # publicado" y "estado → Listo" sobre un ticket intacto, que es el
+  # cierre-que-no-cierra del #113 por otro camino.
+  resp="$(jira_api GET "/issue/$ID?fields=labels")" || grc=$?
+  [ "$grc" -eq 4 ] && exit 4
   key="$(printf '%s' "$resp" | jq -r '.key // empty' 2>/dev/null || echo "")"
   [ -n "$key" ] || { jira_no_existe "$ID" || exit $?; }
 
-  # $body y $target_label los armó el bloque común de arriba.
+  # $body y $target_label los armó el bloque común de arriba. El stderr NO se
+  # tapa: ahí va el diagnóstico concreto (403 de permiso vs 401 de credencial).
   jira_api POST "/issue/$ID/comment" \
-    "$(jq -n --argjson b "$(jira_adf_doc "$body")" '{body:$b}')" >/dev/null 2>&1 \
+    "$(jq -n --argjson b "$(jira_adf_doc "$body")" '{body:$b}')" >/dev/null \
     || { echo "❌ no pude comentar en $ID (¿permiso en el proyecto?)"; exit 4; }
   echo "✅ comentario publicado"
 
@@ -75,7 +82,7 @@ close_jira() {
   # ciclo del harness para no borrarle el triage a un humano.
   nuevos="$(printf '%s' "$resp" | jq -c --arg add "$target_label" \
     '[.fields.labels[]? | select(. != "in-harness" and . != "agent-ready" and . != "shipped")] + [$add] | unique')"
-  if jira_api PUT "/issue/$ID" "$(jq -n --argjson l "$nuevos" '{fields:{labels:$l}}')" >/dev/null 2>&1; then
+  if jira_api PUT "/issue/$ID" "$(jq -n --argjson l "$nuevos" '{fields:{labels:$l}}')" >/dev/null; then
     echo "✅ label → $target_label"
   else
     echo "⚠️  no pude mover el label a '$target_label' en $ID"
@@ -90,14 +97,17 @@ close_jira() {
   # proyecto tiene sus PROPIOS ids de transición, así que cablear uno sería
   # cablear el workflow de un solo proyecto.
   if [ "$STATUS" = "shipped" ]; then
-    local tr_id tr_name
-    tr_id="$(jira_api GET "/issue/$ID/transitions" 2>/dev/null \
+    # UNA sola llamada para las dos preguntas: el id con el que se transiciona y
+    # el nombre con el que se le informa al humano salen de la misma respuesta.
+    local trs tr_id tr_name
+    trs="$(jira_api GET "/issue/$ID/transitions" 2>/dev/null || echo "")"
+    tr_id="$(printf '%s' "$trs" \
       | jq -r '[.transitions[]? | select(.to.statusCategory.key == "done")] | .[0].id // empty' 2>/dev/null || echo "")"
-    tr_name="$(jira_api GET "/issue/$ID/transitions" 2>/dev/null \
+    tr_name="$(printf '%s' "$trs" \
       | jq -r '[.transitions[]? | select(.to.statusCategory.key == "done")] | .[0].to.name // empty' 2>/dev/null || echo "")"
     if [ -n "$tr_id" ]; then
       if jira_api POST "/issue/$ID/transitions" \
-           "$(jq -n --arg t "$tr_id" '{transition:{id:$t}}')" >/dev/null 2>&1; then
+           "$(jq -n --arg t "$tr_id" '{transition:{id:$t}}')" >/dev/null; then
         echo "✅ estado → ${tr_name:-done} (la marca de cierre que un label no da)"
       else
         echo "⚠️  no pude transicionar $ID: queda comentado y etiquetado, pero ABIERTO"

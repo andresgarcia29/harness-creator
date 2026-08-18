@@ -1852,6 +1852,7 @@ run_lang_gates() {
   # como "stack reconocido" apagaría el aviso de más abajo y cambiaría un
   # silencio por otro más difícil de ver.
   local wfs
+  local wf_linted=0
   wfs="$(git diff "origin/$BASE_REF...HEAD" --name-only --diff-filter=ACMR \
     | grep -E '^\.github/workflows/.*\.ya?ml$' || true)"
   if [ -n "$wfs" ]; then
@@ -1859,6 +1860,7 @@ run_lang_gates() {
       gate "actionlint (workflows)"
       # shellcheck disable=SC2086
       actionlint $wfs
+      wf_linted=1
     else
       echo "⚠️  este cambio toca workflows de GitHub Actions y actionlint NO está instalado:"
       printf '%s\n' "$wfs" | sed 's/^/     · /'
@@ -1880,8 +1882,12 @@ run_lang_gates() {
     echo "   package.json, pyproject.toml, pubspec.yaml, Cargo.toml, pom.xml,"
     echo "   build.gradle, Gemfile, composer.json, *.csproj/*.sln, mix.exs,"
     echo "   buf.yaml, y *.tf y Chart.yaml (raíz o subdirs, prof. 4)."
-    [ -n "$wfs" ] && echo "   (Sus workflows SÍ pasaron por actionlint, pero eso valida YAML de CI,"
-    [ -n "$wfs" ] && echo "    no el repo: no lo tomes como que algo se construyó.)"
+    # La condición es wf_linted y no wfs: con actionlint AUSENTE el bloque de
+    # arriba acaba de avisar que NO se validaron y de emitir el supuesto, así
+    # que afirmar acá que sí pasaron era contradecirse en la misma corrida, y
+    # en el caso exacto que este gate existe para cubrir.
+    [ "$wf_linted" -eq 1 ] && echo "   (Sus workflows SÍ pasaron por actionlint, pero eso valida YAML de CI,"
+    [ "$wf_linted" -eq 1 ] && echo "    no el repo: no lo tomes como que algo se construyó.)"
     echo "   Si este repo SÍ se construye, agregá su rama en run_lang_gates:"
     echo "   un eje sin implementación es un vendor cableado (CONTRIBUTING #8)."
     emit assumption "$REPO NO compilado ni testeado: run_lang_gates no reconoce su stack"

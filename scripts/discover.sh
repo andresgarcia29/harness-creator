@@ -56,11 +56,20 @@ guess_role() { # guess_role <dir> <name> — imprime el rol en stdout
       first_tf="$(find "$dir" -maxdepth 4 -name "*.tf" -not -path "*/.git/*" -print -quit 2>/dev/null)"
       [ -z "$first_tf" ] || tf_dir="$(dirname "$first_tf")"
     fi
+    # Los ejemplos y los tests NO son entornos: la convención mayoritaria de un
+    # módulo reutilizable (terraform-aws-modules y las que la copian) es traer
+    # `examples/dev` y `test/qa`, y sin excluirlos ese módulo se clasificaba
+    # infra-live, o sea "aplica infra al mergear": la etiqueta OPUESTA a lo que
+    # es, y la que decide qué modelo de deploy le aplica el harness.
     if [ -n "$(find "$dir" -maxdepth 2 -type d \
                  \( -name gbl -o -name global -o -name prod -o -name prd \
                     -o -name sbx -o -name sandbox -o -name dev -o -name stg \
                     -o -name stage -o -name qa -o -name nonprod \) \
-                 -not -path "*/.git/*" -print -quit 2>/dev/null)" ]; then
+                 -not -path "*/.git/*" \
+                 -not -path "*/example/*"  -not -path "*/examples/*" \
+                 -not -path "*/test/*"     -not -path "*/tests/*" \
+                 -not -path "*/fixtures/*" -not -path "*/testdata/*" \
+                 -print -quit 2>/dev/null)" ]; then
       # Un directorio de ENTORNO (terraform/prod, terraform/sbx…) es evidencia
       # directa de stack aplicable: gana sobre variables.tf, porque un stack
       # live perfectamente puede declarar variables y outputs propios.

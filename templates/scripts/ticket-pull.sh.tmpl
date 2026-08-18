@@ -247,7 +247,12 @@ esac
 
 # 1 · Traer el ticket. `fields` explícito y no `*all`: la respuesta completa de
 # un issue con historial trae megas de JSON y acá se usan siete campos.
-resp="$(jira_api GET "/issue/$ID?fields=summary,description,status,labels,priority,issuetype,project")"
+# El rc se captura: `jira_api` DEVUELVE el veredicto (4 auth/red, 44 no está) en
+# vez de salir, para que las mutaciones de más abajo puedan degradar. Acá, en
+# cambio, sin ticket no hay nada que hacer, y un 4 ya se diagnosticó en stderr.
+grc=0
+resp="$(jira_api GET "/issue/$ID?fields=summary,description,status,labels,priority,issuetype,project")" || grc=$?
+[ "$grc" -eq 4 ] && exit 4
 key="$(printf '%s' "$resp" | jq -r '.key // empty' 2>/dev/null || echo "")"
 if [ -z "$key" ]; then
   # Jira devuelve 404 para "no existe" Y para "existe pero no lo podés ver", y
@@ -277,7 +282,10 @@ write_task_md "$ID" \
 # conservando el resto: un PUT de labels REEMPLAZA la lista, así que calcularla
 # mal acá borra los labels de triage de un humano.
 nuevos="$(printf '%s' "$resp" | jq -c '[.fields.labels[]? | select(. != "agent-ready")] + ["in-harness"] | unique')"
-if jira_api PUT "/issue/$ID" "$(jq -n --argjson l "$nuevos" '{fields:{labels:$l}}')" >/dev/null 2>&1; then
+# El stderr NO se tapa: ahí va el diagnóstico de jira_api (un 403 acá es
+# "permiso de editar", que es otra cosa que "credencial inválida"), y taparlo
+# dejaba al humano con un aviso genérico sobre la única pista concreta.
+if jira_api PUT "/issue/$ID" "$(jq -n --argjson l "$nuevos" '{fields:{labels:$l}}')" >/dev/null; then
   echo "✅ label → in-harness"
 else
   echo "⚠️  no pude mover el label en $ID (¿permiso de edición?): seguí, pero el"
@@ -292,7 +300,7 @@ fi
 # POSTean como ADF, no como string.
 claim_body="🤖 $CLAIM_MARK: \`$CLAIM_ID\` tomó este ticket. Task-id: \`$ID\`. Trazabilidad: commits con trailer \`Task: $ID\`."
 if jira_api POST "/issue/$ID/comment" \
-     "$(jq -n --argjson b "$(jira_adf_doc "$claim_body")" '{body:$b}')" >/dev/null 2>&1; then
+     "$(jq -n --argjson b "$(jira_adf_doc "$claim_body")" '{body:$b}')" >/dev/null; then
   # orderBy=created: el orden lo da el SERVIDOR, que es lo único que los
   # workspaces comparten. El primero de la lista es el dueño.
   winner="$(jira_api GET "/issue/$ID/comment?orderBy=created&maxResults=50" 2>/dev/null \

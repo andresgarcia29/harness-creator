@@ -39,8 +39,27 @@ jira_require_key() {  # → sale 4 si falta credencial: sin ella no hay nada que
   exit 4
 }
 
-# curl contra la REST v3 de Jira. Devuelve el cuerpo crudo; corta con 4 si la
-# red o la auth fallaron, que es un problema del operador y no del ticket.
+# curl contra la REST v3 de Jira. Imprime el cuerpo crudo en stdout, el
+# diagnóstico en stderr, y DEVUELVE el veredicto: nunca sale del proceso.
+#
+# POR QUÉ DEVUELVE Y NO SALE, que es el bug que esta función tuvo primero: sus
+# consumidores llaman a las mutaciones dentro de un `if` con un `else` que
+# degrada ("no pude mover el label: seguí, pero el ticket se muestra
+# agent-ready"). Con un `exit 4` acá adentro esas ramas eran INALCANZABLES: una
+# cuenta bot con permiso de comentar pero no de editar (403, y es una
+# configuración habitual en Jira) mataba ticket-pull a mitad de camino, con el
+# task.md ya escrito y el claim sin publicar, o sea el trabajo duplicado que el
+# claim existe para impedir. Y como el llamador redirigía stderr, moría sin UNA
+# línea de salida. Quién corta y quién sigue lo decide el consumidor, que es el
+# que sabe qué llevaba hecho.
+#
+# El 404 tiene código PROPIO porque significa cosas opuestas según el verbo: en
+# el GET del issue es "diagnosticá" (jira_no_existe), y en un POST/PUT es la
+# operación RECHAZADA. Devolviéndolo como éxito, el cierre cantaba
+# "✅ comentario publicado" y "✅ estado → Listo" sobre un ticket intacto, que
+# es exactamente el cierre-que-no-cierra del #113.
+#
+# Exit: 0 ok · 4 red, auth o HTTP inesperado · 44 el recurso no está (404)
 jira_api() {  # jira_api <método> <path-relativo> [data-json]
   local method="$1" path="$2" data="${3:-}" out code
   if [ -n "$data" ]; then
@@ -48,23 +67,25 @@ jira_api() {  # jira_api <método> <path-relativo> [data-json]
       -w '\n%{http_code}' -X "$method" "$JIRA_API$path" \
       -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
       -H "Content-Type: application/json" -H "Accept: application/json" \
-      --data "$data" 2>/dev/null)" || { echo "❌ error de red contra Jira ($JIRA_URL)" >&2; exit 4; }
+      --data "$data" 2>/dev/null)" || { echo "❌ error de red contra Jira ($JIRA_URL)" >&2; return 4; }
   else
     out="$(curl -s --retry 3 --retry-delay 2 --retry-all-errors \
       -w '\n%{http_code}' -X "$method" "$JIRA_API$path" \
       -u "$JIRA_EMAIL:$JIRA_API_TOKEN" \
-      -H "Accept: application/json" 2>/dev/null)" || { echo "❌ error de red contra Jira ($JIRA_URL)" >&2; exit 4; }
+      -H "Accept: application/json" 2>/dev/null)" || { echo "❌ error de red contra Jira ($JIRA_URL)" >&2; return 4; }
   fi
   code="$(printf '%s' "$out" | tail -n1)"
   case "$code" in
     2*) printf '%s' "$out" | sed '$d' ;;
     401|403)
-      echo "❌ Jira rechazó la credencial (HTTP $code) para $JIRA_EMAIL en $JIRA_URL" >&2
-      echo "   Jira Cloud usa Basic con email:api_token. Si tu instancia es" >&2
-      echo "   Server/Data Center la auth es bearer y este carril no la cubre." >&2
-      exit 4 ;;
-    404) printf '%s' "$out" | sed '$d' ;;  # el consumidor decide: jira_no_existe diagnostica
-    *)  echo "❌ Jira devolvió HTTP $code en $method $path" >&2; exit 4 ;;
+      echo "❌ Jira rechazó la operación ($method $path, HTTP $code) para $JIRA_EMAIL en $JIRA_URL" >&2
+      echo "   401 es credencial: Jira Cloud usa Basic con email:api_token, y si" >&2
+      echo "   tu instancia es Server/Data Center la auth es bearer y este carril" >&2
+      echo "   no la cubre. 403 suele ser PERMISO sobre el proyecto (comentar y" >&2
+      echo "   editar son permisos distintos), no una key inválida." >&2
+      return 4 ;;
+    404) printf '%s' "$out" | sed '$d'; return 44 ;;
+    *)  echo "❌ Jira devolvió HTTP $code en $method $path" >&2; return 4 ;;
   esac
 }
 
@@ -77,17 +98,34 @@ jira_api() {  # jira_api <método> <path-relativo> [data-json]
 # es válida, el número no está, y puede ser inexistente o sin permiso de
 # lectura. Ahí no se afirma.
 jira_no_existe() {  # jira_no_existe <ID> → 2 · 6
-  local id="$1" prefix keys
+  local id="$1" prefix keys prc=0
   prefix="${id%%-*}"
+  # SE PREGUNTA POR EL PROYECTO, no se busca en una lista. `/project/search`
+  # pagina, y con un site de más de 100 proyectos el prefijo podía quedar fuera
+  # de la primera página: el script afirmaba "el token es de otra instancia de
+  # Jira" sobre un proyecto perfectamente alcanzable, mandando a revisar la
+  # credencial, que es el desvío que este diagnóstico existe para evitar.
+  # Un GET directo contesta la pregunta exacta en UNA llamada y sin paginar.
+  jira_api GET "/project/$prefix" >/dev/null 2>&1 || prc=$?
+  # La lista sigue, pero como CONTEXTO del mensaje y no como veredicto: la
+  # primera página alcanza para que el humano compare de un vistazo.
   keys="$(jira_api GET "/project/search?maxResults=100" 2>/dev/null \
     | jq -r '[.values[]?.key] | join(" ")' 2>/dev/null || echo "")"
-  if [ -n "$keys" ] && ! printf ' %s ' "$keys" | grep -q " $prefix "; then
+  if [ "$prc" -eq 44 ]; then
     echo "❌ el proyecto '$prefix' no existe con esta credencial." >&2
     echo "   Esta JIRA_API_TOKEN entra a: $JIRA_URL" >&2
-    echo "   y alcanza los proyectos: $keys" >&2
+    [ -n "$keys" ] && echo "   y alcanza los proyectos: $keys" >&2
     echo "   Compará el site con la URL de tu ticket: si no coinciden, el token" >&2
     echo "   es de otra instancia de Jira (mismo prefijo, otra org)." >&2
     return 6
+  fi
+  if [ "$prc" -ne 0 ]; then
+    # Ni "no existe" ni "existe": la pregunta no corrió (auth, red, HTTP raro).
+    # Decirlo así y no elegir una de las dos, que es la ley de esta casa.
+    echo "❌ $id no aparece, y TAMPOCO pude comprobar si el proyecto '$prefix'" >&2
+    echo "   es alcanzable con esta credencial (el diagnóstico de arriba dice" >&2
+    echo "   por qué). No sé cuál de las causas es." >&2
+    return 2
   fi
   echo "❌ $id no aparece con esta credencial." >&2
   echo "   El proyecto '$prefix' SÍ existe en $JIRA_URL, así que son dos causas" >&2
@@ -122,7 +160,15 @@ jira_adf_text() {  # jira_adf_text <adf-json> → texto plano
 
 # texto → ADF. Los comentarios de la v3 se POSTean como ADF, no como string:
 # mandar `{"body":"texto"}` da 400. jq -Rs construye el sobre mínimo válido.
-jira_adf_doc() {  # jira_adf_doc <texto> → JSON ADF de un párrafo
+#
+# UN PÁRRAFO POR LÍNEA, y no todo el texto en un solo nodo: ADF ignora los `\n`
+# dentro de un nodo `text`, así que la evidencia del cierre (commits por repo,
+# resultado del deploy) se renderizaba como un chorizo de una línea justo en el
+# comentario que alguien va a leer para entender qué pasó. Una línea vacía es un
+# párrafo SIN content: un nodo `text` con string vacío es ADF inválido y da 400.
+jira_adf_doc() {  # jira_adf_doc <texto> → JSON ADF, un párrafo por línea
   printf '%s' "${1:-}" | jq -Rs '{type:"doc", version:1,
-    content:[{type:"paragraph", content:[{type:"text", text:.}]}]}'
+    content:( (. / "\n")
+      | map(if . == "" then {type:"paragraph"}
+            else {type:"paragraph", content:[{type:"text", text:.}]} end) )}'
 }

@@ -145,6 +145,27 @@ bash "$ROOT/scripts/discover.sh" "$WS" >/dev/null 2>&1
 assert_eq 11 "$(jq -r '.repo_count' "$WS/inventory.json")" "directorios sin .git se ignoran"
 
 echo
+echo "── infra: el directorio de ENTORNO decide, pero examples/ y test/ no son entornos"
+# `terraform/prod` es evidencia directa de stack aplicable y por eso gana sobre
+# variables.tf. El problema es que la convención mayoritaria de un MÓDULO
+# reutilizable (terraform-aws-modules y las que la copian) trae `examples/dev` y
+# `test/qa`: sin excluirlos, un módulo se clasifica infra-live, o sea "aplica
+# infra al mergear", la etiqueta OPUESTA a lo que es. Y no es cosmético: el rol
+# decide qué modelo de deploy le aplica el harness al repo.
+mk_repo tf-vpc
+touch "$WS/repos/tf-vpc/main.tf" "$WS/repos/tf-vpc/variables.tf"
+mkdir -p "$WS/repos/tf-vpc/examples/dev";  touch "$WS/repos/tf-vpc/examples/dev/main.tf"
+mkdir -p "$WS/repos/tf-vpc/test/qa";       touch "$WS/repos/tf-vpc/test/qa/main.tf"
+mk_repo tf-plataforma
+mkdir -p "$WS/repos/tf-plataforma/terraform/prod"
+touch "$WS/repos/tf-plataforma/terraform/prod/main.tf"
+bash "$ROOT/scripts/discover.sh" "$WS" >/dev/null 2>&1
+assert_eq infra-module "$(role tf-vpc)" \
+  "un módulo con examples/dev y test/qa sigue siendo infra-module (no 'aplica al mergear')"
+assert_eq infra-live "$(role tf-plataforma)" \
+  "y el stack live con terraform/prod SÍ es infra-live: la señal sigue mordiendo"
+
+echo
 echo "── .serena/project.yml: el archivo sin el cual Serena ignora TODO el código (#214)"
 # En campo: get_symbols_overview fallaba sobre el 100% de la plataforma con los
 # language servers VIVOS. repos/ está gitignoreado a propósito y el default de

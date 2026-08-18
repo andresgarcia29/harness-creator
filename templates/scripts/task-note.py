@@ -105,6 +105,9 @@ def redact(text: str) -> str:
          "[REDACTADO:jwt]"),
         (r"(AKIA|ASIA)[A-Z0-9]{12,}", "[REDACTADO:aws]"),
         (r"lin_api_[A-Za-z0-9]{20,}", "[REDACTADO:linear]"),
+        # Atlassian (Jira): ATATT los de usuario, ATCTT los scoped. Los legacy
+        # de 24 chars no se pueden matchear sin redactar prosa cualquiera.
+        (r"AT[AC]TT[A-Za-z0-9_=\-]{20,}", "[REDACTADO:atlassian]"),
     ]
     for pat, rep in pats:
         text = re.sub(pat, rep, text)

@@ -143,6 +143,10 @@ secrets:
 # Declara los repos cuyo kind no cuenta la historia completa: una library con
 # workflow de release, un infra-live que aplica al mergear. doctor.sh avisa si
 # un repo tiene workflows de deploy y su driver resuelve a none.
+# OJO con los repos que aplican por Atlantis (atlantis.yaml): no tienen workflow
+# de deploy propio, el apply lo dispara el merge, y su kind los manda a none.
+# Son los que más necesitan un verify_cmd, porque su única otra señal es leer
+# el comentario del PR a mano.
 # Claves PLANAS por repo (el parser es awk línea a línea; nada anidado):
 #   driver          gitops | actions | none
 #   verify_cmd      comando post-deploy que interroga al ARTEFACTO desplegado;
@@ -207,11 +211,18 @@ port_forwards:
 forge: {{FORGE}}                   # github | gitlab | bitbucket
 
 tickets:
-  provider: {{TICKETS_PROVIDER}}   # linear | github | none
+  provider: {{TICKETS_PROVIDER}}   # linear | github | jira | none
   repo: {{TICKETS_REPO}}           # solo github: owner/repo donde viven los
                                    # issues. Sin esto, ticket-pull no sabe de
                                    # qué repo es "123" y te lo dice en vez de
                                    # adivinar.
+                                   # solo jira: la key va en el ID del ticket
+                                   # (PROJ-123) y el site en JIRA_URL, así que
+                                   # no hay nada que fijar acá. Jira Cloud
+                                   # autentica con Basic email:api_token
+                                   # (JIRA_URL + JIRA_EMAIL + JIRA_API_TOKEN),
+                                   # NO con bearer: mezclarlos da un 401 sin
+                                   # explicación.
 
 memory:
   provider: {{MEMORY_PROVIDER}}    # engram | none

@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # ticket-close.sh — cierra el loop harness → tracker. Cero tokens.
 # shipped: comenta commits por repo + resultado del deploy, label → shipped, y
-#          en Linear mueve el ESTADO a completado, que es la marca real de
-#          cierre: un label puede no existir en el team y el ticket quedaría
-#          igual de abierto que antes (#113).
+#          además mueve el ESTADO a completado, que es la marca real de cierre:
+#          un label puede no existir en el team/proyecto y el ticket quedaría
+#          igual de abierto que antes (#113). En Linear es el estado de tipo
+#          `completed`; en Jira, una transición a statusCategory `done`.
 # failed:  comenta el diagnóstico, label regresa a agent-ready. El estado NO se
 #          toca: alguien lo va a retomar, y decidir su triage no es de acá.
 #
 # Exit: 0 ok · 1 uso · 2 el ticket no existe · 4 error auth/red
-#       6 la LINEAR_API_KEY alcanza otra organizacion de Linear
+#       6 la credencial alcanza otra organización (otra org de Linear, otro
+#         site de Jira)
 #
 # Uso: ticket-close.sh <TICKET-ID> --status shipped|failed [--note "..."]
-# Requiere LINEAR_API_KEY (vía with-secrets.sh).
+# Requiere la credencial del proveedor (vía with-secrets.sh):
+#   linear → LINEAR_API_KEY · github → gh autenticado
+#   jira   → JIRA_URL + JIRA_EMAIL + JIRA_API_TOKEN
 set -euo pipefail
 ID="${1:?uso: ticket-close.sh <TICKET-ID> --status shipped|failed}"
 STATUS=""; NOTE=""
@@ -48,11 +52,83 @@ close_github() {
   exit 0
 }
 
+close_jira() {
+  # El carril de Jira vive en scripts/jira.sh (#113): el diagnóstico de los 404
+  # ambiguos es el mismo que necesita ticket-pull, y copiarlo acá dejaría dos
+  # fórmulas que un día dejan de coincidir.
+  # shellcheck source=/dev/null
+  . "$WS/scripts/jira.sh"
+  jira_require_key
+
+  local resp key nuevos grc=0
+  # `jira_api` DEVUELVE el veredicto (4 auth/red, 44 no está) en vez de salir:
+  # las ✅ de abajo tienen que poder no imprimirse. Antes un 404 en cualquiera
+  # de estas llamadas contaba como éxito y el cierre cantaba "comentario
+  # publicado" y "estado → Listo" sobre un ticket intacto, que es el
+  # cierre-que-no-cierra del #113 por otro camino.
+  resp="$(jira_api GET "/issue/$ID?fields=labels")" || grc=$?
+  [ "$grc" -eq 4 ] && exit 4
+  key="$(printf '%s' "$resp" | jq -r '.key // empty' 2>/dev/null || echo "")"
+  [ -n "$key" ] || { jira_no_existe "$ID" || exit $?; }
+
+  # $body y $target_label los armó el bloque común de arriba. El stderr NO se
+  # tapa: ahí va el diagnóstico concreto (403 de permiso vs 401 de credencial).
+  jira_api POST "/issue/$ID/comment" \
+    "$(jq -n --argjson b "$(jira_adf_doc "$body")" '{body:$b}')" >/dev/null \
+    || { echo "❌ no pude comentar en $ID (¿permiso en el proyecto?)"; exit 4; }
+  echo "✅ comentario publicado"
+
+  # Un PUT de labels REEMPLAZA la lista: se conserva todo lo que no sea del
+  # ciclo del harness para no borrarle el triage a un humano.
+  nuevos="$(printf '%s' "$resp" | jq -c --arg add "$target_label" \
+    '[.fields.labels[]? | select(. != "in-harness" and . != "agent-ready" and . != "shipped")] + [$add] | unique')"
+  if jira_api PUT "/issue/$ID" "$(jq -n --argjson l "$nuevos" '{fields:{labels:$l}}')" >/dev/null; then
+    echo "✅ label → $target_label"
+  else
+    echo "⚠️  no pude mover el label a '$target_label' en $ID"
+  fi
+
+  # EL CIERRE TIENE QUE CERRAR (#113), y en Jira eso es una TRANSICIÓN, no un
+  # label: los labels son convención de cada proyecto y pueden no existir.
+  # Se elige por `statusCategory.key == "done"` y no por nombre, por la misma
+  # razón que en Linear se elige por `type`: "Done", "Cerrado", "Listo" y
+  # "Deployed" son todos nombres legítimos del mismo estado, y elegir por
+  # nombre es adivinar el idioma del equipo. Además el workflow de cada
+  # proyecto tiene sus PROPIOS ids de transición, así que cablear uno sería
+  # cablear el workflow de un solo proyecto.
+  if [ "$STATUS" = "shipped" ]; then
+    # UNA sola llamada para las dos preguntas: el id con el que se transiciona y
+    # el nombre con el que se le informa al humano salen de la misma respuesta.
+    local trs tr_id tr_name
+    trs="$(jira_api GET "/issue/$ID/transitions" 2>/dev/null || echo "")"
+    tr_id="$(printf '%s' "$trs" \
+      | jq -r '[.transitions[]? | select(.to.statusCategory.key == "done")] | .[0].id // empty' 2>/dev/null || echo "")"
+    tr_name="$(printf '%s' "$trs" \
+      | jq -r '[.transitions[]? | select(.to.statusCategory.key == "done")] | .[0].to.name // empty' 2>/dev/null || echo "")"
+    if [ -n "$tr_id" ]; then
+      if jira_api POST "/issue/$ID/transitions" \
+           "$(jq -n --arg t "$tr_id" '{transition:{id:$t}}')" >/dev/null; then
+        echo "✅ estado → ${tr_name:-done} (la marca de cierre que un label no da)"
+      else
+        echo "⚠️  no pude transicionar $ID: queda comentado y etiquetado, pero ABIERTO"
+      fi
+    else
+      # Sin transición a `done` DISPONIBLE no hay a dónde cerrar, y puede ser
+      # por el workflow o por permisos. No se da por cerrado.
+      echo "⚠️  ninguna transición disponible de $ID llega a un estado 'done'."
+      echo "   Puede ser el workflow del proyecto o tu permiso de transición."
+      echo "   El ticket queda comentado y etiquetado, pero ABIERTO. No lo doy por cerrado."
+    fi
+  fi
+  exit 0
+}
+
 case "$PROVIDER" in
   linear) : ;;   # sigue abajo, es el camino original
   github) : ;;   # se despacha después de armar la evidencia
+  jira)   : ;;   # idem: la evidencia es del harness, no del proveedor
   none|"") echo "❌ sin tracker configurado (tickets.provider: none): nada que cerrar."; exit 0 ;;
-  *) echo "❌ proveedor de tickets desconocido: '$PROVIDER' (implementados: linear, github)"; exit 4 ;;
+  *) echo "❌ proveedor de tickets desconocido: '$PROVIDER' (implementados: linear, github, jira)"; exit 4 ;;
 esac
 if [ "$PROVIDER" = "linear" ]; then
   # El carril de Linear vive en scripts/linear.sh (#113): el diagnóstico de "el
@@ -97,6 +173,7 @@ fi
 # cada driver solo lo publica. Así agregar un tracker no puede cambiar qué
 # evidencia se reporta.
 [ "$PROVIDER" = "github" ] && close_github
+[ "$PROVIDER" = "jira" ]   && close_jira
 
 # 2 · Resolver ids y publicar (linear)
 resp="$(gql "$(jq -n --arg id "$ID" '{query:"query($id:String!){ issue(id:$id){ id team{id} labels{nodes{id name}} } }", variables:{id:$id}}')")"

@@ -410,6 +410,55 @@ shipped_sha() {  # shipped_sha → sha completo del último ship de ESTE repo
 # veia una linea. El canal de datos y el de explicacion no pueden ser el mismo.
 #   LANDED_SHA = sha a vigilar · exit 0 hay que vigilar · 1 no hay nada todavia
 LANDED_SHA=""
+
+# ── Y LO QUE SE RESUELVE, SE ESCRIBE (#217) ───────────────────────────
+# `landed` lo escribía ship.sh UNA sola vez, en false, y NADIE lo volvía a
+# tocar: un grep de `landed:true` sobre scripts/ no devolvía nada. Con
+# `flow: prs`, POLICY-SHIP-005 lee ese campo y bloquea deploy y archive PARA
+# SIEMPRE, aunque el PR haya mergeado y el apply esté verde. Y su remediación
+# ("re-corré deploy-watch, que resuelve el commit real") era exactamente lo que
+# no funcionaba: esta función resolvía el sha en MEMORIA y salía sin persistir,
+# así que quien la seguía entraba en un bucle. El efecto neto es que /archive
+# quedaba INALCANZABLE para toda tarea con entrega por PR, y archive es la pieza
+# por la que el SDD vive o muere: sin ella el delta-spec nunca se funde.
+#
+# Este es el único punto del flujo que tiene el dato Y la razón para tenerlo.
+# Fail-open a propósito: si no se puede escribir se avisa y el watcher sigue
+# vigilando, porque el deploy importa más que el registro; pero se DICE, para
+# que el bloqueo posterior tenga causa visible en vez de ser un misterio.
+# SE AGREGA UNA LÍNEA, NO SE REESCRIBE EL ARCHIVO, y eso NO es pereza: ship.log
+# lo escriben VARIOS productores con `>>` (ship.sh por repo, instance-ship.sh,
+# y una ola de ship-wave puede estar shippeando otro repo justo ahora). Un
+# append corto es atómico; un read-modify-write se come la línea que alguien
+# agregó entre la lectura y el mv, y perder un registro de ship es peor que el
+# bloqueo que esto viene a arreglar. Además el orden ya es el contrato: la
+# policy declara que "un ship posterior del mismo repo que SÍ aterrizó lo saca
+# de la lista", o sea que el ÚLTIMO registro del repo es el estado, y esa es
+# exactamente la regla que hace que agregar alcance.
+#
+# La entrada se marca `event: "landed"` y conserva el sha que verificó ship.sh
+# en `ship_sha`: no se pierde procedencia, y quien lea el log ve las dos cosas
+# (lo que se shippeó y lo que aterrizó) en vez de un campo pisado.
+persistir_landed() {  # persistir_landed <sha-aterrizado>
+  local log="$WS/tasks/$TASK/ship.log" entry linea
+  [ -f "$log" ] || return 0
+  entry="$(jq -c --arg r "$REPO" 'select(.repo == $r)' "$log" 2>/dev/null | tail -1)"
+  [ -n "$entry" ] || entry='{}'
+  linea="$(printf '%s' "$entry" | jq -c \
+    --arg r "$REPO" --arg sha "$1" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+      {repo: $r, event: "landed", landed: true, sha: $sha, short: $sha[0:12],
+       landed_sha: $sha, landed_at: $at}
+      + (if .sha then {ship_sha: .sha} else {} end)
+      + (if .branch then {branch: .branch} else {} end)
+      + (if .pr then {pr: .pr} else {} end)' 2>/dev/null)"
+  if [ -n "$linea" ] && printf '%s\n' "$linea" >> "$log"; then
+    return 0
+  fi
+  say "⚠️  no pude registrar el merge en ship.log: la transición a deploy/archive"
+  say "   va a seguir bloqueada por POLICY-SHIP-005 aunque el PR haya mergeado."
+  return 1
+}
+
 resolve_landed_sha() {
   local entry landed pr branch sha
   LANDED_SHA=""
@@ -422,7 +471,11 @@ resolve_landed_sha() {
   # la igualdad, no por la presencia.
   landed="$(printf '%s' "$entry" | jq -r 'if .landed == false then "false" else "true" end' 2>/dev/null)"
   if [ "$landed" != "false" ]; then
-    LANDED_SHA="$(printf '%s' "$entry" | jq -r '.sha // empty')"; return 0
+    # `landed_sha` primero: en una entrada ya resuelta por una corrida anterior,
+    # `sha` sigue siendo el commit de la RAMA (el que verificó ship.sh) y el que
+    # aterrizó es otro, porque la cola de merge rebasea o hace squash. Vigilar
+    # el de la rama es la ceguera que esta función existe para evitar.
+    LANDED_SHA="$(printf '%s' "$entry" | jq -r '.landed_sha // .sha // empty')"; return 0
   fi
   branch="$(printf '%s' "$entry" | jq -r '.branch // empty')"
   pr="$(printf '%s' "$entry" | jq -r '.pr // empty')"
@@ -447,7 +500,9 @@ resolve_landed_sha() {
     [ "$rc" -eq 124 ] && rc=3
     if [ "$rc" -eq 0 ] && [ -n "$sha" ]; then
       say "── el PR de $branch ya mergeó: vigilo el commit que aterrizó (${sha:0:12}), no el que verificó ship.sh ──"
-      LANDED_SHA="$sha"; return 0
+      LANDED_SHA="$sha"
+      persistir_landed "$sha" && say "   (registrado en ship.log: landed=true, ${sha:0:12})"
+      return 0
     fi
     if [ "$rc" -eq 3 ]; then
       say "⚠️  no pude preguntarle al forge si el PR mergeó (falta la CLI o no hay acceso)."
@@ -723,6 +778,13 @@ ciego() { CEGUERAS="${CEGUERAS:+$CEGUERAS
 # genera por template, y curl sin --compressed que falla en silencio).
 if [ "$DRIVER" = "none" ] && [ -z "$(answers_repo_key "$REPO" verify_cmd)" ] \
     && [ ! -x "$WS/scripts/smoke/$REPO.sh" ]; then
+  # ANTES DE SALIR, SE REGISTRA EL MERGE (#217). Que este watcher no tenga nada
+  # que VERIFICAR no significa que no tenga nada que SABER: con flow: prs, un
+  # repo sin driver (un repo de docs, por ejemplo) se quedaba en landed:false
+  # para siempre, porque el único punto que resuelve el merge salía por acá
+  # antes de preguntarlo. Y con un solo repo así, POLICY-SHIP-005 bloquea la
+  # tarea ENTERA: deploy y archive, para todos los repos, sin salida.
+  resolve_landed_sha || true
   say "ℹ️  $REPO no se verifica con este watcher."
   say "   NO reviso nada, y por lo tanto tampoco propongo revertir nada:"
   say "   un modelo que no aplica no puede declarar un deploy rojo."

@@ -371,6 +371,86 @@ class EvidenceTest(unittest.TestCase):
             capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    # ── el sello se mide donde vive el repo DECLARADO (#218) ──
+    # `--cwd` valía "." por defecto, así que quien corría `evidence.py run
+    # --repo docs` parado en la raíz del workspace sellaba contra el HEAD del
+    # repo de la INSTANCIA declarando `repo: docs`. En evidence.log las dos se
+    # leen IGUAL (mismo runner, mismo kind, misma aserción) y solo se
+    # distinguen cruzando el commit contra el repo, que es lo que nadie hace a
+    # ojo. Pasó dos veces en la misma tarea, a dos agentes distintos.
+
+    def _mk_worktree(self, repo_name, sufijo=""):
+        """Un árbol de <repo> en el layout real: worktrees/<task>/<repo>."""
+        wt = self.root / "worktrees" / self.task.name / f"{repo_name}{sufijo}"
+        wt.mkdir(parents=True)
+        for cmd in (["git", "init", "-q", "-b", "main"],
+                    ["git", "config", "user.email", "t@e.io"],
+                    ["git", "config", "user.name", "T"]):
+            subprocess.run(cmd, cwd=wt, check=True)
+        (wt / "propio.md").write_text("del repo declarado\n")
+        subprocess.run(["git", "add", "."], cwd=wt, check=True)
+        subprocess.run(["git", "commit", "-qm", f"init {repo_name}"], cwd=wt, check=True)
+        return wt, subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=wt, text=True).strip()
+
+    def _run_sin_cwd(self, repo_name, desde):
+        return subprocess.run(
+            ["python3", str(SCRIPT), "run", "--task-dir", str(self.task),
+             "--repo", repo_name, "--runner", "implementer", "--kind", "test",
+             "--", "true"],
+            cwd=str(desde), capture_output=True, text=True)
+
+    def test_run_sin_cwd_sella_contra_el_worktree_del_repo(self):
+        wt, commit_bueno = self._mk_worktree("docs")
+        # Se corre desde la RAÍZ DEL WORKSPACE, que es donde estaban parados los
+        # dos agentes del reporte: su HEAD es otro y no existe en `docs`.
+        result = self._run_sin_cwd("docs", self.root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        evidence_id = next(l.split("=", 1)[1] for l in result.stdout.splitlines()
+                           if l.startswith("EVIDENCE_ID="))
+        manifest = json.loads((self.task / f"evidence/{evidence_id}.json").read_text())
+        self.assertEqual(manifest["commit"], commit_bueno,
+                         "selló contra un commit que no es el del repo declarado")
+        self.assertEqual(Path(manifest["cwd"]).resolve(), wt.resolve())
+        self.assertIn("--cwd derivado", result.stdout)
+
+    def test_run_rechaza_un_cwd_fuera_del_repo_declarado(self):
+        self._mk_worktree("docs")
+        # El árbol existe y --cwd apunta a OTRO: sellar ahí produce un manifiesto
+        # que se lee bien y no sirve, así que se rechaza en vez de escribirlo.
+        result = subprocess.run(
+            ["python3", str(SCRIPT), "run", "--task-dir", str(self.task),
+             "--repo", "docs", "--runner", "implementer", "--kind", "test",
+             "--cwd", str(self.repo), "--", "true"],
+            capture_output=True, text=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("NO pertenece al repo declarado", result.stderr)
+        self.assertIn("docs", result.stderr)
+        self.assertFalse((self.task / "evidence.log").exists(),
+                         "no se escribe un sello inservible")
+
+    def test_run_sin_worktree_sigue_sellando_donde_esta(self):
+        # El repo de la INSTANCIA no tiene worktree por tarea: su árbol ES el
+        # workspace. Sin árbol declarado que contradiga, se sella donde se está,
+        # que es el comportamiento de siempre y el único posible.
+        result = self._run_sin_cwd("atlas", self.repo)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        evidence_id = next(l.split("=", 1)[1] for l in result.stdout.splitlines()
+                           if l.startswith("EVIDENCE_ID="))
+        manifest = json.loads((self.task / f"evidence/{evidence_id}.json").read_text())
+        self.assertEqual(manifest["commit"], self.commit)
+
+    def test_run_con_varios_nodos_no_elige_por_vos(self):
+        # Los worktrees de nodo del DAG llevan sufijo (`<repo>@T1`). Con más de
+        # uno, derivar sería elegir el árbol equivocado con la misma cara que el
+        # bueno: se pide el --cwd explícito.
+        self._mk_worktree("api", "@T1")
+        self._mk_worktree("api", "@T2")
+        result = self._run_sin_cwd("api", self.root)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("api@T1", result.stderr)
+        self.assertIn("api@T2", result.stderr)
+
     # ── identidad de contenido: la evidencia sobrevive al rebase como el veredicto ──
 
     def mk_manifest(self, evidence_id, commit, patch_id=None, **extra):

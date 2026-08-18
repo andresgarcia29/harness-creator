@@ -90,6 +90,11 @@ _SECRET_PATTERNS = [
     (re.compile(r'\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}'), '[REDACTADO:jwt]'),
     (re.compile(r'\b(AKIA|ASIA)[A-Z0-9]{12,}'), '[REDACTADO:aws]'),
     (re.compile(r'\blin_api_[A-Za-z0-9]{20,}'), '[REDACTADO:linear]'),
+    # Atlassian (Jira): los tokens actuales llevan prefijo, ATATT los de
+    # usuario y ATCTT los scoped. Los legacy de 24 chars alfanuméricos NO se
+    # pueden matchear sin redactar prosa cualquiera; para esos el que tapa es
+    # el patrón genérico de `token=`/`api_key=` de más abajo.
+    (re.compile(r'\bAT[AC]TT[A-Za-z0-9_=\-]{20,}'), '[REDACTADO:atlassian]'),
     (re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----'), '[REDACTADO:privkey]'),
     (re.compile(r'((?:password|passwd|secret|token|api[_-]?key|authorization)["\']?\s*[:=]\s*["\']?)([^\s"\',}]{6,})',
                 re.I), r'\1[REDACTADO]'),

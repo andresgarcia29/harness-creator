@@ -164,6 +164,22 @@ bs_install() {
     uv)
       curl -fsSL https://astral.sh/uv/install.sh > "$d/uv.sh" \
         && UV_INSTALL_DIR="$BINDIR" sh "$d/uv.sh" >/dev/null && rc=0 ;;
+    awscli)
+      # El instalador oficial: trae su propio Python, no es binario suelto. La
+      # firma que AWS publica es PGP (no un .sha256 al lado), así que
+      # _bs_fetch no puede verificarla; se instala con --install-dir/--bin-dir
+      # para no necesitar sudo.
+      f="$(_bs_fetch "$d" "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip")" \
+        && unzip -oq "$f" -d "$d" \
+        && "$d/aws/install" --install-dir "$HOME/.local/lib/aws-cli" --bin-dir "$BINDIR" --update >/dev/null && rc=0 ;;
+    observe)
+      # El repo es observeinc/cli (observeinc/observe-cli NO existe: da 404, y
+      # con él la receta entera). El artefacto es un gzip del binario suelto,
+      # no un tarball, así que va gunzip y no tar. El sums lleva la versión en
+      # el nombre (observe_<ver>_checksums.txt), por eso se pide el tag primero.
+      v="$(curl -fsSL https://api.github.com/repos/observeinc/cli/releases/latest | jq -r .tag_name)" \
+        && f="$(_bs_fetch "$d" "https://github.com/observeinc/cli/releases/download/$v/observe-linux-x64.gz" "https://github.com/observeinc/cli/releases/download/$v/observe_${v#v}_checksums.txt")" \
+        && gunzip -c "$f" > "$d/observe" && install -m 0755 "$d/observe" "$BINDIR/observe" && rc=0 ;;
     *) warn "no tengo receta de Linux para '$bin'" ;;
   esac
   rm -rf "$d"

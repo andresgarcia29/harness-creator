@@ -24,16 +24,57 @@ pkg_has() { # pkg_has <dir> <dep>
 }
 
 guess_role() { # guess_role <dir> <name> — imprime el rol en stdout
-  local dir="$1" name="$2"
+  local dir="$1" name="$2" tf_dir="" first_tf=""
 
   # contratos: buf o dominancia de .proto
   if [ -f "$dir/buf.yaml" ] || [ -f "$dir/buf.gen.yaml" ]; then echo "contracts"; return; fi
 
+  # App que lleva su propia infra al lado: código de aplicación en la RAÍZ y el
+  # terraform confinado a un subdirectorio. Sin este caso, el maxdepth 4 de
+  # abajo se los come y una app deployable termina como infra-live → driver
+  # `none` → cero verificación post-ship (el bug espejo del que motivó la
+  # regla 8: aplicar el modelo equivocado por clasificar por el archivo que
+  # aparece primero y no por lo que el repo ES).
+  # No basta el marcador en raíz: un módulo terraform puede traer un
+  # package.json de tooling. Se exige además evidencia de deployable
+  # (Dockerfile o chart), y que NO haya .tf en la raíz.
+  if [ -z "$(find "$dir" -maxdepth 1 -name '*.tf' -print -quit 2>/dev/null)" ] \
+     && { [ -f "$dir/go.mod" ] || [ -f "$dir/pyproject.toml" ] || [ -f "$dir/package.json" ] || [ -f "$dir/pubspec.yaml" ]; } \
+     && { find "$dir" -maxdepth 2 -name "Dockerfile*" -not -path "*/.git/*" -print -quit 2>/dev/null | grep -q . \
+          || find "$dir" -maxdepth 3 -name "Chart.yaml" -not -path "*/.git/*" -print -quit 2>/dev/null | grep -q .; }; then
+    : # cae a las ramas de lenguaje de abajo, que ya distinguen service/frontend/library
   # infra terraform: module (reutilizable) vs live (raíz aplicable).
   # maxdepth 4: los monorepos de infra viven en envs/prod/… y modules/x/… —
   # a profundidad 2 no se veían y caían a ci-library (bug real de campo).
-  if ls "$dir"/*.tf >/dev/null 2>&1 || find "$dir" -maxdepth 4 -name "*.tf" -not -path "*/.git/*" -print -quit 2>/dev/null | grep -q .; then
-    if [ -f "$dir/variables.tf" ] || [ -f "$dir/outputs.tf" ] || echo "$name" | grep -qi "module"; then
+  elif ls "$dir"/*.tf >/dev/null 2>&1 || find "$dir" -maxdepth 4 -name "*.tf" -not -path "*/.git/*" -print -quit 2>/dev/null | grep -q .; then
+    # variables.tf/outputs.tf se buscan en la raíz Y junto al primer .tf: la
+    # convención mayoritaria es terraform/ en subdirectorio, y exigirlos en la
+    # raíz hacía que módulos reutilizables se declararan infra-live, o sea
+    # "aplica infra al mergear", lo contrario de lo que son.
+    tf_dir="$dir"
+    if [ -z "$(find "$dir" -maxdepth 1 -name '*.tf' -print -quit 2>/dev/null)" ]; then
+      first_tf="$(find "$dir" -maxdepth 4 -name "*.tf" -not -path "*/.git/*" -print -quit 2>/dev/null)"
+      [ -z "$first_tf" ] || tf_dir="$(dirname "$first_tf")"
+    fi
+    # Los ejemplos y los tests NO son entornos: la convención mayoritaria de un
+    # módulo reutilizable (terraform-aws-modules y las que la copian) es traer
+    # `examples/dev` y `test/qa`, y sin excluirlos ese módulo se clasificaba
+    # infra-live, o sea "aplica infra al mergear": la etiqueta OPUESTA a lo que
+    # es, y la que decide qué modelo de deploy le aplica el harness.
+    if [ -n "$(find "$dir" -maxdepth 2 -type d \
+                 \( -name gbl -o -name global -o -name prod -o -name prd \
+                    -o -name sbx -o -name sandbox -o -name dev -o -name stg \
+                    -o -name stage -o -name qa -o -name nonprod \) \
+                 -not -path "*/.git/*" \
+                 -not -path "*/example/*"  -not -path "*/examples/*" \
+                 -not -path "*/test/*"     -not -path "*/tests/*" \
+                 -not -path "*/fixtures/*" -not -path "*/testdata/*" \
+                 -print -quit 2>/dev/null)" ]; then
+      # Un directorio de ENTORNO (terraform/prod, terraform/sbx…) es evidencia
+      # directa de stack aplicable: gana sobre variables.tf, porque un stack
+      # live perfectamente puede declarar variables y outputs propios.
+      echo "infra-live"
+    elif [ -f "$tf_dir/variables.tf" ] || [ -f "$tf_dir/outputs.tf" ] || echo "$name" | grep -qi "module"; then
       echo "infra-module"
     else
       echo "infra-live"
@@ -119,12 +160,41 @@ scan_repo() {
   find "$dir" -maxdepth 3 -path "*/migrations/*" -name "*.sql" -print -quit 2>/dev/null | grep -q . && signals+=("migrations")
   grep -rq "argoproj.io" "$dir" --include="*.yaml" 2>/dev/null && signals+=("argocd")
   grep -rq "kargo.akuity.io" "$dir" --include="*.yaml" 2>/dev/null && signals+=("kargo")
+  # atlantis: la TERCERA forma de aplicar infra, y la que no dejaba rastro.
+  # El gate de deploy del doctor pregunta "¿hay un workflow con deploy/apply en
+  # el nombre?", así que un repo que aplica terraform al mergear por un comentario
+  # de Atlantis contestaba NO y se saltaba entero: driver → none, deploy-watch
+  # "no reviso nada", y el apply rojo se descubre a mano. Medido en un workspace
+  # real: 17 repos con atlantis.yaml, 5 de ellos invisibles para ese gate.
+  { [ -f "$dir/atlantis.yaml" ] || [ -f "$dir/atlantis.yml" ]; } && signals+=("atlantis")
   grep -rq 'provider "google"' "$dir" --include="*.tf" 2>/dev/null && signals+=("gcp")
+  # Gemelas de gcp/gke: el eje "nube" tenía UNA sola implementación detectada,
+  # así que un workspace 100% AWS se veía idéntico a uno sin nube (regla 8: un
+  # eje que varía se DETECTA, no se asume).
+  grep -rq 'provider "aws"' "$dir" --include="*.tf" 2>/dev/null && signals+=("aws")
+  grep -rq 'aws_eks_cluster\|aws_eks_node_group' "$dir" --include="*.tf" 2>/dev/null && signals+=("eks")
+  grep -rq 'aws_lambda_function' "$dir" --include="*.tf" 2>/dev/null && signals+=("lambda")
   # Señales que el CATÁLOGO ya filtraba por prosa y nadie emitía, así que
   # capacidades correctas nunca se ofrecían aunque la evidencia estuviera en
   # el repo. Cada una tiene su consumidor en catalog/capabilities.yaml.
   grep -rq 'google_container_cluster' "$dir" --include="*.tf" 2>/dev/null && signals+=("gke")
   grep -rqi 'prometheus' "$dir" --include="*.y*ml" --include="*.tf" 2>/dev/null && signals+=("prometheus")
+  # Observabilidad más allá de prometheus: mismo eje, otras implementaciones.
+  grep -rq 'observeinc\|observe_\|OBSERVE_CUSTOMER' "$dir" --include="*.tf" --include="*.y*ml" 2>/dev/null && signals+=("observe")
+  grep -rq 'aws_cloudwatch' "$dir" --include="*.tf" 2>/dev/null && signals+=("cloudwatch")
+  # Streaming: el eje que no tenía NI UNA implementación detectada, así que un
+  # workspace sobre Kafka se veía igual que uno sin event streaming. Se mira la
+  # infra Y el cliente porque los topics casi nunca viven en el mismo repo que
+  # los consume: en los 91 repos medidos la única evidencia era una policy IAM
+  # con arn:aws:kafka (o sea MSK, consumido pero no creado acá), cero recursos
+  # confluent_* y cero clientes, así que buscar solo `provider "confluent"`
+  # habría contestado "acá no hay streaming" sobre una plataforma que sí lo usa.
+  # Por eso arn:aws:kafka cuenta: es permiso sobre un cluster que existe.
+  { grep -rq 'confluent_\|provider "confluent"\|aws_msk\|arn:aws:kafka' "$dir" --include="*.tf" 2>/dev/null \
+    || grep -rqi 'confluent-kafka\|kafkajs\|@confluentinc\|segmentio/kafka-go\|Shopify/sarama\|IBM/sarama\|springframework.kafka' \
+       "$dir" --include="go.mod" --include="package.json" --include="pyproject.toml" \
+       --include="requirements*.txt" --include="pom.xml" --include="build.gradle*" 2>/dev/null; } \
+    && signals+=("kafka")
   grep -rqi 'sentry' "$dir" --include="package.json" --include="go.mod" \
     --include="pyproject.toml" --include="requirements*.txt" --include="Gemfile" 2>/dev/null \
     && signals+=("sentry")
@@ -194,6 +264,15 @@ jq -n \
       helm:[$repos[]|select(.signals|index("helm"))|.name],
       argocd:[$repos[]|select(.signals|index("argocd"))|.name],
       kargo:[$repos[]|select(.signals|index("kargo"))|.name],
+      atlantis:[$repos[]|select(.signals|index("atlantis"))|.name],
+      gcp:[$repos[]|select(.signals|index("gcp"))|.name],
+      aws:[$repos[]|select(.signals|index("aws"))|.name],
+      eks:[$repos[]|select(.signals|index("eks"))|.name],
+      lambda:[$repos[]|select(.signals|index("lambda"))|.name],
+      observe:[$repos[]|select(.signals|index("observe"))|.name],
+      cloudwatch:[$repos[]|select(.signals|index("cloudwatch"))|.name],
+      kafka:[$repos[]|select(.signals|index("kafka"))|.name],
+      compose:[$repos[]|select(.signals|index("compose"))|.name],
       missing_claude_md:[$repos[]|select(.has_claude_md|not)|.name]
     }}' > "$WS/inventory.json"
 

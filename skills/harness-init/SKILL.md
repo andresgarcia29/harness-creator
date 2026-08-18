@@ -149,14 +149,18 @@ harness; cada agente es contexto y mantenimiento.
    consumidor es un cronjob salvo que el humano diga que va a usarlo;
    regístralas comentadas como "solo para harness-cronjobs". Las `phase: 2` se mencionan como
    siguientes pasos, no se instalan.
-6. **Tickets**: `linear` | `github` | `none`. Los TRES están
+6. **Tickets**: `linear` | `github` | `jira` | `none`. Los CUATRO están
    implementados en `ticket-pull.sh` y `ticket-close.sh` (antes solo
    existía Linear y para github la tabla decía "adapta los contratos", o
    sea un script improvisado sin template ni test). Si elige github,
    pregunta también el **repo de los issues** (`owner/repo`) y regístralo
    en `tickets.repo`: sin eso el script no sabe de qué repo es el issue
-   `123`. En los dos casos el harness solo lee, mueve labels y comenta;
-   nunca edita el cuerpo ni cierra el ticket fuera de `/archive`.
+   `123`. Si elige jira NO hace falta repo (la key viaja en el ID:
+   `PROJ-123`), pero SÍ hace falta decirle que Jira Cloud pide tres
+   variables y autentica con Basic `email:api_token`, no con bearer:
+   `JIRA_URL`, `JIRA_EMAIL` y `JIRA_API_TOKEN`. En los tres casos el
+   harness solo lee, mueve labels y comenta; nunca edita el cuerpo ni
+   cierra el ticket fuera de `/archive`.
 7. **Memoria**: engram sí/no; perfiles (default: orquestador y
    arquitecto SOLAMENTE). La respuesta va a `memory.provider` del answers
    Y a `{{MEMORY_PROVIDER}}` del CLAUDE.md: es la MISMA respuesta en los
@@ -175,6 +179,14 @@ harness; cada agente es contexto y mantenimiento.
    `inventory.json → secret_hints` (el discovery detecta .sops.yaml,
    doppler.yaml, op://, aws_secretsmanager/google_secret_manager en
    terraform, VAULT_ADDR, .env.example) — evidencia, no adivinanza.
+   Cuando `secret_hints` viene vacío o empatado, desempata con la NUBE:
+   `summary.aws` no vacío y `summary.gcp` vacío hace de
+   `aws-secrets-manager` la opción por defecto, y al revés con
+   `gcp-secret-manager`; con las dos no vacías es multi-cloud y ahí sí se
+   pregunta, porque la evidencia no alcanza para elegir. Estas dos señales
+   se medían desde el discovery y no desempataban NADA: un workspace con 39
+   repos de Terraform sobre AWS llegaba a esta pregunta igual que uno sin
+   nube. No reemplaza a `secret_hints`: es el desempate de abajo.
    Si vault: VAULT_ADDR y path base del KV (solo referencias). El
    TOKEN nunca se pide por chat: bootstrap.sh lo pide interactivo
    (read -s directo al archivo) y VALIDA su vigencia — un token
@@ -198,12 +210,31 @@ harness; cada agente es contexto y mantenimiento.
    (deploy/release/apply en el nombre o un `on: push` a la trunk) son los
    candidatos; `kind: service|frontend|mobile` ya caen a gitops solos y
    no hace falta declararlos.
+   **Y los repos con `atlantis.yaml`** (los lista `summary.atlantis` del
+   inventory): aplican infra al MERGEAR, por un comentario en el PR y sin
+   workflow propio, así que su `kind` los manda a `none` y nadie los
+   verifica. Van con `driver: actions` y un `verify_cmd` que interroga al
+   recurso aplicado, no al plan; o con `driver: none` MÁS `verify_cmd`, que
+   deploy-watch trata como verificado (salta CI/gitops y corre el verify) y
+   es lo correcto cuando no hay run de Actions que mirar. Lo mismo para los
+   repos de `summary.lambda`: el artefacto es la función, y se pregunta por
+   ella (`aws lambda get-function --function-name <fn>`), no por el apply.
+   **Y los repos de `summary.kafka`**: un consumidor puede desplegar verde y
+   no estar consumiendo (grupo sin asignar, deserializador roto, topic mal
+   nombrado), y un `curl` al pod no lo ve. Su verify natural es el LAG del
+   consumer group, que no crece: con `confluent-mcp` es
+   `get-consumer-group-lag`; sin él, `kafka-consumer-groups --describe`. Es
+   la misma regla que el resto del item: se interroga al artefacto, y para un
+   consumidor el artefacto es el avance del offset, no el proceso vivo.
    **Y por cada repo con driver, el verify post-deploy** (claves planas a
    4 espacios: `verify_cmd`/`verify_expect`/`verify_timeout`): un comando
    que interroga al ARTEFACTO desplegado, para TODOS los drivers (con
    `none` es la única señal). Ofrece los dos primitivos de campo: leer el
    asset DESDE el pod (no del CDN que cachea) y comparar pod vs CDN con
-   `curl --compressed`. Si la tarea encadena publish/bump entre repos,
+   `curl --compressed`. En los repos de `summary.compose` del inventario
+   (traen `docker-compose*.yml`) ya existe un stack de dependencias
+   declarado, así que el verify puede levantarlo en vez de inventar mocks; era
+   otra señal medida desde el discovery que no despachaba nada. Si la tarea encadena publish/bump entre repos,
    pregunta también `post_ship` (lo ejecuta ship-wave tras aterrizar el
    repo). Y si el flujo usa túneles locales (port-forward a un cluster),
    llena el bloque `port_forwards:` (`{{PORT_FORWARDS_LIST}}`; sin
@@ -398,7 +429,9 @@ Scripts SIEMPRE con `chmod +x`. Tabla completa:
 | `scripts/bounded.sh` | scripts/bounded.sh | siempre: `run_bounded`, el acotador de llamadas externas. Lo sourcean ship.sh (sondas de los gates) y deploy-watch.sh (las nueve llamadas de red). Mata el GRUPO de procesos y escala a SIGKILL: el idiom anterior (`perl -e 'alarm N; exec'`) mataba un solo proceso y un nieto huérfano dejaba el `$( )` bloqueado igual, o sea que acotaba en el papel y no en el reloj. Sin esto, un watcher se cuelga hasta 35 días (el techo real de un workflow run de GitHub) |
 | `scripts/emit.sh` | scripts/emit.sh | siempre — el bus del harness: lo que ship.sh y /smart DECIDEN. Fail-open, redacta antes de escribir. Sin esto el panel solo ve agentes y tokens (la mitad prestada), nunca las decisiones ni los gates (la nuestra) |
 | `scripts/secrets.sh` | scripts/secrets.sh.tmpl | siempre (fuente según answers; subcomandos pull\|check\|doctor: doctor cruza lo que los repos declaran necesitar contra lo provisto, con candidato best-effort desde la fuente) |
-| `scripts/ticket-pull.sh`, `scripts/ticket-close.sh` | scripts/ticket-*.tmpl | tickets=linear (github: adapta los mismos contratos a `gh issue`) |
+| `scripts/ticket-pull.sh`, `scripts/ticket-close.sh` | scripts/ticket-*.tmpl | tickets != none. Los tres proveedores (linear, github, jira) son funciones DENTRO de los mismos dos scripts, no forks |
+| `scripts/linear.sh` | scripts/linear.sh | tickets=linear: el carril compartido: el diagnóstico de "no existe" vs "tu key es de otra org" vive en UN lugar (#113) |
+| `scripts/jira.sh` | scripts/jira.sh | tickets=jira: idem para Jira, que además necesita ADF↔texto: la v3 devuelve la descripción como JSON anidado y un `.description` directo escribe "null", o sea una tarea SIN requisitos |
 | `scripts/deploy-watch.sh` | scripts/deploy-watch.sh.tmpl | si hay CD (gha/argocd/kargo en inventory). Con `--coalesce` hay UN watcher por repo en vez de uno por ship: los demás se anotan en `.harness/deploy-pending/<repo>.jsonl` y salen, el vivo re-apunta al sha más nuevo que DESCIENDA del que vigila (ArgoCD despliega HEAD, los ancestros van incluidos) y al terminar atribuye su `deploy-<repo>.log` a todas las tareas cubiertas. Medido: una familia de 13 lotes del mismo repo pagó 13 ciclos de deploy que uno cubría |
 | `semgrep/rules.yaml` | semgrep-rules.yaml.tmpl | si semgrep elegido |
 | `.mcp.json` | campo `config` del catálogo por MCP elegido | si hay MCPs |

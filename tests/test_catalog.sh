@@ -334,4 +334,69 @@ corre_receta capacidad-inventada; rc=$?
 [ "$rc" -ne 0 ] && pass "un bin sin receta devuelve != 0 (ensure lo reporta como fallo)" \
                 || fail "un bin sin receta salio 0: ensure lo contaria como instalado"
 
+echo "── cada detect: signal:<x> nombra una señal que discover.sh EMITE"
+# POR QUE: `detect:` es lo que hace que la entrevista OFREZCA la capacidad. En
+# forma `signal:<x>` es verificable, y ahí está el valor; el problema es que
+# nadie verificaba que la <x> exista. Una señal mal escrita (o renombrada en
+# discover.sh) no falla: la capacidad simplemente no se ofrece NUNCA, y eso se
+# ve igual que "el workspace no la necesita". Es la misma clase de silencio que
+# el ratchet de brew/Linux: el catálogo declara una cadena que no se cumple, y
+# lo dice nadie. Pasó con observe-cli y aws-cloudwatch, que nacieron con la
+# señal en PROSA ("repos con observeinc en *.tf") cuando discover.sh ya emitía
+# la señal de verdad: inverificable por construcción.
+emitidas="$(grep -o 'signals+=("[a-z0-9_-]*")' "$ROOT/scripts/discover.sh" \
+  | sed 's/.*("//; s/")//' | sort -u)"
+huerfanas=""
+while read -r s; do
+  [ -n "$s" ] || continue
+  printf '%s\n' "$emitidas" | grep -qx "$s" || huerfanas="$huerfanas $s"
+done <<EOF
+$(grep -o 'detect: "signal:[a-z0-9_-]*"' "$CAT" | sed 's/.*signal://; s/"//' | sort -u)
+EOF
+[ -z "$huerfanas" ] \
+  && pass "las $(printf '%s\n' "$emitidas" | grep -c .) señales de discover.sh cubren todo detect: signal: del catálogo" \
+  || fail "el catálogo filtra por señales que discover.sh NO emite (la capacidad no se ofrece nunca):$huerfanas"
+
+echo "── y al revés: cada señal que discover.sh emite la LEE alguien"
+# POR QUE: el ratchet de arriba cierra UN extremo de la cadena y el hueco
+# espejo quedaba abierto. Una señal emitida que nadie consume cuesta lo mismo
+# que una señal inexistente: el discovery la mide, la escribe en el inventory,
+# y la entrevista sigue sin ofrecer nada. Se ve igual que "el workspace no lo
+# usa", que es justo la confusión que la regla 8 existe para impedir (un eje
+# que varía se DETECTA **y se DESPACHA**; detectar sin despachar es media
+# regla). Paso con `eks`: 11 clusters medidos en un workspace real, la señal
+# emitida desde el primer dia, y CERO lectores, asi que una plataforma entera
+# sobre EKS se veia identica a una sin Kubernetes gestionado.
+# Consumir vale de tres formas, porque las tres hacen que la señal ACTUE:
+# `detect: signal:<x>` en el catálogo (ofrece una capacidad), nombrarla en la
+# entrevista/plantillas (recomienda una respuesta), o leerla en un gate.
+sin_lector=""
+while read -r s; do
+  [ -n "$s" ] || continue
+  grep -q "detect: \"signal:$s\"" "$CAT" && continue
+  # `summary.<s>`, `index("<s>")` o `signal:<s>`: una REFERENCIA A LA SEÑAL.
+  # Con `\b$s\b` a secas el gate se apagaba solo, y no en teoría: `aws` quedaba
+  # "leído" por `aws-secrets-manager` y por los patrones de redacción
+  # `[REDACTADO:aws]`, y `gcp` por `gcp-secret-manager`, así que las DOS señales
+  # de la nube estaban huérfanas con el ratchet en verde. Se probó borrando el
+  # lector de verdad: seguía pasando. Un gate que la prosa vecina satisface mide
+  # la prosa, no la cadena.
+  grep -rqE "summary\.$s\b|index\(\"$s\"\)|signal:$s\b" \
+    "$ROOT/skills" "$ROOT/commands" "$ROOT/templates" \
+    "$ROOT/scripts/doctor.sh" 2>/dev/null && continue
+  # Tercera forma, la que usan las señales viejas: nombrarla en una frase que
+  # habla del INVENTARIO o de las SEÑALES ("si hay CD (gha/argocd/kargo en
+  # inventory)", "Detecté buf.yaml en proto → gate buf-breaking"). Eso despacha
+  # de verdad, así que vale; lo que no vale es la palabra suelta en cualquier
+  # contexto, que es lo que dejaba pasar a aws y gcp.
+  grep -rqE "(inventor|señal|signal|detect|gate|by_role|role_guess).*\b$s\b|\b$s\b.*(inventor|señal|signal|detect|gate|by_role|role_guess)" \
+    "$ROOT/skills" "$ROOT/commands" "$ROOT/scripts/doctor.sh" 2>/dev/null && continue
+  sin_lector="$sin_lector $s"
+done <<EOF
+$emitidas
+EOF
+[ -z "$sin_lector" ] \
+  && pass "ninguna señal emitida muere en el inventory (todas tienen catálogo, entrevista o gate)" \
+  || fail "discover.sh emite señales que NADIE lee: se miden y no despachan nada, igual que no detectarlas:$sin_lector"
+
 t_done

@@ -790,12 +790,67 @@ def _partir_suciedad(cwd: Path, porcelain: str, task_id: str) -> "tuple[str, lis
     return "\n".join(propias), ajenas
 
 
-def command_run(args: argparse.Namespace) -> int:
+def arboles_del_repo(task_dir: Path, repo: str) -> "list[Path]":
+    """Los árboles que el LAYOUT dice que son de <repo> en esta tarea.
+
+    Uno por worktree: `worktrees/<task>/<repo>`, y los de un nodo del DAG, que
+    llevan sufijo (`worktrees/<task>/<repo>@T1`). El workspace es el padre de
+    `tasks/<id>`, la misma regla ESTRUCTURAL que usa _arbol_compartido: no hace
+    falta leer el answers ni el manifest, así que no hay un segundo lugar donde
+    la respuesta pueda divergir."""
+    ws = task_dir.parent.parent
+    base = ws / "worktrees" / task_dir.name
+    candidatos = [base / repo] + sorted(base.glob(f"{repo}@*"))
+    return [c for c in candidatos if (c / ".git").exists()]
+
+
+def resolver_cwd(args: argparse.Namespace, task_dir: Path) -> Path:
+    """El árbol contra el que se sella, DERIVADO cuando nadie lo pasa.
+
+    EL DEFECTO QUE ESTO CIERRA (#218): `--cwd` valía "." por defecto, así que
+    quien corría `evidence.py run --repo docs` parado en la raíz del workspace
+    sellaba contra el HEAD del repo de la INSTANCIA declarando `repo: docs`. El
+    sello se lee IGUAL que uno bueno (mismo runner, mismo kind, misma
+    aserción) y solo se distingue cruzando el commit contra el repo, que es lo
+    que nadie hace a ojo. Pasó dos veces en la misma tarea, a dos agentes
+    distintos: verdict-scaffold descartó la evidencia por su filtro de commit y
+    el reviewer se quedó sin veredicto sin que nadie entendiera por qué. Si ese
+    filtro no existiera, o si los dos HEAD coincidieran por casualidad, un sello
+    medido sobre el árbol equivocado pasaría por bueno.
+
+    El comando ya recibía --repo y --task-dir, o sea que tenía todo para saber
+    dónde mirar. Y cuando el árbol del repo existe, un --cwd que apunte AFUERA
+    es un error, no una preferencia: se rechaza en vez de sellar algo inservible
+    (la misma ley que require_task_dir, que valida y jamás crea)."""
+    arboles = arboles_del_repo(task_dir, args.repo)
+    if args.cwd is None:
+        if len(arboles) == 1:
+            print(f"EVIDENCE: --cwd derivado de --repo: {arboles[0]}")
+            return arboles[0]
+        if len(arboles) > 1:
+            die(f"--repo {args.repo} tiene {len(arboles)} árboles en esta tarea "
+                f"({', '.join(a.name for a in arboles)}) y no pasaste --cwd.\n"
+                "EVIDENCE: son los worktrees por nodo del DAG; elegir uno por vos "
+                "sería sellar contra el árbol equivocado con la misma cara que uno "
+                "bueno.\n  ↳ remediación: pasá --cwd con el worktree de TU nodo")
+        return Path(".").resolve()
     cwd = Path(args.cwd).resolve()
+    if arboles and not any(cwd == a or a in cwd.parents for a in arboles):
+        die(f"--cwd {cwd} no está dentro del árbol de '{args.repo}' en esta tarea "
+            f"({arboles[0]}).\n"
+            "EVIDENCE: el sello quedaría atado a un commit que NO pertenece al repo "
+            "declarado. En evidence.log se lee igual que uno bueno y solo se "
+            "distingue cruzando el commit contra el repo (#218).\n"
+            f"  ↳ remediación: --cwd {arboles[0]}")
+    return cwd
+
+
+def command_run(args: argparse.Namespace) -> int:
     task_dir = Path(args.task_dir).resolve()
+    require_task_dir(task_dir)
+    cwd = resolver_cwd(args, task_dir)
     if not cwd.is_dir():
         die(f"cwd inexistente: {cwd}")
-    require_task_dir(task_dir)
     before = git(cwd, "rev-parse", "HEAD")
 
     # EL ÁRBOL TIENE QUE ESTAR LIMPIO, Y ESTO NO ES CEREMONIA.
@@ -1354,7 +1409,11 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--repo", required=True)
     run.add_argument("--runner", required=True)
     run.add_argument("--kind", required=True, choices=("test", "lint", "build", "security", "canary"))
-    run.add_argument("--cwd", default=".")
+    run.add_argument("--cwd", default=None,
+                     help="árbol contra el que se sella. Por defecto se DERIVA "
+                          "de --repo y --task-dir (worktrees/<task>/<repo>): "
+                          "el default anterior era '.', y quien lo omitía "
+                          "sellaba contra el HEAD de donde estuviera parado")
     run.add_argument("--no-slot", action="store_true",
                      help="no envolver el comando en build-slot.sh (para "
                           "llamadores que ya gestionan el semáforo)")

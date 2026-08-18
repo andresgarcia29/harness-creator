@@ -1564,4 +1564,103 @@ out="$( export PATH="$WS/bin:$PATH"
 assert_not_contains "$out" "RUIDO" "los mensajes van a stderr: stdout son SOLO ids"
 rm -f "$WS/bin/gh"
 
+echo
+echo "── flow: prs: lo que el watcher RESUELVE tiene que quedar ESCRITO (#217)"
+# `landed` lo escribia ship.sh una sola vez, en false, y nadie lo volvia a
+# tocar: POLICY-SHIP-005 bloqueaba deploy y archive PARA SIEMPRE aunque el PR
+# hubiera mergeado. La remediacion que el gate imprimia ("re-corre
+# deploy-watch, que resuelve el commit real") era justo lo que no funcionaba:
+# el watcher resolvia el sha en MEMORIA y salia sin persistir, asi que quien la
+# seguia entraba en un bucle y /archive quedaba inalcanzable.
+awk '/^LANDED_SHA=""$/{f=1} f{print} f&&/^}$/{n++; if(n==2) exit}' \
+  "$ROOT/templates/scripts/deploy-watch.sh.tmpl" > "$WS/landed.sh"
+grep -q 'persistir_landed' "$WS/landed.sh" || { echo "no pude extraer el tramo de landed"; exit 1; }
+grep -q 'resolve_landed_sha' "$WS/landed.sh" || { echo "falta resolve_landed_sha en el tramo"; exit 1; }
+
+# El forge de mentira: la interfaz real que consume el watcher (forge.sh se
+# sourcea en un bash hijo, asi que tiene que ser un archivo de verdad).
+mk_forge() {  # mk_forge <sha-mergeado|"">: vacio = el PR sigue abierto
+  cat > "$WS/scripts/forge.sh" <<FORGE
+forge_pr_merged() { [ -n "$1" ] || return 1; printf '%s' "$1"; }
+FORGE
+}
+mk_shiplog() {  # una tarea de dos repos con flow: prs, los dos sin aterrizar
+  mkdir -p "$WS/tasks/T-217"
+  cat > "$WS/tasks/T-217/ship.log" <<'LOG'
+{"repo":"docs","sha":"aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111","short":"aaaa1111aaaa","branch":"task/T-217","pr":"https://x/1","landed":false,"shipped_at":"2026-08-18T00:00:00Z"}
+{"repo":"terraform-core","sha":"bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222","short":"bbbb2222bbbb","branch":"task/T-217","pr":"https://x/2","landed":false,"shipped_at":"2026-08-18T00:01:00Z"}
+LOG
+}
+corre_landed() {  # corre_landed <repo> → LANDED_SHA en stdout, diagnosticos aparte
+  ( set -uo pipefail
+    cd "$WS"; WS="$WS"; TASK=T-217; REPO="$1"
+    say() { echo "$1" >&2; }
+    emit() { :; }
+    acota
+    . "$WS/landed.sh"
+    resolve_landed_sha; printf '%s' "$LANDED_SHA" ) 2>/dev/null
+}
+entrada() { jq -c --arg r "$1" 'select(.repo==$r)' "$WS/tasks/T-217/ship.log" | tail -1; }
+
+mk_shiplog; mk_forge "cccc3333cccc3333cccc3333cccc3333cccc3333"
+out="$(corre_landed terraform-core)"
+assert_eq "cccc3333cccc3333cccc3333cccc3333cccc3333" "$out" "resuelve el sha que aterrizo (lo que ya hacia)"
+assert_eq "true" "$(entrada terraform-core | jq -r '.landed')" \
+  "#217: y AHORA lo escribe: landed queda en true"
+assert_eq "cccc3333cccc3333cccc3333cccc3333cccc3333" "$(entrada terraform-core | jq -r '.landed_sha')" \
+  "con el sha aterrizado"
+assert_eq "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222" "$(entrada terraform-core | jq -r '.ship_sha')" \
+  "y el que verifico ship.sh conservado: no se pierde la procedencia del gate de evidencia"
+assert_eq "landed" "$(entrada terraform-core | jq -r '.event')" "marcada como lo que es, no como un ship"
+# Se AGREGA una linea, no se reescribe el archivo: ship.log lo escriben varios
+# productores con >> a la vez, y un read-modify-write se come la linea que otro
+# agrego en el medio. La entrada original queda intacta como historia.
+assert_eq "false" "$(jq -c 'select(.repo=="terraform-core")' "$WS/tasks/T-217/ship.log" | head -1 | jq -r '.landed')" \
+  "la entrada del ship original no se toca"
+assert_eq "false" "$(entrada docs | jq -r '.landed')" \
+  "y la del OTRO repo, que no mergeo, tampoco"
+assert_eq 3 "$(grep -c . "$WS/tasks/T-217/ship.log")" "las dos lineas de antes siguen ahi, mas la nueva"
+
+# Idempotente: una segunda corrida no vuelve a escribir, porque la entrada ya
+# dice landed. Un log que crece una linea por corrida seria ruido eterno.
+corre_landed terraform-core >/dev/null
+assert_eq 3 "$(grep -c . "$WS/tasks/T-217/ship.log")" "correrlo de nuevo NO agrega otra linea"
+
+# Segunda corrida: ya no hay nada que preguntarle al forge, y el sha que se
+# vigila es el ATERRIZADO, no el de la rama (que es el que quedo en .sha).
+mk_forge ""
+out="$(corre_landed terraform-core)"
+assert_eq "cccc3333cccc3333cccc3333cccc3333cccc3333" "$out" \
+  "una entrada ya resuelta vigila el sha aterrizado, no el de la rama"
+
+# El PR que NO mergeo no se marca: el campo dice la verdad en los dos sentidos.
+out="$(corre_landed docs)"
+assert_eq "" "$out" "sin merge no hay sha que vigilar"
+assert_eq "false" "$(entrada docs | jq -r '.landed')" "y landed sigue en false: no se inventa un aterrizaje"
+
+# Varios ships del mismo repo: se marca el ULTIMO, que es el estado de hoy
+# (la misma regla que usa repos_not_landed del lado de la policy).
+mk_shiplog; mk_forge "dddd4444dddd4444dddd4444dddd4444dddd4444"
+cat >> "$WS/tasks/T-217/ship.log" <<'LOG'
+{"repo":"docs","sha":"eeee5555eeee5555eeee5555eeee5555eeee5555","short":"eeee5555eeee","branch":"task/T-217b","pr":"https://x/3","landed":false,"shipped_at":"2026-08-18T02:00:00Z"}
+LOG
+corre_landed docs >/dev/null
+assert_eq "false" "$(jq -c 'select(.repo=="docs")' "$WS/tasks/T-217/ship.log" | head -1 | jq -r '.landed')" \
+  "el ship viejo del repo queda como estaba: es historia"
+assert_eq "true" "$(entrada docs | jq -r '.landed')" "y el ULTIMO registro del repo es el que manda"
+assert_eq "eeee5555eeee5555eeee5555eeee5555eeee5555" "$(entrada docs | jq -r '.ship_sha')" \
+  "el aterrizaje se ata al ULTIMO ship, no al primero"
+
+# Y EL REPO SIN DRIVER TAMBIEN REGISTRA. Que este watcher no tenga nada que
+# VERIFICAR no significa que no tenga nada que SABER: un repo de docs con
+# driver none salia por el early exit ANTES de preguntar por el merge, se
+# quedaba en landed:false para siempre, y POLICY-SHIP-005 mira TODOS los repos,
+# asi que uno solo dejaba la tarea entera sin deploy ni archive.
+tmpl="$ROOT/templates/scripts/deploy-watch.sh.tmpl"
+salida_l="$(grep -n 'no se verifica con este watcher' "$tmpl" | head -1 | cut -d: -f1)"
+resolve_l="$(awk -v n="$salida_l" 'NR<n && /^  resolve_landed_sha \|\| true$/{l=NR} END{print l+0}' "$tmpl")"
+[ "${resolve_l:-0}" -gt 0 ] \
+  && pass "el repo sin driver resuelve (y registra) el merge ANTES de salir" \
+  || fail "el early exit de driver=none sale sin registrar: ese repo no sale nunca de landed:false"
+
 t_done

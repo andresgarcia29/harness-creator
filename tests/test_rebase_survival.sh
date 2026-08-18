@@ -305,6 +305,28 @@ printf '%s\n' '{"repo":"web","sha":"bbb","landed":true}' >> "$TD3/ship.log"
 python3 "$POLICY_PY" --policy "$POL" transition "$TD3" deploy --actor o >/dev/null 2>&1 \
   && pass "tras el merge, deploy se destraba" || fail "sigue trabado despues del merge"
 
+# EL CABLE, NO SOLO LA PIEZA (#217): hasta ahora este test probaba que el gate
+# se destraba con una entrada aterrizada... que NADIE escribía. `landed` lo
+# ponía ship.sh una sola vez, en false, y ningún otro punto del harness lo
+# volvía a tocar, así que POLICY-SHIP-005 bloqueaba deploy y archive PARA
+# SIEMPRE con flow: prs, y su propia remediación ("re-corré deploy-watch")
+# no destrababa nada porque el watcher resolvía el merge en MEMORIA.
+# El que la escribe ahora es deploy-watch; acá se verifica que la FORMA REAL que
+# escribe es la que este gate acepta. Si una de las dos puntas cambia, esto cae.
+TD5="$WS/tasks/T5"; mkdir -p "$TD5"
+python3 "$POLICY_PY" --policy "$POL" init "$TD5" --lane full >/dev/null
+for ph in rfc implement review; do
+  python3 "$POLICY_PY" --policy "$POL" transition "$TD5" $ph --actor o >/dev/null
+done
+printf '%s\n' '{"repo":"web","sha":"aaa","branch":"task/T5","pr":"http://pr/9","landed":false}' > "$TD5/ship.log"
+python3 "$POLICY_PY" --policy "$POL" transition "$TD5" ship --actor o >/dev/null
+python3 "$POLICY_PY" --policy "$POL" transition "$TD5" deploy --actor o >/dev/null 2>&1 \
+  && fail "arranca destrabado: el caso no prueba nada" || pass "T5 arranca trabado, como en campo"
+printf '%s\n' '{"repo":"web","event":"landed","landed":true,"sha":"ccc111","short":"ccc111","landed_sha":"ccc111","landed_at":"2026-08-18T03:00:00Z","ship_sha":"aaa","branch":"task/T5","pr":"http://pr/9"}' >> "$TD5/ship.log"
+python3 "$POLICY_PY" --policy "$POL" transition "$TD5" deploy --actor o >/dev/null 2>&1 \
+  && pass "#217: la entrada que escribe deploy-watch destraba el gate de verdad" \
+  || fail "#217: el watcher escribe una forma que POLICY-SHIP-005 no acepta: el cable sigue cortado"
+
 # COMPAT: flow: trunk no escribe `landed`, y un campo AUSENTE no es false
 # (confundir esas dos cosas fue justo el bug del // de jq)
 TD4="$WS/tasks/T4"; mkdir -p "$TD4"

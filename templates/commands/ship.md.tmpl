@@ -26,6 +26,12 @@ es correr los scripts y solo despertar en rojo.
    el delta-spec de algo sin mergear es spec rot al revés. `deploy-watch`
    resuelve solo el commit real cuando el PR mergea, y mientras tanto te lo
    dice en vez de vigilar el commit equivocado.
+   **Y cuando mergea, lo REGISTRA** (`landed: true` en `ship.log`): ese
+   registro es lo único que destraba `deploy` y `archive` en
+   `POLICY-SHIP-005`, así que tras el merge corré `deploy-watch` una vez por
+   repo, **incluidos los que no despliegan** (un repo de docs con
+   `driver: none` también tiene que quedar registrado: el gate mira TODOS, y
+   uno solo sin registrar deja la tarea entera trabada).
 2. Verde → `scripts/with-secrets.sh scripts/deploy-watch.sh <task-id> <repo>`
    — Actions → Kargo → health ArgoCD → smoke canary.
    - 🔴 → deploy-watch ya hizo/pidió ROLLBACK PRIMERO. Lee su log en

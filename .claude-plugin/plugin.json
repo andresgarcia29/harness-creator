@@ -1,6 +1,6 @@
 {
   "name": "harness-creator",
-  "version": "0.62.0",
+  "version": "0.62.1",
   "description": "Instala y mantiene un harness de ingeniería agéntica multi-repo: descubre tus repos, propone una topología de agentes con evidencia, te entrevista, y genera agentes, gates deterministas, comandos de pipeline, MCPs, docs y memoria desde un catálogo de capacidades.",
   "author": {
     "name": "Andres Garcia"

@@ -14,4 +14,9 @@ set -a
 # shellcheck disable=SC1091
 . "$WS/.secrets"
 set +a
+# Un secreto, dos nombres: npm y bun leen el token del registry privado de
+# NODE_AUTH_TOKEN (los .npmrc escriben ${NODE_AUTH_TOKEN}), no de GH_TOKEN.
+if [ -n "${GH_TOKEN:-}" ] && [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+  export NODE_AUTH_TOKEN="$GH_TOKEN"
+fi
 exec "$@"

@@ -566,7 +566,81 @@ class EvidenceTest(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
-    def test_run_takes_a_slot_and_seals_contention(self):
+    def _fake_docker(self):
+        """Un `docker` de mentira, primero en el PATH: el test mide a QUIEN se
+        envuelve, no a docker. Sin esto habria que tener docker instalado y
+        buildear algo de verdad para probar una decision de tres lineas."""
+        bindir = self.root / "fakebin"
+        bindir.mkdir(exist_ok=True)
+        fake = bindir / "docker"
+        fake.write_text("#!/bin/sh\necho fake-docker \"$@\"\n")
+        fake.chmod(0o755)
+        return dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}")
+
+    def _corre(self, *extra, env=None):
+        result = subprocess.run(
+            ["python3", str(SCRIPT), "run", "--task-dir", str(self.task),
+             "--repo", "atlas", "--runner", "qa-atlas", "--kind", "test",
+             "--cwd", str(self.repo), *extra],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            check=False, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifests = sorted((self.task / "evidence").glob("EV-*.json"),
+                           key=lambda p: p.stat().st_mtime)
+        return json.loads(manifests[-1].read_text())["contention"]
+
+    # ── A QUIEN se le cobra el semaforo (#221) ──────────────────────────
+    # El default era envolver TODO comando sellado, y contradecia el contrato
+    # que el harness ensena: la Ley 8 y guard-build-slot.sh hablan SOLO de
+    # `docker build/run`. Caso de campo: cuatro corridas encoladas con load
+    # 0.56 en 8 nucleos y ninguna era docker (dos gates de Playwright, una
+    # medicion de QA, un `go test`); una espero 25 minutos con la maquina al
+    # 7%. Un gate de navegador no ocupa un slot dimensionado para builds.
+
+    def test_comando_que_no_es_docker_no_toma_slot(self):
+        cont = self._corre("--", "sh", "-c", "echo ok")
+        self.assertFalse(cont["slot_wrapped"])
+        self.assertIsNone(cont["test_slots"])
+
+    def test_docker_build_toma_slot_sin_pedirlo(self):
+        # Fail-CLOSED del lado que importa: si esto se rompe, un docker build
+        # sellado corre sin semaforo y vuelve el load 286 con 6 nucleos.
+        cont = self._corre("--", "docker", "build", ".", env=self._fake_docker())
+        self.assertTrue(cont["slot_wrapped"])
+        # presupuesto de BUILD (Ley 8: max(1, nucleos/4)), no el de tests: para
+        # docker el runner NO pisa HARNESS_BUILD_SLOTS.
+        self.assertIsNone(cont["test_slots"])
+
+    def test_docker_adentro_de_bash_c_tambien_se_detecta(self):
+        cont = self._corre("--", "bash", "-c", "docker buildx build .",
+                           env=self._fake_docker())
+        self.assertTrue(cont["slot_wrapped"])
+
+    def test_slot_flag_envuelve_lo_que_no_es_docker(self):
+        # La leccion de los once vitest en seis nucleos sigue disponible, pero
+        # ahora la pide quien SABE que su comando funde la maquina.
+        cont = self._corre("--slot", "--", "sh", "-c", "echo ok")
+        self.assertTrue(cont["slot_wrapped"])
+        self.assertIsInstance(cont["test_slots"], int)   # presupuesto de TESTS
+
+    def test_docker_pesado_discrimina_como_el_hook(self):
+        d = self._load_module()._docker_pesado
+        for cmd in (["docker", "build", "."],
+                    ["docker", "run", "--rm", "img"],
+                    ["docker", "buildx", "build", "."],
+                    ["docker", "compose", "-f", "x.yml", "build"],
+                    ["/usr/local/bin/docker", "run", "img"],
+                    ["bash", "-c", "docker build ."]):
+            self.assertTrue(d(cmd), cmd)
+        for cmd in (["npx", "playwright", "test"],
+                    ["go", "test", "./..."],
+                    ["bash", "-c", "bun run test:e2e"],
+                    ["docker", "ps"],
+                    ["docker", "logs", "-f", "web"],
+                    ["docker", "compose", "up"]):
+            self.assertFalse(d(cmd), cmd)
+
+    def test_run_seals_contention(self):
         result = subprocess.run(
             ["python3", str(SCRIPT), "run", "--task-dir", str(self.task),
              "--repo", "atlas", "--runner", "qa-atlas", "--kind", "test",
@@ -578,7 +652,6 @@ class EvidenceTest(unittest.TestCase):
         data = json.loads((self.task / f"evidence/{evidence_id}.json").read_text())
         cont = data.get("contention")
         self.assertIsInstance(cont, dict)      # macOS y Linux tienen ps + loadavg
-        self.assertTrue(cont["slot_wrapped"])  # build-slot.sh vive junto a evidence.py
         self.assertGreaterEqual(cont["cores"], 1)
         self.assertGreaterEqual(cont["foreign_test_procs_peak"], 0)
         self.assertIn(cont["suspect"], (True, False))
@@ -590,32 +663,22 @@ class EvidenceTest(unittest.TestCase):
                              cont["foreign_test_procs_peak"])
         self.assertIn(cont["active_measured"], (True, False))
 
-    def test_no_slot_flag_skips_wrapper(self):
-        result = subprocess.run(
-            ["python3", str(SCRIPT), "run", "--task-dir", str(self.task),
-             "--repo", "atlas", "--runner", "qa-atlas", "--kind", "test",
-             "--cwd", str(self.repo), "--no-slot", "--", "sh", "-c", "echo ok"],
-            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        manifests = sorted((self.task / "evidence").glob("EV-*.json"),
-                           key=lambda p: p.stat().st_mtime)
-        data = json.loads(manifests[-1].read_text())
-        self.assertFalse(data["contention"]["slot_wrapped"])
+    def test_no_slot_le_gana_a_slot(self):
+        # --no-slot es el "nunca" explicito: gana sobre --slot y sobre la
+        # deteccion de docker, para el llamador que ya gestiona el semaforo.
+        cont = self._corre("--slot", "--no-slot", "--", "sh", "-c", "echo ok")
+        self.assertFalse(cont["slot_wrapped"])
+        cont = self._corre("--no-slot", "--", "docker", "build", ".",
+                           env=self._fake_docker())
+        self.assertFalse(cont["slot_wrapped"])
 
     def test_held_slot_is_not_reacquired(self):
-        # el eslabón anti-deadlock de la cadena ship → evidence → build-slot
-        env = dict(os.environ, HARNESS_BUILD_SLOT_HELD="1")
-        result = subprocess.run(
-            ["python3", str(SCRIPT), "run", "--task-dir", str(self.task),
-             "--repo", "atlas", "--runner", "qa-atlas", "--kind", "test",
-             "--cwd", str(self.repo), "--", "sh", "-c", "echo ok"],
-            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            check=False, env=env)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        manifests = sorted((self.task / "evidence").glob("EV-*.json"),
-                           key=lambda p: p.stat().st_mtime)
-        data = json.loads(manifests[-1].read_text())
-        self.assertFalse(data["contention"]["slot_wrapped"])
+        # el eslabon anti-deadlock de la cadena ship -> evidence -> build-slot.
+        # Con docker, que es lo que de verdad se envuelve desde #221.
+        env = self._fake_docker()
+        env["HARNESS_BUILD_SLOT_HELD"] = "1"
+        cont = self._corre("--", "docker", "build", ".", env=env)
+        self.assertFalse(cont["slot_wrapped"])
 
     def test_suspect_rule_and_slots_are_deterministic(self):
         module = self._load_module()

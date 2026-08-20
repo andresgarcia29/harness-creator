@@ -3,7 +3,7 @@
 # Un generador DEBE escribir el digest de abajo en .harness-templates de
 # la instancia: sin eso, nadie puede saber con qué set se generó.
 plugin_version: 0.62.1
-fc27fef367acd244632d2878b85a0ce40c6a3718bda8b276831a90955b8b6f68  scripts/doctor.sh
+f420dfe261d119d75c49d896335c04b624db7abab598934b79831d0ae6b2a19e  scripts/doctor.sh
 77ab20012f45ae3c308bcc1020a8c50c7a9eeef973f3ad459b984fd4fe1ac99b  templates/AGENTS.md.tmpl
 4d1907f5c82a0d12f55a7c6aa4e24fff57ef1282f0eb9136e38abebf07168540  templates/CLAUDE.md.tmpl
 76b79f633c0cb547d61225899de83b9ec23e6756ab91e99abe2a2aee2af39948  templates/Makefile.tmpl
@@ -107,7 +107,7 @@ b0bea6dd6b4fe8c9fe1ed19124041a32290dc4f3e4dc72cdb8443a4ae77bda57  templates/scri
 ced7e153747cf1a730abe9156b594f9332dcf3eb18bebd2c6b366452bcd59b7d  templates/scripts/with-secrets.sh
 d7a22d59434a72350853a31a0c71c035361fccd49f503999e743c78b4af23fcb  templates/scripts/worktree-task.sh
 75b3923c204fe369b42dc3fcb6e219bddbb41c8dd44ab9340a2cb8320f7a5d78  templates/semgrep-rules.yaml.tmpl
-83ec5e3463d51d23995127a5e64ed066e55243105917863157b962a08ea4c6b3  templates/settings.json.tmpl
+3cf6ea5a7779ebd1d12c09febb973bd7bac17cb1470c0762f7ccf178604a3074  templates/settings.json.tmpl
 74134961eeef8506d469cb8424b09aa7ea7d9ddf2b9ea9b86ff02c82ee112576  templates/skills.yaml.tmpl
 02580f139389dc93a328548c8a5e1d6a4e964b6ff4b97f335b932df0b45a529b  templates/skills/custom-build-rule/SKILL.md
 9925c718138fb32cc78df85b8526b22c249684e6e0f43c00f8c3950dd8cacd9c  templates/skills/custom-build-skill/SKILL.md
@@ -119,4 +119,4 @@ b4a953e4bf0371e24aa6cc3ed2ebbb056999da789f98d99c57fff7c032a0db44  templates/skil
 1b8a61fae86b92b3b8e6e9c2476bb22b53f1675ec52cba55552a15408bf637d1  templates/ui/panel.sh
 7942c3c4b0f99e626475c9b02bbe4babb7553ffbd480a6b17bb7a6bb04a8ac55  templates/ui/pricing.json
 546fe5efcda96907cd6f64ad5b77b12a1231a2a7cf0ae88a946dd5e3a4cfc671  templates/ui/server.py
-digest: ab652e7900015cfcf40c078a71b1c29e6cd378d6faa9c171613ca60e058381dc
+digest: 8a1780f1a3b453457779eef069a93ec5098709e2350e0bcc94b9242dbe510437

@@ -168,7 +168,9 @@ Actualización de la instancia en $ARGUMENTS (o el directorio actual).
      el que los registra en sus matchers. Un hook nuevo copiado sin
      re-generar `settings.json` llega al disco y no lo invoca nadie: es
      una protección que el humano cree tener y no tiene. `settings.json`
-     es propiedad del plugin (hooks + denials read-only): se re-instancia
+     es propiedad del plugin (hooks + `permissions`: deny, allow y
+     `defaultMode`, sin los cuales el relevo headless por fase no puede
+     correr un script ni escribir un byte): se re-instancia
      entero desde el template, y si la instancia le agregó hooks propios,
      eso se resuelve como `.new` con el humano igual que el resto.
      Y **el panel**:

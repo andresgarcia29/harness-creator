@@ -366,6 +366,50 @@ assert_eq 1 "$(espera_relanzos 1)" "el PID reciclado ya no reclama la tarea de o
 kill "$ajeno" 2>/dev/null; wait 2>/dev/null
 
 echo
+echo "── el relevo no nace amordazado: las concesiones VIAJAN en la linea"
+# Una sesion headless no tiene a quien pedirle aprobacion: lo que no este
+# concedido queda denegado en silencio. Y el allow del settings de PROYECTO lo
+# descarta el CLI mientras el workspace no este confiado, asi que confiar en el
+# archivo no alcanza: las reglas tienen que ir por bandera.
+rm -f "$WS/relanzamientos.txt" "$WS/.harness/events.jsonl"
+rm -rf "$WS/.harness/claims" "$WS/.harness/orch-watch" "$WS/tasks"
+mkdir -p "$WS/.claude"
+cat > "$WS/.claude/settings.json" <<'JSON'
+{"permissions":{"defaultMode":"acceptEdits",
+ "allow":["Bash(bash scripts/*)","Bash(python3 scripts/*)"],
+ "deny":["Bash(terraform destroy:*)"]}}
+JSON
+nueva_tarea MORDAZA implement 1300
+evento MORDAZA tool 1300
+out="$(corre once)"; espera_relanzos 1 >/dev/null
+linea="$(cat "$WS/relanzamientos.txt")"
+assert_contains "$linea" "--allowedTools" "el relanzamiento concede algo"
+assert_contains "$linea" "Bash(bash scripts/*)" "y son las reglas del settings de la instancia, no una lista propia"
+assert_contains "$linea" "Bash(python3 scripts/*)" "las dos, no la primera"
+assert_not_contains "$linea" "dangerously-skip-permissions" \
+  "sin tirar el deny entero por la ventana: --allowedTools concede, no revoca"
+# El prompt sobrevive: --allowedTools es variadica y se come todo lo que venga
+# detras, asi que el orden importa y este test es quien lo sostiene.
+case "$linea" in
+  "-p /smart MORDAZA --allowedTools"*) pass "el prompt va ANTES de la bandera variadica (si no, el CLI se queda sin prompt)" ;;
+  *) fail "orden equivocado en la linea de relanzamiento: '$linea'" ;;
+esac
+
+echo
+echo "── un settings sin allow no rompe el relanzamiento (solo no concede)"
+rm -f "$WS/relanzamientos.txt" "$WS/.harness/events.jsonl"
+rm -rf "$WS/.harness/claims" "$WS/.harness/orch-watch" "$WS/tasks"
+echo '{"permissions":{"deny":[]}}' > "$WS/.claude/settings.json"
+nueva_tarea SINALLOW implement 1300
+evento SINALLOW tool 1300
+out="$(corre once)"
+assert_eq 1 "$(espera_relanzos 1)" "relanza igual"
+assert_contains "$(cat "$WS/relanzamientos.txt")" "/smart SINALLOW" "con su prompt entero"
+assert_not_contains "$(cat "$WS/relanzamientos.txt")" "--allowedTools" \
+  "y sin una bandera vacia, que el CLI leeria como el prompt"
+rm -rf "$WS/.claude"
+
+echo
 echo "── sin CLI de claude no se inventa un relanzamiento"
 rm -rf "$WS/.harness/claims" "$WS/.harness/orch-watch"
 nopath="$(t_path_without claude)"

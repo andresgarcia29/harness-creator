@@ -3,7 +3,7 @@
 # Un generador DEBE escribir el digest de abajo en .harness-templates de
 # la instancia: sin eso, nadie puede saber con qué set se generó.
 plugin_version: 0.62.2
-f420dfe261d119d75c49d896335c04b624db7abab598934b79831d0ae6b2a19e  scripts/doctor.sh
+836824a8098256d37843c44017a22a79a3f5bc9c009f1083d0af06711fcfbf97  scripts/doctor.sh
 77ab20012f45ae3c308bcc1020a8c50c7a9eeef973f3ad459b984fd4fe1ac99b  templates/AGENTS.md.tmpl
 4d1907f5c82a0d12f55a7c6aa4e24fff57ef1282f0eb9136e38abebf07168540  templates/CLAUDE.md.tmpl
 76b79f633c0cb547d61225899de83b9ec23e6756ab91e99abe2a2aee2af39948  templates/Makefile.tmpl
@@ -86,7 +86,7 @@ c5b2600919a57911b3121d9a7ea2188bf43005402e0f7393b210fe39d68d346a  templates/scri
 4bb63a0e1f335a8969345f89c795d4bb86760da874e18aa876645dfd733e0552  templates/scripts/linear.sh
 e7be1a5693bcd45f88033dd6ffb4ea88550d5e7148c233756a4caf9f443f19ea  templates/scripts/mark-read.sh
 ffa92b2c4026fee10565f82f21ed3b7b6014f062889dd04fa3a83a27756f07d2  templates/scripts/minion-probe.sh
-ec1c053f0607bd495fac2fe51007db1db14e0ebbe09b6283b9212ea963f79c07  templates/scripts/orchestrator-watch.sh
+96eb1e14702decf2cab5cc072112587627ae6d24b260e6139f70d77933fa7f7a  templates/scripts/orchestrator-watch.sh
 9bda98343da24f4e95a35ca62204eb9ac4a829b28033c6db935d0eceae67d592  templates/scripts/pipeline-steps.sh
 52f59f81a67b29eb994bca97767d77a5f2824b01fb3d4eee0925255b69536d88  templates/scripts/plan-lint.sh
 04391eac0cf99b64c1707f9340384c110e707470f289c595d00801a34ad2f04f  templates/scripts/port-forwards.sh
@@ -119,4 +119,4 @@ b4a953e4bf0371e24aa6cc3ed2ebbb056999da789f98d99c57fff7c032a0db44  templates/skil
 1b8a61fae86b92b3b8e6e9c2476bb22b53f1675ec52cba55552a15408bf637d1  templates/ui/panel.sh
 7942c3c4b0f99e626475c9b02bbe4babb7553ffbd480a6b17bb7a6bb04a8ac55  templates/ui/pricing.json
 546fe5efcda96907cd6f64ad5b77b12a1231a2a7cf0ae88a946dd5e3a4cfc671  templates/ui/server.py
-digest: 9dfa4bf62a2e66e3c086aff2d1a3c7f897d23136b953ba968e0a21fd69f99718
+digest: fec8c57a2cadfbc4d611d8a1df53eaf864cf9691bea6d1fcc21925604322e1bb

@@ -232,10 +232,12 @@ if [ -f "$WS/.claude/settings.json" ]; then
     warn "settings.json sin permissions.allow y/o defaultMode: el relevo por fase (claude -p) queda denegado en silencio: consume el handoff y no escribe nada"
     echo "   ↳ remediación: /harness-update re-instancia .claude/settings.json (es"
     echo "     propiedad del plugin) y trae el bloque permissions completo."
-    echo "     Y el allow de un settings de PROYECTO no aplica hasta que el"
-    echo "     workspace esté CONFIADO: abrí Claude Code acá una vez de forma"
-    echo "     interactiva y aceptá el diálogo de confianza, o el CLI descarta"
-    echo "     las reglas con un aviso y el relevo vuelve a quedar denegado."
+    echo "     El allow es además de donde orchestrator-watch.sh saca lo que le"
+    echo "     concede al relevo por --allowedTools: vacío el allow, vacía la"
+    echo "     concesión. Y para las sesiones INTERACTIVAS el allow de un"
+    echo "     settings de proyecto no aplica hasta que el workspace esté"
+    echo "     CONFIADO (aceptá el diálogo la primera vez que abras Claude"
+    echo "     Code acá, o el CLI descarta las reglas con un aviso)."
   fi
 else
   warn ".claude/settings.json faltante — sin hooks de protección"

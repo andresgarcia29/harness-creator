@@ -375,10 +375,38 @@ relaunch() {  # relaunch <task-id>
     return 1
   fi
   mkdir -p "$WS/tasks/$task" 2>/dev/null || true
+  # ── EL RELEVO NACE AMORDAZADO SI NO SE LE CONCEDE NADA ───────────────
+  # Una sesión headless no tiene a quién pedirle aprobación: lo que no esté
+  # concedido queda DENEGADO en silencio. Medido en campo (COR-1446): cuatro
+  # relevos consecutivos con cero bytes escritos, 146k tokens de un architect
+  # irrecuperables, y la tarea horas varada SIN registro porque hasta
+  # `harness-policy.py pause` estaba denegado. El daemon parecía vivo.
+  #
+  # Las reglas NO se escriben acá: se leen del `permissions.allow` del propio
+  # settings de la instancia, que es su única fuente. Se pasan igual por
+  # `--allowedTools` en vez de confiar en que el settings alcance, y esa
+  # duplicación aparente es el arreglo: el CLI DESCARTA el allow de un settings
+  # de proyecto mientras el workspace no esté CONFIADO ("Ignoring N
+  # permissions.allow entries: this workspace has not been trusted"), y el
+  # daemon corre justo donde nadie va a ver ese aviso. Por bandera se concede
+  # igual (verificado contra un workspace sin confiar). El `deny` del settings
+  # sigue mandando: `--allowedTools` concede, no revoca, y por eso NO se usa
+  # `--dangerously-skip-permissions`, que tiraría el deny entero (kubectl
+  # apply, terraform destroy, git push --force) junto con la mordaza.
+  local -a permisos=()
+  if command -v jq >/dev/null 2>&1; then
+    while IFS= read -r regla; do
+      [ -n "$regla" ] && permisos+=("$regla")
+    done < <(jq -r '.permissions.allow[]? // empty' "$WS/.claude/settings.json" 2>/dev/null)
+  fi
   # `-p` (headless) y el modelo NO se fija acá: /smart lee su propio
   # `preferred_model` de task.md. Salida a un log de la tarea, que es donde el
   # humano ya busca cuando algo sale raro.
-  nohup claude -p "/smart $task" >>"$WS/tasks/$task/orchestrator-watch.log" 2>&1 &
+  # El prompt va ANTES de `--allowedTools` a propósito: la bandera es variádica
+  # y se come todo lo que venga detrás, prompt incluido (`Error: Input must be
+  # provided either through stdin or as a prompt argument`).
+  nohup claude -p "/smart $task" ${permisos[0]+--allowedTools "${permisos[@]}"} \
+    >>"$WS/tasks/$task/orchestrator-watch.log" 2>&1 &
   pid=$!
   printf '%s\n' "$pid" > "$CLAIMS/orch-$task.lock.d/pid" 2>/dev/null || true
   # La identidad va JUNTO al pid y en el mismo momento: es lo que distingue a

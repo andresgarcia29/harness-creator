@@ -408,5 +408,37 @@ grep -q 'vault kv get .* 2>&1 >/dev/null' "$smoke" \
 grep -q 'warn .*\$err' "$smoke" \
   && fail "el mensaje imprime \$err: si algún día trae el valor, lo publica" \
   || pass "y \$err no se imprime nunca, que es lo que cierra la fuga de verdad"
+echo
+echo "── #225: with-secrets deriva NODE_AUTH_TOKEN de GH_TOKEN"
+# Los .npmrc de los frontends escriben ${NODE_AUTH_TOKEN}: sin el alias, npm/bun
+# dan 401 aunque el token del vault ya tenga read:packages, y el sintoma se lee
+# como "falta un permiso" en vez de "falta el nombre".
+cp "$ROOT/templates/scripts/with-secrets.sh" "$WS/scripts/with-secrets.sh"
+ws_run() { (cd "$WS" && bash scripts/with-secrets.sh sh -c 'echo "${NODE_AUTH_TOKEN:-VACIO}"'); }
+
+printf 'GH_TOKEN=ghp_x\n' > "$WS/.secrets"
+assert_eq "ghp_x" "$(ws_run)" "con GH_TOKEN y sin NODE_AUTH_TOKEN: lo deriva"
+
+printf 'GH_TOKEN=ghp_x\nNODE_AUTH_TOKEN=propio\n' > "$WS/.secrets"
+assert_eq "propio" "$(ws_run)" "si .secrets lo define, el alias no lo pisa"
+
+printf 'OTRA=1\n' > "$WS/.secrets"
+assert_eq "VACIO" "$(ws_run)" "sin GH_TOKEN no inventa un token"
+
+# mutacion: sin el guard de 'no pisar', el valor propio del .secrets se pierde
+mut="$WS/scripts/with-secrets-sin-guard.sh"
+sed 's/ && \[ -z "${NODE_AUTH_TOKEN:-}" \]//' "$WS/scripts/with-secrets.sh" > "$mut"
+printf 'GH_TOKEN=ghp_x\nNODE_AUTH_TOKEN=propio\n' > "$WS/.secrets"
+out="$(cd "$WS" && bash scripts/with-secrets-sin-guard.sh sh -c 'echo "$NODE_AUTH_TOKEN"')"
+assert_eq "ghp_x" "$out" "quitar el guard pisa el valor propio: la aserción muerde"
+
+echo
+echo "── y el doctor no lo pide como faltante cuando GH_TOKEN está provisto"
+mkdir -p "$WS/repos/fe"
+printf 'NODE_AUTH_TOKEN=\n' > "$WS/repos/fe/.env.example"
+gen vault    # VAULT_KEYS inyecta dump_kv GH_TOKEN
+printf 'GH_TOKEN=x\n' > "$WS/.secrets"
+out="$( ( cd "$WS" && PATH="$(t_path_without vault)" bash scripts/secrets.sh doctor 2>&1 ) )"
+assert_not_contains "$out" "FALTA NODE_AUTH_TOKEN" "el alias cuenta como provisto"
 
 t_done

@@ -70,6 +70,26 @@ chmod +x "$WS/.claude/hooks/guard-fantasma.sh"
 out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
 echo "$out" | grep -q "guard-fantasma" && fail "hook OK no debería reportarse" || pass "hook existente y ejecutable: silencio"
 
+echo "── doctor: el relevo headless sin permisos es un daemon decorativo"
+
+# El settings de arriba (el del hook fantasma) NO tiene bloque permissions:
+# es exactamente el que toda instancia recibia antes de #220.
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_contains "$out" "relevo por fase" "doctor avisa que el relevo queda denegado en silencio"
+assert_contains "$out" "harness-update" "el aviso trae la remediacion que re-instancia el settings"
+# con allow + defaultMode, silencio verde
+python3 - "$WS/.claude/settings.json" <<'PY2'
+import json, sys
+p = sys.argv[1]
+j = json.load(open(p))
+j["permissions"] = {"defaultMode": "acceptEdits", "allow": ["Bash(bash scripts/*)"]}
+json.dump(j, open(p, "w"))
+PY2
+out="$(bash "$ROOT/scripts/doctor.sh" "$WS" 2>&1)"
+assert_contains "$out" "permisos del relevo headless" "con allow + defaultMode: check en verde"
+echo "$out" | grep -q "denegado en silencio" && fail "el warn sigue saliendo con el settings arreglado" \
+  || pass "settings completo: sin warn"
+
 echo "── doctor: frescura de clones (la ruta del stat SE EJERCITA)"
 
 # dos clones falsos con FETCH_HEAD viejo: el warn debe salir y el doctor

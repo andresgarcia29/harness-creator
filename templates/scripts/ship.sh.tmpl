@@ -2701,8 +2701,9 @@ tiene_runner_navegador() {  # 0 puede correrlo · 1 no lo declara · 2 declarado
 # ── ¿ESTA CORRIDA EJERCITÓ EL NAVEGADOR? ──────────────────────────────
 # NO se infiere del texto del comando. Caso de campo (#166), medido con 22 tests
 # de Chromium sellados: `bun run test:e2e` corre Playwright y la palabra
-# "playwright" no aparece en ningún lado del argv, porque evidence.py envuelve en
-# build-slot.sh y el binario lo resuelve el gestor de paquetes por dentro. El
+# "playwright" no aparece en ningún lado del argv, porque el binario lo resuelve
+# el gestor de paquetes por dentro (y hasta #221 evidence.py además envolvía el
+# argv sellado en build-slot.sh, que tapaba todavía más). El
 # gate reconocía la forma que él mismo sugiere (`npx playwright test`) y no la
 # que el repo define en su package.json.
 #

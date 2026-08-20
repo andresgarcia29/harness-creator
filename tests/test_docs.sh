@@ -44,6 +44,40 @@ case "$pony" in
   "") fail "settings.json.tmpl perdió PONYTAIL_DEFAULT_MODE del bloque env" ;;
   *)  fail "PONYTAIL_DEFAULT_MODE='$pony' no es un modo de ponytail (off|lite|full|ultra)" ;;
 esac
+# ── El bloque `permissions` es lo que decide si el RELEVO puede trabajar.
+# El template traia `deny` y nada mas, y una sesion headless sin `allow` no
+# puede correr un solo script del harness: `claude -p` no tiene a quien
+# preguntarle, asi que cada tool call queda denegada en silencio. Medido en
+# campo (COR-1446): cuatro relevos consecutivos con CERO bytes escritos, 146k
+# tokens de un architect que no pudo materializar plan.md ni dag.json, y la
+# tarea horas varada SIN registro porque hasta `harness-policy.py pause`
+# estaba denegado. El daemon de relevo nacia decorativo en toda instalacion.
+sj_perm="$root/templates/settings.json.tmpl"
+sj_allow="$(python3 -c "import json;print('\n'.join(json.load(open('$sj_perm'))['permissions'].get('allow',[])))")"
+[ -n "$sj_allow" ] && pass "settings.json.tmpl trae bloque permissions.allow" \
+  || fail "settings.json.tmpl SIN allow: el relevo headless no puede correr nada"
+# Los tres lanzadores con los que el harness invoca lo suyo. Verificado
+# end-to-end contra `claude -p`: la forma `Bash(bash scripts/*)` concede y la
+# forma sin frontera de token (`Bash(bash scripts/:*)`) NO, aunque lo parezca.
+for l in "bash scripts/" "sh scripts/" "python3 scripts/"; do
+  printf '%s\n' "$sj_allow" | grep -qF "Bash($l" \
+    && pass "allow cubre '$l*' (los scripts del harness)" \
+    || fail "allow sin '$l*': el relevo no puede correr los scripts del harness"
+done
+# Escribir. El architect que no puede escribir su plan quema el modelo entero
+# para nada, y los hooks de Edit|Write (guard-canonical, guard-worktree) son
+# los que de verdad protegen: el modo de permiso no los saltea.
+sj_mode="$(python3 -c "import json;print(json.load(open('$sj_perm'))['permissions'].get('defaultMode',''))")"
+case "$sj_mode" in
+  acceptEdits|bypassPermissions) pass "settings.json.tmpl fija defaultMode='$sj_mode': el relevo puede escribir" ;;
+  "") fail "settings.json.tmpl sin defaultMode: la sesion headless no escribe un byte" ;;
+  *)  fail "defaultMode='$sj_mode' no habilita escritura headless" ;;
+esac
+# Y el allow no se come al deny: deny le gana a allow, pero solo si sigue ahi.
+sj_deny="$(python3 -c "import json;print(len(json.load(open('$sj_perm'))['permissions'].get('deny',[])))")"
+[ "${sj_deny:-0}" -ge 10 ] && pass "el deny sigue entero junto al allow ($sj_deny reglas)" \
+  || fail "el bloque deny se encogio a $sj_deny reglas al agregar el allow"
+
 skill_sj="$(grep '^| `.claude/settings.json`' "$root/skills/harness-init/SKILL.md")"
 assert_contains "$skill_sj" "PONYTAIL_DEFAULT_MODE" \
   "la tabla de generación nombra la perilla, no la deja como string mágico"

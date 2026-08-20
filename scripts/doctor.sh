@@ -215,6 +215,28 @@ if [ -f "$WS/.claude/settings.json" ]; then
   if [ -f "$WS/.claude/hooks/block-direct-push.sh" ]; then
     [ -x "$WS/.claude/hooks/block-direct-push.sh" ] && ok "hook block-direct-push ejecutable" || fail "hook block-direct-push no ejecutable" "chmod +x .claude/hooks/block-direct-push.sh"
   fi
+  # 4b · El RELEVO por fase necesita permisos, no solo hooks.
+  # `orchestrator-watch.sh` levanta la fase siguiente como `claude -p "/smart
+  # <id>"`, o sea una sesión HEADLESS: no tiene a quién pedirle aprobación, así
+  # que todo lo que el settings no conceda queda denegado en silencio. Un
+  # settings con `deny` y sin `allow` deja al relevo sin poder correr un script
+  # del harness, ni siquiera `harness-policy.py pause` para registrar que se
+  # frenó; y sin `defaultMode` no escribe un byte de plan.md. Medido en campo:
+  # cuatro relevos con cero bytes escritos, 146k tokens de architect
+  # irrecuperables y horas de tarea varada SIN registro. El daemon parecía vivo.
+  perm_allow="$(jq -r '.permissions.allow // [] | length' "$WS/.claude/settings.json" 2>/dev/null || echo 0)"
+  perm_mode="$(jq -r '.permissions.defaultMode // ""' "$WS/.claude/settings.json" 2>/dev/null || echo "")"
+  if [ "${perm_allow:-0}" -ge 1 ] && [ -n "$perm_mode" ]; then
+    ok "permisos del relevo headless: allow ($perm_allow reglas) + defaultMode=$perm_mode"
+  else
+    warn "settings.json sin permissions.allow y/o defaultMode: el relevo por fase (claude -p) queda denegado en silencio: consume el handoff y no escribe nada"
+    echo "   ↳ remediación: /harness-update re-instancia .claude/settings.json (es"
+    echo "     propiedad del plugin) y trae el bloque permissions completo."
+    echo "     Y el allow de un settings de PROYECTO no aplica hasta que el"
+    echo "     workspace esté CONFIADO: abrí Claude Code acá una vez de forma"
+    echo "     interactiva y aceptá el diálogo de confianza, o el CLI descarta"
+    echo "     las reglas con un aviso y el relevo vuelve a quedar denegado."
+  fi
 else
   warn ".claude/settings.json faltante — sin hooks de protección"
 fi

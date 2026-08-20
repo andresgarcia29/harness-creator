@@ -63,6 +63,13 @@
     ]
   },
   "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Bash(bash scripts/*)",
+      "Bash(sh scripts/*)",
+      "Bash(python3 scripts/*)",
+      "Bash(git:*)"
+    ],
     "deny": [
       "Bash(kubectl apply:*)",
       "Bash(kubectl delete:*)",

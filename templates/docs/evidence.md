@@ -33,8 +33,15 @@ Durante ship, `evidence.py verify` exige que cada ID:
 El manifiesto sella un bloque `contention` que mide la máquina compartida
 durante la corrida: procesos de test ajenos, cuántos de ellos estaban
 realmente quemando CPU (medido por delta de tiempo de CPU entre muestras, no
-por el promedio de vida del proceso) y el load. El runner además toma un slot
-del semáforo de builds (perilla `HARNESS_TEST_SLOTS`).
+por el promedio de vida del proceso) y el load.
+
+El runner toma un slot del semáforo de builds **solo cuando corresponde**: si
+el comando es un `docker build/run` (lo único que la Ley 8 manda al semáforo)
+o si el llamador pasa `--slot` porque sabe que su suite funde la máquina
+(perilla `HARNESS_TEST_SLOTS`). Un gate de navegador de 10 minutos NO ocupa un
+slot dimensionado para builds: envolver todo por defecto dejó cuatro corridas
+encoladas con load 0.56 en 8 núcleos y ninguna era docker. `--no-slot` es el
+"nunca" explícito y le gana a los dos.
 
 Ese bloque VIAJA con la evidencia y `verify` lo DECLARA por stderr, pero **no
 la rechaza**. La razón es una asimetría: `verify` mata cualquier manifiesto que

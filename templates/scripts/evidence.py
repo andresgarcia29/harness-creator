@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -294,6 +295,50 @@ def _test_slots(cores: int):
     if os.environ.get("HARNESS_BUILD_SLOTS", "").isdigit():
         return None
     return max(2, cores // 3)
+
+
+def _docker_pesado(command) -> bool:
+    """¿El comando es un `docker build/run` de toolchain, o sea lo ÚNICO que la
+    Ley 8 manda al semáforo?
+
+    POR QUÉ EXISTE: el runner envolvía en `build-slot.sh` TODO comando sellado,
+    y eso contradice el contrato que el propio harness enseña (Ley 8 y
+    `guard-build-slot.sh` hablan solo de `docker build/run`). Caso de campo:
+    cuatro corridas encoladas con load 0.56 en 8 núcleos y NINGUNA era docker
+    (dos gates de Playwright, una medición de QA, un `go test`); una esperó 25
+    minutos con la máquina al 7%, y un humano tuvo que subir
+    `HARNESS_BUILD_SLOTS` y desalojar. Envenena además el diagnóstico de dueño
+    vivo: un dueño esperando slot parece muerto.
+
+    El comando llega como argv (no como texto de shell), así que acá no hace
+    falta el sanitizador de heredocs/comillas del hook: se mira token a token.
+    Los `-c` de `bash`/`sh` traen el comando adentro de UN token, así que todo
+    token con espacios se re-tokeniza con shlex.
+
+    Sesgo deliberado: ante la duda, ENVOLVER. Un falso positivo cuesta espera;
+    un falso negativo es un `docker build` sin semáforo, que es lo que la
+    Ley 8 existe para impedir (load 286 con 6 núcleos fue real)."""
+    toks = []
+    for tok in command:
+        toks.append(tok)
+        if any(ch.isspace() for ch in tok):
+            try:
+                toks.extend(shlex.split(tok))
+            except ValueError:
+                pass
+    for i, tok in enumerate(toks):
+        if os.path.basename(tok) != "docker":
+            continue
+        # Cualquier `build`/`run` DESPUÉS del `docker` cuenta, sin exigir que
+        # sea el token siguiente: entre medio caben `buildx`, `compose`, y
+        # flags con su valor (`-f x.yml`, `--context foo`), y enumerar esas
+        # formas es una lista que envejece mal (la primera versión de esto ya
+        # se comía `docker compose -f x.yml build`). El precio es un falso
+        # positivo si alguien SELLA un comando que MENCIONA "docker … build"
+        # sin correrlo; el precio del otro lado es un build sin semáforo.
+        if any(sig in ("build", "run") for sig in toks[i + 1:]):
+            return True
+    return False
 
 
 class BoundedEcho:
@@ -976,21 +1021,32 @@ def command_run(args: argparse.Namespace) -> int:
             file=sys.stderr)
         return 3
 
-    # ── Semáforo: la suite toma un slot del MISMO pool que los builds ────
-    # Caso de campo: once vitest en seis núcleos (503s y rojo vs 106s y verde
-    # en máquina libre). El pool es el de build-slot a propósito: dos pools
-    # sumarían presupuestos y la máquina se funde igual. La cadena no
-    # re-lockea: build-slot exporta HARNESS_BUILD_SLOT_HELD=1 al hijo, y un
-    # docker build interior hace exec directo.
+    # ── Semáforo: SOLO lo que la Ley 8 manda al semáforo ─────────────────
+    # El default era envolver TODO comando sellado, y contradecía el contrato
+    # que el propio harness enseña (ver _docker_pesado): gates de navegador de
+    # 5-10 min entraban a un pool dimensionado para `docker build`. Ahora
+    # entran los dos casos que corresponden y ninguno más:
+    #   (a) el comando ES un docker build/run → presupuesto de BUILD, o sea el
+    #       de la Ley 8: build-slot.sh calcula max(1, núcleos/4) por su cuenta;
+    #   (b) --slot: el llamador SABE que su comando funde la máquina. Caso de
+    #       campo que lo justifica: once vitest en seis núcleos (503s y rojo vs
+    #       106s y verde en máquina libre) → presupuesto de TESTS, más ancho.
+    # El pool es el mismo en los dos casos a propósito: dos pools sumarían
+    # presupuestos y la máquina se funde igual. La cadena no re-lockea:
+    # build-slot exporta HARNESS_BUILD_SLOT_HELD=1 al hijo, y un docker build
+    # interior hace exec directo.
     build_slot = Path(__file__).resolve().parent / "build-slot.sh"
     child_env = os.environ.copy()
     slot_wrapped = False
     test_slots = None
-    if (not getattr(args, "no_slot", False) and build_slot.is_file()
+    docker = _docker_pesado(command)
+    if (not getattr(args, "no_slot", False) and (docker or getattr(args, "slot", False))
+            and build_slot.is_file()
             and os.environ.get("HARNESS_BUILD_SLOT_HELD") != "1"):
-        test_slots = _test_slots(_cores())
-        if test_slots is not None:
-            child_env["HARNESS_BUILD_SLOTS"] = str(test_slots)
+        if not docker:
+            test_slots = _test_slots(_cores())
+            if test_slots is not None:
+                child_env["HARNESS_BUILD_SLOTS"] = str(test_slots)
         command = ["bash", str(build_slot), *command]
         slot_wrapped = True
 
@@ -1414,9 +1470,17 @@ def parser() -> argparse.ArgumentParser:
                           "de --repo y --task-dir (worktrees/<task>/<repo>): "
                           "el default anterior era '.', y quien lo omitía "
                           "sellaba contra el HEAD de donde estuviera parado")
+    run.add_argument("--slot", action="store_true",
+                     help="envolver el comando en build-slot.sh aunque no sea "
+                          "un docker build/run: para suites que SÍ funden la "
+                          "máquina (once vitest en seis núcleos). Por defecto "
+                          "solo se envuelve el docker build/run que nombra la "
+                          "Ley 8; un gate de navegador de 10 min no ocupa un "
+                          "slot pensado para builds")
     run.add_argument("--no-slot", action="store_true",
-                     help="no envolver el comando en build-slot.sh (para "
-                          "llamadores que ya gestionan el semáforo)")
+                     help="no envolver NUNCA, ni siquiera un docker build "
+                          "(para llamadores que ya gestionan el semáforo). "
+                          "Gana sobre --slot")
     run.add_argument("--verbose", action="store_true",
                      help="vuelca la salida COMPLETA al stdout en vez del "
                           "resumen acotado. El log en disco es idéntico en "

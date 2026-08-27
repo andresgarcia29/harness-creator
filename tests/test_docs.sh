@@ -56,10 +56,22 @@ sj_perm="$root/templates/settings.json.tmpl"
 sj_allow="$(python3 -c "import json;print('\n'.join(json.load(open('$sj_perm'))['permissions'].get('allow',[])))")"
 [ -n "$sj_allow" ] && pass "settings.json.tmpl trae bloque permissions.allow" \
   || fail "settings.json.tmpl SIN allow: el relevo headless no puede correr nada"
-# Los tres lanzadores con los que el harness invoca lo suyo. Verificado
-# end-to-end contra `claude -p`: la forma `Bash(bash scripts/*)` concede y la
-# forma sin frontera de token (`Bash(bash scripts/:*)`) NO, aunque lo parezca.
-for l in "bash scripts/" "sh scripts/" "python3 scripts/"; do
+# Los tres lanzadores con los que el harness invoca lo suyo, MÁS la forma pelada.
+# Verificado end-to-end contra `claude -p`: la forma `Bash(bash scripts/*)`
+# concede y la forma sin frontera de token (`Bash(bash scripts/:*)`) NO, aunque
+# lo parezca.
+#
+# La pelada (`Bash(scripts/*)`) es la que faltaba, y no es cosmética: el patrón
+# matchea el comando ENTERO desde el principio, y /smart y CLAUDE.md escriben
+# `scripts/ship.sh ...` sin intérprete, así que no matcheaba NINGUNA regla.
+# Medido: el relevo headless recibía "This command requires approval", concluía
+# "esta sesión nació amordazada", lo escribía en el handoff y cerraba el turno
+# sin mover la fase; dos relevos seguidos perdidos y la fase deploy sin cerrar
+# ~1h sobre un deploy ya verde, mientras `python3 scripts/harness-policy.py`
+# corría igual en la misma sesión. Las interactivas no lo ven porque van con
+# --dangerously-skip-permissions; el único que lo sufre es el relevo, que a
+# propósito NO usa esa bandera para no tirar el deny.
+for l in "scripts/" "bash scripts/" "sh scripts/" "python3 scripts/"; do
   printf '%s\n' "$sj_allow" | grep -qF "Bash($l" \
     && pass "allow cubre '$l*' (los scripts del harness)" \
     || fail "allow sin '$l*': el relevo no puede correr los scripts del harness"
@@ -82,6 +94,12 @@ skill_sj="$(grep '^| `.claude/settings.json`' "$root/skills/harness-init/SKILL.m
 assert_contains "$skill_sj" "PONYTAIL_DEFAULT_MODE" \
   "la tabla de generación nombra la perilla, no la deja como string mágico"
 assert_contains "$skill_sj" "off" "la tabla dice cuál es el valor que de verdad ahorra tokens"
+# La regla pelada tiene que estar EXPLICADA donde se documenta el allow: sin el
+# porqué, el próximo que "limpie duplicados" la borra y el relevo vuelve a
+# declararse amordazado.
+assert_contains "$skill_sj" "Bash(scripts/*)" \
+  "la tabla nombra la forma PELADA, que es la que los prompts del harness escriben"
+assert_contains "$skill_sj" "CUATRO" "y cuenta las cuatro reglas, no tres"
 
 # ── Ley 15: la recomendada es la duradera, nunca la rápida.
 # Caso real: un agente marcó "editar state.json a mano (recomendado)" porque no

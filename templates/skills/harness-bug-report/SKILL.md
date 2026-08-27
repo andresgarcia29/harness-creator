@@ -48,13 +48,16 @@ Si el bug te BLOQUEA, el orden es LEY y no admite improvisación:
 | un gate de ship.sh falla con entrada válida, o pasa con entrada inválida | bug del harness ✓ |
 | el doctor reporta verde algo roto (o rojo algo sano) | bug del harness ✓ |
 | un comando del pipeline documenta un flag/contrato que no existe | bug del harness ✓ |
+| un script que escribió TU instancia y vive bajo `scripts/` (no sale de ningún template del plugin) | bug TUYO: arréglalo acá, la Ley 12 no lo cubre |
 | tus tests, tu build, tu servicio | bug TUYO: arréglalo en tu repo |
 | tu paso custom, tu spec, tu abogado, tu answers | artefacto de tu instancia: arréglalo aquí |
 | falta un CLI/MCP que elegiste | configuración: `scripts/bootstrap.sh`, no issue |
 | te falta una capacidad que el harness nunca prometió | feature request, no bug |
 
 `scripts/harness-bug.sh check <ruta>` decide la primera columna sin opinión:
-propiedad del artefacto y si está personalizado localmente.
+propiedad del artefacto y si está personalizado localmente. La propiedad la
+decide la PROCEDENCIA (¿lo instala el plugin?), no la carpeta: vivir bajo
+`scripts/` no hace tuyo lo del harness ni del harness lo tuyo.
 
 ## Paso 1: verifica que es REAL (las cinco, en orden)
 

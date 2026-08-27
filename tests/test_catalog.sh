@@ -301,10 +301,17 @@ if [ -n "$out" ]; then cp "$src" "$out"; else cat "$src"; fi
 CURLEOF
 chmod +x "$KB/bin/"*
 
-mkdir -p "$KB/srv/release/v1.33.0/bin/linux/amd64"
-printf 'yo soy kubectl\n' > "$KB/srv/release/v1.33.0/bin/linux/amd64/kubectl"
+# La ruta del artefacto depende de la plataforma desde el #236, y el par lo
+# resuelve el propio template: cablear "linux/amd64" acá haría que el test
+# pasara solo en Linux/x86_64. La verificación de checksum es lo que se prueba,
+# y esa es la misma en las cuatro plataformas (el par lo cubre
+# test_bootstrap_platform.sh).
+KPLAT="$(bash -c '. "$1"; bs_platform' _ "$KB/recetas.sh")"
+KDIR="$KB/srv/release/v1.33.0/bin/${KPLAT% *}/${KPLAT#* }"
+mkdir -p "$KDIR"
+printf 'yo soy kubectl\n' > "$KDIR/kubectl"
 printf 'v1.33.0' > "$KB/srv/release/stable.txt"
-( cd "$KB/srv/release/v1.33.0/bin/linux/amd64" \
+( cd "$KDIR" \
   && { command -v sha256sum >/dev/null 2>&1 && sha256sum kubectl || shasum -a 256 kubectl; } \
      | awk '{print $1}' > kubectl.sha256 )
 
@@ -323,7 +330,7 @@ assert_eq 0 "$rc" "binario intacto: la receta sale 0"
 
 # (2) EL CASO: el binario cambia y el checksum publicado NO. Es lo que produce
 #     un mirror comprometido o un MITM.
-printf 'yo soy kubectl MANIPULADO\n' > "$KB/srv/release/v1.33.0/bin/linux/amd64/kubectl"
+printf 'yo soy kubectl MANIPULADO\n' > "$KDIR/kubectl"
 rm -f "$DEST"; corre_receta kubectl; rc=$?
 [ "$rc" -ne 0 ] && pass "binario manipulado: la receta CORTA (exit $rc)" \
                 || fail "binario manipulado: salio 0, o sea que el checksum no frena nada"

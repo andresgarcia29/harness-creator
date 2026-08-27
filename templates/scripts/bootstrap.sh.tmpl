@@ -79,6 +79,10 @@ link_into_path() {
 # host es casi siempre uno donde no se es root (si se pudiera ser root, brew
 # tampoco seria un problema). Apuntar a /usr/local/bin ahi tira a la basura la
 # descarga y su verificacion en la ultima linea.
+#
+# El nombre dice "de Linux" porque el catalogo las declara en `install_linux`,
+# o sea como alternativa a brew. Lo que bajan NO es de Linux: desde el #236 cada
+# receta resuelve la plataforma de ESTA maquina (ver bs_platform).
 BINDIR="$HOME/.local/bin"
 
 # _bs_sha256 <archivo>: imprime su sha256, con la herramienta que haya.
@@ -107,28 +111,100 @@ _bs_fetch() {
   printf '%s' "$d/$n"
 }
 
-# bs_install <bin>: la receta de Linux de esa capacidad, para lo que ningun
-# package manager portable resuelve. Todo lo que baja un binario verifica su
-# checksum cuando el fabricante lo publica al lado (#192).
+# ── UNA RECETA QUE NO MIRA LA PLATAFORMA INSTALA UN BINARIO AJENO ─────
+# Estas recetas bajaban SIEMPRE el artefacto de linux/amd64, con la plataforma
+# escrita a mano dentro de cada URL. En un host macOS eso no falla al instalar:
+# el ELF de Linux se copia a $BINDIR con permiso de ejecucion, `command -v` lo
+# encuentra y el doctor canta verde. El fallo aparece mucho despues y lejos,
+# cuando un agente en medio de una tarea corre `bd`, `kubectl` o `terraform` y
+# recibe "exec format error". Es el falso verde que el resto del harness
+# persigue, esta vez fabricado por el propio bootstrap (issue #236).
+#
+# bs_platform resuelve el par UNA vez y las recetas lo interpolan. Lo que NO se
+# hace es inventar un nombre unico: cada proveedor bautiza sus artefactos como
+# quiere, y traducir mal es volver a bajar el binario de otra maquina. El
+# naming vive en la receta de cada uno, verificado contra los assets reales:
+#   · dl.k8s.io ........ $os/$arch          (linux/amd64, darwin/arm64)
+#   · hashicorp ........ ${os}_${arch}      (terraform_1.9.0_darwin_arm64.zip)
+#   · argo-cd .......... argocd-$os-$arch
+#   · beads ............ beads_<ver>_${os}_${arch}.tar.gz
+#   · nodejs ........... node-$v-$os-$narch con x64 donde el resto dice amd64
+#   · observeinc/cli ... observe-$os-$narch.gz (mismo x64 que node)
+#   · Google Cloud ..... google-cloud-cli-$os-$garch con x86_64 y arm
+#   · AWS .............. awscli-exe-$os-$aarch con x86_64 y aarch64
+# helm y uv no aparecen en la lista porque sus instaladores oficiales detectan
+# la plataforma solos: ahi la receta baja el script, no un binario.
+#
+# Y donde el proveedor NO publica artefacto para la plataforma detectada, se
+# falla RUIDOSO. Bajar el de otra arquitectura "por si acaso" es exactamente el
+# bug que esto cierra.
+bs_platform() {  # imprime "<os> <arch>": os en darwin|linux, arch en amd64|arm64
+  local s m os arch
+  s="$(uname -s)"; m="$(uname -m)"
+  case "$s" in
+    Darwin) os=darwin ;;
+    Linux)  os=linux ;;
+    # Un os desconocido (FreeBSD, MINGW) NO se traduce a linux: se pasa tal
+    # cual en minusculas para que _bs_plat_ok lo rechace por su nombre real.
+    *)      os="$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')" ;;
+  esac
+  case "$m" in
+    x86_64|amd64)  arch=amd64 ;;
+    arm64|aarch64) arch=arm64 ;;
+    *)             arch="$m" ;;
+  esac
+  printf '%s %s' "$os" "$arch"
+}
+
+# _bs_plat_ok <bin> <os/arch> <soportadas...>: 0 si el proveedor publica ese
+# artefacto. Si no, nombra el par detectado Y la lista real, y devuelve 1 para
+# que la cadena de la receta corte antes de descargar nada. El mensaje ES la
+# remediacion (regla 5); callarse aca se cobra como "exec format error" en
+# medio de una tarea, a kilometros de la causa.
+_bs_plat_ok() {
+  local bin="$1" want="$2"; shift 2
+  local p
+  for p in "$@"; do [ "$p" = "$want" ] && return 0; done
+  warn "no hay binario de '$bin' para $want; el proveedor publica: $*"
+  warn "  ↳ instalalo desde su fuente oficial (catalog/capabilities.yaml: install / install_alt)"
+  return 1
+}
+
+# bs_install <bin>: la receta de descarga directa de esa capacidad, para lo que
+# ningun package manager portable resuelve. Todo lo que baja un binario verifica
+# su checksum cuando el fabricante lo publica al lado (#192) y baja el artefacto
+# de LA plataforma de esta maquina (#236).
 bs_install() {
-  local bin="$1" d f v rc=1
+  local bin="$1" d f v rc=1 plat os arch narch garch aarch
+  plat="$(bs_platform)"; os="${plat% *}"; arch="${plat#* }"
+  # Los alias por proveedor, resueltos una vez. Un arch que no conocemos se
+  # copia tal cual: no hay traduccion que inventar, y _bs_plat_ok ya lo corta.
+  case "$arch" in
+    amd64) narch=x64;    garch=x86_64; aarch=x86_64 ;;
+    arm64) narch=arm64;  garch=arm;    aarch=aarch64 ;;
+    *)     narch="$arch"; garch="$arch"; aarch="$arch" ;;
+  esac
   d="$(mktemp -d)" || return 1
   mkdir -p "$BINDIR" || { rm -rf "$d"; return 1; }
   case "$bin" in
     kubectl)
-      v="$(curl -fsSL https://dl.k8s.io/release/stable.txt)" \
-        && f="$(_bs_fetch "$d" "https://dl.k8s.io/release/$v/bin/linux/amd64/kubectl" "https://dl.k8s.io/release/$v/bin/linux/amd64/kubectl.sha256")" \
+      _bs_plat_ok kubectl "$os/$arch" linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 \
+        && v="$(curl -fsSL https://dl.k8s.io/release/stable.txt)" \
+        && f="$(_bs_fetch "$d" "https://dl.k8s.io/release/$v/bin/$os/$arch/kubectl" "https://dl.k8s.io/release/$v/bin/$os/$arch/kubectl.sha256")" \
         && install -m 0755 "$f" "$BINDIR/kubectl" && rc=0 ;;
     terraform|vault)
-      v="$(curl -fsSL "https://api.releases.hashicorp.com/v1/releases/$bin/latest" | jq -r .version)" \
-        && f="$(_bs_fetch "$d" "https://releases.hashicorp.com/$bin/$v/${bin}_${v}_linux_amd64.zip" "https://releases.hashicorp.com/$bin/$v/${bin}_${v}_SHA256SUMS")" \
+      _bs_plat_ok "$bin" "$os/$arch" linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 \
+        && v="$(curl -fsSL "https://api.releases.hashicorp.com/v1/releases/$bin/latest" | jq -r .version)" \
+        && f="$(_bs_fetch "$d" "https://releases.hashicorp.com/$bin/$v/${bin}_${v}_${os}_${arch}.zip" "https://releases.hashicorp.com/$bin/$v/${bin}_${v}_SHA256SUMS")" \
         && unzip -oq "$f" "$bin" -d "$BINDIR" && chmod 0755 "$BINDIR/$bin" && rc=0 ;;
     argocd)
-      f="$(_bs_fetch "$d" "https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64" "https://github.com/argoproj/argo-cd/releases/latest/download/cli_checksums.txt")" \
+      _bs_plat_ok argocd "$os/$arch" linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 \
+        && f="$(_bs_fetch "$d" "https://github.com/argoproj/argo-cd/releases/latest/download/argocd-$os-$arch" "https://github.com/argoproj/argo-cd/releases/latest/download/cli_checksums.txt")" \
         && install -m 0755 "$f" "$BINDIR/argocd" && rc=0 ;;
     bd)
-      v="$(curl -fsSL https://api.github.com/repos/steveyegge/beads/releases/latest | jq -r .tag_name)" \
-        && f="$(_bs_fetch "$d" "https://github.com/steveyegge/beads/releases/download/$v/beads_${v#v}_linux_amd64.tar.gz" "https://github.com/steveyegge/beads/releases/download/$v/checksums.txt")" \
+      _bs_plat_ok bd "$os/$arch" linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 \
+        && v="$(curl -fsSL https://api.github.com/repos/steveyegge/beads/releases/latest | jq -r .tag_name)" \
+        && f="$(_bs_fetch "$d" "https://github.com/steveyegge/beads/releases/download/$v/beads_${v#v}_${os}_${arch}.tar.gz" "https://github.com/steveyegge/beads/releases/download/$v/checksums.txt")" \
         && tar -xzf "$f" -C "$d" bd && install -m 0755 "$d/bd" "$BINDIR/bd" && rc=0 ;;
     npm)
       # node no es un binario suelto: trae su lib/. Se instala el prefijo y se
@@ -138,16 +214,22 @@ bs_install() {
       # --location=user porque npm SE NIEGA a cambiar el prefix cuando lo
       # encuentra en un .npmrc de proyecto (cualquier ancestro del cwd), y el
       # bootstrap corre desde el workspace.
-      v="$(curl -fsSL https://nodejs.org/dist/index.json | jq -r 'map(select(.lts != false))[0].version')" \
-        && f="$(_bs_fetch "$d" "https://nodejs.org/dist/$v/node-$v-linux-x64.tar.xz" "https://nodejs.org/dist/$v/SHASUMS256.txt")" \
+      # El directorio que sale del tarball lleva la plataforma en el NOMBRE, asi
+      # que el `mv` usa las mismas variables que la URL: cablear "linux-x64" ahi
+      # rompe el paso siguiente aunque la descarga haya sido la correcta.
+      _bs_plat_ok node "$os/$arch" linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 \
+        && v="$(curl -fsSL https://nodejs.org/dist/index.json | jq -r 'map(select(.lts != false))[0].version')" \
+        && f="$(_bs_fetch "$d" "https://nodejs.org/dist/$v/node-$v-$os-$narch.tar.xz" "https://nodejs.org/dist/$v/SHASUMS256.txt")" \
         && mkdir -p "$HOME/.local/lib" && tar -xJf "$f" -C "$d" \
-        && rm -rf "$HOME/.local/lib/node" && mv "$d/node-$v-linux-x64" "$HOME/.local/lib/node" \
+        && rm -rf "$HOME/.local/lib/node" && mv "$d/node-$v-$os-$narch" "$HOME/.local/lib/node" \
         && ln -sf "$HOME/.local/lib/node/bin/node" "$HOME/.local/lib/node/bin/npm" "$HOME/.local/lib/node/bin/npx" "$BINDIR/" \
         && PATH="$BINDIR:$PATH" "$HOME/.local/lib/node/bin/npm" config set prefix "$HOME/.local" --location=user && rc=0 ;;
     gcloud)
       # el unico sin sha256 publicado al lado del artefacto; trae su propio
       # Python, asi que tampoco es un binario suelto.
-      f="$(_bs_fetch "$d" "https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-linux-x86_64.tar.gz")" \
+      # Google escribe el arm de 64 bits como "arm" a secas, no "arm64".
+      _bs_plat_ok gcloud "$os/$arch" linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 \
+        && f="$(_bs_fetch "$d" "https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-$os-$garch.tar.gz")" \
         && mkdir -p "$HOME/.local/lib" && rm -rf "$HOME/.local/lib/google-cloud-sdk" \
         && tar -xzf "$f" -C "$HOME/.local/lib" \
         && "$HOME/.local/lib/google-cloud-sdk/install.sh" --quiet --usage-reporting=false --path-update=false >/dev/null \
@@ -169,18 +251,31 @@ bs_install() {
       # firma que AWS publica es PGP (no un .sha256 al lado), así que
       # _bs_fetch no puede verificarla; se instala con --install-dir/--bin-dir
       # para no necesitar sudo.
-      f="$(_bs_fetch "$d" "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip")" \
-        && unzip -oq "$f" -d "$d" \
-        && "$d/aws/install" --install-dir "$HOME/.local/lib/aws-cli" --bin-dir "$BINDIR" --update >/dev/null && rc=0 ;;
+      #
+      # Y este zip existe SOLO para Linux (x86_64 y aarch64): en macOS AWS
+      # publica un .pkg, que es otro instalador y pide sudo. Antes se bajaba el
+      # de Linux igual, se descomprimia, y `aws/install` copiaba binarios ELF a
+      # un directorio del PATH sin quejarse una sola vez.
+      if _bs_plat_ok awscli "$os/$arch" linux/amd64 linux/arm64; then
+        f="$(_bs_fetch "$d" "https://awscli.amazonaws.com/awscli-exe-$os-$aarch.zip")" \
+          && unzip -oq "$f" -d "$d" \
+          && "$d/aws/install" --install-dir "$HOME/.local/lib/aws-cli" --bin-dir "$BINDIR" --update >/dev/null && rc=0
+      elif [ "$os" = darwin ]; then
+        warn "  en macOS el instalador de AWS es un .pkg que pide permisos de administrador:"
+        warn "      brew install awscli    (o el .pkg: https://awscli.amazonaws.com/AWSCLIV2.pkg)"
+      fi ;;
     observe)
       # El repo es observeinc/cli (observeinc/observe-cli NO existe: da 404, y
       # con él la receta entera). El artefacto es un gzip del binario suelto,
       # no un tarball, así que va gunzip y no tar. El sums lleva la versión en
       # el nombre (observe_<ver>_checksums.txt), por eso se pide el tag primero.
-      v="$(curl -fsSL https://api.github.com/repos/observeinc/cli/releases/latest | jq -r .tag_name)" \
-        && f="$(_bs_fetch "$d" "https://github.com/observeinc/cli/releases/download/$v/observe-linux-x64.gz" "https://github.com/observeinc/cli/releases/download/$v/observe_${v#v}_checksums.txt")" \
+      # El arch va con el naming de node (x64, no amd64), que es el que usan sus
+      # assets: observe-darwin-arm64.gz, observe-linux-x64.gz.
+      _bs_plat_ok observe "$os/$arch" linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 \
+        && v="$(curl -fsSL https://api.github.com/repos/observeinc/cli/releases/latest | jq -r .tag_name)" \
+        && f="$(_bs_fetch "$d" "https://github.com/observeinc/cli/releases/download/$v/observe-$os-$narch.gz" "https://github.com/observeinc/cli/releases/download/$v/observe_${v#v}_checksums.txt")" \
         && gunzip -c "$f" > "$d/observe" && install -m 0755 "$d/observe" "$BINDIR/observe" && rc=0 ;;
-    *) warn "no tengo receta de Linux para '$bin'" ;;
+    *) warn "no tengo receta de descarga directa para '$bin'" ;;
   esac
   rm -rf "$d"
   return "$rc"

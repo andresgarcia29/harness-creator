@@ -142,6 +142,92 @@ plugin_only() {  # plugin_only <ruta> → 0 si vive SOLO en el plugin
     *) return 1 ;;
   esac
 }
+
+# ── BAJO scripts/ LA PREGUNTA ES DE QUIÉN ES, NO DÓNDE VIVE (#228) ────
+# El criterio era el PREFIJO de ruta: todo `scripts/*.sh` o `*.py` se declaraba
+# del plugin. Consecuencia medida en campo: un script que la instancia escribió
+# y versiona (`scripts/dev-up.sh`, que no existe en ningún template del plugin)
+# salía "propiedad: plugin", y con eso la Ley 12 le prohíbe al agente arreglar
+# SU PROPIO código y lo manda a abrir un issue upstream que nadie puede tomar,
+# porque el archivo no vive ahí. El arreglo real estaba a un commit de distancia
+# en su propio repo. Y `scripts/` es justo donde varias reglas del workspace
+# mandan versionar las herramientas propias.
+#
+# Es el MISMO defecto que el #104 en guard-canonical.sh, y se responde con el
+# mismo criterio: la procedencia es lo que el GENERADOR instala, no dónde
+# aterrizó. La lista viaja como DATO (no como ramas de `case`) por lo mismo que
+# allá: así el test la lee sin parsear bash y la compara contra
+# templates/scripts/, o sea que una lista cableada no puede envejecer sin que la
+# suite lo cace. Sí, la misma lista vive en los dos artefactos: son dos procesos
+# distintos (un hook de Edit/Write y este script) y cualquiera de los dos puede
+# faltar en una instancia, así que compartirla en runtime sería atarlos; lo que
+# las mantiene iguales es que la suite DERIVA las dos de templates/scripts/.
+#
+# Son los scripts que el generador instala bajo scripts/ (la tabla de generación
+# de skills/harness-init/SKILL.md), más doctor.sh, que se COPIA desde el repo del
+# plugin. El panel (scripts/ui/*) va por su propia rama.
+PLUGIN_SCRIPTS='
+adr-new.sh archived-repos.sh bootstrap.sh bounded.sh build-slot.sh
+change-id.sh dag-coalesce.sh deploy-watch.sh doctor.sh emit.sh evidence.py fe.sh finding.sh
+forge.sh gowork.sh graph-refresh.sh harness-bug.sh harness-cost.py
+harness-metrics.py harness-policy.py harness-sink.py harness-version.sh
+instance-repo.sh instance-ship.sh jira.sh linear.sh mark-read.sh minion-probe.sh orchestrator-watch.sh
+pipeline-steps.sh plan-lint.sh
+port-forwards.sh pull-all.sh py.sh quiet.sh repo-brief.sh secrets.sh
+ship-wave.sh ship.sh skills-sync.sh stamp-models.sh task-note.py ticket-close.sh
+ticket-pull.sh verdict-beads.sh verdict-scaffold.sh with-secrets.sh
+worktree-task.sh
+'
+
+# El plugin EN DISCO es la otra mitad de la respuesta, y la única que sabe qué
+# instala el generador HOY: si upstream agrega un script después de que esta
+# copia se instaló, la lista de arriba no lo conoce. `CLAUDE_PLUGIN_ROOT` solo
+# existe DENTRO de los comandos de Claude Code, y a este script lo corre un
+# agente desde su shell, así que la ruta se RESUELVE en vez de esperar que
+# alguien la exporte (mismo aprendizaje que #194/#196 en harness-version.sh).
+# Cada candidata se valida por su CONTENIDO (templates/MANIFEST.sha256): un
+# directorio con el nombre correcto y sin templates adentro no es el plugin.
+# NO se mira el clon de repos/harness-creator a propósito: está en un commit
+# cualquiera (puede ser una rama de tarea) y la procedencia no se pregunta a un
+# árbol de trabajo. Si nada resuelve, manda la lista, que es exactamente la
+# versión que instaló esta instancia.
+PLUGIN_TPL_DIR=""      # cache: se resuelve una vez por corrida
+PLUGIN_TPL_RESUELTO=0
+plugin_tpl_dir() {  # → ruta de templates/ del plugin instalado, o vacío
+  [ "$PLUGIN_TPL_RESUELTO" -eq 1 ] && { printf '%s' "$PLUGIN_TPL_DIR"; return 0; }
+  PLUGIN_TPL_RESUELTO=1
+  local c cv
+  cv="$(ls -d "${HOME:-/nonexistent}"/.claude/plugins/cache/harness/harness-creator/*/ 2>/dev/null \
+        | sed 's|/*$||' | sort -V | tail -1)"
+  for c in "${CLAUDE_PLUGIN_ROOT:-}" "${HARNESS_PLUGIN_ROOT:-}" \
+           "${HOME:-/nonexistent}/.claude/plugins/marketplaces/harness" \
+           "${HOME:-/nonexistent}/.claude/plugins/marketplaces/harness/harness-creator" \
+           "$cv" \
+           "${HOME:-/nonexistent}/.claude/plugins/cache/harness/harness-creator" \
+           "${HOME:-/nonexistent}/.claude/plugins/cache/harness"; do
+    [ -n "$c" ] || continue
+    if [ -d "$c/templates" ] && [ -f "$c/templates/MANIFEST.sha256" ]; then
+      PLUGIN_TPL_DIR="$c/templates"; break
+    fi
+  done
+  printf '%s' "$PLUGIN_TPL_DIR"
+}
+
+del_plugin() {  # del_plugin <ruta relativa a scripts/> → 0 si la instala el plugin
+  # El panel es un árbol entero que viene de templates/ui/, no un archivo suelto.
+  case "$1" in ui/*) return 0 ;; esac
+  local s tdir
+  # shellcheck disable=SC2086
+  for s in $PLUGIN_SCRIPTS; do [ "$s" = "$1" ] && return 0; done
+  # Los templates que el generador INSTANCIA llevan sufijo .tmpl (ship.sh.tmpl):
+  # preguntar solo por el nombre pelado dejaría fuera justo a los que más se
+  # reportan. Se pregunta por la ruta relativa entera y no por el basename: un
+  # scripts/loquesea/ship.sh de la instancia no es el ship.sh del plugin.
+  tdir="$(plugin_tpl_dir)"
+  [ -n "$tdir" ] || return 1
+  [ -f "$tdir/scripts/$1" ] || [ -f "$tdir/scripts/$1.tmpl" ]
+}
+
 owner_of() {
   case "$1" in
     scripts/smoke/*|scripts/cronjobs/jobs/local-*) echo instance ;;
@@ -150,7 +236,7 @@ owner_of() {
     # siendo codigo de plugin, pero de OTRO plugin: reportarlos aca abriria el
     # issue en el repo equivocado, contra una ruta que ya no existe.
     scripts/cronjobs/*) echo otro-repo ;;
-    scripts/*.sh|scripts/*.py|scripts/ui/*) echo plugin ;;
+    scripts/*) del_plugin "${1#scripts/}" && echo plugin || echo instance ;;
     .claude/hooks/*.sh) echo plugin ;;
     .claude/commands/*.md) echo plugin ;;
     .claude/skills/skill-creator/*|.claude/skills/pipeline-step-creator/*|.claude/skills/harness-bug-report/*) echo plugin ;;
@@ -363,6 +449,12 @@ cmd_check() {
   fi
   if [ "$own" != "plugin" ]; then
     echo "veredicto: NO reportable upstream (es artefacto de tu instancia)"
+    # Vivir bajo scripts/ no lo hace del harness, y ese es el malentendido caro:
+    # el agente lee "plugin", la Ley 12 le prohíbe tocarlo y abre un issue
+    # upstream contra un archivo que allá no existe (#228).
+    case "$p" in
+      scripts/*) note "vive bajo scripts/ pero el plugin no lo instala (no está en sus templates): lo escribió esta instancia, así que la Ley 12 no aplica y podés arreglarlo acá" ;;
+    esac
     note "arréglalo aquí; si crees que el GENERADOR lo produjo mal, reporta el generador, no el archivo"
     return 3
   fi
@@ -405,7 +497,15 @@ cmd_report() {
   # 1 · propiedad y drift (fail-closed)
   local own drift; own="$(owner_of "$file")"; drift="$(drift_of "$file")"
   [ "$own" = "otro-repo" ] && die "$file pertenece a harness-cronjobs, no a este plugin: abri el issue en ese repo" 3
-  [ "$own" = "plugin" ] || die "$file es artefacto de tu instancia, no del plugin: no hay bug upstream que reportar" 3
+  if [ "$own" != "plugin" ]; then
+    # El mismo desarme que en `check` (#228): el que llega hasta acá con un
+    # script propio bajo scripts/ está a punto de abrir un issue contra un
+    # archivo que upstream no tiene.
+    case "$file" in
+      scripts/*) die "$file vive bajo scripts/ pero el plugin no lo instala (no está en sus templates): lo escribió esta instancia, así que la Ley 12 no aplica y el arreglo va acá" 3 ;;
+    esac
+    die "$file es artefacto de tu instancia, no del plugin: no hay bug upstream que reportar" 3
+  fi
   if [ "$drift" = "distinto" ] && [ "$force" -ne 1 ]; then
     die "$file está personalizado localmente: upstream no lo reproduce tal cual" 7
   fi

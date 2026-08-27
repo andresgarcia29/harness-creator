@@ -100,6 +100,100 @@ assert_contains "$out" "no existe en el workspace" "y lo dice"
 out="$(cd "$WS" && eval "$BUG $RPT --file docs/quality.md --dry-run" 2>&1)"; rc=$?
 assert_eq 3 "$rc" "report sobre artefacto de la instancia: exit 3"
 
+echo "── #228: bajo scripts/ manda QUIÉN LO INSTALA, no el prefijo de ruta"
+
+# El defecto medido: el clasificador decidía por el prefijo `scripts/`, así que
+# un script que la instancia escribió y versiona (dev-up.sh, que no existe en
+# ningún template del plugin) salía "propiedad: plugin". Con eso la Ley 12 le
+# prohíbe al agente arreglar SU PROPIO código y lo manda a abrir un issue
+# upstream contra un archivo que allá no existe. Es el mismo defecto que el #104
+# arregló en guard-canonical.sh, en otro artefacto.
+#
+# HOME apunta al workspace en TODO este bloque a propósito: sin eso el
+# resolvedor del plugin miraría el ~/.claude de quien corre la suite y el test
+# mediría la máquina en vez del código.
+printf '#!/usr/bin/env bash\necho levanto el entorno local\n' > "$WS/scripts/dev-up.sh"
+printf 'print("chequeo propio de la instancia")\n' > "$WS/scripts/v21-check.py"
+
+out="$(cd "$WS" && HOME="$WS" $BUG check scripts/dev-up.sh 2>&1)"; rc=$?
+assert_eq 3 "$rc" "#228: un script propio bajo scripts/ NO es reportable upstream"
+assert_contains "$out" "propiedad: instance" "#228: y se clasifica como de la instancia"
+assert_contains "$out" "el plugin no lo instala" "y el mensaje desarma el malentendido de la Ley 12"
+assert_contains "$out" "podés arreglarlo acá" "diciendo lo que el agente necesita saber para seguir"
+
+out="$(cd "$WS" && HOME="$WS" $BUG check scripts/v21-check.py 2>&1)"; rc=$?
+assert_eq 3 "$rc" "#228: y un .py propio tampoco (el prefijo tampoco lo salvaba a él)"
+
+# Ni con el plugin de verdad en disco delante: la respuesta sale de sus
+# templates, y ahí dev-up.sh no está.
+out="$(cd "$WS" && HOME="$WS" CLAUDE_PLUGIN_ROOT="$ROOT" $BUG check scripts/dev-up.sh 2>&1)"; rc=$?
+assert_eq 3 "$rc" "#228: con el plugin en disco, la respuesta es la misma"
+out="$(cd "$WS" && HOME="$WS" eval "$BUG $RPT --file scripts/dev-up.sh --dry-run" 2>&1)"; rc=$?
+assert_eq 3 "$rc" "#228: y el report tampoco lo deja pasar (exit 3)"
+assert_contains "$out" "el plugin no lo instala" "#228: con el mismo desarme que check, no un 'no es del plugin' a secas"
+
+# La contra-mitad, que es la que un fix perezoso rompe: lo que SÍ instala el
+# plugin sigue siendo del plugin, venga de un template literal o de un .tmpl.
+cp "$ROOT/templates/scripts/ship.sh.tmpl" "$WS/scripts/ship.sh"
+out="$(cd "$WS" && HOME="$WS" $BUG check scripts/ship.sh 2>&1)"; rc=$?
+assert_eq 0 "$rc" "#228: ship.sh (que sale de ship.sh.tmpl) sigue siendo reportable"
+assert_contains "$out" "propiedad: plugin" "#228: y sigue clasificado como del plugin"
+out="$(cd "$WS" && HOME="$WS" $BUG check scripts/emit.sh 2>&1)"; rc=$?
+assert_eq 0 "$rc" "#228: y un script copiado literal también"
+
+# Fuera de scripts/ nada cambió: la tabla de propiedad sigue mandando.
+out="$(cd "$WS" && HOME="$WS" $BUG check .claude/hooks/block-direct-push.sh 2>&1)"; rc=$?
+assert_eq 0 "$rc" "#228: un hook del plugin sigue siendo del plugin"
+out="$(cd "$WS" && HOME="$WS" $BUG check docs/quality.md 2>&1)"; rc=$?
+assert_eq 3 "$rc" "#228: y un doc de la instancia sigue siendo tuyo"
+mkdir -p "$WS/scripts/smoke" "$WS/scripts/cronjobs/jobs"
+printf 'humo\n' > "$WS/scripts/smoke/svc.sh"
+printf 'job\n' > "$WS/scripts/cronjobs/jobs/local-x.sh"
+out="$(cd "$WS" && HOME="$WS" $BUG check scripts/smoke/svc.sh 2>&1)"; rc=$?
+assert_eq 3 "$rc" "#228: scripts/smoke/ sigue siendo de la instancia"
+out="$(cd "$WS" && HOME="$WS" $BUG check scripts/cronjobs/jobs/local-x.sh 2>&1)"; rc=$?
+assert_eq 3 "$rc" "#228: y los cronjobs locales también"
+
+# El plugin EN DISCO es la mitad que la lista no puede saber: un script que
+# upstream agregó DESPUÉS de que esta copia se instaló. Se stubea un plugin
+# entero (con su MANIFEST, que es lo que valida que ahí vive un plugin) en el
+# cache versionado, que es donde Claude Code lo deja de verdad.
+PLG="$WS/.claude/plugins/cache/harness/harness-creator/0.99.9"
+mkdir -p "$PLG/templates/scripts"
+printf 'digest: fake\n' > "$PLG/templates/MANIFEST.sha256"
+printf '#!/usr/bin/env bash\n' > "$PLG/templates/scripts/nuevo-del-plugin.sh"
+printf '#!/usr/bin/env bash\n' > "$PLG/templates/scripts/otro-del-plugin.sh.tmpl"
+printf '#!/usr/bin/env bash\n' > "$WS/scripts/nuevo-del-plugin.sh"
+printf '#!/usr/bin/env bash\n' > "$WS/scripts/otro-del-plugin.sh"
+out="$(cd "$WS" && HOME="$WS" $BUG check scripts/nuevo-del-plugin.sh 2>&1)"; rc=$?
+assert_eq 0 "$rc" "#228: un script que la lista no conoce pero el plugin instala: es del plugin"
+out="$(cd "$WS" && HOME="$WS" $BUG check scripts/otro-del-plugin.sh 2>&1)"; rc=$?
+assert_eq 0 "$rc" "#228: y el sufijo .tmpl del template no lo esconde"
+# …y el plugin en disco no vuelve plugin a cualquier cosa que viva en scripts/
+out="$(cd "$WS" && HOME="$WS" $BUG check scripts/dev-up.sh 2>&1)"; rc=$?
+assert_eq 3 "$rc" "#228: con el plugin resuelto, dev-up.sh sigue siendo de la instancia"
+rm -f "$WS/scripts/nuevo-del-plugin.sh" "$WS/scripts/otro-del-plugin.sh"
+rm -rf "$WS/.claude/plugins" "$WS/scripts/smoke" "$WS/scripts/cronjobs" "$WS/scripts/ship.sh"
+
+# La lista de procedencia NO puede envejecer. Es el mismo dato que el hook
+# guard-canonical (#104) y por la misma razón viaja como DATO: la suite la
+# DERIVA del árbol de templates y falla si se queda atrás. El día que el plugin
+# agregue un script, una lista vieja lo declararía de la instancia y su bug se
+# quedaría sin canal.
+lista_real="$( { for f in "$ROOT"/templates/scripts/*; do
+                   b="$(basename "$f")"; [ "$b" = "__pycache__" ] && continue
+                   echo "${b%.tmpl}"
+                 done; echo doctor.sh; } | sort | tr '\n' ' ')"
+lista_de() {  # lista_de <archivo> → el PLUGIN_SCRIPTS que lleva adentro, ordenado
+  sed -n "/^PLUGIN_SCRIPTS='/,/^'$/p" "$1" \
+    | sed "s/^PLUGIN_SCRIPTS='//; s/^'$//" | tr ' \n' '\n\n' | grep -v '^$' | sort | tr '\n' ' '
+}
+assert_eq "$lista_real" "$(lista_de "$ROOT/templates/scripts/harness-bug.sh")" \
+  "PLUGIN_SCRIPTS de harness-bug.sh == lo que el generador instala bajo scripts/"
+assert_eq "$(lista_de "$ROOT/templates/hooks/guard-canonical.sh")" \
+  "$(lista_de "$ROOT/templates/scripts/harness-bug.sh")" \
+  "y es la MISMA lista que juzga el hook: dos criterios distintos serían dos verdades"
+
 echo "── el repro es obligatorio y no vacío"
 
 out="$(cd "$WS" && $BUG report --title x --file scripts/emit.sh --impact y --dry-run 2>&1)"; rc=$?

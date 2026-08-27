@@ -9,10 +9,10 @@ trimestre — y una spec podrida es PEOR que ninguna, porque los agentes
 la ejecutan con confianza.
 
 Precondición: el deploy de TODAS las tareas del ticket está verde
-(ship.log completo + deploy-watch 🟢). Si no, PARA.
+(ship-ledger.jsonl completo + deploy-watch 🟢). Si no, PARA.
 
 **Con `flow: prs` hay una precondición más, y es la que se olvida**: cada
-entrada de `ship.log` tiene que tener `landed` distinto de `false`. Un PR
+entrada de `ship-ledger.jsonl` tiene que tener `landed` distinto de `false`. Un PR
 abierto NO es un cambio desplegado, y fusionar su delta-spec en la spec maestra
 antes del merge deja la spec describiendo algo que no existe: spec rot, pero al
 revés y más difícil de detectar, porque la spec parece adelantada en vez de
@@ -103,7 +103,7 @@ hallazgo archivado sin bead deja de existir (Ley 7).
    antes de seguir; no lo fuerces.
 
 4. **Archiva el cambio completo**: mueve los artefactos de la tarea
-   (task.md, plan.md, delta-spec.md, veredictos, ship.log) a
+   (task.md, plan.md, delta-spec.md, veredictos, ship-ledger.jsonl) a
    `tasks/archive/YYYY-MM-DD-<id>/`. El archive es AUDIT TRAIL: nunca
    se edita ni borra.
 4b. **Escribí la nota que sobrevive a la tarea**:

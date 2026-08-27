@@ -20,9 +20,13 @@ extract() {  # extract <nombre-funcion> — de 'nombre() {' a su '}' de 1er nive
 { extract gate_lane; extract gate_quick_size; } > "$WS/gate_lane.sh"
 grep -q 'LANE_GUARD_PATTERN' "$WS/gate_lane.sh" || { echo "no pude extraer gate_lane"; exit 1; }
 grep -q 'lane-limits' "$WS/gate_lane.sh" || { echo "no pude extraer gate_quick_size"; exit 1; }
-{ extract par; extract close_serial_gate; extract known_bug_cubre
+{ extract par; extract gate_watchdog; extract plazo_humano; extract close_serial_gate; extract known_bug_cubre
   extract collect_gate_slots
   extract run_phase0_gates; extract run_parallel_gates
+  # El knob del deadline se extrae CON su validación (el `case` que rechaza un
+  # valor no numérico): si el test redeclarara el default, mediría su propia
+  # copia y el día que el template cambie el número esto seguiría verde.
+  awk '/^GATE_TIMEOUT_SECS=/{f=1} f{print} f&&/^esac/{exit}' "$TMPL"
   # El knob va DESPUES de las funciones a proposito: se sourcea y recien
   # despues se invoca run_phase0_gates, asi que el orden alcanza. Extraerlo
   # del template (y no redeclararlo aca) es lo que hace que el test mida el
@@ -33,6 +37,8 @@ grep -q 'GDIR' "$WS/pargates.sh" || { echo "no pude extraer par/run_parallel_gat
 grep -q 'fase 0' "$WS/pargates.sh" || { echo "no pude extraer run_phase0_gates"; exit 1; }
 grep -q 'HARNESS_KNOWN_BUG' "$WS/pargates.sh" || { echo "no pude extraer el knob HARNESS_KNOWN_BUG"; exit 1; }
 grep -q '^known_bug_cubre() {' "$WS/pargates.sh" || { echo "no pude extraer known_bug_cubre"; exit 1; }
+grep -q '^gate_watchdog() {' "$WS/pargates.sh" || { echo "no pude extraer gate_watchdog"; exit 1; }
+grep -q 'HARNESS_GATE_TIMEOUT_SECS' "$WS/pargates.sh" || { echo "no pude extraer el knob HARNESS_GATE_TIMEOUT_SECS"; exit 1; }
 
 echo "── gate_lane: el carril lo verifica el diff, no la fe"
 
@@ -448,6 +454,190 @@ out="$(run_kb "tests=porque-si" "tests" 2>&1)"; rc=$?
 assert_eq 3 "$rc" "knob sin url de issue: rechazado (exit 3)"
 assert_contains "$out" "https://github.com/" "diciendo que forma se espera"
 kb_ledger_off; kb_gh_off
+
+echo
+echo "── HARNESS_GATE_TIMEOUT_SECS: un gate que cuelga se rinde, y se lleva a sus hijos (#227)"
+# Caso de campo: un precheck llevaba 4 días y 15 horas bloqueado en
+# `anon_pipe_read`, con 0% de CPU y sin una sola línea en el bus. El silencio
+# era indistinguible de "todavía está trabajando", así que la tarea dejó de
+# existir para el pipeline. Y al matarlo por fuera quedaban `node (vitest)`
+# huérfanos (PPID 1) ocupando puertos.
+#
+# Se mide contra la maquinaria REAL (par + gate_watchdog + collect_gate_slots
+# extraídos del template) con un deadline de pocos segundos: lo que se prueba
+# es el mecanismo, no la paciencia.
+
+# El default del template, leído de la línea que el propio template define.
+assert_eq 3600 "${GATE_TIMEOUT_SECS_DEFAULT:=$( ( unset HARNESS_GATE_TIMEOUT_SECS
+  . "$WS/pargates.sh" >/dev/null 2>&1; printf '%s' "$GATE_TIMEOUT_SECS" ) )}" \
+  "default generoso (60 min): un timeout SIEMPRE significa algo roto, no un gate lento"
+
+# Un knob ilegible NO puede valer "sin límite": cae al default, diciéndolo.
+to_basura="$( ( HARNESS_GATE_TIMEOUT_SECS="un rato"; export HARNESS_GATE_TIMEOUT_SECS
+  . "$WS/pargates.sh" 2>&1; printf 'VAL=%s' "$GATE_TIMEOUT_SECS" ) )"
+assert_contains "$to_basura" "VAL=3600" "un knob no numérico cae al default, no a 'sin límite'"
+assert_contains "$to_basura" "no es un número de segundos" "y lo dice en vez de tragárselo"
+
+# El colgado: un gate que lanza un nieto y se queda esperando para siempre. El
+# nieto escribe su pid a un archivo, que es como después se comprueba que el
+# kill llegó al GRUPO entero y no solo al gate.
+NIETO_PID="$WS/nieto.pid"
+run_deadline() {  # run_deadline <secs>: la fase cara con el slot lang colgado
+  rm -f "$NIETO_PID"
+  ( set -eu; WS="$WS"; REPO=test; CURRENT_GATE=""; PRECHECK=0
+    HARNESS_GATE_TIMEOUT_SECS="$1"; export HARNESS_GATE_TIMEOUT_SECS
+    NIETO_PID="$NIETO_PID"
+    emit() { :; }; gate() { CURRENT_GATE="$1"; echo "── gate: $1 ──"; }
+    run_lang_gates_sealed() {
+      gate "vitest de test"
+      # el NIETO: sobrevive a un kill del gate pelado, muere con el grupo.
+      # Se lanza con `sh -c` y no con `( ... ) &` porque `$$` dentro de un
+      # subshell de bash sigue siendo el pid del shell PADRE (bash 3.2 no
+      # tiene BASHPID): el fixture guardaría el pid equivocado y el test
+      # mataría al que lo corre.
+      sh -c 'echo $$ > "$1"; exec sleep 300' _ "$NIETO_PID" &
+      sleep 300
+    }
+    run_security_gates() { echo SEC-EVIDENCIA; }
+    . "$WS/pargates.sh"; run_parallel_gates )
+}
+
+t0=$SECONDS
+out="$(run_deadline 3 2>&1)"; rc=$?
+dur=$((SECONDS - t0))
+
+assert_eq 3 "$rc" "el gate colgado termina en ROJO agregado (exit 3), no en silencio"
+[ "$dur" -lt 60 ] \
+  && pass "y termina solo, en ${dur}s: no hace falta un timeout externo" \
+  || fail "el deadline no lo cortó: tardó ${dur}s"
+assert_contains "$out" "el gate 'lang' NO terminó en 3 segundo(s)" "el rojo NOMBRA el gate que se colgó y el plazo que le dio"
+assert_contains "$out" "se colgó en: vitest de test" "y el comando concreto que quedó abierto"
+assert_contains "$out" "run_lang_gates_sealed" "y qué corría ese slot"
+assert_contains "$out" "HARNESS_GATE_TIMEOUT_SECS=" "con el knob para subirlo si de verdad tarda más"
+assert_contains "$out" "SEC-EVIDENCIA" "el slot vecino corrió y su salida NO se pierde"
+assert_contains "$out" "gates rojos" "y el agregado lo cuenta como rojo"
+
+# LA MITAD QUE MOTIVÓ EL "secundario" DEL ISSUE: los huérfanos.
+nieto="$(cat "$NIETO_PID" 2>/dev/null || true)"
+if [ -n "$nieto" ]; then
+  sleep 1
+  if kill -0 "$nieto" 2>/dev/null; then
+    kill -9 "$nieto" 2>/dev/null || true
+    fail "el nieto del gate quedó VIVO (PPID 1, puerto ocupado): el kill no llegó al grupo"
+  else
+    pass "el nieto del gate murió con él: se mata el GRUPO de procesos, no solo el gate"
+  fi
+else
+  fail "el fixture no dejó rastro del nieto: el caso de los huérfanos no se midió"
+fi
+
+# CONTRA-MITAD, y es la que impide que el arreglo se coma corridas sanas: un
+# gate que termina ANTES del deadline no se toca ni paga la espera.
+t0=$SECONDS
+out="$( ( set -eu; WS="$WS"; REPO=test; CURRENT_GATE=""; PRECHECK=0
+    HARNESS_GATE_TIMEOUT_SECS=30; export HARNESS_GATE_TIMEOUT_SECS
+    emit() { :; }; gate() { CURRENT_GATE="$1"; }
+    run_lang_gates_sealed() { echo LANG-EVIDENCIA; }
+    run_security_gates() { echo SEC-EVIDENCIA; }
+    . "$WS/pargates.sh"; run_parallel_gates ) 2>&1 )"; rc=$?
+dur=$((SECONDS - t0))
+assert_eq 0 "$rc" "un gate que termina a tiempo sigue verde"
+assert_not_contains "$out" "NO terminó" "y nadie le menciona el deadline"
+[ "$dur" -lt 10 ] \
+  && pass "y NO espera al perro: vuelve en ${dur}s, no en los 30 del deadline" \
+  || fail "el verde pagó la espera del deadline (${dur}s)"
+assert_contains "$out" "deadline: 30 segundo(s)" "el anuncio de la fase cara dice cuánto va a esperar"
+
+# El escape declarado: 0 apaga el perro (una suite que de verdad tarda más).
+out="$( ( set -eu; WS="$WS"; REPO=test; CURRENT_GATE=""; PRECHECK=0
+    HARNESS_GATE_TIMEOUT_SECS=0; export HARNESS_GATE_TIMEOUT_SECS
+    emit() { :; }; gate() { CURRENT_GATE="$1"; }
+    run_lang_gates_sealed() { echo LANG-EVIDENCIA; }
+    run_security_gates() { echo SEC-EVIDENCIA; }
+    . "$WS/pargates.sh"; run_parallel_gates ) 2>&1 )"; rc=$?
+assert_eq 0 "$rc" "con el knob en 0 la fase corre igual"
+assert_contains "$out" "SIN deadline" "y el log DICE que esta corrida no tiene límite"
+
+# El deadline no es solo de la fase cara: la misma maquinaria (par) lo aplica
+# a la fase 0. Un gate barato que cuelga es el mismo silencio, más raro.
+out="$( ( set -eu; WS="$WS"; REPO=test; CURRENT_GATE=""; PRECHECK=1
+    HARNESS_GATE_TIMEOUT_SECS=3; export HARNESS_GATE_TIMEOUT_SECS
+    emit() { :; }; gate() { CURRENT_GATE="$1"; }
+    gate_tests_untouched() { sleep 300; }
+    . "$WS/pargates.sh"; run_phase0_gates ) 2>&1 )"; rc=$?
+assert_eq 3 "$rc" "un gate de la fase 0 colgado también se corta (exit 3)"
+assert_contains "$out" "el gate 'tests' NO terminó" "y el rojo nombra a ESE slot"
+
+echo
+echo "── el ledger de ship deja de llamarse como un log (#232)"
+# `tasks/<id>/ship.log` NO era un log: era la CONTABILIDAD de fase, una línea
+# JSON por repo publicado, y de ella salen POLICY-SHIP-004 y el sha que
+# deploy-watch vigila. Su nombre era indistinguible de "el archivo donde guardo
+# la salida del ship", y el orquestador que hacía lo obvio
+#
+#     bash scripts/ship.sh <task> <repo> > tasks/<task>/ship.log 2>&1
+#
+# lo destruía: el shell abre ese archivo con O_TRUNC y le da el fd como stdout,
+# con un offset que avanza; la línea del ledger se anexa en EOF con O_APPEND, y
+# la prosa que ship.sh sigue imprimiendo DESPUÉS cae en el offset de stdout, que
+# quedó por debajo, y la pisa byte a byte. El ship salía 0, el push aterrizaba,
+# y la tarea quedaba clavada en review con el código ya en main.
+{ extract ship_ledger; extract ledger_append; } > "$WS/ledger.sh"
+LEDGER_FN="$WS/ledger.sh"   # ruta absoluta: adentro del fixture $WS es OTRO workspace
+grep -q 'ship-ledger.jsonl' "$LEDGER_FN" || { echo "no pude extraer ship_ledger"; exit 1; }
+grep -q '^ledger_append() {' "$LEDGER_FN" || { echo "no pude extraer ledger_append"; exit 1; }
+
+LWS="$WS/ledgerws"; mkdir -p "$LWS/tasks/T1"
+LINEA='{"repo":"svc","sha":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef","short":"deadbee","shipped_at":"2026-08-26T00:00:00Z"}'
+
+# EL REPRO, tal cual: el ship escribe su línea y DESPUÉS sigue imprimiendo, con
+# el stdout redirigido al archivo que antes era el ledger.
+( set -euo pipefail; WS="$LWS"; TASK=T1; REPO=svc
+  emit() { :; }
+  . "$LEDGER_FN"
+  ledger_append "$LINEA"
+  i=0; while [ "$i" -lt 200 ]; do echo "prosa del ship, línea $i"; i=$((i + 1)); done
+) > "$LWS/tasks/T1/ship.log" 2>&1
+
+assert_file "$LWS/tasks/T1/ship-ledger.jsonl" "el ledger vive en ship-ledger.jsonl"
+assert_eq "$LINEA" "$(cat "$LWS/tasks/T1/ship-ledger.jsonl")" \
+  "y la línea SOBREVIVE al stdout del ship redirigido a ship.log (el repro de #232)"
+assert_contains "$(cat "$LWS/tasks/T1/ship.log")" "prosa del ship" \
+  "ship.log queda para lo que su nombre promete: la salida del ship"
+assert_not_contains "$(cat "$LWS/tasks/T1/ship.log")" '"repo":"svc"' \
+  "y NO se mezcla con la contabilidad: son dos archivos con dos dueños"
+
+# La contra-mitad, que demuestra que la trampa era REAL y no una teoría: el
+# mismo movimiento contra el nombre viejo destruye la línea.
+rm -rf "$LWS/tasks/T1"; mkdir -p "$LWS/tasks/T1"
+( printf '%s\n' "$LINEA" >> "$LWS/tasks/T1/ship.log"
+  i=0; while [ "$i" -lt 200 ]; do echo "prosa del ship, línea $i"; i=$((i + 1)); done
+) > "$LWS/tasks/T1/ship.log" 2>&1
+grep -q '^{' "$LWS/tasks/T1/ship.log" \
+  && fail "el repro de #232 ya no reproduce: el test dejó de medir lo que dice medir" \
+  || pass "contra el nombre viejo la línea SE PIERDE: la trampa era determinista, no mala suerte"
+
+# LA DEFENSA BARATA que el issue pedía además del rename: anexar y RELEER.
+# Un ledger que no se puede escribir (acá: un directorio con ese nombre) tiene
+# que gritar, no seguir de largo dejando la tarea muerta en silencio.
+rm -rf "$LWS/tasks/T1"; mkdir -p "$LWS/tasks/T1/ship-ledger.jsonl"
+out="$( ( set -euo pipefail; WS="$LWS"; TASK=T1; REPO=svc
+  emit() { :; }
+  . "$LEDGER_FN"
+  ledger_append "$LINEA" || echo "RC=$?"
+) 2>&1 )"
+assert_contains "$out" "al releerla NO ESTÁ" "si la línea no sobrevive, el ship lo GRITA"
+assert_contains "$out" "POLICY-SHIP-004" "y nombra la consecuencia exacta"
+assert_contains "$out" "$LINEA" "y entrega la línea entera para reconstruirla a mano"
+assert_contains "$out" "RC=1" "y devuelve rojo, no un cero mentiroso"
+rm -rf "$LWS"
+
+# NINGÚN escritor puede haber quedado apuntando al nombre viejo: un solo `>>`
+# olvidado reabre el foot-gun entero.
+esc="$(grep -n '>>[[:space:]]*"\$WS/tasks/\$TASK/ship\.log"' "$TMPL" || true)"
+assert_eq "" "$esc" "ship.sh.tmpl no escribe NADA en ship.log (todo pasa por ledger_append)"
+assert_eq 2 "$(grep -c '^[[:space:]]*ledger_append "' "$TMPL")" \
+  "los DOS caminos de publicación (trunk y prs) registran por el mismo sitio"
 
 # el preflight existe y precede estructuralmente al lock
 extract gate_ship_preflight > "$WS/preflight.sh"

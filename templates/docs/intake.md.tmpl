@@ -108,7 +108,7 @@ trailer `Task: <id>` y `tasks/<id>/`. Si quieres el ticket en
   → in-harness, comenta el task-id. Exit: 0 ok · 2 no existe · 3 sin
   agent-ready · 4 auth/red. Solo lectura + labels + comentarios.
 - `scripts/ticket-close.sh <ID> --status shipped|failed` — comenta
-  commits por repo + ship.log; label → shipped (o regresa a
+  commits por repo + ship-ledger.jsonl; label → shipped (o regresa a
   agent-ready con el diagnóstico).
 
 Trazabilidad completa: ticket ↔ beads ↔ commits (`Task:`) ↔ deploy, en

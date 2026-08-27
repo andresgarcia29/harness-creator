@@ -349,16 +349,21 @@ echo "🟢 instancia publicada: $n commit(s) a origin/$BB"
 registrar_fase() {  # registrar_fase <task-id> <sha>
   local tarea="$1" sha="$2" out rc=0 repo
   [ -f "$WS/tasks/$tarea/state.json" ] || return 0
-  # PRIMERO ship.log, DESPUÉS la transición, y ese orden no es cosmético: el
+  # PRIMERO el ledger, DESPUÉS la transición, y ese orden no es cosmético: el
   # gate que decide es `POLICY-SHIP-004`, que cuenta repos con ship registrado.
   # Sin esta línea, la transición se niega con "faltan repos por shippear:
   # <repo>" sobre un repo que acaba de shippear, que es exactamente el mensaje
   # que el reporte trae. El formato es el MISMO que escribe ship.sh: un lector
   # (deploy-watch, la policy, el panel) no tiene por qué saber quién publicó.
+  # Y el ARCHIVO también es el mismo: `ship-ledger.jsonl`, no `ship.log` (#232).
+  # El nombre viejo invitaba a redirigirle el stdout de un ship encima, y esa
+  # redirección con O_TRUNC pisaba el JSON byte a byte: el push aterrizaba y la
+  # tarea quedaba clavada en review. Los lectores caen al nombre viejo; los
+  # escritores, ninguno.
   repo="$(instance_repo_slug)"; [ -n "$repo" ] || repo="$(basename "$WS")"
   printf '{"repo":"%s","sha":"%s","short":"%s","shipped_at":"%s"}\n' \
     "$repo" "$sha" "$(git rev-parse --short "$sha" 2>/dev/null)" \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$WS/tasks/$tarea/ship.log"
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$WS/tasks/$tarea/ship-ledger.jsonl"
   out="$(python3 "$WS/scripts/harness-policy.py" --policy "$WS/harness-policy.json" \
           transition "$WS/tasks/$tarea" ship --actor instance-ship 2>&1)" || rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -384,7 +389,7 @@ elif [ "$(printf '%s\n' "$RANGO_TRAILERS" | grep -c .)" -gt 1 ]; then
   # peor que no registrar. Se nombran las dos y se deja el comando servido.
   echo "⚠️  el rango publicado mezcla varias tareas: no registro la fase de ninguna."
   printf '%s\n' "$RANGO_TRAILERS" | sed 's/^/   · /'
-  echo "   ↳ registrá la que corresponda a mano (ship.log primero, si falta):"
+  echo "   ↳ registrá la que corresponda a mano (la línea de ship-ledger.jsonl primero, si falta):"
   echo "     python3 scripts/harness-policy.py transition tasks/<id> ship --actor humano"
 else
   registrar_fase "$RANGO_TRAILERS" "$(git rev-parse HEAD)"

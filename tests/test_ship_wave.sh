@@ -14,8 +14,9 @@ cp "$ROOT/templates/scripts/harness-policy.py" "$WS/scripts/"
 cp "$ROOT/templates/scripts/emit.sh" "$WS/scripts/"
 sed 's/{{LOOP_BUDGET}}/3/' "$ROOT/templates/policy.json.tmpl" > "$WS/harness-policy.json"
 
-# stub de ship.sh: loggea la invocación y APPENDEA su línea a ship.log (como
-# el real); un marcador de fallo por repo permite el caso rojo
+# stub de ship.sh: loggea la invocación y APPENDEA su línea a ship-ledger.jsonl
+# (como el real, que dejó de escribir en ship.log por #232); un marcador de
+# fallo por repo permite el caso rojo
 export SHIPCALLS="$WS/ship-calls.log"; : > "$SHIPCALLS"
 cat > "$WS/scripts/ship.sh" <<'SH'
 #!/bin/sh
@@ -25,7 +26,7 @@ WS="$(cd "$(dirname "$0")/.." && pwd)"
 [ -f "$WS/.fail-$repo" ] && { echo "ship de $repo ROJO (fixture)"; exit 3; }
 landed=true
 [ -f "$WS/.prs-$repo" ] && landed=false
-printf '{"repo":"%s","sha":"abc1234","landed":%s}\n' "$repo" "$landed" >> "$WS/tasks/$task/ship.log"
+printf '{"repo":"%s","sha":"abc1234","landed":%s}\n' "$repo" "$landed" >> "$WS/tasks/$task/ship-ledger.jsonl"
 SH
 chmod +x "$WS/scripts/ship.sh"
 # with-secrets stub: marca que el hook corre autenticado
@@ -70,12 +71,12 @@ echo "── reanudación idempotente: nada se repite"
 : > "$SHIPCALLS"; : > "$HOOKLOG"
 out="$(run_wave T1)"; rc=$?
 assert_eq 0 "$rc" "segunda corrida: exit 0"
-assert_eq "" "$(cat "$SHIPCALLS")" "ningún ship se re-invoca (ship.log los salta)"
+assert_eq "" "$(cat "$SHIPCALLS")" "ningún ship se re-invoca (el ledger los salta)"
 assert_eq "" "$(cat "$HOOKLOG")" "ningún hook verde se repite (ship-wave.log los salta)"
 
 echo "── un rojo detiene la ola con el retome exacto"
 
-rm -f "$WS/tasks/T1/ship.log" "$WS/tasks/T1/ship-wave.log"; : > "$SHIPCALLS"
+rm -f "$WS/tasks/T1/ship-ledger.jsonl" "$WS/tasks/T1/ship.log" "$WS/tasks/T1/ship-wave.log"; : > "$SHIPCALLS"
 touch "$WS/.fail-agora"
 out="$(run_wave T1)"; rc=$?
 assert_eq 1 "$rc" "ship rojo: exit 1"
@@ -92,7 +93,7 @@ assert_eq "ship agora" "$(cat "$SHIPCALLS")" "--from salta los predecesores"
 
 echo "── flow prs: el post_ship se DIFIERE, la ola sigue"
 
-rm -f "$WS/tasks/T1/ship.log" "$WS/tasks/T1/ship-wave.log"
+rm -f "$WS/tasks/T1/ship-ledger.jsonl" "$WS/tasks/T1/ship.log" "$WS/tasks/T1/ship-wave.log"
 : > "$SHIPCALLS"; : > "$HOOKLOG"; : > "$WS/.harness/events.jsonl"
 touch "$WS/.prs-design-system"
 out="$(run_wave T1)"; rc=$?
@@ -103,6 +104,21 @@ assert_contains "$out" "🟡" "el cierre es amarillo, no verde"
 assert_contains "$(cat "$WS/.harness/events.jsonl")" "assumption" "y el diferimiento queda en el bus"
 assert_contains "$(cat "$SHIPCALLS")" "ship agora" "los repos siguientes SÍ shippearon"
 rm -f "$WS/.prs-design-system"
+
+echo "── el ledger viejo (ship.log) sigue contando: las tareas en vuelo (#232)"
+# El ledger pasó a llamarse ship-ledger.jsonl porque `ship.log` invitaba a
+# redirigirle el stdout del ship encima. Una tarea que ya estaba a mitad de ola
+# cuando se actualizó el harness tiene sus líneas en el nombre VIEJO: si la ola
+# dejara de verlas, re-shippearía repos que ya publicaron.
+rm -f "$WS/tasks/T1/ship-ledger.jsonl" "$WS/tasks/T1/ship.log" "$WS/tasks/T1/ship-wave.log"
+: > "$SHIPCALLS"; : > "$HOOKLOG"
+printf '{"repo":"design-system","sha":"abc1234","landed":true}\n' > "$WS/tasks/T1/ship.log"
+out="$(run_wave T1)"; rc=$?
+assert_eq 0 "$rc" "con el ledger en el nombre viejo: exit 0"
+assert_eq "ship agora" "$(cat "$SHIPCALLS")" \
+  "design-system NO se re-shippea: su línea estaba en ship.log y la ola la ve igual"
+assert_contains "$(cat "$HOOKLOG")" "hook design-system" \
+  "y landed=true del archivo viejo destraba su post_ship"
 
 echo "── sin DAG: el mensaje manda al camino correcto"
 

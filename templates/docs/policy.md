@@ -282,8 +282,10 @@ entrega declarada sea `trunk`.
 La registra **`ship.sh`**, no el orquestador. `ship.sh` se corre una vez por
 repo, pide la transición después de cada push, y solo prospera en el último:
 `POLICY-SHIP-004` la rechaza mientras quede un repo planificado sin veredicto
-o un repo con veredicto que no figure en `ship.log` (las fuentes son
-`dag.json`, `state.repos` y `ship.log`), y el mensaje nombra cuáles faltan.
+o un repo con veredicto que no figure en `ship-ledger.jsonl` (las fuentes son
+`dag.json`, `state.repos` y `ship-ledger.jsonl`, con caída al nombre viejo
+`ship.log` para las tareas anteriores al renombre), y el mensaje nombra
+cuáles faltan.
 
 Por eso el orquestador **no** debe pedirla: adelantarla dejaba a los repos
 restantes sin camino, porque `validate-ship` exige fase `review` y el grafo no

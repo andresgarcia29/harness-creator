@@ -321,7 +321,11 @@ class State:
                 done.add('implement')
                 if passed == len(verdicts) and passed:
                     done.add('review')
-            if has('ship.log'):
+            # El ledger de ship pasó a llamarse ship-ledger.jsonl (#232): el
+            # nombre viejo invitaba a redirigirle el stdout del ship encima y
+            # truncarlo. Se miran los dos: las tareas anteriores al renombre
+            # tienen su contabilidad en el archivo viejo.
+            if has('ship-ledger.jsonl') or has('ship.log'):
                 done.add('ship')
             if glob.glob(os.path.join(d, 'deploy-*.log')):
                 done.add('deploy')

@@ -1911,6 +1911,334 @@ class PolicyTest(unittest.TestCase):
         self.assertEqual(result.returncode, 3)
         self.assertIn("POLICY-DAG-010", result.stderr)
 
+    # ── grant-round: la otra mitad del "escala a humano" (#235) ───────────
+    # Los tres POLICY-LIMIT-001 ordenaban escalar a un humano y el CLI no tenía
+    # NINGÚN subcomando con el que ese humano contestara: la tarea se quedaba en
+    # la fase sin camino legítimo, porque editar state.json a mano está
+    # prohibido y encima queda indistinguible de una edición no declarada.
+
+    def grant_round(self, repo="", actor="humana", reason="miré los tres veredictos"):
+        args = ["grant-round", self.task, "--actor", actor, "--reason", reason]
+        if repo:
+            args += ["--repo", repo]
+        return self.run_policy(*args)
+
+    def agotar_el_techo(self, repo="atlas"):
+        """Deja al repo contra el techo SIN convergencia: 3 rondas, 2 bloqueantes
+        cada vez. La cuarta es la que el motor manda escalar a humano."""
+        self.reach("rfc", "implement")
+        self.assertEqual(self.transition_repo("review", repo).returncode, 0)
+        for count in (2, 2):
+            self.assertEqual(self.review_round(repo, count).returncode, 0)
+
+    def test_el_limite_nombra_el_comando_que_concede_la_ronda(self):
+        """Regla 5 del repo: los mensajes de error son prompts. Un 'escala a
+        humano' sin el comando exacto manda a escalar a la nada."""
+        self.agotar_el_techo()
+        cuarta = self.review_round("atlas", 2)
+        self.assertEqual(cuarta.returncode, 3)
+        self.assertIn("POLICY-LIMIT-001", cuarta.stderr)
+        self.assertIn("grant-round", cuarta.stderr)
+        self.assertIn(f"tasks/{self.task.name}", cuarta.stderr)
+        self.assertIn("--repo atlas", cuarta.stderr)
+        self.assertIn("--actor", cuarta.stderr)
+        self.assertIn("--reason", cuarta.stderr)
+
+    def test_grant_round_concede_UNA_ronda_y_queda_auditada(self):
+        self.agotar_el_techo()
+        self.assertEqual(self.review_round("atlas", 2).returncode, 3)
+
+        concedida = self.grant_round("atlas", reason="el blocking 3 es de un flake")
+        self.assertEqual(concedida.returncode, 0, concedida.stderr)
+        state = self.state()
+        grant = state["round_grants"][0]
+        self.assertEqual(grant["repo"], "atlas")
+        self.assertEqual(grant["actor"], "humana")
+        self.assertEqual(grant["reason"], "el blocking 3 es de un flake")
+        self.assertNotIn("used_round", grant, "recién concedida no está gastada")
+        self.assertTrue(grant["at"], "la concesión declara CUÁNDO")
+        marca = [h for h in state["history"] if h.get("kind") == "round-grant"]
+        self.assertEqual(len(marca), 1, state["history"])
+        self.assertEqual(marca[0]["actor"], "humana")
+        # y no cuenta como movimiento de fase: no declara `to`
+        self.assertNotIn("to", marca[0])
+
+        # la ronda que el techo rebotaba, ahora pasa, y lo DICE
+        cuarta = self.review_round("atlas", 2)
+        self.assertEqual(cuarta.returncode, 0, cuarta.stderr)
+        self.assertIn("CONCEDIDA", cuarta.stdout)
+        self.assertIn("humana", cuarta.stdout)
+        state = self.state()
+        self.assertEqual(state["review_rounds_by_repo"]["atlas"], 4)
+        self.assertEqual(state["round_grants"][0]["used_round"], 4)
+        self.assertTrue(state["round_grants"][0]["used_at"])
+        # quién autorizó la ronda queda en el MOVIMIENTO, no solo en la concesión
+        self.assertEqual(state["history"][-1]["round_grant"]["actor"], "humana")
+
+    def test_una_concesion_no_es_un_bypass_permanente(self):
+        # LA CONTRA-MITAD: gastada la concesión, el techo vuelve a ser el techo.
+        self.agotar_el_techo()
+        self.assertEqual(self.grant_round("atlas").returncode, 0)
+        self.assertEqual(self.review_round("atlas", 2).returncode, 0)
+        quinta = self.review_round("atlas", 2)
+        self.assertEqual(quinta.returncode, 3, quinta.stdout)
+        self.assertIn("POLICY-LIMIT-001", quinta.stderr)
+        self.assertIn("grant-round", quinta.stderr)
+        self.assertEqual(self.state()["review_rounds_by_repo"]["atlas"], 4)
+
+    def test_la_ronda_concedida_a_mano_SI_se_puede_shippear(self):
+        """Misma lección que el #182 en su otro brazo: una ronda que el motor
+        dejó pasar y el ship después rechaza es una tarea trabada con el trabajo
+        terminado. El techo del ship sube en EXACTAMENTE lo concedido."""
+        self.agotar_el_techo()
+        self.assertEqual(self.grant_round("atlas").returncode, 0)
+        self.assertEqual(self.review_round("atlas", 2).returncode, 0)
+        self.assertEqual(self.state()["review_rounds"], 4)
+        commit = "e" * 40
+        ok = self.run_policy("validate-ship", self.task, "--commit", commit,
+                             "--verdict", self.valid_verdict(commit))
+        self.assertEqual(ok.returncode, 0, ok.stdout + ok.stderr)
+        # y UNA concesión sube el techo UNA vez: la ronda 5 sin conceder no pasa
+        state = self.state()
+        state["review_rounds"] = 5
+        (self.task / "state.json").write_text(json.dumps(state))
+        r = self.run_policy("validate-ship", self.task, "--commit", commit,
+                            "--verdict", self.task / "verdict-atlas.json")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("POLICY-LIMIT-001", r.stderr)
+        self.assertIn("grant-round", r.stderr, "el ship también nombra el comando")
+
+    def test_no_se_concede_por_adelantado(self):
+        # Mismo principio que el cost-waive: un permiso guardado antes de que el
+        # techo exista es un cheque en blanco que nadie revisa al cobrarse.
+        self.reach("rfc", "implement")
+        self.assertEqual(self.transition_repo("review", "atlas").returncode, 0)
+        temprano = self.grant_round("atlas")
+        self.assertEqual(temprano.returncode, 3, temprano.stdout)
+        self.assertIn("POLICY-ROUND-002", temprano.stderr)
+        self.assertIn("transition", temprano.stderr)      # el camino normal, nombrado
+        self.assertNotIn("round_grants", json.dumps(self.state()))
+
+    def test_dos_concesiones_vivas_a_la_vez_se_rechazan(self):
+        self.agotar_el_techo()
+        self.assertEqual(self.grant_round("atlas", reason="la primera").returncode, 0)
+        segunda = self.grant_round("atlas", reason="la segunda")
+        self.assertEqual(segunda.returncode, 3, segunda.stdout)
+        self.assertIn("POLICY-ROUND-003", segunda.stderr)
+        self.assertIn("la primera", segunda.stderr)   # dice cuál está sin usar
+        self.assertEqual(len(self.state()["round_grants"]), 1)
+
+    def test_grant_round_sin_motivo_es_un_techo_apagado(self):
+        self.agotar_el_techo()
+        mudo = self.grant_round("atlas", reason="   ")
+        self.assertEqual(mudo.returncode, 3)
+        self.assertIn("POLICY-ROUND-001", mudo.stderr)
+
+    def test_el_contador_por_TAREA_tambien_tiene_su_concesion(self):
+        # El tercer POLICY-LIMIT-001: el de una transición sin --repo, que cuenta
+        # por tarea. Sin bucket propio, la concesión de un repo lo destrabaría.
+        self.reach("rfc", "implement")
+        for _ in range(3):
+            self.assertEqual(self.transition("review").returncode, 0)
+            self.assertEqual(self.transition("implement").returncode, 0)
+        techo = self.transition("review")
+        self.assertEqual(techo.returncode, 3)
+        self.assertIn("grant-round", techo.stderr)
+        self.assertNotIn("--repo", techo.stderr.split("grant-round")[1][:60],
+                         "sin repo, el comando que se ofrece tampoco lo lleva")
+        self.assertEqual(self.grant_round().returncode, 0)
+        cuarta = self.transition("review")
+        self.assertEqual(cuarta.returncode, 0, cuarta.stderr)
+        self.assertIn("CONCEDIDA", cuarta.stdout)
+        self.assertEqual(self.state()["review_rounds"], 4)
+
+    # ── reseal-delta: el delta enmendado después del veredicto (#231) ─────
+    # Editar tasks/<id>/delta-spec.md entre el veredicto y el ship dejaba la
+    # tarea TRABADA de forma terminal: archive la rechaza, deploy → review no
+    # existe en el carril, y el worktree que el re-scaffold exige lo borró el
+    # propio ship. Y no es un caso raro: escribir el requirement de un blocking
+    # tardío es exactamente lo que el flujo pide.
+
+    def sellar_delta(self, repo="atlas", texto="## ADDED\n- R1: lo que el reviewer vio\n"):
+        delta = self.task / "delta-spec.md"
+        delta.write_text(texto)
+        v = self.task / f"verdict-{repo}.json"
+        datos = json.loads(v.read_text())
+        datos["delta_spec_sha256"] = hashlib.sha256(delta.read_bytes()).hexdigest()
+        v.write_text(json.dumps(datos))
+        return delta
+
+    def reseal(self, repo="atlas", actor="humana", reason="el blocking tardío del reviewer"):
+        return self.run_policy("reseal-delta", self.task, "--repo", repo,
+                               "--actor", actor, "--reason", reason)
+
+    def test_reseal_destraba_el_archive_y_deja_rastro(self):
+        self.reach_deploy()
+        delta = self.sellar_delta()
+        viejo = hashlib.sha256(delta.read_bytes()).hexdigest()
+        # el flujo normal: el reviewer levantó un blocking tardío y hay que
+        # ESCRIBIR su requirement en el delta, ya con el ship pasado
+        delta.write_text("## ADDED\n- R1: lo que el reviewer vio\n- R2: FANTASMA-4\n")
+        nuevo = hashlib.sha256(delta.read_bytes()).hexdigest()
+
+        trabado = self.transition("archive")
+        self.assertEqual(trabado.returncode, 3)
+        self.assertIn("POLICY-ARCHIVE-001", trabado.stderr)
+        self.assertIn("reseal-delta", trabado.stderr, "el gate nombra su salida")
+        self.assertIn(f"tasks/{self.task.name}", trabado.stderr)
+
+        hecho = self.reseal()
+        self.assertEqual(hecho.returncode, 0, hecho.stderr)
+        verdict = json.loads((self.task / "verdict-atlas.json").read_text())
+        self.assertEqual(verdict["delta_spec_sha256"], nuevo)
+        rastro = verdict["delta_reseals"][-1]
+        self.assertEqual(rastro["from_sha256"], viejo)
+        self.assertEqual(rastro["to_sha256"], nuevo)
+        self.assertEqual(rastro["actor"], "humana")
+        self.assertEqual(rastro["phase"], "deploy")
+        self.assertTrue(rastro["at"])
+        self.assertIn("blocking tardío", rastro["reason"])
+        # y el mismo hecho en el ESTADO, que es lo que se lee para auditar
+        state = self.state()
+        self.assertEqual(state["delta_reseals"][-1]["repo"], "atlas")
+        marca = [h for h in state["history"] if h.get("kind") == "delta-reseal"]
+        self.assertEqual(len(marca), 1)
+        self.assertNotIn("to", marca[0], "no es un movimiento de fase")
+
+        self.assertEqual(self.transition("archive").returncode, 0)
+
+    def test_el_resello_no_es_un_permiso_permanente(self):
+        # CONTRA-MITAD: sella el delta VIGENTE, no abre la puerta a editarlo.
+        self.reach_deploy()
+        delta = self.sellar_delta()
+        delta.write_text("## ADDED\n- R2: el requirement tardío\n")
+        self.assertEqual(self.reseal().returncode, 0)
+        delta.write_text("## ADDED\n- R3: y otro más, sin que nadie mire\n")
+        otra_vez = self.transition("archive")
+        self.assertEqual(otra_vez.returncode, 3, otra_vez.stdout)
+        self.assertIn("POLICY-ARCHIVE-001", otra_vez.stderr)
+
+    def test_reseal_solo_despues_del_ship(self):
+        # Antes del ship el camino legítimo EXISTE y es el juicio de verdad.
+        self.reach("rfc", "implement", "review")
+        self.mk_verdict("atlas")
+        self.sellar_delta()
+        (self.task / "delta-spec.md").write_text("## ADDED\n- R9: enmendado\n")
+        temprano = self.reseal()
+        self.assertEqual(temprano.returncode, 3, temprano.stdout)
+        self.assertIn("POLICY-RESEAL-002", temprano.stderr)
+        self.assertIn("/review", temprano.stderr)
+
+    def test_reseal_exige_el_cambio_ya_inmutable_en_la_trunk(self):
+        # El re-sello se apoya en que el commit revisado ya no se puede tocar.
+        # Con el PR abierto (landed:false) esa premisa es falsa.
+        self.reach_deploy()
+        self.sellar_delta()
+        self.mk_verdict("proto")
+        with (self.task / "ship-ledger.jsonl").open("a") as ledger:
+            ledger.write(json.dumps({"repo": "proto", "sha": "def5678",
+                                     "landed": False}) + "\n")
+        (self.task / "delta-spec.md").write_text("## ADDED\n- R9: enmendado\n")
+        sin_trunk = self.reseal("proto")
+        self.assertEqual(sin_trunk.returncode, 3, sin_trunk.stdout)
+        self.assertIn("POLICY-RESEAL-005", sin_trunk.stderr)
+        self.assertIn("INMUTABLE en la trunk", sin_trunk.stderr)
+
+    def test_reseal_de_un_repo_sin_veredicto_no_inventa_el_sello(self):
+        self.reach_deploy()
+        self.sellar_delta()
+        (self.task / "delta-spec.md").write_text("## ADDED\n- R9\n")
+        r = self.reseal("muse")
+        self.assertEqual(r.returncode, 3, r.stdout)
+        self.assertIn("POLICY-RESEAL-003", r.stderr)
+        self.assertIn("atlas", r.stderr, "dice qué veredictos SÍ hay")
+
+    def test_reseal_de_un_delta_que_ya_estaba_sellado_no_hace_nada(self):
+        self.reach_deploy()
+        self.sellar_delta()
+        r = self.reseal()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Nada que hacer", r.stdout)
+        self.assertNotIn("delta_reseals",
+                         (self.task / "verdict-atlas.json").read_text())
+
+    def test_reseal_sin_motivo_es_editar_el_delta_sin_rastro(self):
+        self.reach_deploy()
+        self.sellar_delta()
+        (self.task / "delta-spec.md").write_text("## ADDED\n- R9\n")
+        mudo = self.reseal(reason="  ")
+        self.assertEqual(mudo.returncode, 3)
+        self.assertIn("POLICY-RESEAL-001", mudo.stderr)
+
+    # ── el ledger de ships y su mudanza de nombre (#232) ──────────────────
+    # `ship.log` nunca fue un log: es el ledger que contesta "¿falta algún repo
+    # por shippear?". Su nombre invitaba a la redirección que lo destruye
+    # (`ship.sh <id> <repo> > tasks/<id>/ship.log`), y el ship salía 0 con el
+    # push aterrizado mientras la tarea quedaba clavada en review.
+
+    def mk_shipped_ledger(self, repo, **extra):
+        entry = {"repo": repo, "sha": "abc1234",
+                 "shipped_at": "2026-08-25T10:00:00Z"}
+        entry.update(extra)
+        with (self.task / "ship-ledger.jsonl").open("a") as ledger:
+            ledger.write(json.dumps(entry) + "\n")
+
+    def test_pending_ship_lee_el_ledger_nuevo(self):
+        self.reach("rfc", "implement", "review")
+        self.mk_verdict("atlas")
+        trabada = self.transition("ship")
+        self.assertEqual(trabada.returncode, 3)
+        self.assertIn("POLICY-SHIP-004", trabada.stderr)
+        self.mk_shipped_ledger("atlas")
+        libre = self.transition("ship")
+        self.assertEqual(libre.returncode, 0, libre.stderr)
+
+    def test_el_ledger_viejo_sigue_contando_para_una_tarea_en_vuelo(self):
+        # Compatibilidad: una tarea que shippeó el primer repo con la versión
+        # anterior tiene la mitad de sus ships en cada archivo, y leer solo el
+        # nuevo sería olvidar un ship que de verdad ocurrió.
+        self.reach("rfc", "implement", "review")
+        self.mk_verdict("atlas")
+        self.mk_verdict("proto")
+        self.mk_shipped("atlas")              # ship.log, el nombre viejo
+        self.mk_shipped_ledger("proto")       # ship-ledger.jsonl, el nuevo
+        r = self.transition("ship")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_la_prosa_que_pisaba_el_ledger_ya_no_traba_la_tarea(self):
+        # El caso de campo exacto: la redirección dejó ship.log con 149 líneas
+        # de prosa y CERO líneas de ledger. Con la contabilidad en su propio
+        # archivo, la tarea avanza igual.
+        self.reach("rfc", "implement", "review")
+        self.mk_verdict("atlas")
+        (self.task / "ship.log").write_text(
+            "".join(f"linea de prosa {i}\n" for i in range(149)))
+        self.mk_shipped_ledger("atlas")
+        r = self.transition("ship")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_una_linea_corrupta_del_ledger_nuevo_no_finge_un_ship(self):
+        self.reach("rfc", "implement", "review")
+        self.mk_verdict("atlas")
+        (self.task / "ship-ledger.jsonl").write_text("esto no es json\n")
+        r = self.transition("ship")
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("POLICY-SHIP-004", r.stderr)
+
+    def test_un_pr_sin_mergear_en_el_ledger_nuevo_frena_el_deploy(self):
+        # repos_not_landed lee el mismo ledger: si solo mirara el archivo viejo,
+        # un PR abierto pasaría a deploy sin nada desplegado que vigilar.
+        self.reach("rfc", "implement", "review")
+        self.mk_verdict("atlas")
+        self.mk_shipped_ledger("atlas", landed=False)
+        self.assertEqual(self.transition("ship").returncode, 0)
+        frenado = self.transition("deploy")
+        self.assertEqual(frenado.returncode, 3, frenado.stdout)
+        self.assertIn("POLICY-SHIP-005", frenado.stderr)
+        # y el merge posterior, anexado al ledger, lo destraba
+        self.mk_shipped_ledger("atlas", landed=True)
+        self.assertEqual(self.transition("deploy").returncode, 0)
+
 
 class CostGateTest(unittest.TestCase):
     """POLICY-BUDGET-003: el gasto frena la transicion, medido y solo.

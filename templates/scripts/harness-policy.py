@@ -393,6 +393,57 @@ def workspace_delivery(ws: Path) -> "str | None":
     return None
 
 
+# ── EL LEDGER DE SHIPS Y EL NOMBRE QUE LO DESTRUÍA ────────────────────
+# `tasks/<id>/ship.log` nunca fue un log: es un ledger JSONL, una línea por repo
+# shippeado, y es la única fuente de dos cosas que deciden si la tarea avanza
+# (POLICY-SHIP-004 acá, y el sha que vigila deploy-watch allá). El nombre
+# invitaba justo a lo que lo destruye: `ship.sh <id> <repo> > tasks/<id>/ship.log
+# 2>&1` le da a stdout un fd con offset propio, el append del ledger escribe en
+# EOF, y la prosa que ship.sh imprime DESPUÉS pisa esa línea JSON byte a byte. El
+# ship sale 0, el push aterriza de verdad, y la tarea queda clavada en review con
+# el código ya en main (caso de campo).
+#
+# El ledger se mudó a `ship-ledger.jsonl`, un nombre que nadie confunde con el
+# destino de una redirección. Acá se leen LOS DOS, y en ese orden (primero el
+# viejo, después el nuevo, que es el orden cronológico): una tarea en vuelo al
+# momento de actualizar el harness tiene la mitad de sus ships de cada lado, y
+# leer solo el archivo nuevo sería olvidar ships que de verdad ocurrieron.
+SHIP_LEDGER = "ship-ledger.jsonl"
+SHIP_LEDGER_LEGACY = "ship.log"
+
+
+def ship_ledger(task_dir: Path) -> list:
+    """Las entradas del ledger de ships de la tarea, en orden cronológico.
+
+    Solo las líneas que parsean como JSON y son objetos: el `ship.log` viejo
+    puede traer prosa (es exactamente el defecto que motivó la mudanza) y una
+    línea corrupta no puede fingir que un repo shippeó."""
+    entries = []
+    for name in (SHIP_LEDGER_LEGACY, SHIP_LEDGER):
+        path = task_dir / name
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue   # una línea corrupta no debe fingir que un repo shippeó
+            if isinstance(entry, dict):
+                entries.append(entry)
+    return entries
+
+
+def repos_shipped(task_dir: Path) -> set:
+    """Los repos con al menos una línea de ledger, sin mirar si aterrizaron."""
+    return {e.get("repo") for e in ship_ledger(task_dir) if e.get("repo")}
+
+
 def repos_pending_ship(task_dir: Path) -> list:
     """Repos de la tarea que ya tienen veredicto pero todavía no shippearon.
 
@@ -407,7 +458,8 @@ def repos_pending_ship(task_dir: Path) -> list:
 
     /smart ya lo pedía en prosa ("tras todos los repos verdes solicita review →
     ship"). La prosa no frena a nadie. Las dos fuentes son artefactos que ya
-    existen: verdict-<repo>.json y ship.log (una línea por repo shippeado).
+    existen: verdict-<repo>.json y el ledger de ships (ship-ledger.jsonl, con el
+    ship.log viejo leído por compatibilidad).
 
     Límite: un repo de la tarea que todavía no tiene veredicto no se cuenta
     AQUÍ. Ese caso lo cierra repos_missing_verdict, que lee el inventario que
@@ -416,16 +468,7 @@ def repos_pending_ship(task_dir: Path) -> list:
         p.name[len("verdict-"):-len(".json")]
         for p in task_dir.glob("verdict-*.json")
     )
-    shipped = set()
-    log = task_dir / "ship.log"
-    if log.exists():
-        for line in log.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                shipped.add(json.loads(line).get("repo"))
-            except json.JSONDecodeError:
-                continue   # una línea corrupta no debe fingir que un repo shippeó
+    shipped = repos_shipped(task_dir)
     return [r for r in verdicts if r not in shipped]
 
 
@@ -583,7 +626,7 @@ def repos_not_landed(task_dir: Path) -> list:
     """Repos cuyo ship abrió un PR que todavía NO mergeó.
 
     Con `flow: prs`, ship.sh termina con la rama publicada y el PR abierto, y
-    deja `landed:false` en ship.log: el cambio NO está en la trunk. Avanzar a
+    deja `landed:false` en el ledger: el cambio NO está en la trunk. Avanzar a
     deploy no tiene sentido (no hay nada desplegado que vigilar) y avanzar a
     archive es peor, porque /archive fusiona el delta-spec en la spec maestra:
     la spec pasaría a describir algo que no existe. Es spec rot al revés, y más
@@ -596,17 +639,8 @@ def repos_not_landed(task_dir: Path) -> list:
     Compatible hacia atrás: las entradas de `flow: trunk` no traen `landed`, y
     un campo ausente NO cuenta como false (el bug de `//` en jq salió justo de
     confundir esas dos cosas)."""
-    log = task_dir / "ship.log"
-    if not log.exists():
-        return []
     pending = []
-    for line in log.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for entry in ship_ledger(task_dir):
         if entry.get("landed") is False:
             repo = entry.get("repo")
             if repo and repo not in pending:
@@ -1754,7 +1788,13 @@ def cmd_transition(args: argparse.Namespace) -> int:
                  "fusionaría a las specs maestras. Re-corré /review del repo "
                  "afectado (scripts/verdict-scaffold.sh --rebase conserva el "
                  "juicio que el delta no tocó) para re-emitir el veredicto "
-                 "sobre el delta vigente")
+                 "sobre el delta vigente. Y si el ship YA pasó (o sea que el "
+                 "worktree que el scaffold exige no existe y la fase no vuelve "
+                 "a review), el camino auditable es re-sellar el delta sobre el "
+                 "veredicto del repo cuyo cambio ya es inmutable en la trunk: "
+                 + reseal_delta_cmd(task_dir.name, "")
+                 + ". Deja el hash viejo, el nuevo, quién y por qué en el "
+                 "veredicto y en state.delta_reseals[]")
         unbeaded = non_blocking_without_bead(task_dir)
         if unbeaded:
             if shutil.which("bd"):
@@ -1931,6 +1971,9 @@ def cmd_transition(args: argparse.Namespace) -> int:
         print(f"⚠️  {warning}")
         emit_bus(task_dir, "decision", warning)
 
+    # La concesión humana que esta transición GASTA, si gasta alguna: la
+    # escribe el bloque de review y la lee el history[] de más abajo.
+    ronda_concedida = None
     if args.phase == "review":
         maximum = policy.get("limits", {}).get("max_review_rounds", 3)
         if args.repo:
@@ -1973,43 +2016,86 @@ def cmd_transition(args: argparse.Namespace) -> int:
             # Se llama DESPUÉS de guardar la serie, porque la serie es su dato.
             _, hard, converging = limite_de_rondas(state, policy, args.repo)
             if this_repo > maximum:
+                # QUÉ rebotaría esta ronda, si es que algo la rebota. Se
+                # calcula ANTES de resolver, porque la concesión humana es la
+                # respuesta al motivo del rechazo y el mensaje lo tiene que
+                # nombrar: un "escala a humano" sin el motivo delante manda a
+                # escalar a ciegas.
+                motivo = None
                 if this_repo > hard:
-                    fail("POLICY-LIMIT-001",
-                         f"review round {this_repo} del repo {args.repo} excede el "
-                         f"techo duro {hard} (2× el máximo {maximum}). Aunque los "
-                         "bloqueantes vengan bajando, esta cantidad de rondas ya no "
-                         "es convergencia sino goteo: escala a humano con el "
-                         "historial de veredictos (los otros repos de la tarea no "
-                         "se ven afectados)")
-                if not converging:
+                    motivo = (
+                        f"review round {this_repo} del repo {args.repo} excede el "
+                        f"techo duro {hard} (2× el máximo {maximum}). Aunque los "
+                        "bloqueantes vengan bajando, esta cantidad de rondas ya no "
+                        "es convergencia sino goteo: escala a humano con el "
+                        "historial de veredictos (los otros repos de la tarea no "
+                        "se ven afectados)")
+                elif not converging:
                     traza = (f"{seen[-2]} → {seen[-1]}" if len(seen) >= 2
                              else "sin serie legible de bloqueantes en los veredictos")
-                    fail("POLICY-LIMIT-001",
-                         f"review round {this_repo} del repo {args.repo} excede el "
-                         f"máximo {maximum} y NO bajó bloqueantes ({traza}). Ese repo "
-                         "no converge: escala a humano con el historial de veredictos "
-                         "(los otros repos de la tarea no se ven afectados)")
-                # Sobrevivir a los dos fail() de arriba ES la decisión: la
-                # ronda extra se CONCEDE, y se cuenta como tal en el bus.
-                aviso = (f"ronda extra {this_repo}/{maximum} de {args.repo} "
-                         f"permitida por convergencia: los bloqueantes bajan "
-                         f"({' → '.join(str(n) for n in seen)}), techo duro {hard}")
-                print(f"⚠️  {aviso}")
-                emit_bus(task_dir, "decision", aviso)
+                    motivo = (
+                        f"review round {this_repo} del repo {args.repo} excede el "
+                        f"máximo {maximum} y NO bajó bloqueantes ({traza}). Ese repo "
+                        "no converge: escala a humano con el historial de veredictos "
+                        "(los otros repos de la tarea no se ven afectados)")
+                if motivo is not None:
+                    # ── LA ESCALADA TIENE COMANDO, Y ES ESTE ────────────────
+                    ronda_concedida = consumir_ronda_concedida(
+                        state, args.repo, this_repo)
+                    if ronda_concedida is None:
+                        fail("POLICY-LIMIT-001",
+                             motivo + ". Si ese humano ya miró y decide pagar UNA "
+                             "ronda más, la concede con rastro: "
+                             + grant_round_cmd(task_dir.name, args.repo)
+                             + " (queda en history[] y en state.round_grants[], "
+                             "vale por UNA sola ronda y sube el techo del ship en "
+                             "exactamente 1). Si no la concede, la salida es "
+                             "cerrar el repo con lo que hay o partir la tarea")
+                    aviso = (f"ronda extra {this_repo} de {args.repo} CONCEDIDA por "
+                             f"{ronda_concedida.get('actor', '?')}: "
+                             f"{ronda_concedida.get('reason', '')} "
+                             f"(máximo {maximum}, techo duro {hard})")
+                    print(f"🎟️  {aviso}")
+                    emit_bus(task_dir, "decision", aviso)
+                else:
+                    # Sobrevivir al rechazo de arriba ES la decisión: la
+                    # ronda extra se CONCEDE, y se cuenta como tal en el bus.
+                    aviso = (f"ronda extra {this_repo}/{maximum} de {args.repo} "
+                             f"permitida por convergencia: los bloqueantes bajan "
+                             f"({' → '.join(str(n) for n in seen)}), techo duro {hard}")
+                    print(f"⚠️  {aviso}")
+                    emit_bus(task_dir, "decision", aviso)
             budget_warning(this_repo, maximum, f" de {args.repo}")
             rounds = max([rounds] + list(rounds_by_repo.values()))
         else:
             rounds += 1
             if rounds > maximum:
-                fail("POLICY-LIMIT-001",
-                     f"review round {rounds} excede el máximo {maximum}. Si es una "
-                     "tarea multi-repo, pasá --repo <repo> para que el presupuesto "
-                     "se cuente por repo y no castigue a los que sí convergieron")
+                ronda_concedida = consumir_ronda_concedida(state, "", rounds)
+                if ronda_concedida is None:
+                    fail("POLICY-LIMIT-001",
+                         f"review round {rounds} excede el máximo {maximum}. Si es una "
+                         "tarea multi-repo, pasá --repo <repo> para que el presupuesto "
+                         "se cuente por repo y no castigue a los que sí convergieron. "
+                         "Y si un humano ya miró el historial de veredictos y decide "
+                         "pagar UNA ronda más, la concede con rastro: "
+                         + grant_round_cmd(task_dir.name, "")
+                         + " (vale por UNA sola ronda, queda en history[] y sube el "
+                         "techo del ship en exactamente 1)")
+                aviso = (f"ronda extra {rounds} de la tarea CONCEDIDA por "
+                         f"{ronda_concedida.get('actor', '?')}: "
+                         f"{ronda_concedida.get('reason', '')} (máximo {maximum})")
+                print(f"🎟️  {aviso}")
+                emit_bus(task_dir, "decision", aviso)
             budget_warning(rounds, maximum, "")
     history = state.setdefault("history", [])
     entry = {"from": current, "to": args.phase, "actor": args.actor}
     if args.repo:
         entry["repo"] = args.repo
+    if ronda_concedida is not None:
+        # Quién autorizó esta ronda queda en el MOVIMIENTO, no solo en la
+        # concesión: el history[] es lo que se lee para reconstruir la tarea.
+        entry["round_grant"] = {"actor": ronda_concedida.get("actor"),
+                                "reason": ronda_concedida.get("reason")}
     history.append(entry)
     set_phase(state, args.phase)
     state["review_rounds"] = rounds
@@ -2120,7 +2206,7 @@ def cmd_repos(args: argparse.Namespace) -> int:
     para descartar candidatos: en el caso de campo el arquitecto descartó 48 de
     51 y el plan quedó en dos repos. Los otros tres no tenían nada que
     implementar, revisar ni shippear, así que nunca iban a tener veredicto ni
-    entrada en ship.log, y `review → ship` (que los exige a todos) no podía
+    entrada en el ledger, y `review → ship` (que los exige a todos) no podía
     prosperar NUNCA. La tarea quedaba trabada en review con el código ya en
     main y desplegado verde: contabilidad trabada, no trabajo pendiente. La
     única salida era editar state.json a mano, prohibido por AGENTS.md. O sea:
@@ -2130,7 +2216,7 @@ def cmd_repos(args: argparse.Namespace) -> int:
     así que va fail-closed y solo alcanza al repo que no produjo NADA:
       · con veredicto sellado → no se quita: ese repo se revisó, y borrarlo del
         alcance borraría la prueba de que fue parte de la tarea.
-      · con entrada en ship.log → no se quita: ya shippeó.
+      · con entrada en el ledger de ships → no se quita: ya shippeó.
       · nombrado en dag.json → no se quita: el DAG ES el plan, y sacarlo solo
         de state.repos no destraba nada (`repos_missing_verdict` lee las dos
         fuentes en unión). Si el plan lo descartó, el DAG no debería nombrarlo.
@@ -2172,16 +2258,7 @@ def cmd_repos(args: argparse.Namespace) -> int:
     # ── Lo que ya produjo algo no se borra del alcance ────────────────
     if removed:
         planeados = repos_planned(task_dir)
-        shipped = set()
-        log = task_dir / "ship.log"
-        if log.exists():
-            for line in log.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    shipped.add(json.loads(line).get("repo"))
-                except json.JSONDecodeError:
-                    continue
+        shipped = repos_shipped(task_dir)
         for repo in removed:
             if (task_dir / f"verdict-{repo}.json").exists():
                 fail("POLICY-REPOS-005",
@@ -2194,8 +2271,8 @@ def cmd_repos(args: argparse.Namespace) -> int:
             if repo in shipped:
                 fail("POLICY-REPOS-005",
                      f"'{repo}' ya shippeó (aparece en tasks/{task_dir.name}/"
-                     "ship.log): quitarlo del alcance dejaría un cambio en main "
-                     "que ninguna tarea declara")
+                     f"{SHIP_LEDGER}, o en el ship.log viejo): quitarlo del "
+                     "alcance dejaría un cambio en main que ninguna tarea declara")
             if repo in planeados:
                 fail("POLICY-REPOS-006",
                      f"'{repo}' está en tasks/{task_dir.name}/dag.json, que ES el "
@@ -2373,6 +2450,292 @@ def cmd_evidence_policy(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── LA RONDA QUE CONCEDE UN HUMANO ────────────────────────────────────
+# POLICY-LIMIT-001 termina en "escala a humano" en sus tres bocas, y hasta acá
+# ese humano no tenía NINGÚN comando con el que conceder la ronda: el CLI no
+# exponía grant/waive-round/override de ninguna clase. O sea que el mensaje
+# prescribía una acción que el propio harness no implementaba, y la tarea se
+# quedaba en la fase sin camino legítimo (editar state.json a mano lo prohíbe
+# AGENTS.md, y encima queda indistinguible de una edición no declarada).
+#
+# La concesión vive en `state.round_grants[]`, con el mismo patrón que
+# `cost_waivers` (#90/#103/#122): quién, cuándo, por qué, y una entrada en
+# history[] sin `to`, que phase_is_declared saltea porque no mueve la fase.
+#
+# LO QUE NO ES: un modo de apagar el techo.
+#   · UNA concesión = UNA ronda. La consume la primera ronda que el techo
+#     habría rebotado (queda `used_round` estampado) y no vuelve a servir.
+#   · No se concede por adelantado: la tarea tiene que estar CONTRA el techo,
+#     igual que un cost-waive se ancla a un valor ya medido.
+#   · No se apilan: con una concesión sin usar, la siguiente se rechaza.
+#   · Cada concesión sube el techo de `validate-ship` en exactamente 1, para
+#     que no se repita el #182 (una ronda que el motor concedió y el ship
+#     después rechazó).
+def round_grants(state: dict) -> list:
+    """Las concesiones de ronda del estado, ya filtradas de basura."""
+    grants = state.get("round_grants")
+    if not isinstance(grants, list):
+        return []
+    return [g for g in grants if isinstance(g, dict)]
+
+
+def rondas_concedidas(state: dict, repo: "str | None" = None) -> int:
+    """Cuántas rondas extra concedió un humano.
+
+    El bucket es el repo, y `""` es el contador POR TAREA (el de una transición
+    sin --repo). `repo=None` es la pregunta del ship, que mira la tarea entera:
+    devuelve el máximo por bucket, porque `review_rounds` también es el MÁXIMO
+    entre repos y sumar buckets le regalaría a un repo las rondas de otro."""
+    grants = round_grants(state)
+    if repo is not None:
+        return sum(1 for g in grants if (g.get("repo") or "") == repo)
+    counts = {}
+    for g in grants:
+        bucket = g.get("repo") or ""
+        counts[bucket] = counts.get(bucket, 0) + 1
+    return max(counts.values()) if counts else 0
+
+
+def consumir_ronda_concedida(state: dict, repo: str, ronda: int):
+    """Gasta la concesión pendiente del bucket, o devuelve None si no hay.
+
+    Muta el dict DENTRO de state (round_grants devuelve las mismas referencias),
+    así que el llamador solo tiene que persistir el estado."""
+    for grant in round_grants(state):
+        if (grant.get("repo") or "") != (repo or ""):
+            continue
+        if grant.get("used_round"):
+            continue
+        grant["used_round"] = ronda
+        grant["used_at"] = utcnow()
+        return grant
+    return None
+
+
+def grant_round_cmd(task_name: str, repo: str) -> str:
+    """El comando EXACTO que destraba el techo, para pegarlo en el mensaje."""
+    return ("scripts/harness-policy.py grant-round tasks/" + task_name
+            + (f" --repo {repo}" if repo else "")
+            + " --actor <quien-autoriza> --reason \"<por qué esta ronda más>\"")
+
+
+def cmd_grant_round(args: argparse.Namespace) -> int:
+    """Concede UNA ronda extra de review, con actor y motivo, en el estado.
+
+    Es la otra mitad del "escala a humano" de POLICY-LIMIT-001: el mensaje
+    ordenaba la escalada y no había comando con el que el humano contestara. El
+    #182 cerró el brazo de la ronda concedida POR CONVERGENCIA (que validate-ship
+    rechazaba); este cierra el brazo en que NO hay convergencia, que es
+    justamente cuando el juicio humano es lo único que puede decidir.
+
+    La concesión no mueve la fase ni cuenta la ronda: solo autoriza que la
+    PRÓXIMA entrada a review de ese repo pase el techo una vez."""
+    task_dir = Path(args.task_dir).resolve()
+    policy = load(Path(args.policy), "policy")
+    path = state_path(task_dir)
+    if not (args.reason or "").strip():
+        fail("POLICY-ROUND-001",
+             "una ronda concedida sin motivo es un techo apagado con más pasos: "
+             "--reason \"<por qué esta ronda más, y qué se espera de ella>\"")
+    lock_state(task_dir)
+    state = load(path, "estado")
+    repo = (args.repo or "").strip()
+    maximum, hard, converge = limite_de_rondas(state, policy, repo or None)
+    rounds_by_repo = state.get("review_rounds_by_repo")
+    if not isinstance(rounds_by_repo, dict):
+        rounds_by_repo = {}
+    if repo:
+        llevadas = rounds_by_repo.get(repo)
+        llevadas = llevadas if isinstance(llevadas, int) else 0
+    else:
+        llevadas = state.get("review_rounds")
+        llevadas = llevadas if isinstance(llevadas, int) else 0
+    # No se concede por adelantado, por el mismo motivo que un cost-waive se
+    # ancla al valor medido: una tarea que todavía no llegó al techo no tiene
+    # nada que conceder, y el permiso guardado sería un cheque en blanco que
+    # nadie revisa cuando por fin se cobra.
+    if llevadas < maximum:
+        donde = f"del repo {repo}" if repo else "de la tarea"
+        detalle = (", ".join(f"{r}={n}" for r, n in sorted(rounds_by_repo.items()))
+                   or f"review_rounds={llevadas}")
+        fail("POLICY-ROUND-002",
+             f"las rondas {donde} van en {llevadas} y el máximo es {maximum}: "
+             "todavía no hay techo que conceder, y una concesión guardada de "
+             "antemano es un cheque en blanco. Pedí la ronda por el camino "
+             "normal ('harness-policy.py transition tasks/" + task_dir.name +
+             (f" review --repo {repo}" if repo else " review") +
+             " --actor <quien>') y volvé acá SOLO si POLICY-LIMIT-001 la "
+             f"rebota. Rondas contadas: {detalle}")
+    pendiente = next((g for g in round_grants(state)
+                      if (g.get("repo") or "") == repo and not g.get("used_round")),
+                     None)
+    if pendiente is not None:
+        fail("POLICY-ROUND-003",
+             f"ya hay una ronda concedida SIN USAR para "
+             f"{repo or 'la tarea'} (la autorizó {pendiente.get('actor', '?')} "
+             f"el {pendiente.get('at', '?')}: {pendiente.get('reason', '')}). "
+             "Una concesión es UNA ronda: gastá esa antes de pedir otra, "
+             "porque dos concesiones vivas a la vez son un techo apagado")
+    entry = {
+        "repo": repo, "actor": args.actor, "reason": args.reason,
+        "at": utcnow(), "round": llevadas + 1,
+        "max_review_rounds": maximum, "hard_ceiling": hard,
+        "converging": converge,
+    }
+    grants = round_grants(state)
+    grants.append(entry)
+    state["round_grants"] = grants
+    # kind=round-grant: NO declara `to`, así que phase_is_declared no lo lee
+    # como un movimiento de fase (misma familia que cost-waive, budget y repos).
+    state.setdefault("history", []).append({
+        "kind": "round-grant", "repo": repo, "round": entry["round"],
+        "actor": args.actor, "reason": args.reason,
+    })
+    atomic(path, state)
+    etiqueta = f"del repo {repo}" if repo else "de la tarea"
+    emit_bus(task_dir, "decision",
+             f"ronda {entry['round']} de review {etiqueta} concedida por "
+             f"{args.actor}: {args.reason}")
+    print(f"🎟️  {task_dir.name}: ronda {entry['round']} de review {etiqueta} "
+          f"concedida (autoriza {args.actor}). Es UNA sola: la consume la "
+          "próxima entrada a review que el techo habría rebotado, y queda en "
+          "history[] con quién y por qué")
+    return 0
+
+
+def delta_hash(task_dir: Path) -> "str | None":
+    """La identidad de contenido del delta-spec vigente, o None si no hay."""
+    delta = task_dir / "delta-spec.md"
+    if not delta.is_file():
+        return None
+    return hashlib.sha256(delta.read_bytes()).hexdigest()
+
+
+def reseal_delta_cmd(task_name: str, repo: str) -> str:
+    """El comando EXACTO del re-sello, para pegarlo en el mensaje del gate."""
+    return ("scripts/harness-policy.py reseal-delta tasks/" + task_name
+            + f" --repo {repo or '<repo>'} --actor <quien-autoriza> "
+              "--reason \"<por qué el delta vigente es el correcto>\"")
+
+
+def cmd_reseal_delta(args: argparse.Namespace) -> int:
+    """Re-emite el sello del delta sobre un veredicto ya shippeado, con rastro.
+
+    POR QUÉ EXISTE: editar tasks/<id>/delta-spec.md entre el veredicto y el ship
+    dejaba la tarea TRABADA de forma terminal, y no en un caso raro: escribir el
+    requirement de un blocking tardío es exactamente lo que el flujo pide. Las
+    tres salidas están cerradas por construcción una vez que el ship pasó:
+      · archive lo rechaza (POLICY-ARCHIVE-001: el hash del delta no es el que
+        ningún verdict declara haber revisado);
+      · deploy → review no existe en el carril (POLICY-TRANSITION-001);
+      · el re-scaffold del veredicto exige un worktree que el propio ship borró,
+        y recrearlo nace en la trunk, o sea que invalida toda la evidencia.
+    Resultado medido: el cambio en producción y verificado, y el ciclo SDD sin
+    cerrar, o sea el delta que nunca se fusiona a la spec maestra.
+
+    QUÉ HABILITA, Y NADA MÁS: re-sellar el delta VIGENTE sobre el veredicto de
+    un repo cuyo cambio revisado ya es inmutable en la trunk. No re-abre el
+    juicio, no toca `verdict`/`qa`, no mueve la fase.
+
+    LOS TRES CANDADOS, que son lo que lo distingue de editar el delta sin rastro:
+      · solo post-ship (fase deploy o archive): antes del ship el camino legítimo
+        existe y es /review, que es juicio de verdad y no un sello;
+      · solo con el repo aterrizado en la trunk según el ledger de ships: sin esa
+        prueba, el cambio todavía se puede corregir por el camino normal;
+      · el hash viejo, el nuevo, quién y por qué quedan en el veredicto Y en
+        state.json (`delta_reseals[]` + history[]), así que la concesión es
+        visible para cualquiera que audite la tarea después."""
+    task_dir = Path(args.task_dir).resolve()
+    path = state_path(task_dir)
+    repo = (args.repo or "").strip()
+    if not (args.reason or "").strip():
+        fail("POLICY-RESEAL-001",
+             "re-sellar sin motivo es editar el delta sin rastro con más pasos: "
+             "--reason \"<qué cambió en el delta y por qué el veredicto sigue "
+             "valiendo>\"")
+    lock_state(task_dir)
+    state = load(path, "estado")
+    phase = state.get("phase")
+    if phase not in ("deploy", "archive"):
+        fail("POLICY-RESEAL-002",
+             f"la tarea está en fase {phase!r} y el re-sello es SOLO post-ship "
+             "(deploy o archive). Antes del ship el camino legítimo existe y es "
+             "el juicio de verdad: corré /review del repo "
+             "(scripts/verdict-scaffold.sh --rebase conserva lo que el delta no "
+             "tocó), que re-emite el veredicto sobre el delta vigente. El "
+             "re-sello solo existe para el estado en que ese camino está cerrado "
+             "por construcción: el worktree ya no está y la fase no vuelve")
+    verdict_path = task_dir / f"verdict-{repo}.json"
+    if not repo or not verdict_path.is_file():
+        disponibles = sorted(p.name[len("verdict-"):-len(".json")]
+                             for p in task_dir.glob("verdict-*.json"))
+        fail("POLICY-RESEAL-003",
+             f"no hay tasks/{task_dir.name}/verdict-{repo or '<repo>'}.json que "
+             "re-sellar: el sello vive EN el veredicto, así que sin veredicto no "
+             "hay nada que re-emitir. Veredictos de esta tarea: "
+             + (", ".join(disponibles) or "ninguno"))
+    vigente = delta_hash(task_dir)
+    if vigente is None:
+        fail("POLICY-RESEAL-004",
+             f"no existe tasks/{task_dir.name}/delta-spec.md: sin delta no hay "
+             "sello que emitir, y sin delta POLICY-ARCHIVE-001 tampoco frena "
+             "(no hay nada que fusionar a las specs maestras)")
+    # ── EL CANDADO QUE SOSTIENE TODO: el cambio ya es inmutable en la trunk ──
+    # El re-sello no re-juzga: acepta que el commit que el reviewer miró ya
+    # aterrizó y no se puede volver a tocar. Si NO aterrizó, esa premisa es
+    # falsa y el camino correcto sigue siendo el review de verdad.
+    aterrizados = [e for e in ship_ledger(task_dir)
+                   if e.get("repo") == repo and e.get("landed") is not False]
+    if not aterrizados:
+        fail("POLICY-RESEAL-005",
+             f"'{repo}' no tiene un ship aterrizado en tasks/{task_dir.name}/"
+             f"{SHIP_LEDGER} (ni en el ship.log viejo): el re-sello se apoya en "
+             "que el commit revisado ya es INMUTABLE en la trunk, y sin esa "
+             "prueba estaría blanqueando un delta que nadie revisó sobre un "
+             "cambio que todavía se puede corregir. Si el PR sigue abierto, "
+             "esperá el merge; si el repo no shippeó, corré /review")
+    verdict = load(verdict_path, f"veredicto de {repo}")
+    viejo = verdict.get("delta_spec_sha256")
+    viejo = viejo if isinstance(viejo, str) else ""
+    if viejo == vigente:
+        print(f"✅ {task_dir.name}: el veredicto de {repo} ya sella el delta "
+              f"vigente ({vigente[:12]}). Nada que hacer")
+        return 0
+    sello = {
+        "from_sha256": viejo, "to_sha256": vigente, "actor": args.actor,
+        "reason": args.reason, "at": utcnow(), "phase": phase,
+        "landed_sha": aterrizados[-1].get("sha") or "",
+    }
+    reseals = verdict.get("delta_reseals")
+    reseals = [r for r in reseals if isinstance(r, dict)] if isinstance(reseals, list) else []
+    reseals.append(sello)
+    verdict["delta_reseals"] = reseals
+    verdict["delta_spec_sha256"] = vigente
+    atomic(verdict_path, verdict)
+    # El mismo hecho en el ESTADO, que es lo que se lee para reconstruir la
+    # tarea. `kind` sin `to`: no mueve la fase y phase_is_declared lo saltea,
+    # igual que cost-waive, budget, repos y round-grant.
+    en_estado = state.get("delta_reseals")
+    en_estado = [r for r in en_estado if isinstance(r, dict)] if isinstance(en_estado, list) else []
+    en_estado.append(dict(sello, repo=repo))
+    state["delta_reseals"] = en_estado
+    state.setdefault("history", []).append({
+        "kind": "delta-reseal", "repo": repo, "actor": args.actor,
+        "reason": args.reason, "from_sha256": viejo, "to_sha256": vigente,
+    })
+    atomic(path, state)
+    emit_bus(task_dir, "decision",
+             f"delta-spec re-sellado sobre el veredicto de {repo} "
+             f"({(viejo or 'sin sello')[:12]} → {vigente[:12]}, autoriza "
+             f"{args.actor}): {args.reason}")
+    print(f"🔏 {task_dir.name}: verdict-{repo}.json re-sella el delta vigente "
+          f"({(viejo or 'sin sello previo')[:12]} → {vigente[:12]}, autoriza "
+          f"{args.actor}). Queda en el veredicto y en state.delta_reseals[]; "
+          "POLICY-ARCHIVE-001 ya no frena, y una edición POSTERIOR del delta "
+          "vuelve a frenar como siempre")
+    return 0
+
+
 def limite_de_rondas(state: dict, policy: dict, repo: "str | None" = None):
     """El límite de rondas de review: (máximo, techo duro, ¿converge?).
 
@@ -2442,8 +2805,13 @@ def cmd_validate_ship(args: argparse.Namespace) -> int:
              f"Si nadie la promueve, la tarea termina en review y ese es el "
              f"resultado correcto")
     # ── EL MISMO LÍMITE QUE `transition`, PORQUE LA REGLA ES UNA (#182) ──
+    # Y las rondas que un humano concedió con `grant-round` suben el techo acá
+    # EXACTAMENTE lo que autorizaron (una por concesión). Es la misma lección
+    # del #182 en su otro brazo: una ronda que el motor dejó pasar y el ship
+    # después rechaza es una tarea trabada con el trabajo terminado.
     maximum, hard, converge = limite_de_rondas(state, policy)
-    techo = hard if converge else maximum
+    concedidas = rondas_concedidas(state)
+    techo = (hard if converge else maximum) + concedidas
     rondas = state.get("review_rounds")
     if not isinstance(rondas, int):
         fail("POLICY-LIMIT-001",
@@ -2458,10 +2826,16 @@ def cmd_validate_ship(args: argparse.Namespace) -> int:
                  f". El techo se queda en {maximum} porque los bloqueantes de "
                  "esta tarea NO vienen bajando: sin esa serie no hay excepción "
                  "por convergencia que aplicar")
+        if concedidas:
+            extra += (f" (ya cuenta {concedidas} ronda(s) concedida(s) a mano "
+                      "en state.round_grants[])")
         fail("POLICY-LIMIT-001",
              f"review_rounds={rondas} excede el techo {techo}{extra}. Un repo "
              "que no converge en esa cantidad de rondas necesita un humano, no "
-             "otra vuelta: escalá con el historial de veredictos")
+             "otra vuelta: escalá con el historial de veredictos. Si ese humano "
+             "ya miró y acepta la ronda de más, la concede con rastro y el "
+             "techo sube en 1: "
+             + grant_round_cmd(task_dir.name, "<repo>"))
     verdict = load(Path(args.verdict), "veredicto")
     if verdict.get("schema") != 1:
         fail("POLICY-SHIP-002", "veredicto sin schema v1")
@@ -2580,6 +2954,34 @@ def build_parser() -> argparse.ArgumentParser:
     waive.add_argument("--actor", required=True)
     waive.add_argument("--reason", required=True)
     waive.set_defaults(func=cmd_cost_waive)
+    grant = sub.add_parser("grant-round",
+                           help="concede UNA ronda extra de review cuando "
+                                "POLICY-LIMIT-001 manda escalar a humano: la "
+                                "gasta la próxima entrada a review y queda en "
+                                "history[] con actor y motivo")
+    grant.add_argument("task_dir")
+    grant.add_argument("--repo", default="",
+                       help="repo cuya ronda se concede; sin él se concede "
+                            "sobre el contador POR TAREA (el de una transición "
+                            "sin --repo)")
+    grant.add_argument("--actor", required=True)
+    grant.add_argument("--reason", required=True,
+                       help="qué miró el humano y qué espera de esta ronda")
+    grant.set_defaults(func=cmd_grant_round)
+    reseal = sub.add_parser("reseal-delta",
+                            help="re-emite el sello del delta vigente sobre el "
+                                 "veredicto de un repo YA aterrizado en la "
+                                 "trunk (solo en deploy/archive): destraba "
+                                 "POLICY-ARCHIVE-001 dejando rastro")
+    reseal.add_argument("task_dir")
+    reseal.add_argument("--repo", required=True,
+                        help="repo cuyo veredicto re-sella el delta; su ship "
+                             "tiene que estar aterrizado en el ledger")
+    reseal.add_argument("--actor", required=True)
+    reseal.add_argument("--reason", required=True,
+                        help="qué cambió en el delta y por qué el veredicto "
+                             "sigue valiendo sobre el cambio ya inmutable")
+    reseal.set_defaults(func=cmd_reseal_delta)
     dmode = sub.add_parser("delivery-mode",
                            help="entrega efectiva en una línea: review|prs|trunk, "
                                 "o 'flow' si la tarea no declara ninguna")

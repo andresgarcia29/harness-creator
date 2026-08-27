@@ -8,6 +8,106 @@ contra una instalación real).
 ## No publicado
 
 ### Corregido
+- **`bs_install` bajaba binarios linux/amd64 en cualquier host (#236).** Las
+  recetas de bootstrap fijaban la plataforma en la URL: en macOS instalaban un
+  ELF de Linux, `command -v` lo veía y el doctor cantaba verde, y kubectl/bd/
+  terraform reventaban con "exec format error" a mitad de tarea. Ahora
+  `bs_platform` resuelve OS/ARCH una vez por `uname -s`/`uname -m` y cada receta
+  interpola el naming REAL de su proveedor (verificado contra los assets
+  publicados: k8s usa `os/arch`, hashicorp `os_arch`, node `darwin-arm64`/`x64`,
+  gcloud `darwin-arm`). Si el proveedor no publica artefacto para el par
+  detectado, `_bs_plat_ok` corta RUIDOSO antes de descargar nada, con la lista
+  real de plataformas soportadas y la remediación (awscli en macOS: `brew
+  install awscli` o el `.pkg`; antes copiaba ELFs de Linux al PATH sin una
+  queja). Test nuevo `test_bootstrap_platform.sh` (44 aserciones, sin red)
+  ejercita las 8 recetas del template real en 3 plataformas.
+- **POLICY-LIMIT-001 ordenaba "escala a humano" sin darle comando al humano
+  (#235).** Los tres `fail()` del techo de rondas de review pedían escalar con
+  el historial de veredictos, y el CLI no tenía ningún subcomando con el que ese
+  humano concediera la ronda: la tarea quedaba atorada sin camino legítimo.
+  Nuevo `grant-round <task-dir> [--repo <repo>] --actor <quien> --reason
+  <texto>`, con el patrón de `cost_waivers`: la concesión queda auditada en
+  `state.round_grants[]`, vale exactamente UNA ronda (gastada, la siguiente
+  vuelve a rebotar), no se concede por adelantado ni se apilan dos vivas, y
+  `validate-ship` sube el techo en exactamente lo concedido. Los mensajes de
+  rechazo ahora pegan el comando exacto.
+- **Editar `delta-spec.md` entre el veredicto y el ship trababa la tarea de
+  forma terminal (#231).** POLICY-ARCHIVE-001 rechazaba archive porque el hash
+  del delta no coincidía con ningún veredicto, la vuelta a review no existe en
+  el carril, y el worktree que el re-scaffold exige lo borró el propio ship: las
+  tres salidas cerradas por construcción, con el cambio ya corriendo en
+  producción. Nuevo `reseal-delta <task-dir> --repo <repo> --actor <quien>
+  --reason <texto>`: solo en fase deploy/archive, solo con el repo aterrizado en
+  la trunk según el ledger, re-emite el sello sobre el delta vigente dejando
+  rastro completo (hash viejo, hash nuevo, actor, motivo) en el veredicto y en
+  `state.delta_reseals[]`. No es permiso permanente: una edición posterior del
+  delta vuelve a frenar. El gate nombra el comando en su remediación.
+- **El ledger de ships se llamaba `ship.log` y una redirección lo destruía
+  (#232).** `tasks/<id>/ship.log` era un ledger JSONL, pero su nombre es
+  indistinguible de "el archivo donde guardo la salida del ship": el
+  `> tasks/<id>/ship.log 2>&1` que cualquier orquestador escribe lo abría con
+  O_TRUNC y la prosa posterior pisaba el JSON byte a byte. El ship salía 0, el
+  push aterrizaba, y la tarea quedaba clavada en review (POLICY-SHIP-004) con el
+  código ya en main. La contabilidad vive ahora en `tasks/<id>/ship-ledger.jsonl`
+  y `ship.log` queda libre para lo que su nombre promete. Todos los escritores
+  migrados (ship.sh, instance-ship.sh); todos los lectores (harness-policy,
+  deploy-watch, ship-wave, ticket-close, ui/server) leen la UNIÓN de ambos
+  archivos filtrando a líneas JSON válidas, porque una tarea en vuelo durante el
+  update tiene la mitad de sus ships en cada uno. Además `ledger_append` relee
+  la línea tras anexarla y grita con el comando de reconstrucción si no
+  sobrevivió.
+- **Ningún gate tenía deadline: una suite colgada paraba la tarea para siempre
+  y en silencio (#227).** Medido: un precheck llevaba 4 días 15 horas bloqueado
+  en `anon_pipe_read`, con cero CPU y nada en el bus, indistinguible de "está
+  corriendo", más huérfanos `vitest` con PPID 1 ocupando puertos. Ahora
+  `HARNESS_GATE_TIMEOUT_SECS` (default 3600; `0` lo apaga; un valor ilegible cae
+  al default diciéndolo) gobierna los gates de `par()`: cada slot nace líder de
+  su propio grupo de procesos (`set -m` en el fork, porque `setsid` no existe en
+  macOS), un watchdog lo mata al vencer (TERM al grupo, 5 s de gracia, KILL) y
+  el rojo nombra el gate, el comando colgado, el plazo y el knob para subirlo.
+  `on_exit` se lleva por grupo lo que quede vivo: un Ctrl-C ya no deja nietos
+  escuchando puertos.
+- **`pull-all.sh` salía 0 en un workspace sin clones (#233).** manifest.yaml
+  declaraba N repos, `repos/` no existía, y ningún script del plugin lo
+  materializaba: sin loop local, sin grafo, sin worktrees, y el onboarding sin
+  comando que lo resolviera. Ahora pull-all clona lo que falte desde el manifest
+  (mismo parseo a mano que ya usa harness-policy, clones en paralelo, los
+  archivados excluidos, un `repos/<nombre>` no-git no se pisa) antes de su loop
+  de pull. Un repo declarado SIN `url:` se dice dos veces y nunca se calla, un
+  clone fallido es `exit 1` con su propia línea de resumen, y la segunda corrida
+  es idempotente.
+- **`deploy-watch.sh` daba tres cegueras sobre un rollout sano (#229).** (1) El
+  tramo de rollout contaba pods de CronJob YA TERMINADOS (ready=false, dueño
+  Job) como "réplicas viejas sirviendo" porque comparten las labels de Helm del
+  Deployment, y quemaba el timeout entero: ahora `pods_sirviendo` filtra a
+  Running + ready + sin dueño Job antes de comparar juegos de imagen. (2) El
+  tramo de kargo consultaba Promotions en un namespace fijo y convertía la lista
+  vacía en "es la prueba de que el artefacto no llegó al warehouse", que git log
+  refutaba: el namespace se resuelve desde la app real (con `KARGO_PROJECT` y
+  `kargo_project:` en answers como overrides), la lista vacía se reporta como
+  hecho sobre ESTA consulta, y una respuesta HTML (login SSO) se reporta como
+  fallo de credencial, no como hecho sobre el warehouse. (3) KUBECONFIG: si no
+  está seteado y existe `.secrets.d/kubeconfig` se exporta solo, y un probe
+  acotado dice "kubectl no alcanza el cluster" en vez de dejar que cada tramo
+  muera por un timeout de 300 s indistinguible de un rollout lento.
+- **`harness-bug.sh check` decidía la propiedad por el prefijo `scripts/` y no
+  por procedencia (#228).** El mismo defecto que el #104 arregló en
+  guard-canonical, vivo en el otro lugar que decide lo mismo: un script propio
+  del workspace bajo `scripts/` se clasificaba "plugin", el agente se negaba a
+  arreglarlo por la Ley 12 y abría un issue upstream que nadie podía tomar.
+  Ahora `owner_of` pregunta por procedencia real (la lista de lo que el
+  generador instala, en unión con los templates del plugin en disco, resueltos
+  como en harness-version), y el veredicto de un script de instancia dice
+  explícitamente que la Ley 12 no aplica. Auditados los demás lugares que miran
+  ese prefijo: ninguno decide pertenencia.
+- **El allowlist generado no admitía la forma en que el propio harness escribe
+  sus comandos (#230).** harness-init concedía `Bash(bash scripts/*)` y
+  variantes con intérprete, pero /smart y CLAUDE.md escriben `scripts/x.sh`
+  pelado, que no matchea ninguna regla: el relevo headless probaba un comando,
+  recibía "requires approval", concluía "nací amordazado" y cerraba el turno sin
+  mover la fase (dos sesiones seguidas perdidas sobre un deploy ya verde). El
+  template suma `Bash(scripts/*)`, así la forma documentada y la forma con
+  prefijo conceden igual y el deny sigue mandando.
 - **`--verify` verificaba la DECLARACIÓN del update, no los archivos.** Comparaba
   el string que el propio update escribió en `.harness-templates` contra el
   digest del MANIFEST del tag, o sea confirmaba "copié del set correcto" y no

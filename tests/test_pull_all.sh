@@ -5,7 +5,9 @@
 # un repo salteado por un artefacto untracked quedó 16 commits atrás y el
 # "todo al día" del final lo tapó; las auditorías corrieron sobre código que
 # ya no existía), mugre solo-untracked NO impide el pull (el rebase no la
-# toca), y un origin roto es fallo con exit 1, no silencio.
+# toca), y un origin roto es fallo con exit 1, no silencio. Y (#233) que un
+# workspace recién creado se MATERIALICE: manifest.yaml declara los repos y
+# repos/ ni existe, así que pull-all clona lo que falta antes de pullear.
 set -u
 . "$(dirname "$0")/lib.sh"
 t_ws
@@ -127,5 +129,78 @@ git -C "$WS/repos/enrama2" checkout -q main
 out="$(bash "$WS/scripts/pull-all.sh" 2>&1)"; rc=$?
 assert_eq 0 "$rc" "todo limpio: exit 0"
 assert_contains "$out" "todo al día" "y el resumen de siempre vuelve"
+
+# ── #233: workspace RECIÉN CREADO (manifest con repos, repos/ inexistente) ──
+# Ningún script del plugin materializaba los clones: pull-all iteraba repos/*/,
+# no encontraba nada y salía 0 con "sin repos git". El onboarding no tenía
+# comando que resolviera el estado inicial y el único síntoma era un verde.
+# Los origins son repos git LOCALES (file://): la suite no toca la red.
+mk_origin() {  # mk_origin <nombre> → solo el bare origin, sin clon local
+  local n="$1" work="$WS/seedf-$1"
+  git init -q --bare -b main "$WS/origins/$n.git"
+  git init -q -b main "$work" && git_id "$work" commit -q --allow-empty -m base
+  git -C "$work" remote add origin "$WS/origins/$n.git"
+  git -C "$work" push -q origin main
+}
+mk_origin uno; mk_origin dos
+
+FRESH="$WS/fresh"
+mkdir -p "$FRESH/scripts"
+cp "$ROOT/templates/scripts/pull-all.sh" "$FRESH/scripts/"
+cat > "$FRESH/manifest.yaml" <<EOF
+project: "acme"
+harness_version: "0.0.0-test"
+
+repos:
+  - name: uno
+    url: file://$WS/origins/uno.git
+    branch: main
+    kind: service
+  - name: dos
+    url: "file://$WS/origins/dos.git"
+    kind: library
+  - name: sin-remoto
+    kind: docs
+#  - name: comentado
+#    url: file://$WS/origins/comentado.git
+
+dag:
+  - name: no-soy-un-repo
+    url: file://$WS/origins/no-soy-un-repo.git
+EOF
+assert_no_file "$FRESH/repos" "el workspace nace SIN repos/ (el estado que nadie resolvía)"
+
+echo "── #233: materializar repos/ desde manifest.yaml"
+out="$(bash "$FRESH/scripts/pull-all.sh" 2>&1)"; rc=$?
+assert_eq 0 "$rc" "workspace recién creado: exit 0 (clona y pullea)"
+assert_contains "$out" "✓ clonado uno" "clona el repo declarado en el manifest"
+assert_contains "$out" "✓ clonado dos" "y el segundo también (url entre comillas)"
+assert_file "$FRESH/repos/uno/.git/HEAD" "uno quedó clonado de verdad"
+assert_file "$FRESH/repos/dos/.git/HEAD" "dos quedó clonado de verdad"
+assert_not_contains "$out" "sin repos git" "ya no sale 0 diciendo que no hay nada que hacer"
+assert_contains "$out" "sin-remoto" "el repo del manifest SIN url se nombra (no se calla)"
+assert_contains "$out" "SIN url" "y se dice exactamente qué le falta"
+assert_not_contains "$out" "todo al día" "con un repo declarado sin clonar, el resumen no miente"
+assert_no_file "$FRESH/repos/no-soy-un-repo" "la lista dag: no aporta repos falsos"
+assert_no_file "$FRESH/repos/comentado" "los ejemplos comentados del template no ensucian"
+
+# segunda corrida: idempotente (no re-clona) y a partir de acá es un pull normal
+echo marca > "$FRESH/repos/uno/.marca"
+git_id "$WS/seedf-dos" commit -q --allow-empty -m avance
+git -C "$WS/seedf-dos" push -q origin main
+nuevo_dos="$(git -C "$WS/seedf-dos" rev-parse --short HEAD)"
+out="$(bash "$FRESH/scripts/pull-all.sh" 2>&1)"; rc=$?
+assert_eq 0 "$rc" "segunda corrida: exit 0"
+assert_not_contains "$out" "clonado uno" "idempotente: lo ya clonado NO se re-clona"
+assert_file "$FRESH/repos/uno/.marca" "y el clon existente no se pisa"
+assert_contains "$out" "✓ uno: ya al día" "pasa a pullearse como cualquier clon canónico"
+assert_eq "$nuevo_dos" "$(git -C "$FRESH/repos/dos" rev-parse --short HEAD)" \
+  "dos quedó en el HEAD nuevo del origin (el pull corrió sobre lo recién clonado)"
+
+# un clone que FALLA es fallo visible con exit 1, no un aviso más
+rm -rf "$FRESH/repos/dos" "$WS/origins/dos.git"
+out="$(bash "$FRESH/scripts/pull-all.sh" 2>&1)"; rc=$?
+assert_eq 1 "$rc" "un clone que falla = exit 1 (no silencio)"
+assert_contains "$out" "✗ dos: clone falló" "y se reporta al estilo del script"
 
 t_done

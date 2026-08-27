@@ -3,6 +3,8 @@
 #
 # "Empezar con lo más nuevo" es preparación determinista: cuesta $0 tokens y
 # evita la peor clase de retrabajo (implementar sobre una base vieja). Reglas:
+#   · primero MATERIALIZA: lo que manifest.yaml declara y repos/ no tiene, se
+#     clona (un workspace recién creado no tenía comando que lo poblara)
 #   · paralelo total: el cuello es la red, no el CPU
 #   · un clon SUCIO se salta con aviso (el canónico debe estar limpio; los
 #     cambios viven en worktrees, y un pull --rebase sobre mugre es peligro)
@@ -126,6 +128,113 @@ _is_archived() {  # _is_archived <repo>
   grep -qxF "$1" "$WS/.cache/archived-repos.txt"
 }
 
+# ── LO QUE EL MANIFEST DECLARA Y repos/ NO TIENE, SE CLONA ────────────
+# manifest.yaml es la fuente de verdad de los clones, pero NINGÚN script del
+# plugin los materializaba: en un workspace recién generado repos/ ni existe,
+# este script no tenía sobre qué iterar y salía 0 con "sin repos git". El
+# onboarding no tenía comando que resolviera el estado inicial (sin clones no
+# hay loop local, ni grafo, ni worktrees) y el único síntoma era un verde.
+#
+# Va ACÁ y no en un script aparte a propósito: `make pull` ya es el comando de
+# "poné el workspace en su estado más nuevo", y un clon que falta es
+# exactamente eso. Es idempotente: lo ya clonado no se re-clona, se pullea
+# abajo como siempre.
+#
+# Se clona el HEAD por defecto del origin, NO el `branch:` del manifest: un -b
+# contra una rama que el remoto no tiene revienta el clone entero, y el loop de
+# abajo ya reporta (y con distancia) el árbol que no es la trunk.
+MANIFEST="$WS/manifest.yaml"
+CL="$OUT/clones"
+mkdir -p "$CL"
+
+# Parseo a mano, el MISMO que hace harness-policy.py (repo_kinds/repo_names):
+# se cortan los comentarios primero, así los ejemplos comentados del template no
+# ensucian, y una clave top-level cierra el item en curso, de modo que la lista
+# `dag:` de más abajo no aporte repos falsos. Sale "<nombre>\t<url>" por repo;
+# un repo sin `url:` sale con la url vacía y se REPORTA (no se calla).
+_manifest_repos() {
+  [ -f "$MANIFEST" ] || return 0
+  awk '
+    function flush() { if (n != "") printf "%s\t%s\n", n, u; n=""; u="" }
+    /^[^ \t#]/ { flush(); inrepos = ($0 ~ /^repos:/); next }
+    {
+      sub(/#.*/, ""); line = $0
+      gsub(/^[ \t]+|[ \t]+$/, "", line)
+      if (!inrepos || line == "") next
+      if (line ~ /^-[ \t]*name:/) {
+        flush(); sub(/^-[ \t]*name:[ \t]*/, "", line)
+        gsub(/^["\047]+|["\047]+$/, "", line); n = line
+      } else if (n != "" && line ~ /^url:/) {
+        sub(/^url:[ \t]*/, "", line)
+        gsub(/^["\047]+|["\047]+$/, "", line); u = line
+      }
+    }
+    END { flush() }
+  ' "$MANIFEST"
+}
+
+clone_one() {  # clone_one <nombre> <url> <slot>
+  local name="$1" url="$2" slot="$3"
+  # Mismo estilo que skills-sync.sh: silencioso si sale bien, y si falla dice
+  # qué mirar. </dev/null es obligatorio: esto corre en background compartiendo
+  # el stdin del while de abajo, y un git sobre ssh que pida algo se lo comería.
+  if git clone -q "$url" "$WS/repos/$name" </dev/null >/dev/null 2>&1; then
+    echo "✓ clonado $name (del manifest: $url)" > "$CL/$slot.txt"
+    : > "$CL/$slot.ok"
+  else
+    echo "✗ $name: clone falló (¿existe? ¿acceso?) url: $url" > "$CL/$slot.txt"
+    echo 1 > "$CL/$slot.rc"
+  fi
+}
+
+declared=0; clone_fails=0; nourl_n=0; cloned_n=0; cslot=0
+CPIDS=""
+while IFS="$(printf '\t')" read -r name url; do
+  [ -n "$name" ] || continue
+  # El nombre viene de un archivo de la instancia y se usa para armar una ruta:
+  # misma higiene que el resto del harness (bajo repos/ y sin traversal).
+  case "$name" in
+    */*|.*|*" "*) echo "✗ manifest.yaml: nombre de repo inválido ('$name'); lo ignoro"; continue ;;
+  esac
+  _is_archived "$name" && continue
+  declared=$((declared+1))
+  [ -d "$WS/repos/$name/.git" ] && continue
+  cslot=$((cslot+1))
+  if [ -d "$WS/repos/$name" ]; then
+    echo "✗ $name: repos/$name existe y NO es un clon git; no lo piso (borralo y re-corré make pull)" > "$CL/$cslot.txt"
+    echo 1 > "$CL/$cslot.rc"
+    continue
+  fi
+  if [ -z "$url" ]; then
+    echo "⚠️  $name: declarado en manifest.yaml SIN url; no hay de dónde clonarlo" > "$CL/$cslot.txt"
+    printf '%s\n' "$name" > "$CL/$cslot.nourl"
+    continue
+  fi
+  mkdir -p "$WS/repos"
+  clone_one "$name" "$url" "$cslot" </dev/null &
+  CPIDS="$CPIDS $!"
+done <<EOF
+$(_manifest_repos)
+EOF
+for p in $CPIDS; do wait "$p" 2>/dev/null; done
+for f in "$CL"/*.rc;    do [ -f "$f" ] && clone_fails=$((clone_fails+1)); done
+for f in "$CL"/*.ok;    do [ -f "$f" ] && cloned_n=$((cloned_n+1)); done
+for f in "$CL"/*.nourl; do [ -f "$f" ] && nourl_n=$((nourl_n+1)); done
+if [ "$cslot" -gt 0 ]; then
+  for f in "$CL"/*.txt; do [ -f "$f" ] && cat "$f"; done | sort
+  [ "$cloned_n" -gt 0 ] && echo "── $cloned_n repo(s) del manifest clonados; siguen al pull como el resto"
+fi
+
+# Un repo declarado sin url no se puede materializar NUNCA: es un aviso con
+# remediación exacta, y se dice tanto arriba como en el resumen (si solo se
+# dijera arriba se lo come el scroll, que es la ley del resto del script).
+_report_nourl() {
+  [ "$nourl_n" -gt 0 ] || return 0
+  echo "── ⚠️  $nourl_n repo(s) del manifest SIN url: no se pueden clonar"
+  for f in "$CL"/*.nourl; do [ -f "$f" ] || continue; printf '     %s\n' "$(cat "$f")"; done
+  echo "   Agregale 'url: <remoto-git>' a esa entrada de manifest.yaml y re-corré make pull."
+}
+
 for d in "$WS"/repos/*/; do
   if _is_archived "$(basename "$d")"; then continue; fi
   [ -d "$d/.git" ] || continue
@@ -138,7 +247,16 @@ if [ -d "$WS/.git" ]; then
   pull_one "$WS" "$slot" &
   PIDS="$PIDS $!"
 fi
-[ "$slot" -gt 0 ] || { echo "sin repos git (ni en repos/ ni el workspace)"; exit 0; }
+if [ "$slot" -le 0 ]; then
+  if [ "$declared" -gt 0 ]; then
+    echo "sin repos git: manifest.yaml declara $declared repo(s) y NINGUNO quedó en repos/ (detalle arriba)"
+  else
+    echo "sin repos git (ni en repos/ ni el workspace)"
+  fi
+  _report_nourl
+  [ "$clone_fails" -gt 0 ] && exit 1
+  exit 0
+fi
 
 for p in $PIDS; do wait "$p" 2>/dev/null; done
 
@@ -182,12 +300,23 @@ if [ "$branch_n" -gt 0 ]; then
   echo "   Cuando la rama ya no haga falta: git -C repos/<repo> checkout <trunk> && make pull."
   echo "   (la rama NO se toca sola: puede tener commits sin publicar)"
 fi
+_report_nourl
+if [ "$clone_fails" -gt 0 ]; then
+  echo "── $clone_fails clone(s) del manifest FALLARON; detalle arriba"
+  echo "   Sin ese clon no hay worktree, ni grafo, ni lectura canónica de ese repo."
+fi
 if [ "$fails" -gt 0 ]; then
   echo "── $fails pull(s) FALLARON (red o conflicto de rebase); detalle arriba"
+fi
+if [ "$fails" -gt 0 ] || [ "$clone_fails" -gt 0 ]; then
   exit 1
 fi
 if [ "$skip_n" -gt 0 ] || [ "$branch_n" -gt 0 ]; then
   echo "── al día: $((slot - skip_n - branch_n)) de $slot repos ($skip_n saltados, $branch_n en otra rama; arriba en rojo)"
+elif [ "$nourl_n" -gt 0 ]; then
+  # "todo al día" con un repo del manifest que ni siquiera está clonado es la
+  # misma mentira cara que con uno salteado.
+  echo "── al día: $slot repos ($nourl_n declarado(s) en el manifest sin url, arriba en rojo)"
 else
   echo "── todo al día: $slot repos en paralelo"
 fi

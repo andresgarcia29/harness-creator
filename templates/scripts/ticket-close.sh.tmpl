@@ -154,10 +154,15 @@ for base in "$WS/repos"/*/; do
 $commits
 \`\`\`"
 done
-[ -f "$WS/tasks/$ID/ship.log" ] && evidence="$evidence
-**ship.log**
+# El ledger de ship se llama `ship-ledger.jsonl` desde #232 (el nombre viejo,
+# `ship.log`, invitaba a que un orquestador le redirigiera el stdout del ship
+# encima y lo truncara). Se leen los DOS: una tarea que empezó antes del
+# renombre tiene sus líneas en el archivo viejo.
+ship_ledger_txt="$(cat "$WS/tasks/$ID/ship.log" "$WS/tasks/$ID/ship-ledger.jsonl" 2>/dev/null || true)"
+[ -n "$ship_ledger_txt" ] && evidence="$evidence
+**ship-ledger.jsonl**
 \`\`\`
-$(cat "$WS/tasks/$ID/ship.log")
+$ship_ledger_txt
 \`\`\`"
 
 if [ "$STATUS" = "shipped" ]; then

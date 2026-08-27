@@ -574,7 +574,7 @@ Fíjate en la asimetría del diagrama, porque es **todo** el diseño: el mismo h
 
 **El estado de la tarea también tiene ley.** `harness-policy.py` es el único que mueve las fases, y desde hace poco lo hace bajo un lock exclusivo, porque con varias sesiones abiertas dos comandos concurrentes sobre la misma tarea podían leer el mismo estado y pisarse el registro. Además, cada movimiento queda en `history[]`, y `validate-ship` comprueba que la fase actual sea la que dejó el último movimiento registrado. Editar `state.json` a mano deja de ser un atajo silencioso: falla con `POLICY-STATE-003` y te dice cómo reconstruir el movimiento. Para el caso legítimo de haberse adelantado existe `harness-policy.py rollback`, que solo va hacia atrás, exige un motivo, deja registro y **no cobra una ronda de review** que nunca ocurrió.
 
-En tareas de varios repositorios hay una trampa que el harness ahora cierra: `ship.sh` se corre una vez por repo y exige estar en fase `review`, así que avanzar la fase antes de que el último repo haya publicado dejaba a los que faltaban sin camino de vuelta. `POLICY-SHIP-004` rechaza ese avance mientras quede algún repo con veredicto y sin entrada en `ship.log`, y te dice cuáles faltan.
+En tareas de varios repositorios hay una trampa que el harness ahora cierra: `ship.sh` se corre una vez por repo y exige estar en fase `review`, así que avanzar la fase antes de que el último repo haya publicado dejaba a los que faltaban sin camino de vuelta. `POLICY-SHIP-004` rechaza ese avance mientras quede algún repo con veredicto y sin entrada en `ship-ledger.jsonl` (el ledger de fase: una línea JSON por repo publicado, que ya no se llama `ship.log` porque ese nombre invitaba a redirigirle el stdout del ship encima y truncarlo), y te dice cuáles faltan.
 
 ### ⑦ Deploy: rollback primero, diagnóstico después
 
@@ -978,7 +978,7 @@ templates/         todo lo que se genera:
 
 La suite prueba **el código real de los templates**, no copias ni mocks del sistema bajo prueba, y cada test crea su workspace temporal y lo borra: nada toca tu workspace ni la red. El reloj es de la corrida completa medida en un laptop (9 m 53 s en macOS): crece con la suite, así que tómalo como orden de magnitud y no como promesa.
 
-La tabla de abajo no los lista todos (son 71 archivos): están los que explican mejor qué se protege y por qué. El número lo verifica la propia suite (`test_docs.sh` cuenta los archivos y lo compara con esta línea), porque una cuenta escrita a mano en prosa se queda atrás en tres PRs y nadie se entera.
+La tabla de abajo no los lista todos (son 72 archivos): están los que explican mejor qué se protege y por qué. El número lo verifica la propia suite (`test_docs.sh` cuenta los archivos y lo compara con esta línea), porque una cuenta escrita a mano en prosa se queda atrás en tres PRs y nadie se entera.
 
 | Test | Qué protege |
 |---|---|

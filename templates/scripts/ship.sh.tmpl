@@ -139,6 +139,42 @@ PUSH_RETRY_BUDGET="${HARNESS_PUSH_RETRIES:-20}"
 # reintentan en fase y se vuelven a pisar (manada). El jitter los desincroniza.
 PUSH_BACKOFF_MAX="${HARNESS_PUSH_BACKOFF_MAX:-30}"
 
+# ── EL DEADLINE DE UN GATE: HARNESS_GATE_TIMEOUT_SECS (#227) ──────────
+# Un gate que cuelga no dice ni verde ni rojo: se queda esperando, y ESE
+# silencio es indistinguible de "todavía está trabajando". Caso de campo: un
+# precheck llevaba 4 días y 15 horas bloqueado en `anon_pipe_read`, con 0% de
+# CPU y sin una sola línea en el bus; la tarea simplemente dejó de existir para
+# el pipeline. Y al matarlo por fuera quedaban hijos huérfanos (vitest con
+# PPID 1) ocupando puertos, que estorbaban la corrida siguiente.
+#
+# El cuelgue casi nunca es del harness (era la suite del repo, atascada a mitad
+# de ejecución), y por eso el arreglo no puede ser "arreglar esa suite": lo que
+# faltaba es que un gate SEPA RENDIRSE. Un rojo que dice "el gate lang no
+# terminó en 60 minutos" es accionable; el silencio no lo es.
+#
+# Default generoso a propósito: 60 minutos es más de lo que tarda cualquier
+# suite sana, así que un timeout SIEMPRE significa algo roto, no un gate lento.
+# `0` lo desactiva (para una suite que de verdad tarda más, y para poder
+# comparar contra el comportamiento viejo cuando se depura el propio harness).
+#
+# El deadline lo aplica `par`, o sea que cubre TODO lo que corre en paralelo:
+# los caros (lang, security) y los baratos de la fase 0. Los gates SERIALES
+# quedan fuera, y no por olvido: corren en el proceso del ship, así que no hay
+# un grupo aparte que matar sin matar al ship entero. Si mañana un gate serial
+# se cuelga, la respuesta es mudarlo a `par`, que ya trae el deadline puesto, y
+# no cablearle un timeout suelto que después nadie mantiene.
+#
+# Lo que SÍ cubre el ship entero: su trap de salida se lleva por grupo a todo
+# lo que `par` haya dejado vivo, así que un `timeout` externo o un Ctrl-C ya no
+# dejan nietos huérfanos (ver on_exit).
+GATE_TIMEOUT_SECS="${HARNESS_GATE_TIMEOUT_SECS:-3600}"
+case "$GATE_TIMEOUT_SECS" in
+  ''|*[!0-9]*)
+    echo "⚠️  HARNESS_GATE_TIMEOUT_SECS='$GATE_TIMEOUT_SECS' no es un número de segundos:"
+    echo "   uso el default (3600). Un knob ilegible no puede valer 'sin límite'."
+    GATE_TIMEOUT_SECS=3600 ;;
+esac
+
 # ── EL ROJO QUE NO ES TUYO: HARNESS_KNOWN_BUG='<slot>=<url>' ──────────
 # Caso de campo: un agente en una tarea de PRODUCTO choca con un bug del
 # HARNESS (un gate que revienta, o que hace lo contrario de lo que su cabecera
@@ -534,8 +570,58 @@ precheck_verificado() {  # → completo | ninguno | desconocido
     *)              printf 'ninguno' ;;
   esac
 }
+# ── EL LEDGER NO SE LLAMA COMO UN LOG (#232) ─────────────────────────
+# `tasks/<id>/ship-ledger.jsonl` NO es la salida del ship: es la CONTABILIDAD
+# de fase, una línea JSON por repo publicado, y de ella salen dos decisiones:
+# POLICY-SHIP-004 (si la tarea puede pasar de `review` a `ship`) y el sha que
+# deploy-watch vigila.
+#
+# Se llamaba `ship.log`, y ese nombre es indistinguible de "el archivo donde
+# guardo la salida del ship". Caso de campo, determinista y silencioso en los
+# dos extremos que importan:
+#
+#     bash scripts/ship.sh <task> <repo> > tasks/<task>/ship.log 2>&1
+#
+# El shell abre ese archivo con O_TRUNC y le da el fd a ship.sh como stdout,
+# con un offset que avanza. La línea del ledger se anexa aparte con O_APPEND
+# (en EOF), pero ship.sh sigue imprimiendo DESPUÉS de anexarla, y esas
+# escrituras caen en el offset de stdout, que quedó POR DEBAJO: pisan el JSON
+# byte a byte. El ship sale 0, el push aterriza de verdad, y la tarea queda
+# clavada en `review` con el código ya en main y sin camino a deploy ni a
+# archive. Costó reconstruir la línea a mano.
+#
+# La corrección elimina la causa en vez de detectarla: el ledger se llama
+# `ship-ledger.jsonl` y el nombre `ship.log` queda libre para lo que promete.
+# Los LECTORES (harness-policy.py, deploy-watch.sh, ship-wave.sh, el panel)
+# leen el nuevo y caen al viejo, porque las tareas en vuelo tienen su
+# contabilidad en el nombre anterior.
+ship_ledger() {  # → la ruta del ledger de ESTA tarea
+  printf '%s' "$WS/tasks/$TASK/ship-ledger.jsonl"
+}
+# Y la defensa barata que el issue pedía además del rename: anexar y VOLVER A
+# LEER. Cuesta un grep y convierte un fallo silencioso (ship verde, tarea
+# muerta) en un rojo con la línea servida para reconstruirla. No aborta: el
+# push YA ocurrió cuando esto corre, y morir acá no lo desharía; lo que hace es
+# gritar, dejarlo en el bus y entregar el comando exacto.
+ledger_append() {  # ledger_append <línea-json-sin-newline>
+  local linea="$1" dest; dest="$(ship_ledger)"
+  mkdir -p "$WS/tasks/$TASK" 2>/dev/null || true
+  printf '%s\n' "$linea" >> "$dest" 2>/dev/null || true
+  if grep -qF -- "$linea" "$dest" 2>/dev/null; then return 0; fi
+  echo "❌ escribí la línea del ledger en $dest y al releerla NO ESTÁ."
+  echo "   Eso es contabilidad de fase perdida: POLICY-SHIP-004 va a decir que"
+  echo "   '$REPO' no shippeó (y ya shippeó), así que la tarea se queda en"
+  echo "   review con el código publicado."
+  echo "   ↳ causas conocidas: el ledger es un symlink o no hay permiso de"
+  echo "     escritura; o alguien redirigió el stdout de este ship ENCIMA del"
+  echo "     ledger (ver #232: no lo hagas, usá tasks/$TASK/ship.log)."
+  echo "   ↳ remediación, tal cual, desde el workspace:"
+  echo "     printf '%s\\n' '$linea' >> tasks/$TASK/ship-ledger.jsonl"
+  emit assumption "$REPO: la línea del ledger no sobrevivió a la escritura en tasks/$TASK/ship-ledger.jsonl" false
+  return 1
+}
 # El rastro del bug conocido, en formato JSON y en UN solo lugar: lo comparten
-# el sello del precheck y ship.log. Es ADITIVO (vacío cuando no hubo knob) para
+# el sello del precheck y el ledger. Es ADITIVO (vacío cuando no hubo knob) para
 # no tocar el schema 1 ni los consumidores, que leen con jq y toleran claves
 # nuevas. Tres copias de este printf serían tres formatos que tarde o temprano
 # dejan de coincidir, y el que audita compara literales.
@@ -699,6 +785,20 @@ disco_avisa() {
 }
 on_exit() {
   local rc=$?
+  # ── EL SHIP QUE MUERE NO DEJA HIJOS SUELTOS (#227) ──────────────────
+  # Cuando a este proceso lo mata algo de afuera (un `timeout` del
+  # orquestador, un Ctrl-C, un gate serial que aborta con gates paralelos
+  # todavía vivos), los grupos de `par` quedaban reparentados a init: se
+  # midieron `node (vitest)` con PPID 1 de 4 d 15 h y de 1 d 19 h, ocupando
+  # puertos que estorbaban la corrida siguiente. Se los lleva por GRUPO, que
+  # es lo único que alcanza a los nietos. En el camino feliz esto es un no-op:
+  # collect_gate_slots vacía las dos listas al terminar cada fase.
+  local _p
+  for _p in ${PAR_DOGS:-}; do kill "$_p" 2>/dev/null || true; done
+  for _p in ${PAR_PIDS:-}; do
+    kill -TERM "-$_p" 2>/dev/null || kill -TERM "$_p" 2>/dev/null || true
+  done
+  PAR_DOGS=""; PAR_PIDS=""
   # El marcador se escribe DESDE EL TRAP, no después de llamar a run_lang_gates.
   # Es la unica forma de conservar `set -e` sobre los gates: cualquier
   # construccion tipo `run_lang_gates || rc=$?` DESACTIVA set -e dentro de la
@@ -3748,9 +3848,36 @@ gate_ship_preflight() {
 # veredicto, compliance, policy), después los caros (suites, scanners).
 # Caso de campo: un requirements_uncovered=1 (200ms de jq) se descubría
 # tras pagar una suite de 10 minutos que corría en paralelo.
-GDIR=""; PAR_PIDS=""; PAR_SLOTS=""
+#
+# Y CADA GRUPO TIENE DEADLINE (#227). Ver GATE_TIMEOUT_SECS arriba: un gate sin
+# límite convierte cualquier cuelgue de un repo en una tarea perdida en
+# silencio. El perro guardián vive acá, en `par`, y no dentro de cada gate, por
+# la misma razón que el knob de bug conocido: este es el único punto donde el
+# harness conoce el slot por nombre, que es lo que el rojo tiene que citar.
+GDIR=""; PAR_PIDS=""; PAR_SLOTS=""; PAR_DOGS=""
+# ── MATAR AL GATE NO ALCANZA: HAY QUE MATAR A SU DESCENDENCIA ─────────
+# El gate lanza toolchains que lanzan servidores (vitest, jest, un devserver de
+# vite): matar solo al subshell deja a esos nietos vivos, reparentados a init,
+# escuchando puertos y estorbando la corrida siguiente. Se midieron dos
+# huérfanos de 4 d 15 h y 1 d 19 h en una misma máquina.
+#
+# La forma portable de matarlos a todos es el GRUPO DE PROCESOS: `set -m`
+# (control de trabajos) hace que CADA job en background nazca líder de su
+# propio grupo, y entonces `kill -- -$pid` alcanza a toda la descendencia.
+# `setsid` sería lo natural en Linux, pero no existe en macOS de fábrica
+# (CONTRIBUTING #4), y `set -m` es un builtin que corre igual en bash 3.2.
+#
+# El monitor se enciende SOLO para el fork y se apaga enseguida: dejarlo
+# prendido cambia cómo el shell reparte señales y terminal al resto del script.
+# Y el job nace con `< /dev/null` a propósito: sin control de trabajos bash le
+# daba /dev/null a los background por su cuenta, con control de trabajos ya no,
+# y un gate que leyera stdin se quedaría STOPeado por SIGTTIN, que es
+# exactamente el cuelgue mudo que esto viene a cerrar.
 par() {  # par <slot> <gate-fn>... — corre un grupo de gates en background
   local slot="$1"; shift
+  local monitor_previo=0; case "$-" in *m*) monitor_previo=1 ;; esac
+  set -m 2>/dev/null || true
+  printf '%s\n' "$*" > "$GDIR/$slot.cmd" 2>/dev/null || true
   (
     # PAR_SLOT: copia a scope de subshell. El trap EXIT de un subshell que
     # muere por set -e corre DESPUÉS de desmontar los locals de la función
@@ -3774,9 +3901,60 @@ par() {  # par <slot> <gate-fn>... — corre un grupo de gates en background
     }
     trap group_exit EXIT
     local fn; for fn in "$@"; do "$fn"; done
-  ) > "$GDIR/$slot.out" 2>&1 &
-  PAR_PIDS="$PAR_PIDS $!"
+  ) > "$GDIR/$slot.out" 2>&1 < /dev/null &
+  local pid=$!
+  PAR_PIDS="$PAR_PIDS $pid"
   PAR_SLOTS="$PAR_SLOTS $slot"
+  gate_watchdog "$slot" "$pid"
+  [ "$monitor_previo" -eq 1 ] || set +m 2>/dev/null || true
+}
+
+# El plazo dicho como lo diría una persona, en UN solo lugar: el default son 60
+# minutos, pero los tests (y quien depura) lo ponen en segundos, y "no terminó
+# en 0 minuto(s)" es un mensaje que nadie puede accionar.
+plazo_humano() {  # plazo_humano <segundos> → "N minuto(s)" | "N segundo(s)"
+  if [ "${1:-0}" -ge 60 ]; then printf '%s minuto(s)' "$(($1 / 60))"
+  else printf '%s segundo(s)' "${1:-0}"; fi
+}
+
+# gate_watchdog <slot> <pid-líder-del-grupo>: el perro que le pone hora al gate.
+# Nace DENTRO del monitor de `par`, así que él también es líder de su propio
+# grupo: matar al gate no lo mata a él, y matarlo a él no toca al gate.
+#
+# Duerme A PEDACITOS y no de una sola pieza: con un `sleep 3600` el perro
+# seguiría vivo una hora después de que el gate terminó en dos minutos, y
+# `wait` del padre no volvería hasta entonces. Se despierta cada `paso`
+# segundos y se retira en cuanto ve el `.rc` del grupo, que es el archivo que
+# el trap del subshell escribe al salir (no se inventa un marcador nuevo: dos
+# marcadores para el mismo hecho es un desacuerdo esperando a pasar).
+gate_watchdog() {
+  local slot="$1" pid="$2" paso=1
+  [ -n "$pid" ] || return 0
+  [ "${GATE_TIMEOUT_SECS:-0}" -gt 0 ] || return 0
+  # Granularidad: 1 s cuando el deadline es corto (los tests lo ponen en pocos
+  # segundos), 5 s cuando es el default, para no pagar 3600 forks de `sleep`.
+  [ "$GATE_TIMEOUT_SECS" -gt 120 ] && paso=5
+  (
+    local queda="$GATE_TIMEOUT_SECS"
+    while [ "$queda" -gt 0 ]; do
+      [ -f "$GDIR/$slot.rc" ] && exit 0
+      sleep "$paso"
+      queda=$((queda - paso))
+    done
+    [ -f "$GDIR/$slot.rc" ] && exit 0
+    # El marcador se escribe ANTES de matar: si el kill deja al padre sin
+    # `.rc` (un SIGKILL no corre el trap EXIT del subshell), este archivo es
+    # lo ÚNICO que distingue "murió por deadline" de "murió por un gate rojo".
+    printf '%s\n' "$GATE_TIMEOUT_SECS" > "$GDIR/$slot.timeout" 2>/dev/null || true
+    # Al GRUPO primero (alcanza a los nietos); al pid pelado solo si el grupo
+    # no existe, que es el caso degradado donde `set -m` no tuvo efecto.
+    kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    # Gracia corta para que una suite alcance a volcar su reporte, y después
+    # el que no se negocia: un gate colgado ya demostró que no atiende TERM.
+    sleep 5
+    kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+  ) > /dev/null 2>&1 < /dev/null &
+  PAR_DOGS="${PAR_DOGS:-} $!"
 }
 
 close_serial_gate() {
@@ -3863,11 +4041,47 @@ known_bug_cubre() {  # known_bug_cubre <slot>
 }
 
 collect_gate_slots() {  # collect_gate_slots <etiqueta>: espera, imprime TODO, agrega
-  local pid slot rc failed=""
+  local pid slot rc failed="" secs plazo ultimo cmd
   for pid in $PAR_PIDS; do wait "$pid" 2>/dev/null || true; done
+  # Los perros se retiran solos al ver el `.rc`, pero eso tarda hasta un `paso`:
+  # se los levanta acá para no dejar `sleep` colgando entre las dos fases.
+  for pid in ${PAR_DOGS:-}; do kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; done
+  PAR_DOGS=""
   for slot in $PAR_SLOTS; do
     cat "$GDIR/$slot.out"
     rc="$(cat "$GDIR/$slot.rc" 2>/dev/null || echo 1)"
+    # ── EL GATE QUE NO TERMINÓ (#227) ─────────────────────────────────
+    # Un SIGKILL no corre el trap EXIT del subshell, así que el rojo de un
+    # deadline no puede salir de adentro: lo emite el padre, que es quien
+    # sabe el nombre del slot y cuánto lo esperó. Va ANTES del knob de bug
+    # conocido para que el motivo se lea siempre, aunque el slot se declare.
+    if [ -f "$GDIR/$slot.timeout" ]; then
+      rc=124   # la convención de timeout(1), para que un log grepeable lo diga
+      secs="$(cat "$GDIR/$slot.timeout" 2>/dev/null || echo "${GATE_TIMEOUT_SECS:-0}")"
+      plazo="$(plazo_humano "$secs")"
+      cmd="$(cat "$GDIR/$slot.cmd" 2>/dev/null || echo "$slot")"
+      # El último `── gate: X ──` de la salida parcial NOMBRA el comando que
+      # se colgó (pytest, vitest, buf...), que es lo que el humano necesita
+      # para correrlo a mano. Si no hay ninguno, murió antes de abrir el
+      # primero, y eso también se dice en vez de inventar un culpable.
+      ultimo="$(grep '^── gate: ' "$GDIR/$slot.out" 2>/dev/null | tail -1 \
+                | sed 's/^── gate: //; s/ ──$//')"
+      echo "⛔ el gate '$slot' NO terminó en $plazo y lo maté (deadline del harness)."
+      if [ -n "$ultimo" ]; then
+        echo "   · se colgó en: $ultimo"
+      else
+        echo "   · no llegó a abrir ningún gate: se colgó antes del primero"
+      fi
+      echo "   · lo que corría: $cmd"
+      echo "   · maté TODO su grupo de procesos, no solo al gate: los hijos que"
+      echo "     dejan puertos ocupados (vitest, jest, un devserver) se van con él."
+      echo "   ↳ esto casi nunca es tu diff: una suite que no termina suele estar"
+      echo "     esperando algo (modo watch, un puerto tomado, un mock sin cerrar)."
+      echo "     Corré ese comando a mano en el worktree y mirá dónde se para."
+      echo "   ↳ si de verdad tarda más que eso, subí el deadline para esta corrida:"
+      echo "     HARNESS_GATE_TIMEOUT_SECS=$((secs * 2)) scripts/ship.sh ..."
+      emit gate "$slot: NO terminó en $plazo, lo mató el deadline del harness ($REPO)" false "" "$secs"
+    fi
     # El knob se consulta ACÁ y no dentro de cada gate: este es el único punto
     # donde el harness ya conoce el slot por nombre, que es la granularidad que
     # el mensaje de error imprime y por lo tanto la única que un agente puede
@@ -3877,14 +4091,14 @@ collect_gate_slots() {  # collect_gate_slots <etiqueta>: espera, imprime TODO, a
       KNOWN_BUG_USED="$KNOWN_BUG"
       echo "⚠️  slot '$slot' rojo por BUG CONOCIDO del harness: ${KNOWN_BUG#*=}"
       echo "   NO es un verde: es una condición DECLARADA. Queda en el bus, en el"
-      echo "   sello del precheck, en el veredicto y en ship.log. Quitá el"
+      echo "   sello del precheck, en el veredicto y en ship-ledger.jsonl. Quitá el"
       echo "   workaround cuando el issue cierre."
       emit assumption "$REPO: slot '$slot' rojo declarado como bug conocido del harness (${KNOWN_BUG#*=})" false
       rc=0
     fi
     [ "$rc" -eq 0 ] || failed="$failed $slot"
   done
-  rm -rf "$GDIR"; PAR_PIDS=""; PAR_SLOTS=""
+  rm -rf "$GDIR"; PAR_PIDS=""; PAR_SLOTS=""; PAR_DOGS=""
   if [ -n "$failed" ]; then
     CURRENT_GATE="$1:$failed"
     echo "❌ gates rojos ($1):$failed — TODOS los errores están arriba. Corrige TODO"
@@ -3896,7 +4110,7 @@ collect_gate_slots() {  # collect_gate_slots <etiqueta>: espera, imprime TODO, a
 run_phase0_gates() {
   close_serial_gate
   GDIR="$(mktemp -d "${TMPDIR:-/tmp}/ship-gates.XXXXXX")"
-  PAR_PIDS=""; PAR_SLOTS=""
+  PAR_PIDS=""; PAR_SLOTS=""; PAR_DOGS=""
   # En precheck no hay veredicto todavía (ese es justamente el punto: correr
   # lo mecánico ANTES de gastar una ronda de reviewer). Los slots del
   # veredicto van SEPARADOS: dentro de uno solo, set -e aborta en el primer
@@ -3918,8 +4132,15 @@ run_phase0_gates() {
 run_parallel_gates() {
   close_serial_gate
   GDIR="$(mktemp -d "${TMPDIR:-/tmp}/ship-gates.XXXXXX")"
-  PAR_PIDS=""; PAR_SLOTS=""
-  echo "── gates caros en paralelo: lang ∥ security ──"
+  PAR_PIDS=""; PAR_SLOTS=""; PAR_DOGS=""
+  # El deadline se ANUNCIA acá y no solo cuando vence: esta es la línea que
+  # queda última en el log de un precheck colgado, y quien la lea tiene que
+  # poder saber cuánto falta para que el harness se rinda solo.
+  if [ "${GATE_TIMEOUT_SECS:-0}" -gt 0 ]; then
+    echo "── gates caros en paralelo: lang ∥ security (deadline: $(plazo_humano "$GATE_TIMEOUT_SECS") c/u) ──"
+  else
+    echo "── gates caros en paralelo: lang ∥ security (SIN deadline: HARNESS_GATE_TIMEOUT_SECS=0) ──"
+  fi
   par lang      run_lang_gates_sealed
   par security  run_security_gates
   collect_gate_slots "gates paralelos"
@@ -4227,7 +4448,7 @@ while [ "$attempt" -lt "$PUSH_RETRY_BUDGET" ]; do
   # mas, que es lo que hace falta decir sin ambiguedad: con PRs, cuando ship.sh
   # termina el cambio NO esta en main todavia. El sha que se verifico aqui
   # tampoco es el que va a aterrizar, porque la cola de merge del forge rebasea
-  # o hace squash. Por eso ship.log NO registra un sha "shippeado" a secas:
+  # o hace squash. Por eso el ledger NO registra un sha "shippeado" a secas:
   # registra el PR y deja `landed:false`, y deploy-watch resuelve el commit real
   # cuando el PR se mergee. Fingir aqui un ship producirla un /archive que
   # fusiona specs de un cambio que sigue sin mergear.
@@ -4266,9 +4487,9 @@ El sha que aterrice NO sera este si la cola de merge rebasea o hace squash." 2>/
       echo "   (el forge no tiene driver acá, o falta su CLI, o no hay acceso)."
       emit assumption "$REPO: rama $branch publicada, PR no confirmado"
     fi
-    printf '{"repo":"%s","sha":"%s","short":"%s","branch":"%s","pr":"%s","landed":false,"shipped_at":"%s"%s}\n' \
+    ledger_append "$(printf '{"repo":"%s","sha":"%s","short":"%s","branch":"%s","pr":"%s","landed":false,"shipped_at":"%s"%s}' \
       "$REPO" "$sha" "$short" "$branch" "${pr:-}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      "$(known_bug_frag)" >> "$WS/tasks/$TASK/ship.log"
+      "$(known_bug_frag)")" || true
     stamp_provenance "$sha"
     [ -n "${CURRENT_GATE:-}" ] && emit gate "$CURRENT_GATE" true "" "$((SECONDS - ${_G0:-$SECONDS}))" && CURRENT_GATE=""
     emit ship "$REPO: PR abierto desde $branch @ $short (falta el merge)" true
@@ -4330,7 +4551,7 @@ El sha que aterrice NO sera este si la cola de merge rebasea o hace squash." 2>/
     short="$(git rev-parse --short "$push_ref")" # contra el headSha del forge,
                                           # que siempre viene completo. Con el sha
                                           # corto la comparación no matcheaba nunca.
-    echo "{\"repo\":\"$REPO\",\"sha\":\"$sha\",\"short\":\"$short\",\"shipped_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"$(known_bug_frag)}" >> "$WS/tasks/$TASK/ship.log"
+    ledger_append "{\"repo\":\"$REPO\",\"sha\":\"$sha\",\"short\":\"$short\",\"shipped_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"$(known_bug_frag)}" || true
     stamp_provenance "$sha"
     # Cierra el último gate ANTES de anunciar el ship: si lo dejara al trap,
     # el "veredicto ✅" saldría en el bus DESPUÉS del "shippeé" y la historia

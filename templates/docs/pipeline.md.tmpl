@@ -172,7 +172,9 @@ cuánto se miró de verdad, `completo` si al menos un gate de lenguaje
 compiló o testeó, `ninguno` si no corrió ninguno, `desconocido` si no se
 pudo saber. Un `ok:true` con `verificado` distinto de `completo` no es un
 verde verificado y /review lo declara en el veredicto) ·
-`verdict-<repo>.json` (reviewer+qa) · `ship.log` ·
+`verdict-<repo>.json` (reviewer+qa) · `ship-ledger.jsonl` (la
+contabilidad de fase: una línea JSON por repo publicado; NO es la salida
+del ship, no le redirijas stdout encima) ·
 `deploy-<repo>.log` · `agents.json` (los ids con los que se CONTINÚA un
 agente en vez de relanzarlo) · `handoff.json` (el relevo de fase). Estado
 en ARCHIVOS, no en conversación: cualquier sesión puede retomar
@@ -208,6 +210,13 @@ supuesto que resultó falso se vuelve una regla para que el siguiente
   Las vueltas por precheck rojo NO cuentan: el reviewer no vio nada. Los
   reintentos de push por contención tampoco: tienen su propio presupuesto
   (`HARNESS_PUSH_RETRIES`), porque perder una carrera no es una ronda de review.
+- Cada gate paralelo (`lang`, `security` y los baratos de la fase 0) tiene
+  DEADLINE: `HARNESS_GATE_TIMEOUT_SECS`, 3600 s por defecto, `0` lo apaga. Al
+  vencer, el harness mata el GRUPO de procesos del gate (con sus hijos, que si
+  no quedan huérfanos ocupando puertos) y emite un rojo que nombra el slot y el
+  comando que quedó abierto. Un gate sin deadline convierte cualquier suite
+  colgada de un repo en una tarea perdida en silencio, y el silencio es
+  indistinguible de "todavía está trabajando".
 - RFC: 1 ronda normal, 2 máximo → humano. Probes: 2 rondas máximo.
 - Sesiones cortas y desechables por tarea; nunca llegar a compactación.
 - La métrica que se vigila: `review_rounds` en `tasks/<id>/state.json` y

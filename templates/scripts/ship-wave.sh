@@ -9,7 +9,7 @@
 # `harness-policy.py dag-order`, salta lo ya aterrizado, corre ship.sh por
 # repo y, tras cada repo, el hook `deploy.<repo>.post_ship` de answers (bajo
 # with-secrets). Un rojo detiene la ola con el estado claro y el comando de
-# retome. Reanudación idempotente: ship.log salta ships hechos y
+# retome. Reanudación idempotente: ship-ledger.jsonl salta ships hechos y
 # ship-wave.log salta hooks ya verdes.
 #
 # flow: prs con landed:false: la ola SIGUE pero DIFIERE el post_ship de ese
@@ -35,8 +35,20 @@ case "$TASK" in *..*|*/*) echo "❌ task-id inválido: '$TASK'"; exit 1 ;; esac
 command -v jq >/dev/null || { echo "❌ jq requerido"; exit 1; }
 
 WS="$(cd "$(dirname "$0")/.." && pwd)"
-SHIP_LOG="$WS/tasks/$TASK/ship.log"
+# ── EL LEDGER SE LEE DE LOS DOS NOMBRES (#232) ────────────────────────
+# La contabilidad de fase vive en `ship-ledger.jsonl`. Se llamaba `ship.log`, y
+# ese nombre invitaba a redirigirle el stdout del ship encima (O_TRUNC pisando
+# el JSON byte a byte). Las tareas EN VUELO cuando se renombró tienen sus
+# líneas en el archivo viejo, así que se leen los dos, en orden cronológico
+# (primero el viejo): `landed()` se queda con el ÚLTIMO registro del repo y
+# leerlos al revés le daría el más antiguo.
+SHIP_LEDGER="$WS/tasks/$TASK/ship-ledger.jsonl"
+SHIP_LOG_VIEJO="$WS/tasks/$TASK/ship.log"
 WAVE_LOG="$WS/tasks/$TASK/ship-wave.log"
+
+ledger_cat() {  # todas las líneas del ledger, viejo primero
+  cat "$SHIP_LOG_VIEJO" "$SHIP_LEDGER" 2>/dev/null || true
+}
 
 emit() { [ -f "$WS/scripts/emit.sh" ] && bash "$WS/scripts/emit.sh" "$@" >/dev/null 2>&1 || true; }
 
@@ -66,13 +78,11 @@ answers_repo_key() {  # answers_repo_key <repo> <clave> → valor, o vacío
 }
 
 shipped() {  # ¿hay ALGUNA línea de ship para el repo?
-  [ -f "$SHIP_LOG" ] || return 1
-  jq -e --arg r "$1" 'select(.repo == $r)' "$SHIP_LOG" >/dev/null 2>&1
+  ledger_cat | jq -e --arg r "$1" 'select(.repo == $r)' >/dev/null 2>&1
 }
 
 landed() {  # el ÚLTIMO registro del repo, y preguntando igualdad, no presencia
-  [ -f "$SHIP_LOG" ] || return 1
-  [ "$(jq -c --arg r "$1" 'select(.repo == $r)' "$SHIP_LOG" 2>/dev/null \
+  [ "$(ledger_cat | jq -c --arg r "$1" 'select(.repo == $r)' 2>/dev/null \
     | tail -1 | jq -r 'if .landed == false then "false" else "true" end')" = "true" ]
 }
 
@@ -88,9 +98,11 @@ log_wave() {  # log_wave <repo> <step> <ok>
 }
 
 wave_stop() {  # wave_stop <repo> <motivo>
+  local ya
   echo ""
   echo "⛔ la ola de $TASK paró en $1: $2"
-  echo "   Shippeado hasta ahora: $( [ -f "$SHIP_LOG" ] && jq -r '.repo' "$SHIP_LOG" 2>/dev/null | sort -u | tr '\n' ' ' || echo '(nada)')"
+  ya="$(ledger_cat | jq -r '.repo' 2>/dev/null | sort -u | tr '\n' ' ')"
+  echo "   Shippeado hasta ahora: ${ya:-(nada)}"
   echo "   ↳ arregla lo de arriba y retoma EXACTAMENTE donde quedó:"
   echo "     bash scripts/ship-wave.sh $TASK --from $1"
   emit stop "la ola de ship de $TASK paró en $1: $2" "" "$TASK"
@@ -118,7 +130,7 @@ for repo in $order; do
     fi
   fi
   if shipped "$repo"; then
-    echo "✓ $repo ya está en ship.log: no lo re-shippeo"
+    echo "✓ $repo ya está en el ledger de ship: no lo re-shippeo"
   else
     echo "── ola: ship $repo ──"
     bash "$WS/scripts/ship.sh" "$TASK" "$repo" || wave_stop "$repo" "ship.sh salió rojo"

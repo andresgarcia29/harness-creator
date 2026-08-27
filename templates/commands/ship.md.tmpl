@@ -21,12 +21,12 @@ es correr los scripts y solo despertar en rojo.
      regresa al implementer; si es veredicto faltante, `/review`
      primero. NO puentees un gate JAMÁS.
 1b. **Si `flow: prs`**, `ship.sh` no toca la trunk: publica la rama y abre el
-   PR, y su `ship.log` queda con `landed: false`. El cambio NO está desplegado
+   PR, y su `ship-ledger.jsonl` queda con `landed: false`. El cambio NO está desplegado
    hasta que ese PR mergee, así que **no corras `/archive` todavía**: fusionar
    el delta-spec de algo sin mergear es spec rot al revés. `deploy-watch`
    resuelve solo el commit real cuando el PR mergea, y mientras tanto te lo
    dice en vez de vigilar el commit equivocado.
-   **Y cuando mergea, lo REGISTRA** (`landed: true` en `ship.log`): ese
+   **Y cuando mergea, lo REGISTRA** (`landed: true` en `ship-ledger.jsonl`): ese
    registro es lo único que destraba `deploy` y `archive` en
    `POLICY-SHIP-005`, así que tras el merge corré `deploy-watch` una vez por
    repo, **incluidos los que no despliegan** (un repo de docs con

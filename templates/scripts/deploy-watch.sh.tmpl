@@ -106,6 +106,60 @@ ORG="{{GITHUB_ORG}}"
 # 900s de la etapa es lo que hacía que el deadline de la etapa fuera ficción.
 CALL_TIMEOUT="${DEPLOY_CALL_TIMEOUT:-30}"   # por consulta individual
 CALL_GRACE="${DEPLOY_CALL_GRACE:-5}"        # de SIGTERM a SIGKILL
+
+# ── SIN KUBECONFIG, kubectl NO HABLA CON NINGÚN CLUSTER ───────────────
+# Caso de campo: cuatro corridas del watcher perdidas porque nadie exportaba
+# KUBECONFIG. El secreto ya estaba materializado en .secrets.d/kubeconfig (lo
+# deja scripts/secrets.sh con dump_file), pero ningún script del camino lo
+# exportaba, así que kubectl hablaba con el cluster equivocado (o con ninguno)
+# y los tramos de cluster salían por timeout: indistinguible de un rollout
+# lento. La cadena estaba entera menos el último eslabón.
+#
+# Se toma el del entorno si ya viene, y solo se rellena con el del workspace
+# cuando el archivo EXISTE: apuntar KUBECONFIG a una ruta inexistente sería
+# peor que no tocarlo, porque taparía el ~/.kube/config de quien sí lo tiene.
+if [ -z "${KUBECONFIG:-}" ] && [ -f "$WS/.secrets.d/kubeconfig" ]; then
+  : "${KUBECONFIG:=$WS/.secrets.d/kubeconfig}"
+  export KUBECONFIG
+fi
+
+# ── Y SI AUN ASÍ NO SE ALCANZA EL CLUSTER, SE DICE (no se espera) ─────
+# El probe cuesta segundos y contesta la pregunta que el timeout no contesta:
+# "¿esto es un rollout lento o kubectl no llega a ningún lado?". Sin él, las
+# dos cosas se leen igual y el humano paga 300s para no enterarse de nada.
+# Memoizado: los tramos de kargo, argocd y rollout preguntan lo mismo.
+KUBE_PROBE=""
+kubectl_alcanza_cluster() {  # → 0 si kubectl le saca respuesta al API server
+  [ -n "$KUBE_PROBE" ] || {
+    KUBE_PROBE=no
+    if run_bounded 10 "$CALL_GRACE" \
+         kubectl --request-timeout=5s get --raw /readyz >/dev/null 2>&1 \
+       || run_bounded 10 "$CALL_GRACE" \
+         kubectl --request-timeout=5s version >/dev/null 2>&1; then
+      KUBE_PROBE=si
+    fi
+  }
+  [ "$KUBE_PROBE" = si ]
+}
+
+# El aviso va UNA vez, antes de los tramos que usan kubectl, y solo cuando
+# kubectl ESTÁ instalado: "no está el binario" ya tiene su propio mensaje, y
+# repetirlo con otras palabras sería ruido.
+kubectl_gate() {
+  command -v kubectl >/dev/null 2>&1 || return 0
+  kubectl_alcanza_cluster && return 0
+  say "⚠️  kubectl no alcanza el cluster (ni /readyz ni version contestaron)."
+  say "   Los tramos de cluster (kargo, argocd, rollout) van a quedar ciegos:"
+  say "   esto NO es un deploy rojo, y sin este aviso se leería como un rollout"
+  say "   lento hasta agotar el timeout."
+  say "   ↳ revisá KUBECONFIG (ahora: ${KUBECONFIG:-sin definir}) y materializá"
+  say "     el kubeconfig del workspace: make secrets (scripts/secrets.sh, que"
+  say "     deja .secrets.d/kubeconfig), o corré esto bajo scripts/with-secrets.sh."
+  emit assumption "deploy de $REPO: kubectl no alcanza el cluster (KUBECONFIG=${KUBECONFIG:-sin definir})"
+  ciego "kubectl: no alcanza el cluster (revisá KUBECONFIG)"
+  return 1
+}
+
 # ── EL NOMBRE DE LA APP SE RESUELVE, NO SE COMPONE ────────────────────
 # Componerlo del prefijo era el enfoque equivocado, no solo una
 # concatenación mal hecha. Medido en un cluster real de 17 apps: el nombre
@@ -390,10 +444,59 @@ fi
 # La fuente correcta no era el worktree igual: puede estar borrado por
 # `worktree-task.sh --rm` cuando corre /ship. ship.log tiene el sha que
 # REALMENTE aterrizó, que es de lo que este watcher habla.
+# ── EL LEDGER SE MUDÓ DE NOMBRE, Y LA LECTURA UNE LOS DOS (#232) ──────
+# `tasks/<id>/ship.log` nunca fue un log: es un ledger JSONL, una línea por
+# repo shippeado, y de ahí sale el sha que este watcher vigila. El nombre
+# invitaba a la redirección obvia (`ship.sh ... > tasks/<id>/ship.log`), que
+# TRUNCA el archivo y pisa las líneas del ledger con prosa: el ship aterriza,
+# el watcher se queda sin sha y la tarea se traba. Por eso la contabilidad vive
+# ahora en `ship-ledger.jsonl` y `ship.log` queda para lo que su nombre promete.
+#
+# LA LECTURA UNE, NO ELIGE, y esa es la diferencia que importa: una tarea EN
+# VUELO durante el update tiene la mitad de sus ships en cada archivo. Con
+# "prefiero el nuevo si existe", el repo que shippeó ANTES del update queda
+# invisible en cuanto otro repo shippea DESPUÉS, y el watcher se queda sin el
+# sha de un ship que sí ocurrió. La unión respeta el orden del update (primero
+# el viejo, después el nuevo), así que el ÚLTIMO registro de un repo sigue
+# siendo su estado: ese orden ya es el contrato que la policy usa para decidir
+# qué falta shippear, y acá lo único que hace falta es no romperlo.
+#
+# Del archivo viejo se toma SOLO lo que parsea como objeto JSON: un ship.log a
+# medio pisar conserva líneas buenas, y descartarlas por la prosa que las rodea
+# sería perder el dato que sí está.
+ship_ledger_write() {  # → archivo donde se ESCRIBE (la escritura no se une)
+  printf '%s' "$WS/tasks/$TASK/ship-ledger.jsonl"
+}
+
+ship_ledger_rel() {  # → el archivo que se escribe, relativo, para los mensajes
+  printf 'tasks/%s/ship-ledger.jsonl' "$TASK"
+}
+
+ship_ledger_leidos() {  # → los archivos que la lectura unió, para los mensajes
+  local viejo="tasks/$TASK/ship.log" nuevo="tasks/$TASK/ship-ledger.jsonl" s=""
+  [ -f "$WS/$nuevo" ] && s="$nuevo"
+  [ -f "$WS/$viejo" ] && s="${s:+$s ni }$viejo"
+  printf '%s' "${s:-$nuevo}"
+}
+
+ship_ledger_json() {  # → las líneas que SON ledger, de los dos archivos, en orden
+  local f linea
+  for f in "$WS/tasks/$TASK/ship.log" "$WS/tasks/$TASK/ship-ledger.jsonl"; do
+    [ -f "$f" ] || continue
+    # `|| [ -n "$linea" ]`: un ledger sin salto final tiene su última línea, y
+    # es justo la más nueva, o sea la que decide.
+    while IFS= read -r linea || [ -n "$linea" ]; do
+      case "$linea" in '{'*) ;; *) continue ;; esac
+      printf '%s' "$linea" | jq -e 'type == "object"' >/dev/null 2>&1 || continue
+      printf '%s\n' "$linea"
+    done < "$f"
+  done
+}
+
 shipped_sha() {  # shipped_sha → sha completo del último ship de ESTE repo
   local s
-  s="$(jq -r --arg r "$REPO" 'select(.repo == $r) | .sha // empty' \
-        "$WS/tasks/$TASK/ship.log" 2>/dev/null | tail -1)"
+  s="$(ship_ledger_json | jq -r --arg r "$REPO" 'select(.repo == $r) | .sha // empty' \
+        2>/dev/null | tail -1)"
   printf '%s' "$s"
 }
 
@@ -439,11 +542,21 @@ LANDED_SHA=""
 # La entrada se marca `event: "landed"` y conserva el sha que verificó ship.sh
 # en `ship_sha`: no se pierde procedencia, y quien lea el log ve las dos cosas
 # (lo que se shippeó y lo que aterrizó) en vez de un campo pisado.
+#
+# LA ESCRITURA NO SE UNE: va SIEMPRE al archivo nuevo (#232), aunque la entrada
+# que se está actualizando viva en el ship.log viejo. Escribir en el viejo sería
+# volver a poner contabilidad en el archivo que la redirección trunca, y la
+# semántica sale sola sin reescribir nada: la lectura une con el viejo primero,
+# así que la línea nueva queda ÚLTIMA para ese repo y es la que gana. El
+# registro viejo queda intacto como historia, que es la misma regla que ya
+# gobierna dos ships del mismo repo.
 persistir_landed() {  # persistir_landed <sha-aterrizado>
-  local log="$WS/tasks/$TASK/ship.log" entry linea
-  [ -f "$log" ] || return 0
-  entry="$(jq -c --arg r "$REPO" 'select(.repo == $r)' "$log" 2>/dev/null | tail -1)"
-  [ -n "$entry" ] || entry='{}'
+  local log entry linea
+  log="$(ship_ledger_write)"
+  entry="$(ship_ledger_json | jq -c --arg r "$REPO" 'select(.repo == $r)' 2>/dev/null | tail -1)"
+  # Sin una sola entrada de ledger no hay ship que marcar como aterrizado, y
+  # crear el archivo para inventar uno sería peor que no escribir nada.
+  [ -n "$entry" ] || return 0
   linea="$(printf '%s' "$entry" | jq -c \
     --arg r "$REPO" --arg sha "$1" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
       {repo: $r, event: "landed", landed: true, sha: $sha, short: $sha[0:12],
@@ -454,7 +567,7 @@ persistir_landed() {  # persistir_landed <sha-aterrizado>
   if [ -n "$linea" ] && printf '%s\n' "$linea" >> "$log"; then
     return 0
   fi
-  say "⚠️  no pude registrar el merge en ship.log: la transición a deploy/archive"
+  say "⚠️  no pude registrar el merge en $(ship_ledger_rel): la transición a deploy/archive"
   say "   va a seguir bloqueada por POLICY-SHIP-005 aunque el PR haya mergeado."
   return 1
 }
@@ -462,7 +575,7 @@ persistir_landed() {  # persistir_landed <sha-aterrizado>
 resolve_landed_sha() {
   local entry landed pr branch sha
   LANDED_SHA=""
-  entry="$(jq -c --arg r "$REPO" 'select(.repo == $r)' "$WS/tasks/$TASK/ship.log" 2>/dev/null | tail -1)"
+  entry="$(ship_ledger_json | jq -c --arg r "$REPO" 'select(.repo == $r)' 2>/dev/null | tail -1)"
   [ -n "$entry" ] || return 0
   # OJO con `.landed // true`: el operador `//` de jq trata `false` COMO
   # AUSENTE, asi que `false // true` da `true` y la entrada de un PR sin
@@ -501,7 +614,7 @@ resolve_landed_sha() {
     if [ "$rc" -eq 0 ] && [ -n "$sha" ]; then
       say "── el PR de $branch ya mergeó: vigilo el commit que aterrizó (${sha:0:12}), no el que verificó ship.sh ──"
       LANDED_SHA="$sha"
-      persistir_landed "$sha" && say "   (registrado en ship.log: landed=true, ${sha:0:12})"
+      persistir_landed "$sha" && say "   (registrado en $(ship_ledger_rel): landed=true, ${sha:0:12})"
       return 0
     fi
     if [ "$rc" -eq 3 ]; then
@@ -597,7 +710,8 @@ repo_kind() {  # repo_kind <repo> → kind declarado en manifest.yaml, o vacío
 #   3. gitops, por compatibilidad con instancias previas a esta regla
 answers_repo_key() {  # answers_repo_key <repo> <clave> → valor plano declarado, o vacío
   # Claves PLANAS a 4 espacios bajo el repo a 2 (driver, verify_cmd,
-  # verify_expect, verify_timeout, post_ship). Un bloque anidado NO se
+  # verify_expect, verify_timeout, post_ship, critical_jobs, workflow,
+  # kargo_project). Un bloque anidado NO se
   # soporta a propósito: este parser es awk línea a línea.
   [ -f "$WS/harness-answers.yaml" ] || return 0
   awk -v r="$1" -v k="$2" '
@@ -1009,8 +1123,8 @@ red() { # red <motivo>
   # aterrizo (PR sin mergear, o forge inalcanzable). La segunda ya se explico
   # arriba, y repetir "no hay ship" seria decir algo falso justo antes de una
   # decision sobre produccion.
-  if [ -z "$last_sha" ] && jq -e --arg r "$REPO" 'select(.repo == $r)' \
-       "$WS/tasks/$TASK/ship.log" >/dev/null 2>&1; then
+  if [ -z "$last_sha" ] && ship_ledger_json \
+       | jq -e --arg r "$REPO" 'select(.repo == $r)' >/dev/null 2>&1; then
     say "⏪ NO propongo revertir nada: hay un ship de $REPO registrado, pero no"
     say "   pude establecer QUÉ commit está desplegado (el motivo está arriba)."
     say "   Revertir sin saber qué se revierte es exactamente lo que no hago."
@@ -1019,7 +1133,7 @@ red() { # red <motivo>
   if [ -z "$last_sha" ]; then
     # Sin sha no hay revert que proponer, y sugerirlo con el campo vacío es
     # peor que callarse: manda al agente a improvisar sobre produccion.
-    say "⏪ NO sé qué revertir: no hay ship de $REPO en tasks/$TASK/ship.log."
+    say "⏪ NO sé qué revertir: no hay ship de $REPO en $(ship_ledger_leidos)."
     say "   Puede que este deploy no venga de un ship de esta tarea. Diagnostica"
     say "   primero y decide vos: no propongo una acción destructiva a ciegas."
   else
@@ -1186,11 +1300,11 @@ if [ "$DRIVER" != "none" ] && command -v gh >/dev/null; then
   else
     # Antes esto no existía y era el agujero: sin sha, el script seguía como si
     # nada. Un watcher que no sabe qué mirar tiene que decirlo.
-    say "⚠️ no sé qué commit vigilar: no hay ship de $REPO en tasks/$TASK/ship.log."
+    say "⚠️ no sé qué commit vigilar: no hay ship de $REPO en $(ship_ledger_leidos)."
     say "   La etapa de Actions NO corrió. Esto no es un deploy verde: es un"
     say "   deploy del que no sé nada."
-    emit assumption "Actions de $REPO NO verificado: sin sha en ship.log"
-    ciego "actions: no hay sha de $REPO en tasks/$TASK/ship.log"
+    emit assumption "Actions de $REPO NO verificado: sin sha en el ledger de ships"
+    ciego "actions: no hay sha de $REPO en $(ship_ledger_leidos)"
   fi
   if [ -z "$run_ids" ] && [ -n "$head_sha" ] && [ -z "$runs_json" ]; then
     say "⚠️ ningún run de Actions para el commit ${head_sha:0:12} tras 100 s."
@@ -1332,6 +1446,10 @@ fi
 # toda la señal que tiene, y fingir más sería inventar.
 if [ "$DRIVER" = "gitops" ]; then
 
+# Los tres tramos que siguen le preguntan al cluster. Si kubectl no llega, se
+# dice ACÁ y no dentro de un timeout: el aviso vale justamente por llegar antes.
+kubectl_gate || true
+
 # Epoch del commit shippeado, leído del clon canónico. Vacío = no comparable, y
 # eso NO se convierte en rojo: es la mitad (b) que se declara ciega.
 ship_commit_epoch() {
@@ -1359,6 +1477,68 @@ kargo_env_bridge() {
   [ -n "${KARGO_TOKEN:-}" ]       || export KARGO_TOKEN="${KARGO_API_TOKEN:-}"
 }
 kargo_env_bridge
+
+# ── EL NAMESPACE DE LA CONSULTA SALE DE LA APP, NO DE UN LITERAL ──────
+# Un proyecto de Kargo ES un namespace, y el que se contestó en la entrevista
+# vale para la instancia entera: en cuanto cada app vive en el suyo, la consulta
+# se va al namespace equivocado y devuelve una lista VACÍA. Caso de campo: el
+# tramo preguntó por el proyecto configurado, no encontró nada, y de esa lista
+# vacía dedujo que el artefacto no había llegado al warehouse; el git log del
+# repo mostraba la promoción de Kargo ya mergeada, con el tag que corrían los
+# pods. Un namespace equivocado se estaba reportando como un hecho del cluster.
+#
+# El dato correcto ya lo tiene el script: es el mismo namespace que el tramo de
+# rollout mira para encontrar los Deployments de la app. Precedencia, de más
+# explícita a más inferida, igual que en todo el resto del archivo:
+#   1. KARGO_PROJECT / deploy: <repo>: kargo_project   lo que el humano dijo
+#   2. el namespace REAL de la app en el cluster
+#   3. el proyecto declarado al instalar                 el de siempre
+app_k8s_namespace() {  # → namespace donde vive la app, o vacío
+  local ns="" raw
+  if [ -n "${DEPLOY_K8S_WORKLOADS:-}" ]; then
+    ns="$(printf '%s\n' "$DEPLOY_K8S_WORKLOADS" | tr ' ' '\n' \
+          | grep -v '^$' | head -1 | cut -d/ -f1)"
+  fi
+  # `${APP:-}` y no la global pelada: esta función se extrae sola en los tests y
+  # corre bajo `set -u`, donde una global sin inicializar mata el bloque entero.
+  if [ -z "$ns" ] && [ -n "${APP:-}" ] && command -v kubectl >/dev/null 2>&1; then
+    raw="$(run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
+      kubectl --request-timeout="${CALL_TIMEOUT}s" get application "$APP" \
+        -n "${ARGOCD_NAMESPACE:-argocd}" -o json 2>/dev/null)" || raw=""
+    ns="$(printf '%s' "$raw" | jq -r '
+      ([ (.status.resources // [])[] | select(.kind == "Deployment") | .namespace // empty ]
+       + [ .spec.destination.namespace // empty ])
+      | map(select(. != "")) | .[0] // empty' 2>/dev/null)"
+  fi
+  printf '%s' "$ns"
+}
+
+KARGO_NS=""
+kargo_namespace() {  # → namespace donde consultar las Promotions
+  local ns=""
+  [ -n "$KARGO_NS" ] && { printf '%s' "$KARGO_NS"; return 0; }
+  ns="${KARGO_PROJECT:-}"
+  [ -n "$ns" ] || ns="$(answers_repo_key "$REPO" kargo_project 2>/dev/null)"
+  [ -n "$ns" ] || ns="$(app_k8s_namespace)"
+  [ -n "$ns" ] || ns="{{KARGO_PROJECT}}"
+  KARGO_NS="$ns"
+  printf '%s' "$ns"
+}
+
+# ── UNA PÁGINA DE LOGIN NO ES UNA RESPUESTA DEL WAREHOUSE ─────────────
+# Sin credencial (o contra un endpoint detrás de SSO) lo que vuelve es el HTML
+# de la página de login, y el tramo lo volcaba al log y seguía razonando sobre
+# él como si fuera la lista de promociones: un fallo de credencial reportado
+# como un hecho sobre el warehouse. Se detecta por el content-type o por lo que
+# el payload es, que es lo único que siempre está.
+respuesta_es_html() {  # respuesta_es_html <payload> → 0 si es HTML, no datos
+  local muestra
+  muestra="$(printf '%s' "$1" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]' | cut -c1-400)"
+  case "$muestra" in
+    *'<html'*|*'<!doctype'*|*'content-type:text/html'*) return 0 ;;
+  esac
+  return 1
+}
 if command -v kargo >/dev/null; then
   say "── kargo: esperando promoción ──"
   # UNA VERIFICACIÓN QUE NO SE PUDO EJECUTAR NO SE CALLA. Antes esto era un
@@ -1404,19 +1584,20 @@ if command -v kargo >/dev/null; then
   # La cadena del CLI se conserva: un CLI compatible sigue siendo válido, y
   # kubectl puede no tener RBAC sobre esos CRs en toda instancia. Si fallan los
   # tres, se degrada exactamente como hoy. Para confirmar el permiso sin auth de
-  # kargo: kubectl auth can-i list promotions.kargo.akuity.io -n {{KARGO_PROJECT}}
+  # kargo: kubectl auth can-i list promotions.kargo.akuity.io -n <ns-de-la-app>
+  kargo_ns="$(kargo_namespace)"
   kargo_via=""
   if kargo_out="$(run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
-                    kargo get promotions --project "{{KARGO_PROJECT}}" -o json 2>&1)" \
+                    kargo get promotions --project "$kargo_ns" -o json 2>&1)" \
      && printf '%s' "$kargo_out" | jq -e . >/dev/null 2>&1; then
     kargo_via="-o json"
   elif kargo_out="$(run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
-                      kargo get promotions --project "{{KARGO_PROJECT}}" 2>&1)"; then
+                      kargo get promotions --project "$kargo_ns" 2>&1)"; then
     kargo_via="salida de texto"
   elif command -v kubectl >/dev/null \
        && kube_out="$(run_bounded "$CALL_TIMEOUT" "$CALL_GRACE" \
                         kubectl --request-timeout="${CALL_TIMEOUT}s" \
-                        get promotions.kargo.akuity.io -n "{{KARGO_PROJECT}}" \
+                        get promotions.kargo.akuity.io -n "$kargo_ns" \
                         -o json 2>>"$LOG")" \
        && printf '%s' "$kube_out" | jq -e . >/dev/null 2>&1; then
     # El error del CLI se conserva para el log: es el diagnóstico útil si
@@ -1425,8 +1606,21 @@ if command -v kargo >/dev/null; then
     kargo_out="$kube_out"
     kargo_via="kubectl"
   fi
-  if [ -n "$kargo_via" ]; then
-    say "   (kargo respondió por $kargo_via)"
+  if [ -n "$kargo_via" ] && respuesta_es_html "$kargo_out"; then
+    # HTML donde tenía que haber datos: eso no habla del warehouse, habla de la
+    # credencial o del endpoint. Se dice como lo que es y NO se razona sobre el
+    # payload (el HTML de un login no tiene promociones que contar).
+    printf '%s\n' "$kargo_out" >> "$LOG"
+    say "⚠️ la respuesta a la consulta de promociones es HTML, no datos: casi"
+    say "   siempre es una página de login (SSO) o un proxy delante del endpoint."
+    say "   Es un fallo de CREDENCIAL o de DIRECCIÓN, y no dice absolutamente"
+    say "   nada del warehouse: el tramo de promoción NO se verificó."
+    say "   ↳ revisá KARGO_API_ADDRESS/KARGO_API_TOKEN (o KARGO_ADDRESS/KARGO_TOKEN)"
+    say "     y corré esto bajo scripts/with-secrets.sh. La salida cruda está en $LOG."
+    emit assumption "promoción de Kargo NO verificada en $REPO: la respuesta fue HTML (login/proxy), no datos"
+    ciego "kargo: respondió HTML (login o proxy), no datos"
+  elif [ -n "$kargo_via" ]; then
+    say "   (kargo respondió por $kargo_via, namespace $kargo_ns)"
     # Del JSON se saca lo que importa (qué freight, en qué fase) en vez de
     # volcar el objeto entero: cinco líneas de JSON crudo no dicen si promovió.
     # Si el esquema no es el esperado, se muestra tal cual: inventar un resumen
@@ -1446,7 +1640,7 @@ if command -v kargo >/dev/null; then
     # nuevo no aparece hasta que alguien lo pide. Si la lista no muestra nada
     # reciente, la remediación exacta es pedir el refresh, no esperar más.
     say "   (si el freight nuevo no aparece, pedí el refresh del warehouse:"
-    say "    kubectl annotate warehouse <warehouse> -n {{KARGO_PROJECT}} kargo.akuity.io/refresh=\"\$(date +%s)\" --overwrite)"
+    say "    kubectl annotate warehouse <warehouse> -n $kargo_ns kargo.akuity.io/refresh=\"\$(date +%s)\" --overwrite)"
     # ── UNA LISTA VACÍA NO ES UNA PROMOCIÓN: ES SU AUSENCIA ──────────────
     # Tras el arreglo del #112 kargo SÍ responde, y cuando la respuesta es
     # `{"kind":"List","items":null}` el script imprimía la sugerencia del
@@ -1459,6 +1653,14 @@ if command -v kargo >/dev/null; then
     # mi commit?": una promoción vieja promovió el artefacto anterior. Sin
     # fecha del commit no se compara (no se inventa), y entonces manda la
     # presencia, que es lo único observable.
+    #
+    # ── PERO LO QUE SE REPORTA ES LA CONSULTA, NO EL WAREHOUSE ─────────
+    # De la lista vacía este tramo concluía "es la prueba de que el artefacto
+    # todavía no llegó al warehouse", y esa frase afirma sobre un sistema al
+    # que quizá ni le preguntamos: si el namespace no es el de la app, la lista
+    # viene vacía con el freight promovido y mergeado. Lo único que este script
+    # observó es SU consulta, así que eso es lo que dice, con el namespace
+    # delante para que el desempate sea de una línea y no de una sesión.
     if [ "$kargo_via" != "salida de texto" ]; then
       commit_ts="$(ship_commit_epoch)"
       promos_nuevas="$(printf '%s' "$kargo_out" | jq -r --arg t "${commit_ts:-0}" '
@@ -1470,24 +1672,33 @@ if command -v kargo >/dev/null; then
         | length' 2>/dev/null)"
       case "${promos_nuevas:-}" in ''|*[!0-9]*) promos_nuevas=0 ;; esac
       if [ "$promos_nuevas" -eq 0 ]; then
-        say "⚠️ kargo respondió y NO hay promoción posterior a tu ship${LANDED_SHA:+ (${LANDED_SHA:0:12})}."
-        say "   Una lista vacía no es un aviso: es la prueba de que el artefacto"
-        say "   todavía no llegó al warehouse. El tramo de promoción NO se verificó."
+        say "⚠️ no encontré promociones en el namespace '$kargo_ns' posteriores a tu"
+        say "   ship${LANDED_SHA:+ (${LANDED_SHA:0:12})}. Eso es un hecho sobre ESTA consulta, no sobre el"
+        say "   warehouse: si la app no vive en ese namespace, la lista viene vacía"
+        say "   aunque el freight haya promovido. El tramo NO se verificó."
+        say "   ↳ verificá el namespace antes que nada:"
+        say "     kubectl get promotions.kargo.akuity.io -n $kargo_ns"
+        say "     y si es otro, declaralo: KARGO_PROJECT=<ns>, o en harness-answers.yaml"
+        say "     deploy: $REPO: kargo_project: \"<ns>\""
         say "   Esto es CEGUERA, no un rojo: no propongo revertir nada."
-        emit assumption "promoción de Kargo NO verificada en $REPO: sin freight posterior al ship"
-        ciego "kargo: sin promoción posterior al ship (el artefacto todavía no llegó)"
+        emit assumption "promoción de Kargo NO verificada en $REPO: sin promociones posteriores al ship en el namespace $kargo_ns"
+        ciego "kargo: sin promociones posteriores al ship en el namespace '$kargo_ns' (¿es el de la app?)"
       else
         say "   ✓ $promos_nuevas promoción(es) posterior(es) a tu ship"
       fi
     fi
   else
     printf '%s\n' "$kargo_out" >> "$LOG"
-    reason="$(printf '%s' "$kargo_out" | head -1 | cut -c1-160)"
+    if respuesta_es_html "$kargo_out"; then
+      reason="la respuesta fue HTML (login SSO o proxy), no datos: falta credencial o la dirección es otra"
+    else
+      reason="$(printf '%s' "$kargo_out" | head -1 | cut -c1-160)"
+    fi
     # Por dónde se intentó va en el motivo: sin eso, el próximo reporte de
     # campo no puede distinguir "el CLI sigue roto en json" de "ni siquiera
     # llegué a probarlo", que es la ambigüedad que dejó a este bug reportado
     # dos veces con cuatro días de diferencia. Eso ya cerró la pregunta una vez.
-    say "⚠️ kargo no respondió (ni con -o json, ni en texto, ni por kubectl): ${reason:-sin salida}"
+    say "⚠️ kargo no respondió por el namespace '$kargo_ns' (ni con -o json, ni en texto, ni por kubectl): ${reason:-sin salida}"
     say "   la promoción del freight NO se verificó; el deploy sigue por health de ArgoCD"
     emit assumption "promoción de Kargo NO verificada en $REPO: ${reason:-kargo no respondió}"
     ciego "kargo: ${reason:-no respondió}"
@@ -1593,9 +1804,32 @@ rollout_workloads() {  # → "ns nombre" por línea, vacío si no se pudo resolv
     | "\(.namespace // "default") \(.name)"' 2>/dev/null
 }
 
+# ── UN POD DE JOB TERMINADO NO ES UNA RÉPLICA SIRVIENDO ───────────────
+# El selector del Deployment son las labels de Helm, y en un chart con CronJobs
+# esas mismas labels las llevan los pods de cada ejecución. Caso de campo: 17
+# pods de CronJob YA TERMINADOS (ready=false, ownerReferences.kind=Job) con las
+# imágenes de tres versiones anteriores, contra 2 réplicas sanas en la imagen
+# nueva. El tramo vio "3 juegos de imagen distintos" y esperó los 300s enteros
+# sobre un `rollout status` que decía "successfully rolled out". La ceguera no
+# es un rojo, pero traba la fase igual, y el desempate exigía saber de memoria
+# que los pods de CronJob mienten.
+#
+# Un pod que SIRVE tráfico tiene tres marcas, y las tres se piden juntas: no
+# pertenece a un Job, está Running, y sus contenedores están ready. Lo que queda
+# fuera no es "un pod viejo": es un pod que ya terminó su trabajo.
+pods_sirviendo() {  # pods_sirviendo <json de pods> → {"items":[los que sirven]}
+  printf '%s' "$1" | jq -c '
+    { items: [ (.items // [])[]
+      | select((.metadata.deletionTimestamp // "") == "")
+      | select([ (.metadata.ownerReferences // [])[] | .kind ] | index("Job") | not)
+      | select((.status.phase // "") == "Running")
+      | select(((.status.containerStatuses // []) | length) > 0
+               and ((.status.containerStatuses // []) | all(.ready == true))) ] }' 2>/dev/null
+}
+
 check_rollout() {  # → 0 completo con mi artefacto · 1 todavía no · 2 no pude mirar
   local ws deadline rem inc="" imgs n_img ready upd avail reps gen obs nuevo
-  local ns name pods commit_ts
+  local ns name pods vivos commit_ts
   ROLLOUT_DIAG=""
   command -v kubectl >/dev/null 2>&1 || return 2
   command -v jq >/dev/null 2>&1 || return 2
@@ -1646,16 +1880,24 @@ check_rollout() {  # → 0 completo con mi artefacto · 1 todavía no · 2 no pu
         kubectl --request-timeout="${CALL_TIMEOUT}s" get pods -n "$ns" -l "$sel" -o json 2>/dev/null)" \
         || pods=""
       [ -n "$pods" ] || return 2
+      # Solo los que SIRVEN: los pods de Job/CronJob que comparten las labels
+      # del chart ya terminaron y su imagen es historia, no tráfico.
+      vivos="$(pods_sirviendo "$pods")"
+      [ -n "$vivos" ] || return 2
       # Una línea por POD con TODAS sus imágenes, no una lista suelta de
       # imágenes: con un sidecar (service mesh, log shipper) toda instalación
       # tendría dos imágenes distintas y esto declararía "rollout a medias"
       # para siempre. Lo que distingue al pod viejo es su TERNA, no una imagen.
-      imgs="$(printf '%s' "$pods" | jq -r '
+      imgs="$(printf '%s' "$vivos" | jq -r '
         [ (.items // [])[]
-          | select((.metadata.deletionTimestamp // "") == "")
           | [ (.spec.containers // [])[].image ] | sort | join(" + ") ]
         | unique | .[]' 2>/dev/null)"
       n_img="$(printf '%s\n' "$imgs" | grep -c . || true)"
+      # Cero pods sirviendo con los contadores en verde no es un rollout a
+      # medias: es que no estamos midiendo lo que creemos (selector que no
+      # matchea, RBAC sin pods). Afirmar sobre eso sería inventar, así que se
+      # declara ceguera en vez de esperar el timeout entero.
+      [ "${n_img:-0}" -eq 0 ] && return 2
       if [ "${n_img:-0}" -gt 1 ]; then
         inc="$inc   · $ns/$name: $n_img juegos de imagen distintos entre los pods (hay uno viejo sirviendo):
 $(printf '%s\n' "$imgs" | sed 's/^/       /')
@@ -1673,7 +1915,7 @@ $(printf '%s\n' "$imgs" | sed 's/^/       /')
         # campo, el arreglo es comparar el tag contra el build de $LANDED_SHA.
         # `fromdateiso8601` quiere justo el formato que Kubernetes emite
         # (…Z), así que el timestamp va tal cual: normalizarlo lo rompería.
-        nuevo="$(printf '%s' "$pods" | jq -r --argjson t "$commit_ts" '
+        nuevo="$(printf '%s' "$vivos" | jq -r --argjson t "$commit_ts" '
           [ (.items // [])[] | (.status.startTime // empty)
             | fromdateiso8601 | select(. >= $t) ] | length' 2>/dev/null)"
         if [ "${nuevo:-0}" -eq 0 ]; then

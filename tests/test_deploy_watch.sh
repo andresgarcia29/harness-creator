@@ -19,6 +19,12 @@ acota() {  # lo que todo tramo extraido necesita del preambulo del watcher
   CALL_TIMEOUT=10; CALL_GRACE=2
 }
 
+# La suite prueba el codigo REAL del template: cada tramo se extrae y se
+# ejecuta de verdad. Un test que reimplementa lo que prueba miente en cuanto el
+# template cambia.
+extract_fn() { awk "/^$1\(\) \{/{f=1} f{print} f&&/^\}/{exit}" \
+  "$ROOT/templates/scripts/deploy-watch.sh.tmpl"; }
+
 # El bloque de kargo del template, con el placeholder resuelto. Se extrae solo
 # ese tramo: el resto del watcher habla con GitHub Actions y ArgoCD reales.
 sed -e "s|{{KARGO_PROJECT}}|proyecto-demo|g" \
@@ -29,8 +35,13 @@ grep -q 'kargo_out' "$WS/kargo.sh" || { echo "no pude extraer el bloque de kargo
 run_kargo() {  # run_kargo: corre el tramo con el stub de kargo que esté en $WS/bin
   ( set -uo pipefail
     export PATH="$WS/bin:$PATH" CLAUDE_PROJECT_DIR="$WS"
+    unset KARGO_PROJECT
     cd "$WS"; REPO=videocore; LOG="$WS/deploy.log"
     say() { echo "$1" | tee -a "$LOG"; }
+    # El tramo pregunta por el namespace declarado del repo antes de inferirlo:
+    # en el watcher completo eso lo contesta harness-answers.yaml.
+    answers_repo_key() { printf ''; }
+    ciego() { echo "CIEGO: $1"; }
     acota
     . "$WS/scripts/emit.sh"
     . "$WS/kargo.sh" ) 2>&1
@@ -171,6 +182,99 @@ out="$(run_kargo)"
 assert_contains "$out" "promotion-1" "#112: un CLI sin -o json sigue funcionando por texto"
 assert_contains "$out" "salida de texto" "y el motivo dice por donde contesto"
 assert_not_contains "$(bus)" "assumption" "sin supuesto: contesto igual"
+
+echo
+echo "── #229: el namespace de la consulta sale de la APP, no de un literal"
+# Caso de campo: la consulta fue al proyecto configurado en la instalacion, la
+# app vivia en SU propio namespace, la lista vino vacia, y de esa lista vacia el
+# tramo dedujo "es la prueba de que el artefacto todavia no llego al warehouse".
+# El git log del repo mostraba la promocion de Kargo ya mergeada, con el tag que
+# corrian los pods: un namespace equivocado reportado como un hecho del cluster.
+{ extract_fn app_k8s_namespace; extract_fn kargo_namespace; } \
+  | sed 's|{{KARGO_PROJECT}}|proyecto-demo|g' > "$WS/kns.sh"
+grep -q 'app_k8s_namespace' "$WS/kns.sh" || { echo "no pude extraer kargo_namespace"; exit 1; }
+
+cat > "$WS/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *"get application "*) printf '{"spec":{"destination":{"namespace":"svc-demo"}},"status":{"resources":[{"kind":"Service","namespace":"svc-demo","name":"svc-demo"},{"kind":"Deployment","namespace":"svc-demo","name":"svc-demo"}]}}' ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "$WS/bin/kubectl"
+resuelve_ns() {  # resuelve_ns [lo-que-declaro-el-humano]
+  ( set -u; export PATH="$WS/bin:$PATH"
+    KARGO_PROJECT="${1:-}"; APP=svc-demo; REPO=svc-demo; KARGO_NS=""
+    answers_repo_key() { printf ''; }
+    acota; . "$WS/kns.sh"; kargo_namespace )
+}
+assert_eq "svc-demo" "$(resuelve_ns)" \
+  "#229: el namespace sale del namespace REAL de la app, no del proyecto cableado"
+assert_eq "prod-ns" "$( DEPLOY_K8S_WORKLOADS="prod-ns/svc-demo" resuelve_ns )" \
+  "y los workloads declarados a mano mandan sobre la inferencia"
+assert_eq "dicho-por-el-humano" "$(resuelve_ns dicho-por-el-humano)" \
+  "y lo declarado por el humano manda sobre todo: lo mas explicito gana"
+cat > "$WS/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+chmod +x "$WS/bin/kubectl"
+assert_eq "proyecto-demo" "$(resuelve_ns)" \
+  "sin cluster que responda, el fallback es el proyecto declarado al instalar"
+
+# Y la lista vacia se reporta como lo que es: un hecho sobre ESTA consulta.
+cat > "$WS/bin/kargo" <<'STUB'
+#!/usr/bin/env bash
+for a in "$@"; do case "$a" in json) echo '{"kind":"List","items":null}'; exit 0 ;; esac; done
+exit 1
+STUB
+chmod +x "$WS/bin/kargo"
+: > "$WS/.harness/events.jsonl"
+out="$(run_kargo)"
+assert_contains "$out" "no encontré promociones en el namespace" \
+  "#229: la lista vacia habla de la consulta, con su namespace delante"
+assert_not_contains "$out" "es la prueba de que" \
+  "#229: y ya NO afirma un hecho sobre el warehouse que un git log refuta"
+assert_contains "$out" "verificá el namespace" "con la remediacion exacta: mirar el ns primero"
+assert_contains "$out" "kargo_project" "y como declararlo si es otro"
+assert_contains "$(bus)" "Kargo NO verificada" "sigue siendo ceguera declarada, no un verde"
+
+# ── #229: una pagina de login NO es una respuesta del warehouse ──────────
+# Sin credencial (o detras de SSO) lo que vuelve es el HTML del login, y el
+# tramo lo volcaba al log y razonaba sobre el como si fuera la lista.
+cat > "$WS/bin/kargo" <<'STUB'
+#!/usr/bin/env bash
+for a in "$@"; do case "$a" in json) echo "unknown flag" >&2; exit 1 ;; esac; done
+cat <<'HTML'
+<!DOCTYPE html>
+<html><head><title>Sign in</title></head>
+<body><script src="/js-idp.js"></script>addFragmentToURLState()</body></html>
+HTML
+STUB
+chmod +x "$WS/bin/kargo"
+: > "$WS/.harness/events.jsonl"
+out="$(run_kargo)"
+assert_contains "$out" "es HTML, no datos" "#229: el HTML se reporta como lo que es"
+assert_contains "$out" "CREDENCIAL" "y se nombra la causa: credencial o direccion"
+assert_not_contains "$out" "no encontré promociones" \
+  "#229: y NO se convierte en una afirmacion sobre el warehouse"
+assert_not_contains "$out" "addFragmentToURLState" "ni se vuelca la pagina de login a la consola"
+assert_contains "$(bus)" "la respuesta fue HTML" "el supuesto dice que fue HTML, no 'sin freight'"
+assert_contains "$(cat "$WS/deploy.log")" "js-idp" "el payload crudo queda en el log, para diagnosticar"
+
+# Vuelve a fallar por los tres caminos para los casos de abajo.
+cat > "$WS/bin/kargo" <<'STUB'
+#!/usr/bin/env bash
+echo "Error: not authenticated: no token found" >&2
+exit 1
+STUB
+chmod +x "$WS/bin/kargo"
+cat > "$WS/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+echo "The connection to the server localhost:8080 was refused" >&2
+exit 1
+STUB
+chmod +x "$WS/bin/kubectl"
 
 echo
 echo "── un repo que no despliega por GitOps no puede tener un deploy rojo"
@@ -497,8 +601,7 @@ echo "── el sha a vigilar sale de ship.log (antes: \$WT sin definir = ceguer
 # definía. Con set -u la sustitución moría entera, head_sha quedaba vacío, y
 # como las ramas siguientes exigían [ -n "$head_sha" ], la etapa de Actions se
 # saltaba sin vigilar NI avisar. Con driver=actions el deploy nunca se verificó.
-extract_fn() { awk "/^$1\(\) \{/{f=1} f{print} f&&/^\}/{exit}" \
-  "$ROOT/templates/scripts/deploy-watch.sh.tmpl"; }
+# (extract_fn vive arriba: los tramos de kargo tambien lo usan)
 
 # Solo CÓDIGO: el comentario que documenta el bug sí nombra $WT, y debe poder
 # hacerlo sin que el test lo confunda con una regresión.
@@ -507,7 +610,10 @@ grep -v '^[[:space:]]*#' "$ROOT/templates/scripts/deploy-watch.sh.tmpl" \
   && fail "sigue usando \$WT en código, y esa variable nunca se define" \
   || pass "ya no depende de \$WT (la variable fantasma que causaba la ceguera)"
 
-extract_fn shipped_sha > "$WS/shipped.sh"
+# El ledger viaja con la funcion: desde el #232 el sha sale de ship-ledger.jsonl
+# (con lectura de compatibilidad de ship.log), y sin los lectores el tramo
+# extraido moriria con 127 igual que sin run_bounded.
+{ extract_fn ship_ledger_json; extract_fn shipped_sha; } > "$WS/shipped.sh"
 mkdir -p "$WS/tasks/T7"
 printf '%s\n' \
   '{"repo":"otro","sha":"1111111111111111111111111111111111111111"}' \
@@ -1377,7 +1483,7 @@ assert_not_contains "$out" "🔴" "no es rojo: nada esta enfermo, esta INCOMPLET
 printf '%s\n' '{"metadata":{"generation":134},"spec":{"replicas":2,"selector":{"matchLabels":{"app":"apollo"}}},"status":{"observedGeneration":134,"updatedReplicas":2,"readyReplicas":2,"availableReplicas":2}}' > "$WS/k8s/deploy.json"
 # Los pods nacen DESPUES del commit del fixture (que es de ahora mismo): esa es
 # justamente la mitad (b) de la condicion, y una fecha del pasado la falsearia.
-printf '%s\n' '{"items":[{"metadata":{},"spec":{"containers":[{"image":"apollo:2"}]},"status":{"startTime":"2099-01-01T00:00:00Z"}},{"metadata":{},"spec":{"containers":[{"image":"apollo:2"}]},"status":{"startTime":"2099-01-01T00:00:01Z"}}]}' > "$WS/k8s/pods.json"
+printf '%s\n' '{"items":[{"metadata":{},"spec":{"containers":[{"image":"apollo:2"}]},"status":{"phase":"Running","containerStatuses":[{"ready":true}],"startTime":"2099-01-01T00:00:00Z"}},{"metadata":{},"spec":{"containers":[{"image":"apollo:2"}]},"status":{"phase":"Running","containerStatuses":[{"ready":true}],"startTime":"2099-01-01T00:00:01Z"}}]}' > "$WS/k8s/pods.json"
 : > "$WS/.harness/events.jsonl"
 out="$(DEPLOY_ROLLOUT_TIMEOUT=1 run676)"; rc=$?
 assert_contains "$out" "🟢 deploy de apollo verificado" "rollout completo: verde legitimo"
@@ -1394,7 +1500,8 @@ echo "── el manifiesto no es el pod: el rollout se mira en los PODS"
 # verde con los pods corriendo la imagen anterior porque el promotor todavia no
 # habia movido el tag. Un contador contesta "el rollout que hubiera termino", no
 # "mi cambio esta sirviendo".
-{ extract_fn rollout_workloads; extract_fn ship_commit_epoch; extract_fn check_rollout; } > "$WS/rollout.sh"
+{ extract_fn rollout_workloads; extract_fn ship_commit_epoch
+  extract_fn pods_sirviendo; extract_fn check_rollout; } > "$WS/rollout.sh"
 grep -q 'observedGeneration' "$WS/rollout.sh" || { echo "no pude extraer check_rollout"; exit 1; }
 
 # kubectl de palo: contesta el Deployment y los Pods que le pidan, leyendo los
@@ -1437,20 +1544,20 @@ assert_contains "$out" "updated=2" "y el diagnostico trae los contadores medidos
 # (2) contadores completos pero DOS imagenes entre los pods: el pod viejo sigue
 #     sirviendo, y ningun contador lo dice.
 printf '%s\n' '{"metadata":{"generation":10},"spec":{"replicas":2,"selector":{"matchLabels":{"app":"svc-demo"}}},"status":{"observedGeneration":10,"updatedReplicas":2,"readyReplicas":2,"availableReplicas":2}}' > "$WS/k8s/deploy.json"
-printf '%s\n' '{"items":[{"metadata":{},"spec":{"containers":[{"image":"svc-demo:2.9.2"}]},"status":{"startTime":"2026-08-13T10:00:00Z"}},{"metadata":{},"spec":{"containers":[{"image":"svc-demo:2.9.3"}]},"status":{"startTime":"2026-08-13T11:00:00Z"}}]}' > "$WS/k8s/pods.json"
+printf '%s\n' '{"items":[{"metadata":{},"spec":{"containers":[{"image":"svc-demo:2.9.2"}]},"status":{"phase":"Running","containerStatuses":[{"ready":true}],"startTime":"2026-08-13T10:00:00Z"}},{"metadata":{},"spec":{"containers":[{"image":"svc-demo:2.9.3"}]},"status":{"phase":"Running","containerStatuses":[{"ready":true}],"startTime":"2026-08-13T11:00:00Z"}}]}' > "$WS/k8s/pods.json"
 out="$(corre_rollout)"
 assert_contains "$out" "RC=1" "dos imagenes entre los pods: hay uno viejo sirviendo"
 assert_contains "$out" "juegos de imagen distintos" "y lo dice con los dos juegos de imagen"
 
 # (3) todo completo y una sola imagen: verde de verdad.
-printf '%s\n' '{"items":[{"metadata":{},"spec":{"containers":[{"image":"svc-demo:2.9.3"}]},"status":{"startTime":"2026-08-13T11:00:00Z"}},{"metadata":{},"spec":{"containers":[{"image":"svc-demo:2.9.3"}]},"status":{"startTime":"2026-08-13T11:00:01Z"}}]}' > "$WS/k8s/pods.json"
+printf '%s\n' '{"items":[{"metadata":{},"spec":{"containers":[{"image":"svc-demo:2.9.3"}]},"status":{"phase":"Running","containerStatuses":[{"ready":true}],"startTime":"2026-08-13T11:00:00Z"}},{"metadata":{},"spec":{"containers":[{"image":"svc-demo:2.9.3"}]},"status":{"phase":"Running","containerStatuses":[{"ready":true}],"startTime":"2026-08-13T11:00:01Z"}}]}' > "$WS/k8s/pods.json"
 out="$(corre_rollout)"
 assert_contains "$out" "RC=0" "rollout completo con UNA imagen: verde"
 
 # (3b) sidecar: dos imagenes POR POD, iguales en todos. No es un rollout a
 #      medias, y mirar una lista suelta de imagenes lo declararia asi para
 #      siempre en cualquier instalacion con service mesh.
-printf '%s\n' '{"items":[{"metadata":{},"spec":{"containers":[{"image":"svc-demo:2.9.3"},{"image":"proxy:1.20"}]},"status":{"startTime":"2026-08-13T11:00:00Z"}},{"metadata":{},"spec":{"containers":[{"image":"proxy:1.20"},{"image":"svc-demo:2.9.3"}]},"status":{"startTime":"2026-08-13T11:00:01Z"}}]}' > "$WS/k8s/pods.json"
+printf '%s\n' '{"items":[{"metadata":{},"spec":{"containers":[{"image":"svc-demo:2.9.3"},{"image":"proxy:1.20"}]},"status":{"phase":"Running","containerStatuses":[{"ready":true},{"ready":true}],"startTime":"2026-08-13T11:00:00Z"}},{"metadata":{},"spec":{"containers":[{"image":"proxy:1.20"},{"image":"svc-demo:2.9.3"}]},"status":{"phase":"Running","containerStatuses":[{"ready":true},{"ready":true}],"startTime":"2026-08-13T11:00:01Z"}}]}' > "$WS/k8s/pods.json"
 out="$(corre_rollout)"
 assert_contains "$out" "RC=0" "sidecar identico en todos los pods: sigue siendo un rollout completo"
 
@@ -1473,6 +1580,74 @@ out="$( export PATH="$WS/bin:$PATH"
 assert_contains "$out" "RC=1" "pods anteriores a mi commit: el rollout no es el mio"
 assert_contains "$out" "ningún pod nació después de tu commit" "y lo dice sin rodeos"
 rm -f "$WS/bin/git"
+
+echo
+echo "── issue #229: los pods de CronJob YA TERMINADOS no son replicas viejas"
+# Caso de campo: el chart declara CronJobs con las MISMAS labels de Helm que el
+# Deployment, asi que el selector los trae. 17 pods terminados (ready=false,
+# ownerReferences.kind=Job) con las imagenes de tres versiones anteriores, y 2
+# replicas sanas en la imagen nueva. El tramo conto "3 juegos de imagen
+# distintos" y espero los 300s enteros sobre un rollout que kubectl declaraba
+# "successfully rolled out". La ceguera no es un rojo, pero traba la fase igual.
+#
+# Primero la funcion real, sola, con JSON fijo: es donde vive la decision.
+pods_json='{"items":[
+ {"metadata":{"name":"svc-demo-1","ownerReferences":[{"kind":"ReplicaSet"}]},
+  "spec":{"containers":[{"image":"svc-demo:3.28.3"}]},
+  "status":{"phase":"Running","containerStatuses":[{"ready":true}],"startTime":"2026-08-24T10:00:00Z"}},
+ {"metadata":{"name":"svc-demo-2","ownerReferences":[{"kind":"ReplicaSet"}]},
+  "spec":{"containers":[{"image":"svc-demo:3.28.3"}]},
+  "status":{"phase":"Running","containerStatuses":[{"ready":true}],"startTime":"2026-08-24T10:00:01Z"}},
+ {"metadata":{"name":"svc-demo-purge-29793395","ownerReferences":[{"kind":"Job"}]},
+  "spec":{"containers":[{"image":"svc-demo:3.28.2"}]},
+  "status":{"phase":"Succeeded","containerStatuses":[{"ready":false}],"startTime":"2026-08-24T09:00:00Z"}},
+ {"metadata":{"name":"svc-demo-watchdog-29793245","ownerReferences":[{"kind":"Job"}]},
+  "spec":{"containers":[{"image":"svc-demo:3.28.1"}]},
+  "status":{"phase":"Succeeded","containerStatuses":[{"ready":false}],"startTime":"2026-08-24T08:00:00Z"}},
+ {"metadata":{"name":"svc-demo-analytics-29792560"},
+  "spec":{"containers":[{"image":"svc-demo:3.28.1"}]},
+  "status":{"phase":"Failed","containerStatuses":[{"ready":false}],"startTime":"2026-08-23T08:00:00Z"}}
+]}'
+vivos="$( PATH="$WS/bin:$PATH"; . "$WS/rollout.sh"; pods_sirviendo "$pods_json" )"
+assert_eq "2" "$(printf '%s' "$vivos" | jq '.items | length')" \
+  "de 5 pods con las mismas labels, solo 2 SIRVEN (los otros ya terminaron)"
+assert_eq "1" "$(printf '%s' "$vivos" | jq -r '[.items[].spec.containers[].image] | unique | length')" \
+  "y entre esos 2 hay UN solo juego de imagen: no hay ningun pod viejo sirviendo"
+assert_not_contains "$vivos" "3.28.1" "la imagen de un Job terminado no cuenta como tráfico"
+assert_not_contains "$vivos" "svc-demo-analytics" "un pod Failed sin dueño Job tampoco sirve"
+
+# Y el tramo entero, que es lo que el humano ve: con esos mismos pods tiene que
+# cerrar VERDE, no esperar el timeout diciendo "hay uno viejo sirviendo".
+printf '%s\n' '{"status":{"resources":[{"kind":"Deployment","namespace":"prod","name":"svc-demo"}]}}' > "$WS/k8s/app.json"
+printf '%s\n' '{"metadata":{"generation":10},"spec":{"replicas":2,"selector":{"matchLabels":{"app":"svc-demo"}}},"status":{"observedGeneration":10,"updatedReplicas":2,"readyReplicas":2,"availableReplicas":2}}' > "$WS/k8s/deploy.json"
+printf '%s\n' "$pods_json" > "$WS/k8s/pods.json"
+start=$(date +%s)
+out="$(corre_rollout)"
+elapsed=$(( $(date +%s) - start ))
+assert_contains "$out" "RC=0" "#229: con los pods de Job descartados, el rollout esta COMPLETO"
+assert_not_contains "$out" "juegos de imagen distintos" \
+  "#229: y ya no acusa a los pods terminados de ser replicas viejas"
+[ "$elapsed" -lt 10 ] && pass "#229: y no espera el timeout entero (${elapsed}s)" \
+  || fail "#229: espero ${elapsed}s: sigue contando los pods de Job"
+
+# CONTRA-MITAD: un pod viejo DE VERDAD (Running, ready, de un ReplicaSet) sigue
+# delatando el rollout a medias. Si el filtro se comiera este caso, el arreglo
+# habria cambiado una ceguera por un falso verde, que es peor.
+printf '%s\n' '{"items":[
+ {"metadata":{"ownerReferences":[{"kind":"ReplicaSet"}]},"spec":{"containers":[{"image":"svc-demo:3.28.3"}]},
+  "status":{"phase":"Running","containerStatuses":[{"ready":true}],"startTime":"2026-08-24T10:00:00Z"}},
+ {"metadata":{"ownerReferences":[{"kind":"ReplicaSet"}]},"spec":{"containers":[{"image":"svc-demo:3.28.2"}]},
+  "status":{"phase":"Running","containerStatuses":[{"ready":true}],"startTime":"2026-08-24T09:00:00Z"}}
+]}' > "$WS/k8s/pods.json"
+out="$(corre_rollout)"
+assert_contains "$out" "RC=1" "un pod viejo Running y ready SIGUE siendo un rollout a medias"
+assert_contains "$out" "juegos de imagen distintos" "y se dice con los dos juegos de imagen"
+
+# Y si NINGUN pod sirve con los contadores en verde, no estamos midiendo lo que
+# creemos: eso es ceguera declarada, no un rollout a medias ni un verde.
+printf '%s\n' '{"items":[{"metadata":{"ownerReferences":[{"kind":"Job"}]},"spec":{"containers":[{"image":"svc-demo:3.28.1"}]},"status":{"phase":"Succeeded","containerStatuses":[{"ready":false}]}}]}' > "$WS/k8s/pods.json"
+out="$(corre_rollout)"
+assert_contains "$out" "RC=2" "sin un solo pod sirviendo: ceguera, no un verde inventado"
 
 # (5) sin poder mirar (la app no lista Deployments) es CEGUERA, no rojo: el
 #     verde se degrada al del manifiesto, que es la conducta de siempre.
@@ -1572,7 +1747,11 @@ echo "── flow: prs: lo que el watcher RESUELVE tiene que quedar ESCRITO (#21
 # deploy-watch, que resuelve el commit real") era justo lo que no funcionaba:
 # el watcher resolvia el sha en MEMORIA y salia sin persistir, asi que quien la
 # seguia entraba en un bucle y /archive quedaba inalcanzable.
-awk '/^LANDED_SHA=""$/{f=1} f{print} f&&/^}$/{n++; if(n==2) exit}' \
+# Desde ship_ledger_write() y no desde LANDED_SHA="": los lectores del ledger (#232)
+# son parte del tramo, y sin ellos persistir_landed/resolve_landed_sha no
+# encuentran una sola entrada. Se corta en BASE_REF=, que es lo primero que ya
+# no es funcion del tramo.
+awk '/^ship_ledger_write\(\)/{f=1} /^BASE_REF=/{exit} f{print}' \
   "$ROOT/templates/scripts/deploy-watch.sh.tmpl" > "$WS/landed.sh"
 grep -q 'persistir_landed' "$WS/landed.sh" || { echo "no pude extraer el tramo de landed"; exit 1; }
 grep -q 'resolve_landed_sha' "$WS/landed.sh" || { echo "falta resolve_landed_sha en el tramo"; exit 1; }
@@ -1586,6 +1765,7 @@ FORGE
 }
 mk_shiplog() {  # una tarea de dos repos con flow: prs, los dos sin aterrizar
   mkdir -p "$WS/tasks/T-217"
+  rm -f "$WS/tasks/T-217/ship-ledger.jsonl"
   cat > "$WS/tasks/T-217/ship.log" <<'LOG'
 {"repo":"docs","sha":"aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111","short":"aaaa1111aaaa","branch":"task/T-217","pr":"https://x/1","landed":false,"shipped_at":"2026-08-18T00:00:00Z"}
 {"repo":"terraform-core","sha":"bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222","short":"bbbb2222bbbb","branch":"task/T-217","pr":"https://x/2","landed":false,"shipped_at":"2026-08-18T00:01:00Z"}
@@ -1600,7 +1780,11 @@ corre_landed() {  # corre_landed <repo> → LANDED_SHA en stdout, diagnosticos a
     . "$WS/landed.sh"
     resolve_landed_sha; printf '%s' "$LANDED_SHA" ) 2>/dev/null
 }
-entrada() { jq -c --arg r "$1" 'select(.repo==$r)' "$WS/tasks/T-217/ship.log" | tail -1; }
+# La lectura del ledger UNE los dos archivos (#232): el viejo primero, el nuevo
+# despues, y el ULTIMO registro de un repo es su estado. La escritura, en
+# cambio, va SIEMPRE al nuevo, asi que estas dos vistas no son la misma.
+ledger() { cat "$WS/tasks/T-217/ship.log" "$WS/tasks/T-217/ship-ledger.jsonl" 2>/dev/null; }
+entrada() { ledger | jq -c --arg r "$1" 'select(.repo==$r)' | tail -1; }
 
 mk_shiplog; mk_forge "cccc3333cccc3333cccc3333cccc3333cccc3333"
 out="$(corre_landed terraform-core)"
@@ -1615,16 +1799,18 @@ assert_eq "landed" "$(entrada terraform-core | jq -r '.event')" "marcada como lo
 # Se AGREGA una linea, no se reescribe el archivo: ship.log lo escriben varios
 # productores con >> a la vez, y un read-modify-write se come la linea que otro
 # agrego en el medio. La entrada original queda intacta como historia.
-assert_eq "false" "$(jq -c 'select(.repo=="terraform-core")' "$WS/tasks/T-217/ship.log" | head -1 | jq -r '.landed')" \
+assert_eq "false" "$(ledger | jq -c 'select(.repo=="terraform-core")' | head -1 | jq -r '.landed')" \
   "la entrada del ship original no se toca"
+assert_eq 2 "$(grep -c . "$WS/tasks/T-217/ship.log")" \
+  "#232: y el ship.log viejo no crece: la escritura va al ledger nuevo"
 assert_eq "false" "$(entrada docs | jq -r '.landed')" \
   "y la del OTRO repo, que no mergeo, tampoco"
-assert_eq 3 "$(grep -c . "$WS/tasks/T-217/ship.log")" "las dos lineas de antes siguen ahi, mas la nueva"
+assert_eq 3 "$(ledger | grep -c .)" "las dos lineas de antes siguen ahi, mas la nueva"
 
 # Idempotente: una segunda corrida no vuelve a escribir, porque la entrada ya
 # dice landed. Un log que crece una linea por corrida seria ruido eterno.
 corre_landed terraform-core >/dev/null
-assert_eq 3 "$(grep -c . "$WS/tasks/T-217/ship.log")" "correrlo de nuevo NO agrega otra linea"
+assert_eq 3 "$(ledger | grep -c .)" "correrlo de nuevo NO agrega otra linea"
 
 # Segunda corrida: ya no hay nada que preguntarle al forge, y el sha que se
 # vigila es el ATERRIZADO, no el de la rama (que es el que quedo en .sha).
@@ -1645,7 +1831,7 @@ cat >> "$WS/tasks/T-217/ship.log" <<'LOG'
 {"repo":"docs","sha":"eeee5555eeee5555eeee5555eeee5555eeee5555","short":"eeee5555eeee","branch":"task/T-217b","pr":"https://x/3","landed":false,"shipped_at":"2026-08-18T02:00:00Z"}
 LOG
 corre_landed docs >/dev/null
-assert_eq "false" "$(jq -c 'select(.repo=="docs")' "$WS/tasks/T-217/ship.log" | head -1 | jq -r '.landed')" \
+assert_eq "false" "$(ledger | jq -c 'select(.repo=="docs")' | head -1 | jq -r '.landed')" \
   "el ship viejo del repo queda como estaba: es historia"
 assert_eq "true" "$(entrada docs | jq -r '.landed')" "y el ULTIMO registro del repo es el que manda"
 assert_eq "eeee5555eeee5555eeee5555eeee5555eeee5555" "$(entrada docs | jq -r '.ship_sha')" \
@@ -1656,6 +1842,162 @@ assert_eq "eeee5555eeee5555eeee5555eeee5555eeee5555" "$(entrada docs | jq -r '.s
 # driver none salia por el early exit ANTES de preguntar por el merge, se
 # quedaba en landed:false para siempre, y POLICY-SHIP-005 mira TODOS los repos,
 # asi que uno solo dejaba la tarea entera sin deploy ni archive.
+echo
+echo "── #232: el ledger de ships se lee UNIENDO ship-ledger.jsonl y ship.log"
+# ship.log NO era un log: era un ledger JSONL, y su nombre invitaba a la
+# redireccion que lo trunca (`ship.sh ... > tasks/<id>/ship.log`). El ship
+# aterrizaba, el ledger quedaba en prosa y este watcher se quedaba sin sha que
+# vigilar. La contabilidad se mudo a ship-ledger.jsonl. La lectura UNE los dos
+# (viejo primero, nuevo despues) y del viejo toma SOLO lo que parsea como JSON;
+# la escritura va siempre al nuevo.
+mkdir -p "$WS/tasks/T-232"
+lee_sha() {  # lee_sha <repo> → lo que el watcher elegiria vigilar
+  ( WS="$WS"; TASK=T-232; REPO="$1"; . "$WS/shipped.sh"; shipped_sha )
+}
+
+# (1) solo el nombre viejo, limpio: sigue funcionando igual que siempre.
+rm -f "$WS/tasks/T-232/ship-ledger.jsonl"
+printf '%s\n' \
+  '{"repo":"svc-demo","sha":"1111111111111111111111111111111111111111"}' \
+  > "$WS/tasks/T-232/ship.log"
+assert_eq "1111111111111111111111111111111111111111" "$(lee_sha svc-demo)" \
+  "#232: con solo ship.log, el sha sale de ahi (compatibilidad hacia atras)"
+
+# (2) el nombre viejo PISADO por la redireccion: prosa por todos lados y una
+#     linea de ledger que sobrevivio. Lo que parsea se usa; lo que no, se tira.
+{ echo "── ship de svc-demo ──"
+  echo "To https://forge.example/org/svc-demo.git"
+  echo "   026c971..b7fd67f  b7fd67f -> main"
+  printf '%s\n' '{"repo":"svc-demo","sha":"2222222222222222222222222222222222222222"}'
+  echo "✅ shipped svc-demo @ b7fd67f"
+  echo '{ esto no es json }'
+  echo '"una cadena JSON no es una entrada de ledger"'
+} > "$WS/tasks/T-232/ship.log"
+assert_eq "2222222222222222222222222222222222222222" "$(lee_sha svc-demo)" \
+  "#232: un ship.log con prosa mezclada no ciega al watcher: filtra por linea"
+
+# (3) LA TAREA EN VUELO durante el update, que es el caso que obliga a UNIR y no
+#     a elegir: el repo A shippeo ANTES (quedo en el viejo) y el B DESPUES (en el
+#     nuevo). Preferir el nuevo dejaria al watcher sin el sha de A, sobre un ship
+#     que si ocurrio.
+printf '%s\n' \
+  '{"repo":"repo-a","sha":"aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111"}' \
+  > "$WS/tasks/T-232/ship.log"
+printf '%s\n' \
+  '{"repo":"repo-b","sha":"bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222"}' \
+  > "$WS/tasks/T-232/ship-ledger.jsonl"
+assert_eq "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111" "$(lee_sha repo-a)" \
+  "#232: el ship que quedo en el archivo VIEJO se sigue resolviendo"
+assert_eq "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222" "$(lee_sha repo-b)" \
+  "#232: y el que fue al nuevo tambien: la lectura une, no elige"
+assert_eq "" "$(lee_sha otro-repo)" "y un repo sin ship sigue sin devolver el sha de otro"
+
+# (4) el mismo repo en los DOS archivos: manda el ULTIMO, y el orden de la union
+#     es el del update (viejo primero), que es el contrato que ya usa la policy.
+printf '%s\n' \
+  '{"repo":"repo-a","sha":"cccc3333cccc3333cccc3333cccc3333cccc3333"}' \
+  >> "$WS/tasks/T-232/ship-ledger.jsonl"
+assert_eq "cccc3333cccc3333cccc3333cccc3333cccc3333" "$(lee_sha repo-a)" \
+  "#232: con entradas en los dos, gana la mas nueva (la del ledger nuevo)"
+
+# (5) y lo que el watcher ESCRIBE (#217) va SIEMPRE al archivo nuevo, aunque la
+#     entrada que actualiza viva en el viejo: escribir en el viejo seria volver a
+#     poner contabilidad donde la redireccion la trunca. La union hace el resto.
+mk_forge "ffff6666ffff6666ffff6666ffff6666ffff6666"
+printf '%s\n' \
+  '{"repo":"svc-demo","sha":"3333333333333333333333333333333333333333","branch":"task/T-232","pr":"https://x/9","landed":false}' \
+  > "$WS/tasks/T-232/ship.log"
+rm -f "$WS/tasks/T-232/ship-ledger.jsonl"
+corre_232() {
+  ( set -uo pipefail; cd "$WS"; WS="$WS"; TASK=T-232; REPO=svc-demo
+    say() { :; }; emit() { :; }; acota; . "$WS/landed.sh"
+    resolve_landed_sha; printf '%s' "$LANDED_SHA" ) 2>/dev/null
+}
+out="$(corre_232)"
+assert_eq "ffff6666ffff6666ffff6666ffff6666ffff6666" "$out" "resuelve el merge del PR"
+assert_eq "true" "$(jq -c 'select(.repo=="svc-demo")' "$WS/tasks/T-232/ship-ledger.jsonl" | tail -1 | jq -r '.landed')" \
+  "#232: el aterrizaje se registra en ship-ledger.jsonl, aunque el ship viviera en el viejo"
+assert_not_contains "$(cat "$WS/tasks/T-232/ship.log")" "landed_sha" \
+  "y NO se escribe en el ship.log viejo, que ya no es contabilidad"
+assert_eq "3333333333333333333333333333333333333333" \
+  "$(jq -c 'select(.repo=="svc-demo")' "$WS/tasks/T-232/ship-ledger.jsonl" | tail -1 | jq -r '.ship_sha')" \
+  "conservando la procedencia del ship que estaba en el archivo viejo"
+# Y la lectura unida ve el estado nuevo, no el viejo: si no, el watcher volveria
+# a preguntarle al forge para siempre.
+mk_forge ""
+assert_eq "ffff6666ffff6666ffff6666ffff6666ffff6666" "$(corre_232)" \
+  "#232: la union toma la entrada mas reciente del repo, que es la que aterrizo"
+
+echo "── #229: sin KUBECONFIG kubectl no habla con ningun cluster, y eso se DICE"
+# Caso de campo: cuatro corridas perdidas porque nadie exportaba KUBECONFIG. El
+# secreto ya estaba materializado en .secrets.d/kubeconfig; ningun script del
+# camino lo exportaba, y los tramos de cluster salian por timeout, que se lee
+# igual que un rollout lento.
+awk '/^if \[ -z "\$\{KUBECONFIG:-\}" \]/{f=1} f{print} f&&/^fi$/{exit}' \
+  "$ROOT/templates/scripts/deploy-watch.sh.tmpl" > "$WS/kubeconf.sh"
+grep -q 'export KUBECONFIG' "$WS/kubeconf.sh" \
+  || { echo "no pude extraer el bloque de KUBECONFIG"; exit 1; }
+
+mkdir -p "$WS/kcws/.secrets.d"; printf 'apiVersion: v1\n' > "$WS/kcws/.secrets.d/kubeconfig"
+# La ruta del tramo extraido se guarda ANTES: el bloque redefine WS a proposito,
+# y buscarlo despues lo buscaria dentro del workspace de mentira.
+kc_sh="$WS/kubeconf.sh"
+got="$( WS="$WS/kcws"; unset KUBECONFIG; . "$kc_sh"; printf '%s' "${KUBECONFIG:-}" )"
+assert_eq "$WS/kcws/.secrets.d/kubeconfig" "$got" \
+  "#229: sin KUBECONFIG en el entorno, se toma el del workspace"
+got="$( WS="$WS/kcws"; KUBECONFIG=/mio/config; . "$kc_sh"; printf '%s' "$KUBECONFIG" )"
+assert_eq "/mio/config" "$got" "el que ya viene del entorno NO se pisa"
+mkdir -p "$WS/vacio"
+got="$( WS="$WS/vacio"; unset KUBECONFIG; . "$kc_sh"; printf '%s' "${KUBECONFIG:-VACIO}" )"
+assert_eq "VACIO" "$got" \
+  "y sin archivo NO se inventa una ruta (taparia el ~/.kube/config de quien lo tiene)"
+
+# Y si aun asi kubectl no alcanza el cluster, el watcher lo DICE antes de los
+# tramos, en vez de dejar que mueran por timeout.
+{ extract_fn kubectl_alcanza_cluster; extract_fn kubectl_gate; } > "$WS/kgate.sh"
+corre_gate() {
+  ( export PATH="$WS/bin:$PATH"
+    REPO=svc-demo; KUBE_PROBE=""; CEGUERAS=""
+    say() { echo "$1"; }; emit() { echo "BUS: $*"; }
+    ciego() { echo "CIEGO: $1"; }
+    acota
+    . "$WS/kgate.sh"
+    kubectl_gate; echo "RC=$?" )
+}
+cat > "$WS/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+echo "E0824 memcache.go:265 couldn't get current server API group list" >&2
+exit 1
+STUB
+chmod +x "$WS/bin/kubectl"
+out="$(KUBECONFIG="" corre_gate)"
+assert_contains "$out" "RC=1" "cluster inalcanzable: el gate lo reporta"
+assert_contains "$out" "kubectl no alcanza el cluster" "y lo dice con todas las letras"
+assert_contains "$out" "KUBECONFIG" "nombrando la variable que falta"
+assert_contains "$out" "with-secrets.sh" "con la remediacion exacta"
+assert_contains "$out" "NO es un deploy rojo" "sin convertir la ceguera en un rojo"
+assert_contains "$out" "CIEGO:" "y viaja al resumen de cegueras"
+assert_contains "$out" "BUS: assumption" "y al ledger de supuestos"
+
+# Un cluster que SI contesta no se lleva ningun aviso: un aviso que muerde de
+# mas es un aviso que alguien apaga.
+cat > "$WS/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in *--raw*) echo ok ;; *) exit 1 ;; esac
+STUB
+chmod +x "$WS/bin/kubectl"
+out="$(corre_gate)"
+assert_contains "$out" "RC=0" "cluster alcanzable: el gate calla"
+assert_not_contains "$out" "no alcanza el cluster" "y no inventa una ceguera que no hay"
+rm -f "$WS/bin/kubectl"
+
+# Sin kubectl instalado tampoco: ese caso ya tiene su propio mensaje aguas abajo.
+out="$( export PATH="$(t_path_without kubectl)"
+        REPO=svc-demo; KUBE_PROBE=""; CEGUERAS=""
+        say() { echo "$1"; }; emit() { :; }; ciego() { :; }
+        acota; . "$WS/kgate.sh"; kubectl_gate; echo "RC=$?" )"
+assert_contains "$out" "RC=0" "sin kubectl instalado el gate no habla (no duplica el aviso)"
+
 tmpl="$ROOT/templates/scripts/deploy-watch.sh.tmpl"
 salida_l="$(grep -n 'no se verifica con este watcher' "$tmpl" | head -1 | cut -d: -f1)"
 resolve_l="$(awk -v n="$salida_l" 'NR<n && /^  resolve_landed_sha \|\| true$/{l=NR} END{print l+0}' "$tmpl")"

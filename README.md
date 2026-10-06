@@ -12,6 +12,8 @@ your stack: agents with real knowledge of your code, deterministic gates that pr
 ticket → PR → canary → production pipeline with automatic rollback. Every check a script can make, a script
 makes; models only bring judgment where judgment is needed.
 
+![The dashboard the daemon serves (synthetic demo data)](https://raw.githubusercontent.com/andresgarcia29/harness-ui/main/docs/overview.png)
+
 📖 **Read the full documentation in English: [README.en.md](README.en.md)**
 
 🇬🇧 [English version](README.en.md)

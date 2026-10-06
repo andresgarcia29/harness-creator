@@ -1,5 +1,6 @@
 # harness-creator
 
+[![ci](https://github.com/andresgarcia29/harness-creator/actions/workflows/ci.yml/badge.svg)](https://github.com/andresgarcia29/harness-creator/actions/workflows/ci.yml)
 [![version](https://img.shields.io/github/v/tag/andresgarcia29/harness-creator?label=version)](https://github.com/andresgarcia29/harness-creator/tags)
 [![license](https://img.shields.io/github/license/andresgarcia29/harness-creator)](LICENSE)
 ![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)

@@ -1,5 +1,16 @@
 # harness-creator
 
+[![version](https://img.shields.io/github/v/tag/andresgarcia29/harness-creator?label=version)](https://github.com/andresgarcia29/harness-creator/tags)
+[![license](https://img.shields.io/github/license/andresgarcia29/harness-creator)](LICENSE)
+![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-d97757)
+
+**Agents propose. Deterministic systems verify.**
+
+A Claude Code plugin that turns a folder of repositories into a complete agentic engineering harness adapted to
+your stack: agents with real knowledge of your code, deterministic gates that protect `main`, and a
+ticket → PR → canary → production pipeline with automatic rollback. Every check a script can make, a script
+makes; models only bring judgment where judgment is needed.
+
 🇪🇸 [Versión en español](README.md)
 
 **Universal installer for multi-repo agentic engineering harnesses**, shipped as a Claude Code plugin.
